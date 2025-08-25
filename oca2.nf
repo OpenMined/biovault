@@ -9,6 +9,8 @@ if( !params.containsKey('region') ) params.region = "chr15:28110000-28130000"
 if( !params.containsKey('pos')    ) params.pos    = "chr15:28120472-28120472"
 if( !params.containsKey('prefix') ) params.prefix = "herc2_rs12913832"
 
+
+
 // Ensure required inputs are provided
 if( !params.ref || !params.cram ) {
     exit 1, "ERROR: Please provide both --ref <fasta> and --cram <cram> on the command line"
@@ -61,8 +63,7 @@ process faidx {
 
     output:
     path "faidx.txt"
-
-    container 'biocontainers/samtools:v1.19.2_cv1'
+    container 'quay.io/biocontainers/samtools:1.22.1--h96c455f_0'
     shell:
     '''
     samtools faidx !{ref} !{params.pos} > faidx.txt
@@ -80,7 +81,7 @@ process depth {
     output:
     path "depth.txt"
 
-    container 'biocontainers/samtools:v1.19.2_cv1'
+    container 'quay.io/biocontainers/samtools:1.22.1--h96c455f_0'
     shell:
     '''
     # samtools depth doesn't use FASTA; just ensure CRAI is present
@@ -100,7 +101,7 @@ process basecounts {
     output:
     path "basecounts.txt"
 
-    container 'biocontainers/samtools:v1.19.2_cv1'
+    container 'quay.io/biocontainers/samtools:1.22.1--h96c455f_0'
     shell:
     '''
     set -euo pipefail
@@ -129,7 +130,7 @@ process call_region {
     output:
     tuple path("variants.vcf.gz"), path("variants.vcf.gz.csi")
 
-    container 'biocontainers/bcftools:v1.19-1-deb_cv1'
+    container 'quay.io/biocontainers/bcftools:1.22--h3a4d415_1'
     shell:
     '''
     # Emit records even for homozygous-reference sites (-A)
@@ -153,7 +154,7 @@ process interpret_eyes {
     path "eye_color.txt"
     stdout emit: msg   // capture stdout as a channel
 
-    container 'biocontainers/bcftools:v1.19-1-deb_cv1'
+    container 'quay.io/biocontainers/bcftools:1.22--h3a4d415_1'
     shell:
     """
     set -euo pipefail

@@ -1,0 +1,10 @@
+./data/ERR3239283/NA07357.final.cram
+./data/ERR3239277/NA06986.final.cram
+./data/ERR3239284/NA10847.final.cram
+./data/ERR3239279/NA07000.final.cram
+./data/ERR3239278/NA06994.final.cram
+./data/ERR3239285/NA10851.final.cram
+./data/ERR3239276/NA06985.final.cram
+./data/ERR3239282/NA07347.final.cram
+./data/ERR3239280/NA07037.final.cram
+./data/ERR3239281/NA07051.final.cram
