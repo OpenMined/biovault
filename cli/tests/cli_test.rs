@@ -38,16 +38,19 @@ fn test_cli_help() {
 
 #[test]
 fn test_init_command() {
-    let _guard = HOME_MUTEX.lock().unwrap();
+    let _guard = HOME_MUTEX
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
 
     let temp_dir = TempDir::new().unwrap();
     let config_dir = temp_dir.path().join(".biovault");
 
     // Save original HOME/USERPROFILE and set temporary one
-    #[cfg(unix)]
-    let home_var = "HOME";
-    #[cfg(windows)]
-    let home_var = "USERPROFILE";
+    let home_var = if cfg!(windows) {
+        "USERPROFILE"
+    } else {
+        "HOME"
+    };
 
     let original_home = std::env::var(home_var).ok();
     std::env::set_var(home_var, temp_dir.path());
@@ -80,7 +83,9 @@ fn test_init_command() {
 
 #[test]
 fn test_init_command_existing_config() {
-    let _guard = HOME_MUTEX.lock().unwrap();
+    let _guard = HOME_MUTEX
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
 
     let temp_dir = TempDir::new().unwrap();
     let config_dir = temp_dir.path().join(".biovault");
@@ -91,10 +96,11 @@ fn test_init_command_existing_config() {
     fs::write(&config_file, "email: existing@example.com\n").unwrap();
 
     // Save original HOME/USERPROFILE and set temporary one
-    #[cfg(unix)]
-    let home_var = "HOME";
-    #[cfg(windows)]
-    let home_var = "USERPROFILE";
+    let home_var = if cfg!(windows) {
+        "USERPROFILE"
+    } else {
+        "HOME"
+    };
 
     let original_home = std::env::var(home_var).ok();
     std::env::set_var(home_var, temp_dir.path());
