@@ -7,7 +7,6 @@ mod cli;
 mod config;
 
 use cli::commands;
-use config::Config;
 
 #[derive(Parser)]
 #[command(
@@ -33,7 +32,10 @@ enum Commands {
     Init {
         #[arg(help = "Email address for the vault configuration")]
         email: String,
-    }
+    },
+    
+    #[command(about = "Show system information")]
+    Info,
 }
 
 #[tokio::main]
@@ -55,6 +57,9 @@ async fn main() -> Result<()> {
         Commands::Init { email } => {
             info!("Initializing BioVault with email: {}", email);
             commands::init::execute(&email).await?;
+        }
+        Commands::Info => {
+            commands::info::execute().await?;
         }
     }
 
