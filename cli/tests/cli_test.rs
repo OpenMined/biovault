@@ -43,12 +43,17 @@ fn test_init_command() {
     let temp_dir = TempDir::new().unwrap();
     let config_dir = temp_dir.path().join(".biovault");
 
-    // Save original HOME and set temporary HOME
-    let original_home = std::env::var("HOME").ok();
-    std::env::set_var("HOME", temp_dir.path());
+    // Save original HOME/USERPROFILE and set temporary one
+    #[cfg(unix)]
+    let home_var = "HOME";
+    #[cfg(windows)]
+    let home_var = "USERPROFILE";
+
+    let original_home = std::env::var(home_var).ok();
+    std::env::set_var(home_var, temp_dir.path());
 
     let mut cmd = Command::cargo_bin("bv").unwrap();
-    cmd.env("HOME", temp_dir.path())
+    cmd.env(home_var, temp_dir.path())
         .arg("init")
         .arg("test@example.com")
         .assert()
@@ -65,9 +70,11 @@ fn test_init_command() {
     let contents = fs::read_to_string(&config_file).unwrap();
     assert!(contents.contains("email: test@example.com"));
 
-    // Restore original HOME
+    // Restore original HOME/USERPROFILE
     if let Some(home) = original_home {
-        std::env::set_var("HOME", home);
+        std::env::set_var(home_var, home);
+    } else {
+        std::env::remove_var(home_var);
     }
 }
 
@@ -83,12 +90,17 @@ fn test_init_command_existing_config() {
     let config_file = config_dir.join("config.yaml");
     fs::write(&config_file, "email: existing@example.com\n").unwrap();
 
-    // Save original HOME and set temporary HOME
-    let original_home = std::env::var("HOME").ok();
-    std::env::set_var("HOME", temp_dir.path());
+    // Save original HOME/USERPROFILE and set temporary one
+    #[cfg(unix)]
+    let home_var = "HOME";
+    #[cfg(windows)]
+    let home_var = "USERPROFILE";
+
+    let original_home = std::env::var(home_var).ok();
+    std::env::set_var(home_var, temp_dir.path());
 
     let mut cmd = Command::cargo_bin("bv").unwrap();
-    cmd.env("HOME", temp_dir.path())
+    cmd.env(home_var, temp_dir.path())
         .arg("init")
         .arg("new@example.com")
         .assert()
@@ -100,9 +112,11 @@ fn test_init_command_existing_config() {
     assert!(contents.contains("email: existing@example.com"));
     assert!(!contents.contains("email: new@example.com"));
 
-    // Restore original HOME
+    // Restore original HOME/USERPROFILE
     if let Some(home) = original_home {
-        std::env::set_var("HOME", home);
+        std::env::set_var(home_var, home);
+    } else {
+        std::env::remove_var(home_var);
     }
 }
 

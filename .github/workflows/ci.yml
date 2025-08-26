@@ -49,6 +49,7 @@ jobs:
         run: cd cli && cargo fmt -- --check
 
       - name: Run clippy
+        if: matrix.os != 'windows-latest'
         run: cd cli && cargo clippy -- -D warnings
 
       - name: Run tests
