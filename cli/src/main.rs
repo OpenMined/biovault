@@ -36,6 +36,9 @@ enum Commands {
     
     #[command(about = "Show system information")]
     Info,
+    
+    #[command(about = "Check for required dependencies")]
+    Check,
 }
 
 #[tokio::main]
@@ -60,6 +63,9 @@ async fn main() -> Result<()> {
         }
         Commands::Info => {
             commands::info::execute().await?;
+        }
+        Commands::Check => {
+            commands::check::execute().await?;
         }
     }
 

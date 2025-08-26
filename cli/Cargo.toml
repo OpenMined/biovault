@@ -23,3 +23,4 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 dirs = "5.0"
 sysinfo = "0.30"
+which = "6.0"

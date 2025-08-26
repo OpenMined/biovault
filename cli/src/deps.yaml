@@ -1,0 +1,23 @@
+dependencies:
+  - name: docker
+    check_running: true
+    install_instructions: |
+      Install Docker Desktop from https://www.docker.com/products/docker-desktop/
+      Or via Homebrew: brew install --cask docker
+    description: Container runtime for running bioinformatics workflows
+    website: https://www.docker.com
+    
+  - name: nextflow
+    check_running: false
+    install_instructions: |
+      Install via curl: curl -s https://get.nextflow.io | bash
+      Or via Homebrew: brew install nextflow
+    description: Workflow management system for bioinformatics pipelines
+    website: https://get.nextflow.io
+  
+  - name: syftbox
+    check_running: false
+    install_instructions: |
+      Install via curl: curl -fsSL https://syftbox.net/install.sh | sh
+    description: Software tool for system analysis and reporting
+    website: https://syftbox.net
