@@ -24,3 +24,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 dirs = "5.0"
 sysinfo = "0.30"
 which = "6.0"
+tempfile = "3.12"
+
+[dev-dependencies]
+assert_cmd = "2.0"
+predicates = "3.1"

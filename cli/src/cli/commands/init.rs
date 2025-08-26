@@ -9,33 +9,40 @@ struct BioVaultConfig {
 }
 
 pub async fn execute(email: &str) -> Result<()> {
-    let home_dir = dirs::home_dir()
-        .ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
-    
+    // For testing: allow overriding home directory via environment variable
+    let home_dir = if let Ok(test_home) = std::env::var("BIOVAULT_TEST_HOME") {
+        std::path::PathBuf::from(test_home)
+    } else {
+        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?
+    };
+
     let biovault_dir = home_dir.join(".biovault");
-    
+
     if !biovault_dir.exists() {
         fs::create_dir_all(&biovault_dir)?;
         info!("Created directory: {:?}", biovault_dir);
     }
-    
+
     let config_file = biovault_dir.join("config.yaml");
-    
+
     if config_file.exists() {
-        println!("Configuration file already exists at: {}", config_file.display());
+        println!(
+            "Configuration file already exists at: {}",
+            config_file.display()
+        );
         println!("Skipping initialization.");
     } else {
         let config = BioVaultConfig {
             email: email.to_string(),
         };
-        
+
         let yaml_content = serde_yaml::to_string(&config)?;
         fs::write(&config_file, yaml_content)?;
-        
+
         println!("✓ BioVault initialized successfully!");
         println!("  Configuration saved to: {}", config_file.display());
         println!("  Email: {}", email);
     }
-    
+
     Ok(())
 }

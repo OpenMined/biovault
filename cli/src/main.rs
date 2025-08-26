@@ -5,6 +5,7 @@ use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 mod cli;
 mod config;
+mod error;
 
 use cli::commands;
 
@@ -33,23 +34,37 @@ enum Commands {
         #[arg(help = "Email address for the vault configuration")]
         email: String,
     },
-    
+
     #[command(about = "Show system information")]
     Info,
-    
+
     #[command(about = "Check for required dependencies")]
     Check,
+
+    #[command(about = "Project management commands")]
+    Project {
+        #[command(subcommand)]
+        command: ProjectCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum ProjectCommands {
+    #[command(about = "Create a new project")]
+    Create {
+        #[arg(long, help = "Project name")]
+        name: Option<String>,
+
+        #[arg(long, help = "Folder path (defaults to ./{name})")]
+        folder: Option<String>,
+    },
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    let filter_level = if cli.verbose {
-        "debug"
-    } else {
-        "info"
-    };
+    let filter_level = if cli.verbose { "debug" } else { "info" };
 
     tracing_subscriber::registry()
         .with(fmt::layer())
@@ -67,6 +82,11 @@ async fn main() -> Result<()> {
         Commands::Check => {
             commands::check::execute().await?;
         }
+        Commands::Project { command } => match command {
+            ProjectCommands::Create { name, folder } => {
+                commands::project::create(name, folder).await?;
+            }
+        },
     }
 
     Ok(())
