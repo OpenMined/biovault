@@ -33,10 +33,10 @@ enum Commands {
         #[arg(help = "Email address for the vault configuration")]
         email: String,
     },
-    
+
     #[command(about = "Show system information")]
     Info,
-    
+
     #[command(about = "Check for required dependencies")]
     Check,
 }
@@ -45,11 +45,7 @@ enum Commands {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    let filter_level = if cli.verbose {
-        "debug"
-    } else {
-        "info"
-    };
+    let filter_level = if cli.verbose { "debug" } else { "info" };
 
     tracing_subscriber::registry()
         .with(fmt::layer())
