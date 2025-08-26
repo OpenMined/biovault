@@ -46,14 +46,30 @@ fn test_init_command() {
     let config_dir = temp_dir.path().join(".biovault");
 
     // Save original HOME/USERPROFILE and set temporary one
-    let home_var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
-
-    let original_home = std::env::var(home_var).ok();
-    std::env::set_var(home_var, temp_dir.path());
+    let original_home = if cfg!(windows) {
+        // On Windows, dirs::home_dir() may use multiple env vars
+        let original_profile = std::env::var("USERPROFILE").ok();
+        std::env::set_var("USERPROFILE", temp_dir.path());
+        original_profile
+    } else {
+        let original_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", temp_dir.path());
+        original_home
+    };
 
     let mut cmd = Command::cargo_bin("bv").unwrap();
-    cmd.env(home_var, temp_dir.path())
-        .arg("init")
+    // Use our test-specific env var that the init command will respect
+    cmd.env("BIOVAULT_TEST_HOME", temp_dir.path());
+    // Also set platform-specific home for other commands that might use dirs::home_dir()
+    if cfg!(windows) {
+        cmd.env("USERPROFILE", temp_dir.path());
+        // Clear other Windows home-related env vars to prevent interference
+        cmd.env_remove("HOMEDRIVE");
+        cmd.env_remove("HOMEPATH");
+    } else {
+        cmd.env("HOME", temp_dir.path());
+    }
+    cmd.arg("init")
         .arg("test@example.com")
         .assert()
         .success()
@@ -63,17 +79,29 @@ fn test_init_command() {
 
     // Check that config file was created
     let config_file = config_dir.join("config.yaml");
-    assert!(config_file.exists(), "Config file should exist");
+    assert!(
+        config_file.exists(),
+        "Config file should exist at: {}",
+        config_file.display()
+    );
 
     // Check config file contents
     let contents = fs::read_to_string(&config_file).unwrap();
     assert!(contents.contains("email: test@example.com"));
 
     // Restore original HOME/USERPROFILE
-    if let Some(home) = original_home {
-        std::env::set_var(home_var, home);
+    if cfg!(windows) {
+        if let Some(home) = original_home {
+            std::env::set_var("USERPROFILE", home);
+        } else {
+            std::env::remove_var("USERPROFILE");
+        }
     } else {
-        std::env::remove_var(home_var);
+        if let Some(home) = original_home {
+            std::env::set_var("HOME", home);
+        } else {
+            std::env::remove_var("HOME");
+        }
     }
 }
 
@@ -92,14 +120,30 @@ fn test_init_command_existing_config() {
     fs::write(&config_file, "email: existing@example.com\n").unwrap();
 
     // Save original HOME/USERPROFILE and set temporary one
-    let home_var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
-
-    let original_home = std::env::var(home_var).ok();
-    std::env::set_var(home_var, temp_dir.path());
+    let original_home = if cfg!(windows) {
+        // On Windows, dirs::home_dir() may use multiple env vars
+        let original_profile = std::env::var("USERPROFILE").ok();
+        std::env::set_var("USERPROFILE", temp_dir.path());
+        original_profile
+    } else {
+        let original_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", temp_dir.path());
+        original_home
+    };
 
     let mut cmd = Command::cargo_bin("bv").unwrap();
-    cmd.env(home_var, temp_dir.path())
-        .arg("init")
+    // Use our test-specific env var that the init command will respect
+    cmd.env("BIOVAULT_TEST_HOME", temp_dir.path());
+    // Also set platform-specific home for other commands that might use dirs::home_dir()
+    if cfg!(windows) {
+        cmd.env("USERPROFILE", temp_dir.path());
+        // Clear other Windows home-related env vars to prevent interference
+        cmd.env_remove("HOMEDRIVE");
+        cmd.env_remove("HOMEPATH");
+    } else {
+        cmd.env("HOME", temp_dir.path());
+    }
+    cmd.arg("init")
         .arg("new@example.com")
         .assert()
         .success()
@@ -111,10 +155,18 @@ fn test_init_command_existing_config() {
     assert!(!contents.contains("email: new@example.com"));
 
     // Restore original HOME/USERPROFILE
-    if let Some(home) = original_home {
-        std::env::set_var(home_var, home);
+    if cfg!(windows) {
+        if let Some(home) = original_home {
+            std::env::set_var("USERPROFILE", home);
+        } else {
+            std::env::remove_var("USERPROFILE");
+        }
     } else {
-        std::env::remove_var(home_var);
+        if let Some(home) = original_home {
+            std::env::set_var("HOME", home);
+        } else {
+            std::env::remove_var("HOME");
+        }
     }
 }
 
