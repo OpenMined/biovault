@@ -4,7 +4,6 @@ use tracing::info;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 mod cli;
-mod config;
 
 use cli::commands;
 
