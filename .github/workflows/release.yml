@@ -1,0 +1,344 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '**.rs'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+  workflow_dispatch:
+    inputs:
+      bump_type:
+        description: 'Version bump type'
+        required: false
+        type: choice
+        default: 'none'
+        options:
+          - none
+          - patch
+          - minor
+          - major
+      force_version:
+        description: 'Force a specific version (e.g., 0.1.1)'
+        required: false
+        type: string
+      skip_tests:
+        description: 'Skip tests (use with caution)'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  packages: write
+  pull-requests: write
+  actions: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Run tests
+    if: ${{ !inputs.skip_tests }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+      
+      - name: Run tests
+        run: cargo test --all-features
+
+  check-version:
+    name: Check if version needs bump
+    needs: [test]
+    if: ${{ always() && (needs.test.result == 'success' || needs.test.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    outputs:
+      needs_bump: ${{ steps.check.outputs.needs_bump }}
+      current_version: ${{ steps.check.outputs.current_version }}
+      new_version: ${{ steps.check.outputs.new_version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Check version
+        id: check
+        run: |
+          # Check if force_version is provided
+          if [[ -n "${{ github.event.inputs.force_version }}" ]]; then
+            CURRENT_VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+            NEW_VERSION="${{ github.event.inputs.force_version }}"
+            echo "current_version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
+            echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
+            if [[ "$CURRENT_VERSION" != "$NEW_VERSION" ]]; then
+              echo "needs_bump=true" >> $GITHUB_OUTPUT
+              echo "Forcing version from $CURRENT_VERSION to $NEW_VERSION"
+            else
+              echo "needs_bump=false" >> $GITHUB_OUTPUT
+              echo "Version is already $NEW_VERSION"
+            fi
+          # Check if manual bump_type is provided
+          elif [[ "${{ github.event.inputs.bump_type }}" != "" && "${{ github.event.inputs.bump_type }}" != "none" ]]; then
+            CURRENT_VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+            echo "current_version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
+            
+            # Use bump-version script with specified type
+            ./.github/scripts/bump-version.sh ${{ github.event.inputs.bump_type }} --dry-run
+            NEW_VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+            
+            # Reset to original version since this was a dry run
+            git checkout -- Cargo.toml
+            
+            echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
+            echo "needs_bump=true" >> $GITHUB_OUTPUT
+            echo "Manual bump requested: ${{ github.event.inputs.bump_type }} (from $CURRENT_VERSION to $NEW_VERSION)"
+          else
+            # Get current version from Cargo.toml
+            CURRENT_VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+            echo "current_version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
+            
+            # Check if this version has been published already
+            if git tag | grep -q "v$CURRENT_VERSION"; then
+              echo "Version $CURRENT_VERSION already exists, bumping patch version"
+              IFS='.' read -ra VERSION_PARTS <<< "$CURRENT_VERSION"
+              MAJOR="${VERSION_PARTS[0]}"
+              MINOR="${VERSION_PARTS[1]}"
+              PATCH="${VERSION_PARTS[2]}"
+              NEW_PATCH=$((PATCH + 1))
+              NEW_VERSION="$MAJOR.$MINOR.$NEW_PATCH"
+              echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
+              echo "needs_bump=true" >> $GITHUB_OUTPUT
+            else
+              echo "Version $CURRENT_VERSION is new"
+              echo "new_version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
+              echo "needs_bump=false" >> $GITHUB_OUTPUT
+            fi
+          fi
+
+  bump-version:
+    name: Bump version if needed
+    runs-on: ubuntu-latest
+    needs: check-version
+    if: needs.check-version.outputs.needs_bump == 'true'
+    outputs:
+      version: ${{ needs.check-version.outputs.new_version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.PAT_TOKEN || secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+      
+      - name: Update version in Cargo.toml
+        run: |
+          if [[ "${{ github.event.inputs.bump_type }}" != "" && "${{ github.event.inputs.bump_type }}" != "none" ]]; then
+            # Use bump-version script for manual bumps
+            ./.github/scripts/bump-version.sh ${{ github.event.inputs.bump_type }}
+          else
+            # Use sed for automatic bumps
+            sed -i 's/^version = .*/version = "${{ needs.check-version.outputs.new_version }}"/' Cargo.toml
+          fi
+          # Update Cargo.lock
+          cargo update --workspace
+      
+      - name: Commit version bump
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email github-actions[bot]@users.noreply.github.com
+          git add Cargo.toml Cargo.lock
+          git commit -m "chore: bump version to ${{ needs.check-version.outputs.new_version }} [skip ci]"
+          git push
+
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    needs: [check-version, bump-version]
+    if: |
+      always() && 
+      needs.check-version.result == 'success' &&
+      (needs.bump-version.result == 'success' || needs.bump-version.result == 'skipped')
+    strategy:
+      matrix:
+        include:
+          # Linux
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            binary: biovault
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            binary: biovault
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            binary: biovault
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            binary: biovault
+          
+          # macOS
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            binary: biovault
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            binary: biovault
+          
+          # Windows
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            binary: biovault.exe
+          - os: windows-latest
+            target: aarch64-pc-windows-msvc
+            binary: biovault.exe
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          target: ${{ matrix.target }}
+          override: true
+      
+      - name: Install cross-compilation tools
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          if [[ "${{ matrix.target }}" == "x86_64-unknown-linux-musl" ]]; then
+            sudo apt-get update
+            sudo apt-get install -y musl-tools
+          elif [[ "${{ matrix.target }}" == "aarch64-unknown-linux-gnu" ]]; then
+            sudo apt-get update
+            sudo apt-get install -y gcc-aarch64-linux-gnu
+          elif [[ "${{ matrix.target }}" == "aarch64-unknown-linux-musl" ]]; then
+            sudo apt-get update
+            sudo apt-get install -y musl-tools
+            mkdir -p ~/.cargo
+            echo '[target.aarch64-unknown-linux-musl]' >> ~/.cargo/config
+            echo 'linker = "aarch64-linux-gnu-gcc"' >> ~/.cargo/config
+            sudo apt-get install -y gcc-aarch64-linux-gnu
+          fi
+      
+      
+      - name: Build
+        uses: actions-rs/cargo@v1
+        with:
+          use-cross: ${{ matrix.os == 'ubuntu-latest' && (contains(matrix.target, 'aarch64') || contains(matrix.target, 'musl')) }}
+          command: build
+          args: --release --target ${{ matrix.target }}
+      
+      - name: Package binary
+        shell: bash
+        run: |
+          cd target/${{ matrix.target }}/release
+          if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
+            7z a ../../../biovault-${{ matrix.target }}.zip ${{ matrix.binary }}
+          else
+            tar czf ../../../biovault-${{ matrix.target }}.tar.gz ${{ matrix.binary }}
+          fi
+          cd -
+      
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: biovault-${{ matrix.target }}
+          path: |
+            biovault-${{ matrix.target }}.tar.gz
+            biovault-${{ matrix.target }}.zip
+
+  publish-crate:
+    name: Publish to crates.io
+    runs-on: ubuntu-latest
+    needs: [build, check-version, bump-version]
+    if: |
+      always() && 
+      needs.build.result == 'success' &&
+      (needs.bump-version.result == 'success' || needs.bump-version.result == 'skipped')
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+      
+      - name: Publish to crates.io
+        run: cargo publish --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        continue-on-error: true
+
+  create-release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    needs: [build, check-version, bump-version, publish-crate]
+    if: |
+      always() && 
+      needs.build.result == 'success' &&
+      (needs.bump-version.result == 'success' || needs.bump-version.result == 'skipped')
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      
+      - name: Get final version
+        id: version
+        run: |
+          VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+      
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      
+      - name: Create Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          release_name: Release v${{ steps.version.outputs.version }}
+          draft: false
+          prerelease: false
+          body: |
+            # biovault v${{ steps.version.outputs.version }}
+            
+            ## Installation
+            
+            ### Using curl (macOS/Linux)
+            ```bash
+            curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/install.sh | sh
+            ```
+            
+            ### Using Cargo
+            ```bash
+            cargo install biovault
+            ```
+            
+            ### Manual Download
+            Download the appropriate binary for your platform from the assets below.
+      
+      - name: Upload Release Assets
+        run: |
+          for file in artifacts/*/*.{tar.gz,zip}; do
+            if [ -f "$file" ]; then
+              asset_name=$(basename "$file")
+              echo "Uploading $asset_name"
+              gh release upload v${{ steps.version.outputs.version }} "$file" \
+                --repo ${{ github.repository }}
+            fi
+          done
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
