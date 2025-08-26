@@ -29,19 +29,18 @@ pub async fn create(name: Option<String>, folder: Option<String>) -> Result<()> 
         Some(f) => PathBuf::from(f),
         None => {
             // Default to current working directory + project name
-            let cwd = std::env::current_dir()
-                .context("Failed to get current working directory")?;
+            let cwd = std::env::current_dir().context("Failed to get current working directory")?;
             let default_path = cwd.join(&project_name);
-            
+
             // Ask for confirmation
             println!("Project will be created at: {}", default_path.display());
             print!("Continue? [Y/n]: ");
             io::stdout().flush()?;
-            
+
             let mut input = String::new();
             io::stdin().read_line(&mut input)?;
             let input = input.trim().to_lowercase();
-            
+
             if input.is_empty() || input == "y" || input == "yes" {
                 default_path
             } else if input == "n" || input == "no" {
@@ -51,7 +50,9 @@ pub async fn create(name: Option<String>, folder: Option<String>) -> Result<()> 
                 io::stdin().read_line(&mut custom_path)?;
                 PathBuf::from(custom_path.trim())
             } else {
-                return Err(anyhow::anyhow!("Invalid response. Please run the command again.").into());
+                return Err(
+                    anyhow::anyhow!("Invalid response. Please run the command again.").into(),
+                );
             }
         }
     };
@@ -125,13 +126,13 @@ pub async fn create(name: Option<String>, folder: Option<String>) -> Result<()> 
         "✓ Project created successfully at: {}",
         project_dir.display()
     );
-    
+
     // Get the actual folder name for display (might be different from project name)
     let folder_name = project_dir
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or(&project_name);
-    
+
     println!("\nProject structure:");
     println!("  {}/", folder_name);
     println!("    ├── project.yaml");
