@@ -72,6 +72,7 @@ jobs:
       
       - name: Check version
         id: check
+        shell: bash
         run: |
           # Check if force_version is provided
           if [[ -n "${{ github.event.inputs.force_version }}" ]]; then
@@ -149,12 +150,14 @@ jobs:
           fetch-depth: 0
       
       - name: Update version in Cargo.toml
+        shell: bash
         run: |
           sed -i 's/^version = .*/version = "${{ needs.check-version.outputs.new_version }}"/' cli/Cargo.toml
           # Update Cargo.lock
           cd cli && cargo update --workspace
       
       - name: Commit version bump
+        shell: bash
         run: |
           git config user.name github-actions[bot]
           git config user.email github-actions[bot]@users.noreply.github.com
@@ -235,6 +238,7 @@ jobs:
       
       
       - name: Build
+        shell: bash
         run: |
           cd cli
           if [[ "${{ matrix.os }}" == "ubuntu-latest" ]] && ([[ "${{ matrix.target }}" == *"aarch64"* ]] || [[ "${{ matrix.target }}" == *"musl"* ]]); then
@@ -301,6 +305,7 @@ jobs:
       
       - name: Get final version
         id: version
+        shell: bash
         run: |
           VERSION=$(grep '^version = ' cli/Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
           echo "version=$VERSION" >> $GITHUB_OUTPUT
