@@ -211,3 +211,5 @@ data/*
 work/*
 results/*
 submission/results/*
+
+**/.claude/*

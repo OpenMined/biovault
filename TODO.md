@@ -1,0 +1,7 @@
+- cli tool
+- data format
+- wizard
+- create patient record
+- setup nextflow
+- fetch mock data
+- submit
