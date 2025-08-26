@@ -5,9 +5,9 @@ on:
     branches:
       - main
     paths:
-      - '**.rs'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
+      - 'cli/**.rs'
+      - 'cli/Cargo.toml'
+      - 'cli/Cargo.lock'
   workflow_dispatch:
     inputs:
       bump_type:
@@ -54,7 +54,7 @@ jobs:
           override: true
       
       - name: Run tests
-        run: cargo test --all-features
+        run: cd cli && cargo test --all-features
 
   check-version:
     name: Check if version needs bump
@@ -75,7 +75,7 @@ jobs:
         run: |
           # Check if force_version is provided
           if [[ -n "${{ github.event.inputs.force_version }}" ]]; then
-            CURRENT_VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+            CURRENT_VERSION=$(grep '^version = ' cli/Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
             NEW_VERSION="${{ github.event.inputs.force_version }}"
             echo "current_version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
             echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
@@ -88,22 +88,33 @@ jobs:
             fi
           # Check if manual bump_type is provided
           elif [[ "${{ github.event.inputs.bump_type }}" != "" && "${{ github.event.inputs.bump_type }}" != "none" ]]; then
-            CURRENT_VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+            CURRENT_VERSION=$(grep '^version = ' cli/Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
             echo "current_version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
             
-            # Use bump-version script with specified type
-            ./.github/scripts/bump-version.sh ${{ github.event.inputs.bump_type }} --dry-run
-            NEW_VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+            # Calculate new version based on bump type
+            IFS='.' read -ra VERSION_PARTS <<< "$CURRENT_VERSION"
+            MAJOR="${VERSION_PARTS[0]}"
+            MINOR="${VERSION_PARTS[1]}"
+            PATCH="${VERSION_PARTS[2]}"
             
-            # Reset to original version since this was a dry run
-            git checkout -- Cargo.toml
+            case "${{ github.event.inputs.bump_type }}" in
+              major)
+                NEW_VERSION="$((MAJOR + 1)).0.0"
+                ;;
+              minor)
+                NEW_VERSION="$MAJOR.$((MINOR + 1)).0"
+                ;;
+              patch)
+                NEW_VERSION="$MAJOR.$MINOR.$((PATCH + 1))"
+                ;;
+            esac
             
             echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
             echo "needs_bump=true" >> $GITHUB_OUTPUT
             echo "Manual bump requested: ${{ github.event.inputs.bump_type }} (from $CURRENT_VERSION to $NEW_VERSION)"
           else
             # Get current version from Cargo.toml
-            CURRENT_VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+            CURRENT_VERSION=$(grep '^version = ' cli/Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
             echo "current_version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
             
             # Check if this version has been published already
@@ -139,21 +150,15 @@ jobs:
       
       - name: Update version in Cargo.toml
         run: |
-          if [[ "${{ github.event.inputs.bump_type }}" != "" && "${{ github.event.inputs.bump_type }}" != "none" ]]; then
-            # Use bump-version script for manual bumps
-            ./.github/scripts/bump-version.sh ${{ github.event.inputs.bump_type }}
-          else
-            # Use sed for automatic bumps
-            sed -i 's/^version = .*/version = "${{ needs.check-version.outputs.new_version }}"/' Cargo.toml
-          fi
+          sed -i 's/^version = .*/version = "${{ needs.check-version.outputs.new_version }}"/' cli/Cargo.toml
           # Update Cargo.lock
-          cargo update --workspace
+          cd cli && cargo update --workspace
       
       - name: Commit version bump
         run: |
           git config user.name github-actions[bot]
           git config user.email github-actions[bot]@users.noreply.github.com
-          git add Cargo.toml Cargo.lock
+          git add cli/Cargo.toml cli/Cargo.lock
           git commit -m "chore: bump version to ${{ needs.check-version.outputs.new_version }} [skip ci]"
           git push
 
@@ -171,32 +176,32 @@ jobs:
           # Linux
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            binary: biovault
+            binary: bv
           - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
-            binary: biovault
+            binary: bv
           - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
-            binary: biovault
+            binary: bv
           - os: ubuntu-latest
             target: aarch64-unknown-linux-musl
-            binary: biovault
+            binary: bv
           
           # macOS
           - os: macos-latest
             target: x86_64-apple-darwin
-            binary: biovault
+            binary: bv
           - os: macos-latest
             target: aarch64-apple-darwin
-            binary: biovault
+            binary: bv
           
           # Windows
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            binary: biovault.exe
+            binary: bv.exe
           - os: windows-latest
             target: aarch64-pc-windows-msvc
-            binary: biovault.exe
+            binary: bv.exe
 
     steps:
       - uses: actions/checkout@v4
@@ -230,30 +235,33 @@ jobs:
       
       
       - name: Build
-        uses: actions-rs/cargo@v1
-        with:
-          use-cross: ${{ matrix.os == 'ubuntu-latest' && (contains(matrix.target, 'aarch64') || contains(matrix.target, 'musl')) }}
-          command: build
-          args: --release --target ${{ matrix.target }}
+        run: |
+          cd cli
+          if [[ "${{ matrix.os }}" == "ubuntu-latest" ]] && ([[ "${{ matrix.target }}" == *"aarch64"* ]] || [[ "${{ matrix.target }}" == *"musl"* ]]); then
+            cargo install cross
+            cross build --release --target ${{ matrix.target }}
+          else
+            cargo build --release --target ${{ matrix.target }}
+          fi
       
       - name: Package binary
         shell: bash
         run: |
-          cd target/${{ matrix.target }}/release
+          cd cli/target/${{ matrix.target }}/release
           if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
-            7z a ../../../biovault-${{ matrix.target }}.zip ${{ matrix.binary }}
+            7z a ../../../../bv-${{ matrix.target }}.zip ${{ matrix.binary }}
           else
-            tar czf ../../../biovault-${{ matrix.target }}.tar.gz ${{ matrix.binary }}
+            tar czf ../../../../bv-${{ matrix.target }}.tar.gz ${{ matrix.binary }}
           fi
           cd -
       
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: biovault-${{ matrix.target }}
+          name: bv-${{ matrix.target }}
           path: |
-            biovault-${{ matrix.target }}.tar.gz
-            biovault-${{ matrix.target }}.zip
+            bv-${{ matrix.target }}.tar.gz
+            bv-${{ matrix.target }}.zip
 
   publish-crate:
     name: Publish to crates.io
@@ -275,7 +283,7 @@ jobs:
           override: true
       
       - name: Publish to crates.io
-        run: cargo publish --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cd cli && cargo publish --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
         continue-on-error: true
 
   create-release:
@@ -294,7 +302,7 @@ jobs:
       - name: Get final version
         id: version
         run: |
-          VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          VERSION=$(grep '^version = ' cli/Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
           echo "version=$VERSION" >> $GITHUB_OUTPUT
       
       - name: Download all artifacts
@@ -313,7 +321,7 @@ jobs:
           draft: false
           prerelease: false
           body: |
-            # biovault v${{ steps.version.outputs.version }}
+            # BioVault v${{ steps.version.outputs.version }}
             
             ## Installation
             
@@ -326,9 +334,6 @@ jobs:
             ```bash
             cargo install biovault
             ```
-            
-            ### Manual Download
-            Download the appropriate binary for your platform from the assets below.
       
       - name: Upload Release Assets
         run: |
