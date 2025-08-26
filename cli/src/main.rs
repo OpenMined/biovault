@@ -4,6 +4,8 @@ use tracing::info;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 mod cli;
+mod config;
+mod error;
 
 use cli::commands;
 
@@ -38,6 +40,24 @@ enum Commands {
 
     #[command(about = "Check for required dependencies")]
     Check,
+
+    #[command(about = "Project management commands")]
+    Project {
+        #[command(subcommand)]
+        command: ProjectCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum ProjectCommands {
+    #[command(about = "Create a new project")]
+    Create {
+        #[arg(long, help = "Project name")]
+        name: Option<String>,
+
+        #[arg(long, help = "Folder path (defaults to ./{name})")]
+        folder: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -62,6 +82,11 @@ async fn main() -> Result<()> {
         Commands::Check => {
             commands::check::execute().await?;
         }
+        Commands::Project { command } => match command {
+            ProjectCommands::Create { name, folder } => {
+                commands::project::create(name, folder).await?;
+            }
+        },
     }
 
     Ok(())
