@@ -46,11 +46,7 @@ fn test_init_command() {
     let config_dir = temp_dir.path().join(".biovault");
 
     // Save original HOME/USERPROFILE and set temporary one
-    let home_var = if cfg!(windows) {
-        "USERPROFILE"
-    } else {
-        "HOME"
-    };
+    let home_var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
 
     let original_home = std::env::var(home_var).ok();
     std::env::set_var(home_var, temp_dir.path());
@@ -96,11 +92,7 @@ fn test_init_command_existing_config() {
     fs::write(&config_file, "email: existing@example.com\n").unwrap();
 
     // Save original HOME/USERPROFILE and set temporary one
-    let home_var = if cfg!(windows) {
-        "USERPROFILE"
-    } else {
-        "HOME"
-    };
+    let home_var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
 
     let original_home = std::env::var(home_var).ok();
     std::env::set_var(home_var, temp_dir.path());
