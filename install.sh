@@ -275,22 +275,33 @@ main() {
         fi
         print_status "Using specified directory: $install_dir"
     else
-        # First, check for user-writable directories in PATH
-        for dir in "$HOME/.local/bin" "$HOME/bin" "$HOME/.cargo/bin"; do
-            if [[ ":$PATH:" == *":$dir:"* ]]; then
-                if [[ ! -d "$dir" ]]; then
-                    print_status "Creating directory: $dir"
-                    mkdir -p "$dir"
-                fi
-                if [[ -w "$dir" ]]; then
-                    install_dir="$dir"
-                    print_status "Using local directory: $install_dir (no sudo required)"
-                    break
-                fi
+        # First, check system directories that are likely in PATH and writable
+        for dir in "/usr/local/bin" "/opt/bin"; do
+            if [[ ":$PATH:" == *":$dir:"* ]] && [[ -w "$dir" ]]; then
+                install_dir="$dir"
+                print_status "Using system directory: $install_dir (already in PATH)"
+                break
             fi
         done
         
-        # If no user directory in PATH, try to use ~/.local/bin and add to PATH
+        # If no system directory is writable, check for user-writable directories in PATH
+        if [[ -z "$install_dir" ]]; then
+            for dir in "$HOME/.local/bin" "$HOME/bin" "$HOME/.cargo/bin"; do
+                if [[ ":$PATH:" == *":$dir:"* ]]; then
+                    if [[ ! -d "$dir" ]]; then
+                        print_status "Creating directory: $dir"
+                        mkdir -p "$dir"
+                    fi
+                    if [[ -w "$dir" ]]; then
+                        install_dir="$dir"
+                        print_status "Using local directory: $install_dir (no sudo required)"
+                        break
+                    fi
+                fi
+            done
+        fi
+        
+        # If no directory in PATH is writable, try to use ~/.local/bin and add to PATH
         if [[ -z "$install_dir" ]]; then
             install_dir="$HOME/.local/bin"
             if [[ ! -d "$install_dir" ]]; then
@@ -305,7 +316,7 @@ main() {
             fi
         fi
         
-        # Fall back to system directory if needed
+        # Fall back to system directory with sudo if needed
         if [[ ! -w "$install_dir" ]]; then
             install_dir="/usr/local/bin"
             print_warning "Will need sudo to install to $install_dir"

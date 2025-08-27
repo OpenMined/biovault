@@ -1,4 +1,21 @@
 dependencies:
+  - name: java
+    check_running: false
+    min_version: 17
+    install_instructions: |
+      macOS: brew install openjdk@17
+      Ubuntu/Debian: sudo apt-get install openjdk-17-jdk
+      RHEL/CentOS: sudo yum install java-17-openjdk
+      Or download from: https://openjdk.org/
+    description: Java Runtime Environment version 17+ required for Nextflow
+    website: https://openjdk.org/
+    environments:
+      google_colab:
+        install_commands:
+          - apt-get update -y
+          - apt-get install -y openjdk-21-jdk-headless
+        verify_command: java -version
+    
   - name: docker
     check_running: true
     install_instructions: |
@@ -6,6 +23,10 @@ dependencies:
       Or via Homebrew: brew install --cask docker
     description: Container runtime for running bioinformatics workflows
     website: https://www.docker.com
+    environments:
+      google_colab:
+        skip: true
+        skip_reason: "Docker is not supported in Google Colab. Nextflow will use local executor instead."
     
   - name: nextflow
     check_running: false
@@ -14,6 +35,13 @@ dependencies:
       Or via Homebrew: brew install nextflow
     description: Workflow management system for bioinformatics pipelines
     website: https://get.nextflow.io
+    environments:
+      google_colab:
+        install_commands:
+          - curl -s https://get.nextflow.io | bash
+          - mv nextflow /usr/local/bin/
+          - chmod +x /usr/local/bin/nextflow
+        verify_command: nextflow -version
   
   - name: syftbox
     check_running: false
@@ -21,3 +49,7 @@ dependencies:
       Install via curl: curl -fsSL https://syftbox.net/install.sh | sh
     description: Software tool for system analysis and reporting
     website: https://syftbox.net
+    environments:
+      google_colab:
+        skip: true
+        skip_reason: "TODO"
