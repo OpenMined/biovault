@@ -25,6 +25,11 @@ dirs = "5.0"
 sysinfo = "0.30"
 which = "6.0"
 tempfile = "3.12"
+reqwest = { version = "0.12", features = ["stream", "json"] }
+indicatif = "0.17"
+futures-util = "0.3"
+blake3 = { version = "1.5", features = ["rayon"] }
+hex = "0.4"
 
 [dev-dependencies]
 assert_cmd = "2.0"

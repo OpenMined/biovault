@@ -83,6 +83,12 @@ enum Commands {
         #[arg(long, help = "Resume from previous run")]
         resume: bool,
     },
+
+    #[command(name = "sample-data", about = "Manage sample data")]
+    SampleData {
+        #[command(subcommand)]
+        command: SampleDataCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -95,6 +101,21 @@ enum ProjectCommands {
         #[arg(long, help = "Folder path (defaults to ./{name})")]
         folder: Option<String>,
     },
+}
+
+#[derive(Subcommand)]
+enum SampleDataCommands {
+    #[command(about = "Fetch sample data")]
+    Fetch {
+        #[arg(value_delimiter = ',', help = "Patient IDs to fetch (comma-separated)")]
+        patient_ids: Option<Vec<String>>,
+
+        #[arg(long, help = "Fetch all available sample data")]
+        all: bool,
+    },
+
+    #[command(about = "List available sample data")]
+    List,
 }
 
 #[tokio::main]
@@ -150,6 +171,14 @@ async fn main() -> Result<()> {
             )
             .await?;
         }
+        Commands::SampleData { command } => match command {
+            SampleDataCommands::Fetch { patient_ids, all } => {
+                commands::sample_data::fetch(patient_ids, all).await?;
+            }
+            SampleDataCommands::List => {
+                commands::sample_data::list().await?;
+            }
+        },
     }
 
     Ok(())

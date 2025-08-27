@@ -1,0 +1,12 @@
+sample_data_urls:
+  NA06985:
+    ref_version: GRCh38
+    ref: https://ftp.1000genomes.ebi.ac.uk/vol1/ftp/technical/reference/GRCh38_reference_genome/GRCh38_full_analysis_set_plus_decoy_hla.fa
+    ref_index: https://ftp.1000genomes.ebi.ac.uk/vol1/ftp/technical/reference/GRCh38_reference_genome/GRCh38_full_analysis_set_plus_decoy_hla.fa.fai
+    aligned: https://ftp-trace.ncbi.nih.gov/1000genomes/ftp/1000G_2504_high_coverage/data/ERR3239276/NA06985.final.cram
+    aligned_index: https://ftp-trace.ncbi.nih.gov/1000genomes/ftp/1000G_2504_high_coverage/data/ERR3239276/NA06985.final.cram.crai
+    # BLAKE3 checksums for verification (much faster than SHA-256)
+    ref_b3sum: "49cbaceaf79ebc1da6581b2f7599cb03e6552ccce87584d1a0eaec59c3629368"
+    ref_index_b3sum: "002cf8e0066a2226616b5d9cc09994ac06831cd907e13e521bef6dc69403d147"
+    aligned_b3sum: "4556b84f32e58e1a5c4d7238352e9fc0bcaabd2478250733252f2b76047ba3ca"
+    aligned_index_b3sum: "6914d3c6842670bdde272b8cc4dfaf858a84f379e9e79d8b24c1a89d577262e2"

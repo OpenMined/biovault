@@ -3,3 +3,4 @@ pub mod info;
 pub mod init;
 pub mod project;
 pub mod run;
+pub mod sample_data;

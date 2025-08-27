@@ -247,9 +247,12 @@ pub async fn execute(
             .into());
         }
         let ref_path = ref_path.canonicalize().with_context(|| {
-            format!("Failed to resolve reference file path: {}", ref_path.display())
+            format!(
+                "Failed to resolve reference file path: {}",
+                ref_path.display()
+            )
         })?;
-        
+
         if !ref_index_path.exists() {
             return Err(anyhow::anyhow!(
                 "Reference index file not found: {} (resolved to {})",
@@ -259,9 +262,12 @@ pub async fn execute(
             .into());
         }
         let ref_index_path = ref_index_path.canonicalize().with_context(|| {
-            format!("Failed to resolve reference index path: {}", ref_index_path.display())
+            format!(
+                "Failed to resolve reference index path: {}",
+                ref_index_path.display()
+            )
         })?;
-        
+
         if !aligned_path.exists() {
             return Err(anyhow::anyhow!(
                 "Aligned file not found: {} (resolved to {})",
@@ -271,9 +277,12 @@ pub async fn execute(
             .into());
         }
         let aligned_path = aligned_path.canonicalize().with_context(|| {
-            format!("Failed to resolve aligned file path: {}", aligned_path.display())
+            format!(
+                "Failed to resolve aligned file path: {}",
+                aligned_path.display()
+            )
         })?;
-        
+
         if !aligned_index_path.exists() {
             return Err(anyhow::anyhow!(
                 "Aligned index file not found: {} (resolved to {})",
@@ -283,7 +292,10 @@ pub async fn execute(
             .into());
         }
         let aligned_index_path = aligned_index_path.canonicalize().with_context(|| {
-            format!("Failed to resolve aligned index path: {}", aligned_index_path.display())
+            format!(
+                "Failed to resolve aligned index path: {}",
+                aligned_index_path.display()
+            )
         })?;
 
         // Build nextflow command
