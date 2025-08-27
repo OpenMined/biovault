@@ -184,10 +184,10 @@ fn parse_java_version(output: &str) -> Option<u32> {
                     let version_str = &line[start + 1..start + 1 + end];
 
                     // Handle "1.x" format (Java 8 and earlier)
-                    if version_str.starts_with("1.") {
+                    if let Some(stripped) = version_str.strip_prefix("1.") {
                         // Extract the minor version (e.g., "1.8.0_321" -> 8)
-                        if let Some(dot_pos) = version_str[2..].find('.') {
-                            if let Ok(version) = version_str[2..2 + dot_pos].parse::<u32>() {
+                        if let Some(dot_pos) = stripped.find('.') {
+                            if let Ok(version) = stripped[..dot_pos].parse::<u32>() {
                                 return Some(version);
                             }
                         }

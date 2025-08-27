@@ -1,0 +1,1 @@
+cd cli && cargo fmt && cargo clippy

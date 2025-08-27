@@ -9,15 +9,6 @@ enum SystemType {
     Unknown,
 }
 
-impl SystemType {
-    fn as_str(&self) -> &str {
-        match self {
-            SystemType::GoogleColab => "google_colab",
-            SystemType::Unknown => "unknown",
-        }
-    }
-}
-
 pub async fn execute() -> Result<()> {
     println!("BioVault Environment Setup");
     println!("==========================\n");
