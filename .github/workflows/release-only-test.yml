@@ -1,0 +1,13 @@
+name: Release Test
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  call-colab-test:
+    name: Run Colab Test on Release
+    uses: ./.github/workflows/reusable-colab-test.yml
+    with:
+      event_name: 'release'
+      release_tag: ${{ github.event.release.tag_name }}
