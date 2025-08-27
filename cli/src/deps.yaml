@@ -1,4 +1,15 @@
 dependencies:
+  - name: java
+    check_running: false
+    min_version: 17
+    install_instructions: |
+      macOS: brew install openjdk@17
+      Ubuntu/Debian: sudo apt-get install openjdk-17-jdk
+      RHEL/CentOS: sudo yum install java-17-openjdk
+      Or download from: https://openjdk.org/
+    description: Java Runtime Environment version 17+ required for Nextflow
+    website: https://openjdk.org/
+    
   - name: docker
     check_running: true
     install_instructions: |
