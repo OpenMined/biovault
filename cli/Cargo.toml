@@ -1,6 +1,6 @@
 [package]
 name = "biovault"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 authors = ["Madhava Jay <madhava@openmined.org>"]
 description = "A bioinformatics data vault CLI tool"
