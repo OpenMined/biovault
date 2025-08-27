@@ -213,3 +213,7 @@ results/*
 submission/results/*
 
 **/.claude/*
+
+**/.nextflow/*
+**/work/*
+**/.nextflow.log*
