@@ -1,4 +1,4 @@
-use super::check::{DependencyConfig, EnvironmentConfig};
+use super::check::DependencyConfig;
 use crate::Result;
 use std::env;
 use std::process::Command;
