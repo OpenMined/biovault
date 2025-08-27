@@ -1,20 +1,35 @@
 use crate::Result;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::process::Command;
 
 #[derive(Debug, Serialize, Deserialize)]
-struct DependencyConfig {
-    dependencies: Vec<Dependency>,
+pub struct DependencyConfig {
+    pub dependencies: Vec<Dependency>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct Dependency {
-    name: String,
-    check_running: bool,
+pub struct Dependency {
+    pub name: String,
+    pub check_running: bool,
     #[serde(default)]
-    min_version: Option<u32>,
-    install_instructions: String,
-    description: String,
+    pub min_version: Option<u32>,
+    pub install_instructions: String,
+    pub description: String,
+    #[serde(default)]
+    pub environments: Option<HashMap<String, EnvironmentConfig>>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct EnvironmentConfig {
+    #[serde(default)]
+    pub install_commands: Option<Vec<String>>,
+    #[serde(default)]
+    pub verify_command: Option<String>,
+    #[serde(default)]
+    pub skip: bool,
+    #[serde(default)]
+    pub skip_reason: Option<String>,
 }
 
 pub async fn execute() -> Result<()> {
@@ -131,15 +146,13 @@ fn check_version(tool: &str, min_version: u32) -> bool {
 
 fn check_java_version(min_version: u32) -> bool {
     // Try to execute java -version
-    let output = Command::new("java")
-        .arg("-version")
-        .output();
-    
+    let output = Command::new("java").arg("-version").output();
+
     match output {
         Ok(output) => {
             // Java version info is typically printed to stderr
             let version_str = String::from_utf8_lossy(&output.stderr);
-            
+
             // Parse the version from the output
             if let Some(version) = parse_java_version(&version_str) {
                 if version >= min_version {
@@ -162,14 +175,14 @@ fn parse_java_version(output: &str) -> Option<u32> {
     // - java version "1.8.0_321"
     // - openjdk version "11.0.14" 2022-01-18
     // - java version "17" 2021-09-14
-    
+
     for line in output.lines() {
         if line.contains("version") {
             // Extract the version string in quotes
             if let Some(start) = line.find('"') {
                 if let Some(end) = line[start + 1..].find('"') {
                     let version_str = &line[start + 1..start + 1 + end];
-                    
+
                     // Handle "1.x" format (Java 8 and earlier)
                     if version_str.starts_with("1.") {
                         // Extract the minor version (e.g., "1.8.0_321" -> 8)
@@ -190,6 +203,6 @@ fn parse_java_version(output: &str) -> Option<u32> {
             }
         }
     }
-    
+
     None
 }
