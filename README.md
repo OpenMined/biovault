@@ -26,3 +26,6 @@ curl -sSL https://raw.githubusercontent.com/openmined/biovault/main/install.sh |
 - folder
 
 - bv run ./project 
+
+- installer check existing install and version
+- bv update

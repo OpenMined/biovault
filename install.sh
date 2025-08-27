@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# biovault installer script
+# BioVault (bv) installer script
 # Usage: curl -sSL https://raw.githubusercontent.com/openmined/biovault/main/install.sh | bash
 
 set -e
@@ -73,7 +73,7 @@ get_latest_version() {
     fi
 }
 
-# Download and install biovault
+# Download and install BioVault
 install_biovault() {
     local platform="$1"
     local version="$2"
@@ -95,21 +95,25 @@ install_biovault() {
     esac
     
     # Construct download URL for the tarball/zip
-    local archive_name="biovault-${target}"
+    local archive_name="bv-${target}"
     local archive_ext="tar.gz"
     if [[ "$platform" == *"windows"* ]]; then
         archive_ext="zip"
     fi
     archive_name="${archive_name}.${archive_ext}"
+    echo "archive_name: ${archive_name}"
     
     local download_url="https://github.com/openmined/biovault/releases/download/${version}/${archive_name}"
+    echo "download_url: ${download_url}"
     local temp_dir="/tmp/biovault-install-$$"
+    echo "temp_dir: ${temp_dir}"
     mkdir -p "$temp_dir"
     
-    print_status "Downloading biovault ${version} for ${platform}..."
+    print_status "Downloading BioVault ${version} for ${platform}..."
     
     # Download the archive
     local temp_archive="${temp_dir}/${archive_name}"
+    echo "temp_archive: ${temp_archive}"
     if command -v curl >/dev/null 2>&1; then
         curl -L -o "$temp_archive" "$download_url"
     elif command -v wget >/dev/null 2>&1; then
@@ -122,24 +126,33 @@ install_biovault() {
     
     # Verify download
     if [[ ! -f "$temp_archive" ]]; then
-        print_error "Failed to download biovault archive"
+        print_error "Failed to download BioVault archive"
         rm -rf "$temp_dir"
         exit 1
     fi
     
     # Extract the binary
-    print_status "Extracting biovault..."
+    print_status "Extracting BioVault (bv)..."
     cd "$temp_dir"
     if [[ "$archive_ext" == "tar.gz" ]]; then
-        tar -xzf "$archive_name"
+        echo "tar -xzf $archive_name"
+        if ! tar -xzf "$archive_name"; then
+            print_error "Extraction failed: Archive is not in gzip format"
+            rm -rf "$temp_dir"
+            exit 1
+        fi
     elif [[ "$archive_ext" == "zip" ]]; then
-        unzip -q "$archive_name"
+        if ! unzip -q "$archive_name"; then
+            print_error "Extraction failed: Archive is not in zip format"
+            rm -rf "$temp_dir"
+            exit 1
+        fi
     fi
     
     # Find the binary
-    local binary_name="biovault"
+    local binary_name="bv"
     if [[ "$platform" == *"windows"* ]]; then
-        binary_name="biovault.exe"
+        binary_name="bv.exe"
     fi
     
     if [[ ! -f "$binary_name" ]]; then
@@ -152,7 +165,7 @@ install_biovault() {
     chmod +x "$binary_name"
     
     # Install to system path
-    local target_file="${install_dir}/biovault"
+    local target_file="${install_dir}/bv"
     
     print_status "Installing to ${target_file}..."
     
@@ -169,24 +182,25 @@ install_biovault() {
     cd - >/dev/null
     rm -rf "$temp_dir"
     
-    print_success "biovault installed successfully!"
+    print_success "bv installed successfully!"
 }
 
 # Verify installation
 verify_installation() {
-    if command -v biovault >/dev/null 2>&1; then
+    if command -v bv >/dev/null 2>&1; then
         local installed_version
-        installed_version=$(biovault --version 2>/dev/null | head -1 || echo "unknown")
+        installed_version=$(bv --version 2>/dev/null | head -1 || echo "unknown")
         print_success "Installation verified: ${installed_version}"
-        print_status "You can now use 'biovault' to protect your files!"
+        print_status "You can now use 'bv' command!"
         print_status ""
         print_status "Quick start:"
-        print_status "  biovault           # Interactive file protection mode"
-        print_status "  biovault --help    # Show all available options"
+        print_status "  bv --help         # Show all available options"
+        print_status "  bv init <email>   # Initialize BioVault"
+        print_status "  bv info           # Show system information"
         print_status ""
-        print_status "For more information, run: biovault --help"
+        print_status "For more information, run: bv --help"
     else
-        print_error "Installation verification failed. biovault command not found in PATH."
+        print_error "Installation verification failed. bv command not found in PATH."
         print_warning "You may need to restart your shell or update your PATH."
         return 1
     fi
@@ -202,10 +216,37 @@ check_prerequisites() {
 
 # Main installation function
 main() {
-    print_status "biovault installer"
-    print_status "================"
+    print_status "BioVault (bv) installer"
+    print_status "======================="
     
-    # Check prerequisites (currently none required)
+    # Parse command line arguments
+    local custom_install_dir=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --prefix|--install-dir)
+                custom_install_dir="$2"
+                shift 2
+                ;;
+            --help|-h)
+                echo "Usage: $0 [OPTIONS]"
+                echo "Options:"
+                echo "  --prefix, --install-dir <DIR>  Install to specific directory"
+                echo "  --help, -h                     Show this help message"
+                echo ""
+                echo "Examples:"
+                echo "  $0                             # Install to default location"
+                echo "  $0 --prefix ~/.local/bin       # Install to ~/.local/bin"
+                echo "  $0 --install-dir ~/bin         # Install to ~/bin"
+                exit 0
+                ;;
+            *)
+                print_error "Unknown option: $1"
+                echo "Use --help for usage information"
+                exit 1
+                ;;
+        esac
+    done
+    
     # check_prerequisites
     
     # Detect platform
@@ -222,16 +263,53 @@ main() {
     fi
     print_status "Latest version: ${version}"
     
-    # Determine install directory
-    local install_dir="/usr/local/bin"
-    if [[ ":$PATH:" != *":$install_dir:"* ]]; then
-        # Try alternative directories if /usr/local/bin is not in PATH
-        for dir in "$HOME/.local/bin" "$HOME/bin" "/usr/bin"; do
-            if [[ ":$PATH:" == *":$dir:"* ]] && [[ -d "$dir" ]]; then
-                install_dir="$dir"
-                break
+    # Determine install directory - prefer user directories to avoid sudo
+    local install_dir=""
+    
+    # Use custom directory if specified
+    if [[ -n "$custom_install_dir" ]]; then
+        install_dir="$custom_install_dir"
+        if [[ ! -d "$install_dir" ]]; then
+            print_status "Creating directory: $install_dir"
+            mkdir -p "$install_dir"
+        fi
+        print_status "Using specified directory: $install_dir"
+    else
+        # First, check for user-writable directories in PATH
+        for dir in "$HOME/.local/bin" "$HOME/bin" "$HOME/.cargo/bin"; do
+            if [[ ":$PATH:" == *":$dir:"* ]]; then
+                if [[ ! -d "$dir" ]]; then
+                    print_status "Creating directory: $dir"
+                    mkdir -p "$dir"
+                fi
+                if [[ -w "$dir" ]]; then
+                    install_dir="$dir"
+                    print_status "Using local directory: $install_dir (no sudo required)"
+                    break
+                fi
             fi
         done
+        
+        # If no user directory in PATH, try to use ~/.local/bin and add to PATH
+        if [[ -z "$install_dir" ]]; then
+            install_dir="$HOME/.local/bin"
+            if [[ ! -d "$install_dir" ]]; then
+                print_status "Creating local bin directory: $install_dir"
+                mkdir -p "$install_dir"
+            fi
+            
+            if [[ ":$PATH:" != *":$install_dir:"* ]]; then
+                print_warning "Directory $install_dir is not in PATH"
+                print_status "Add the following to your shell config (.bashrc, .zshrc, etc.):"
+                print_status "  export PATH=\"\$HOME/.local/bin:\$PATH\""
+            fi
+        fi
+        
+        # Fall back to system directory if needed
+        if [[ ! -w "$install_dir" ]]; then
+            install_dir="/usr/local/bin"
+            print_warning "Will need sudo to install to $install_dir"
+        fi
     fi
     
     # Install biovault
