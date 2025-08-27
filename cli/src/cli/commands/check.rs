@@ -1,18 +1,35 @@
 use crate::Result;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::process::Command;
 
 #[derive(Debug, Serialize, Deserialize)]
-struct DependencyConfig {
-    dependencies: Vec<Dependency>,
+pub struct DependencyConfig {
+    pub dependencies: Vec<Dependency>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct Dependency {
-    name: String,
-    check_running: bool,
-    install_instructions: String,
-    description: String,
+pub struct Dependency {
+    pub name: String,
+    pub check_running: bool,
+    #[serde(default)]
+    pub min_version: Option<u32>,
+    pub install_instructions: String,
+    pub description: String,
+    #[serde(default)]
+    pub environments: Option<HashMap<String, EnvironmentConfig>>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct EnvironmentConfig {
+    #[serde(default)]
+    pub install_commands: Option<Vec<String>>,
+    #[serde(default)]
+    pub verify_command: Option<String>,
+    #[serde(default)]
+    pub skip: bool,
+    #[serde(default)]
+    pub skip_reason: Option<String>,
 }
 
 pub async fn execute() -> Result<()> {
@@ -44,7 +61,26 @@ pub async fn execute() -> Result<()> {
             }
             println!();
         } else {
-            print!("✓ Found");
+            // Check version requirement if specified
+            if let Some(min_version) = dep.min_version {
+                let version_ok = check_version(&dep.name, min_version);
+                if !version_ok {
+                    all_found = false;
+                    println!("❌ Version too old (requires {} or higher)", min_version);
+                    println!("  Description: {}", dep.description);
+                    println!("  Installation instructions:");
+                    for line in dep.install_instructions.lines() {
+                        if !line.trim().is_empty() {
+                            println!("    {}", line);
+                        }
+                    }
+                    println!();
+                } else {
+                    print!("✓ Found");
+                }
+            } else {
+                print!("✓ Found");
+            }
 
             // Check if it needs to be running and if it is
             if dep.check_running {
@@ -99,4 +135,74 @@ fn get_start_command(service: &str) -> String {
         "docker" => "Open Docker Desktop or run 'sudo dockerd' (Linux)".to_string(),
         _ => format!("Start {}", service),
     }
+}
+
+fn check_version(tool: &str, min_version: u32) -> bool {
+    match tool {
+        "java" => check_java_version(min_version),
+        _ => true, // For tools without version checking, assume OK
+    }
+}
+
+fn check_java_version(min_version: u32) -> bool {
+    // Try to execute java -version
+    let output = Command::new("java").arg("-version").output();
+
+    match output {
+        Ok(output) => {
+            // Java version info is typically printed to stderr
+            let version_str = String::from_utf8_lossy(&output.stderr);
+
+            // Parse the version from the output
+            if let Some(version) = parse_java_version(&version_str) {
+                if version >= min_version {
+                    print!(" (version {})", version);
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        }
+        Err(_) => false,
+    }
+}
+
+fn parse_java_version(output: &str) -> Option<u32> {
+    // Java version output can be in different formats:
+    // - openjdk version "17.0.2" 2022-01-18
+    // - java version "1.8.0_321"
+    // - openjdk version "11.0.14" 2022-01-18
+    // - java version "17" 2021-09-14
+
+    for line in output.lines() {
+        if line.contains("version") {
+            // Extract the version string in quotes
+            if let Some(start) = line.find('"') {
+                if let Some(end) = line[start + 1..].find('"') {
+                    let version_str = &line[start + 1..start + 1 + end];
+
+                    // Handle "1.x" format (Java 8 and earlier)
+                    if let Some(stripped) = version_str.strip_prefix("1.") {
+                        // Extract the minor version (e.g., "1.8.0_321" -> 8)
+                        if let Some(dot_pos) = stripped.find('.') {
+                            if let Ok(version) = stripped[..dot_pos].parse::<u32>() {
+                                return Some(version);
+                            }
+                        }
+                    } else {
+                        // Modern format: extract major version
+                        // Handle both "17" and "17.0.2" formats
+                        let major_part = version_str.split('.').next().unwrap_or(version_str);
+                        if let Ok(version) = major_part.parse::<u32>() {
+                            return Some(version);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    None
 }

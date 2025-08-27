@@ -1,0 +1,15 @@
+version: '3.8'
+
+services:
+  colab-test:
+    build: .
+    image: biovault-colab-test
+    container_name: biovault-colab-test
+    environment:
+      - COLAB_RELEASE_TAG=release-colab_20250822-060052_RC00
+    volumes:
+      - ../../cli:/workspace/cli_src:ro
+    working_dir: /workspace
+    stdin_open: true
+    tty: true
+    command: /bin/bash
