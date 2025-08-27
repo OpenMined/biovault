@@ -18,15 +18,13 @@ jobs:
   colab-environment-test:
     name: Test Colab Setup
     runs-on: ubuntu-latest
-    # Only run on Linux x86_64
-    if: runner.os == 'Linux' && runner.arch == 'X64'
     
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
         
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v5
         
       # Option 1: GitHub Container Registry cache
       - name: Log in to GitHub Container Registry
@@ -57,7 +55,7 @@ jobs:
           
       # Build with caching
       - name: Build Docker image with cache
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
           context: tests/docker
           file: tests/docker/Dockerfile
