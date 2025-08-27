@@ -161,6 +161,7 @@ dependencies = [
  "serde_yaml",
  "sysinfo",
  "tempfile",
+ "thiserror",
  "tokio",
  "tracing",
  "tracing-subscriber",

@@ -1,40 +1,51 @@
-use std::fmt;
+use thiserror::Error;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum Error {
-    Io(std::io::Error),
-    Yaml(serde_yaml::Error),
-    Other(anyhow::Error),
-}
+    #[error("Project folder does not exist: {0}")]
+    ProjectFolderMissing(String),
 
-impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Error::Io(e) => write!(f, "IO error: {}", e),
-            Error::Yaml(e) => write!(f, "YAML error: {}", e),
-            Error::Other(e) => write!(f, "{}", e),
-        }
-    }
-}
+    #[error("Project configuration not found: {0}")]
+    ProjectConfigMissing(String),
 
-impl std::error::Error for Error {}
+    #[error("Workflow file not found: {0}")]
+    WorkflowMissing(String),
 
-impl From<std::io::Error> for Error {
-    fn from(err: std::io::Error) -> Self {
-        Error::Io(err)
-    }
-}
+    #[error("Patient file does not exist: {0}")]
+    PatientFileMissing(String),
 
-impl From<anyhow::Error> for Error {
-    fn from(err: anyhow::Error) -> Self {
-        Error::Other(err)
-    }
-}
+    #[error("Patient not found: {0}")]
+    PatientNotFound(String),
 
-impl From<serde_yaml::Error> for Error {
-    fn from(err: serde_yaml::Error) -> Self {
-        Error::Yaml(err)
-    }
+    #[error("Patient not found in patient file: {0}")]
+    PatientNotFoundInFile(String),
+
+    #[error("No patients specified")]
+    NoPatientsSpecified,
+
+    #[error("Templates not found. Please run 'bv init' first")]
+    TemplatesNotFound,
+
+    #[error("File not found: {file}: {details}")]
+    FileNotFound { file: String, details: String },
+
+    #[error("Checksum verification failed for {0}")]
+    ChecksumFailed(String),
+
+    #[error("HTTP request failed with status: {0}")]
+    HttpRequestFailed(String),
+
+    #[error("{0} patient(s) failed processing")]
+    ProcessingFailed(usize),
+
+    #[error(transparent)]
+    Anyhow(#[from] anyhow::Error),
+
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+
+    #[error(transparent)]
+    Yaml(#[from] serde_yaml::Error),
 }

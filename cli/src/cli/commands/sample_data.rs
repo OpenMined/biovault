@@ -1,4 +1,4 @@
-use crate::Result;
+use crate::error::Error;
 use anyhow::Context;
 use blake3;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -51,7 +51,7 @@ struct PatientRecord {
     aligned_index: String,
 }
 
-pub async fn fetch(patient_ids: Option<Vec<String>>, all: bool) -> Result<()> {
+pub async fn fetch(patient_ids: Option<Vec<String>>, all: bool) -> anyhow::Result<()> {
     let config: SampleDataConfig = serde_yaml::from_str(SAMPLE_DATA_YAML)
         .context("Failed to parse embedded sample data configuration")?;
 
@@ -146,11 +146,7 @@ pub async fn fetch(patient_ids: Option<Vec<String>>, all: bool) -> Result<()> {
                             if let Ok(actual) = calculate_blake3(&target_path) {
                                 println!("    Actual:   {}", actual);
                             }
-                            return Err(anyhow::anyhow!(
-                                "Checksum verification failed for {}",
-                                description
-                            )
-                            .into());
+                            return Err(Error::ChecksumFailed(description.to_string()).into());
                         }
                         Err(e) => {
                             println!("⚠ Could not verify: {}", e);
@@ -178,11 +174,7 @@ pub async fn fetch(patient_ids: Option<Vec<String>>, all: bool) -> Result<()> {
                             }
                             // Delete the corrupted file
                             let _ = fs::remove_file(&target_path);
-                            return Err(anyhow::anyhow!(
-                                "Downloaded file has invalid checksum for {}",
-                                description
-                            )
-                            .into());
+                            return Err(Error::ChecksumFailed(description.to_string()).into());
                         }
                         Err(e) => {
                             println!("⚠ Could not verify: {}", e);
@@ -217,15 +209,21 @@ pub async fn fetch(patient_ids: Option<Vec<String>>, all: bool) -> Result<()> {
     Ok(())
 }
 
-fn extract_filename_from_url(url: &str) -> Result<String> {
-    url.split('/')
-        .last()
-        .ok_or_else(|| anyhow::anyhow!("Invalid URL format: {}", url))
-        .map(|s| s.to_string())
-        .map_err(Into::into)
+fn extract_filename_from_url(url: &str) -> anyhow::Result<String> {
+    Ok(url
+        .rsplit('/')
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("Invalid URL: {}", url))?
+        .split('#')
+        .next()
+        .unwrap()
+        .split('?')
+        .next()
+        .unwrap()
+        .to_string())
 }
 
-fn calculate_blake3(path: &Path) -> Result<String> {
+fn calculate_blake3(path: &Path) -> anyhow::Result<String> {
     // For large files, blake3::Hasher::update_rayon provides parallel hashing
     let mut file = fs::File::open(path)
         .with_context(|| format!("Failed to open file for checksum: {}", path.display()))?;
@@ -274,7 +272,7 @@ fn calculate_blake3(path: &Path) -> Result<String> {
     }
 }
 
-fn verify_file_checksum(path: &Path, expected_b3sum: &str) -> Result<bool> {
+fn verify_file_checksum(path: &Path, expected_b3sum: &str) -> anyhow::Result<bool> {
     let actual = calculate_blake3(path)?;
     Ok(actual == expected_b3sum)
 }
@@ -283,26 +281,22 @@ fn determine_patients_to_fetch(
     config: &SampleDataConfig,
     patient_ids: Option<Vec<String>>,
     all: bool,
-) -> Result<Vec<String>> {
+) -> anyhow::Result<Vec<String>> {
     if all {
         Ok(config.sample_data_urls.keys().cloned().collect())
     } else if let Some(ids) = patient_ids {
         for id in &ids {
             if !config.sample_data_urls.contains_key(id) {
-                return Err(anyhow::anyhow!(
-                    "Patient {} not found in sample data configuration",
-                    id
-                )
-                .into());
+                return Err(Error::PatientNotFound(id.clone()).into());
             }
         }
         Ok(ids)
     } else {
-        Err(anyhow::anyhow!("No patients specified. Use patient IDs or --all flag").into())
+        Err(Error::NoPatientsSpecified.into())
     }
 }
 
-fn load_or_create_patients_file(path: &Path) -> Result<PatientsFile> {
+fn load_or_create_patients_file(path: &Path) -> anyhow::Result<PatientsFile> {
     if path.exists() {
         let content = fs::read_to_string(path).context("Failed to read existing patients.yaml")?;
         Ok(serde_yaml::from_str(&content).context("Failed to parse existing patients.yaml")?)
@@ -313,13 +307,13 @@ fn load_or_create_patients_file(path: &Path) -> Result<PatientsFile> {
     }
 }
 
-fn save_patients_file(path: &Path, patients: &PatientsFile) -> Result<()> {
+fn save_patients_file(path: &Path, patients: &PatientsFile) -> anyhow::Result<()> {
     let yaml = serde_yaml::to_string(patients).context("Failed to serialize patients data")?;
     fs::write(path, yaml).context("Failed to write patients.yaml")?;
     Ok(())
 }
 
-async fn download_file(url: &str, target_path: &Path) -> Result<()> {
+async fn download_file(url: &str, target_path: &Path) -> anyhow::Result<()> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(3600))
         .build()
@@ -332,9 +326,7 @@ async fn download_file(url: &str, target_path: &Path) -> Result<()> {
         .context("Failed to send request")?;
 
     if !response.status().is_success() {
-        return Err(
-            anyhow::anyhow!("HTTP request failed with status: {}", response.status()).into(),
-        );
+        return Err(Error::HttpRequestFailed(response.status().to_string()).into());
     }
 
     let total_size = response.content_length().unwrap_or(0);
@@ -378,7 +370,7 @@ async fn download_file(url: &str, target_path: &Path) -> Result<()> {
     Ok(())
 }
 
-pub async fn list() -> Result<()> {
+pub async fn list() -> anyhow::Result<()> {
     let config: SampleDataConfig = serde_yaml::from_str(SAMPLE_DATA_YAML)
         .context("Failed to parse embedded sample data configuration")?;
 

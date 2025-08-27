@@ -163,9 +163,9 @@ async fn main() -> Result<()> {
             work_dir,
             resume,
         } => {
-            commands::run::execute(
-                &project_folder,
-                &patient_file,
+            commands::run::execute(commands::run::RunParams {
+                project_folder,
+                patient_file,
                 patients,
                 patient,
                 all,
@@ -174,7 +174,7 @@ async fn main() -> Result<()> {
                 with_docker,
                 work_dir,
                 resume,
-            )
+            })
             .await?;
         }
         Commands::SampleData { command } => match command {

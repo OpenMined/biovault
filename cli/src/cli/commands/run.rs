@@ -1,4 +1,4 @@
-use crate::Result;
+use crate::error::Error;
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -70,35 +70,42 @@ struct PatientFile {
     patient: std::collections::HashMap<String, PatientData>,
 }
 
-pub async fn execute(
-    project_folder: &str,
-    patient_file: &str,
-    patients: Option<Vec<String>>,
-    patient: Option<String>,
-    all: bool,
-    test: bool,
-    dry_run: bool,
-    with_docker: bool,
-    work_dir: Option<String>,
-    resume: bool,
-) -> Result<()> {
+pub struct RunParams {
+    pub project_folder: String,
+    pub patient_file: String,
+    pub patients: Option<Vec<String>>,
+    pub patient: Option<String>,
+    pub all: bool,
+    pub test: bool,
+    pub dry_run: bool,
+    pub with_docker: bool,
+    pub work_dir: Option<String>,
+    pub resume: bool,
+}
+
+pub async fn execute(params: RunParams) -> anyhow::Result<()> {
     // Validate project directory
-    let project_path = PathBuf::from(project_folder);
+    let project_path = PathBuf::from(&params.project_folder);
     if !project_path.exists() {
-        return Err(anyhow::anyhow!("Project folder does not exist: {}", project_folder).into());
+        return Err(Error::ProjectFolderMissing(params.project_folder.clone()).into());
     }
 
     let project_yaml = project_path.join("project.yaml");
     if !project_yaml.exists() {
-        return Err(anyhow::anyhow!("project.yaml not found in {}", project_folder).into());
+        return Err(Error::ProjectConfigMissing(params.project_folder.clone()).into());
     }
 
     let workflow_file = project_path
         .join("workflow.nf")
         .canonicalize()
-        .with_context(|| format!("Failed to resolve workflow.nf path in {}", project_folder))?;
+        .with_context(|| {
+            format!(
+                "Failed to resolve workflow.nf path in {}",
+                params.project_folder
+            )
+        })?;
     if !workflow_file.exists() {
-        return Err(anyhow::anyhow!("workflow.nf not found in {}", project_folder).into());
+        return Err(Error::WorkflowMissing(params.project_folder.clone()).into());
     }
 
     // Parse project configuration
@@ -112,9 +119,9 @@ pub async fn execute(
         serde_yaml::from_str(&project_content).context("Failed to parse project.yaml")?;
 
     // Parse patient file
-    let patient_file_path = PathBuf::from(patient_file);
+    let patient_file_path = PathBuf::from(&params.patient_file);
     if !patient_file_path.exists() {
-        return Err(anyhow::anyhow!("Patient file does not exist: {}", patient_file).into());
+        return Err(Error::PatientFileMissing(params.patient_file.clone()).into());
     }
 
     // Get the directory containing the patient file for resolving relative paths
@@ -132,8 +139,14 @@ pub async fn execute(
         serde_yaml::from_str(&patient_content).context("Failed to parse patient file")?;
 
     // Determine which patients to process
-    let patients_to_run =
-        determine_patients(&patient_data, &project_config, patients, patient, all, test)?;
+    let patients_to_run = determine_patients(
+        &patient_data,
+        &project_config,
+        params.patients,
+        params.patient,
+        params.all,
+        params.test,
+    )?;
 
     if patients_to_run.is_empty() {
         println!("No patients to process");
@@ -158,9 +171,7 @@ pub async fn execute(
     let nextflow_config = env_dir.join("nextflow.config");
 
     if !template_nf.exists() || !nextflow_config.exists() {
-        return Err(
-            anyhow::anyhow!("Nextflow templates not found. Please run 'bv init' first").into(),
-        );
+        return Err(Error::TemplatesNotFound.into());
     }
 
     // Create temporary directory for execution
@@ -239,11 +250,10 @@ pub async fn execute(
 
         // Verify that resolved paths exist and canonicalize them
         if !ref_path.exists() {
-            return Err(anyhow::anyhow!(
-                "Reference file not found: {} (resolved to {})",
-                patient_info.ref_path,
-                ref_path.display()
-            )
+            return Err(Error::FileNotFound {
+                file: patient_info.ref_path.clone(),
+                details: format!("resolved to {}", ref_path.display()),
+            }
             .into());
         }
         let ref_path = ref_path.canonicalize().with_context(|| {
@@ -254,11 +264,10 @@ pub async fn execute(
         })?;
 
         if !ref_index_path.exists() {
-            return Err(anyhow::anyhow!(
-                "Reference index file not found: {} (resolved to {})",
-                patient_info.ref_index,
-                ref_index_path.display()
-            )
+            return Err(Error::FileNotFound {
+                file: patient_info.ref_index.clone(),
+                details: format!("resolved to {}", ref_index_path.display()),
+            }
             .into());
         }
         let ref_index_path = ref_index_path.canonicalize().with_context(|| {
@@ -269,11 +278,10 @@ pub async fn execute(
         })?;
 
         if !aligned_path.exists() {
-            return Err(anyhow::anyhow!(
-                "Aligned file not found: {} (resolved to {})",
-                patient_info.aligned,
-                aligned_path.display()
-            )
+            return Err(Error::FileNotFound {
+                file: patient_info.aligned.clone(),
+                details: format!("resolved to {}", aligned_path.display()),
+            }
             .into());
         }
         let aligned_path = aligned_path.canonicalize().with_context(|| {
@@ -284,11 +292,10 @@ pub async fn execute(
         })?;
 
         if !aligned_index_path.exists() {
-            return Err(anyhow::anyhow!(
-                "Aligned index file not found: {} (resolved to {})",
-                patient_info.aligned_index,
-                aligned_index_path.display()
-            )
+            return Err(Error::FileNotFound {
+                file: patient_info.aligned_index.clone(),
+                details: format!("resolved to {}", aligned_index_path.display()),
+            }
             .into());
         }
         let aligned_index_path = aligned_index_path.canonicalize().with_context(|| {
@@ -326,17 +333,17 @@ pub async fn execute(
             .arg(results_dir.to_string_lossy().as_ref());
 
         // Add work directory if specified
-        if let Some(ref work_dir_path) = work_dir {
+        if let Some(ref work_dir_path) = params.work_dir {
             cmd.arg("-work-dir").arg(work_dir_path);
         }
 
         // Add resume flag if specified
-        if resume {
+        if params.resume {
             cmd.arg("-resume");
         }
 
         // Add Docker flag
-        if with_docker {
+        if params.with_docker {
             cmd.arg("-with-docker");
         }
 
@@ -347,7 +354,7 @@ pub async fn execute(
         let cmd_str = format!("{:?}", cmd);
         println!("\nCommand: {}", cmd_str);
 
-        if dry_run {
+        if params.dry_run {
             println!("[DRY RUN] Would execute the above command");
             success_count += 1;
         } else {
@@ -387,7 +394,7 @@ pub async fn execute(
     println!("Total: {}", success_count + fail_count);
 
     if fail_count > 0 {
-        return Err(anyhow::anyhow!("{} patient(s) failed processing", fail_count).into());
+        return Err(Error::ProcessingFailed(fail_count).into());
     }
 
     Ok(())
@@ -400,11 +407,11 @@ fn determine_patients(
     patient_arg: Option<String>,
     all: bool,
     test: bool,
-) -> Result<Vec<String>> {
+) -> anyhow::Result<Vec<String>> {
     // Priority 1: Test mode
     if test {
         if !patient_data.patient.contains_key("TEST") {
-            return Err(anyhow::anyhow!("TEST patient not found in patient file").into());
+            return Err(Error::PatientNotFoundInFile("TEST".to_string()).into());
         }
         return Ok(vec!["TEST".to_string()]);
     }
@@ -412,7 +419,7 @@ fn determine_patients(
     // Priority 2: Command-line patient override (single)
     if let Some(patient_id) = patient_arg {
         if !patient_data.patient.contains_key(&patient_id) {
-            return Err(anyhow::anyhow!("Patient {} not found in patient file", patient_id).into());
+            return Err(Error::PatientNotFoundInFile(patient_id.clone()).into());
         }
         return Ok(vec![patient_id]);
     }
@@ -421,9 +428,7 @@ fn determine_patients(
     if let Some(patient_list) = patients_arg {
         for patient_id in &patient_list {
             if !patient_data.patient.contains_key(patient_id) {
-                return Err(
-                    anyhow::anyhow!("Patient {} not found in patient file", patient_id).into(),
-                );
+                return Err(Error::PatientNotFoundInFile(patient_id.clone()).into());
             }
         }
         return Ok(patient_list);
@@ -438,10 +443,10 @@ fn determine_patients(
     if !project_config.patients.is_empty() {
         for patient_id in &project_config.patients {
             if !patient_data.patient.contains_key(patient_id) {
-                return Err(anyhow::anyhow!(
-                    "Patient {} (from project.yaml) not found in patient file",
+                return Err(Error::PatientNotFoundInFile(format!(
+                    "{} (from project.yaml)",
                     patient_id
-                )
+                ))
                 .into());
             }
         }
@@ -449,5 +454,5 @@ fn determine_patients(
     }
 
     // No patients specified
-    Err(anyhow::anyhow!("No patients specified. Use --patient, --patients, --all, --test flags or define patients in project.yaml").into())
+    Err(Error::NoPatientsSpecified.into())
 }
