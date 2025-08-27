@@ -237,7 +237,7 @@ pub async fn execute(
         let aligned_path = patient_dir.join(&patient_info.aligned);
         let aligned_index_path = patient_dir.join(&patient_info.aligned_index);
 
-        // Verify that resolved paths exist
+        // Verify that resolved paths exist and canonicalize them
         if !ref_path.exists() {
             return Err(anyhow::anyhow!(
                 "Reference file not found: {} (resolved to {})",
@@ -246,6 +246,22 @@ pub async fn execute(
             )
             .into());
         }
+        let ref_path = ref_path.canonicalize().with_context(|| {
+            format!("Failed to resolve reference file path: {}", ref_path.display())
+        })?;
+        
+        if !ref_index_path.exists() {
+            return Err(anyhow::anyhow!(
+                "Reference index file not found: {} (resolved to {})",
+                patient_info.ref_index,
+                ref_index_path.display()
+            )
+            .into());
+        }
+        let ref_index_path = ref_index_path.canonicalize().with_context(|| {
+            format!("Failed to resolve reference index path: {}", ref_index_path.display())
+        })?;
+        
         if !aligned_path.exists() {
             return Err(anyhow::anyhow!(
                 "Aligned file not found: {} (resolved to {})",
@@ -254,6 +270,21 @@ pub async fn execute(
             )
             .into());
         }
+        let aligned_path = aligned_path.canonicalize().with_context(|| {
+            format!("Failed to resolve aligned file path: {}", aligned_path.display())
+        })?;
+        
+        if !aligned_index_path.exists() {
+            return Err(anyhow::anyhow!(
+                "Aligned index file not found: {} (resolved to {})",
+                patient_info.aligned_index,
+                aligned_index_path.display()
+            )
+            .into());
+        }
+        let aligned_index_path = aligned_index_path.canonicalize().with_context(|| {
+            format!("Failed to resolve aligned index path: {}", aligned_index_path.display())
+        })?;
 
         // Build nextflow command
         let mut cmd = Command::new("nextflow");

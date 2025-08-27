@@ -2,24 +2,24 @@
 patient:
   TEST:
     ref_version: GRCh38
-    ref: ./data/reference/GRCh38_full_analysis_set_plus_decoy_hla.fa
-    ref_index: ./data/reference/GRCh38_full_analysis_set_plus_decoy_hla.fa.fai
-    aligned: ./data/ERR3239283/NA07357.final.cram
-    aligned_index: ./data/ERR3239283/NA07357.final.cram.crai
+    ref: ../data/reference/GRCh38_full_analysis_set_plus_decoy_hla.fa
+    ref_index: ../data/reference/GRCh38_full_analysis_set_plus_decoy_hla.fa.fai
+    aligned: ../data/ERR3239283/NA07357.final.cram
+    aligned_index: ../data/ERR3239283/NA07357.final.cram.crai
 
   NA07357:
     ref_version: GRCh38
-    ref: ./data/reference/GRCh38_full_analysis_set_plus_decoy_hla.fa
-    ref_index: ./data/reference/GRCh38_full_analysis_set_plus_decoy_hla.fa.fai
-    aligned: ./data/ERR3239283/NA07357.final.cram
-    aligned_index: ./data/ERR3239283/NA07357.final.cram.crai
+    ref: ../data/reference/GRCh38_full_analysis_set_plus_decoy_hla.fa
+    ref_index: ../data/reference/GRCh38_full_analysis_set_plus_decoy_hla.fa.fai
+    aligned: ../data/ERR3239283/NA07357.final.cram
+    aligned_index: ../data/ERR3239283/NA07357.final.cram.crai
 
   NA06986:
     ref_version: GRCh38
-    ref: ./data/reference/GRCh38_full_analysis_set_plus_decoy_hla.fa
-    ref_index: ./data/reference/GRCh38_full_analysis_set_plus_decoy_hla.fa.fai
-    aligned: ./data/ERR3239277/NA06986.final.cram
-    aligned_index: ./data/ERR3239277/NA06986.final.cram.crai
+    ref: ../data/reference/GRCh38_full_analysis_set_plus_decoy_hla.fa
+    ref_index: ../data/reference/GRCh38_full_analysis_set_plus_decoy_hla.fa.fai
+    aligned: ../data/ERR3239277/NA06986.final.cram
+    aligned_index: ../data/ERR3239277/NA06986.final.cram.crai
 
   MADHAVA:
     ref_version: GRCh38
