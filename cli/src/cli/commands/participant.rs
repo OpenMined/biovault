@@ -48,7 +48,7 @@ impl ParticipantsFile {
         let parent = path.parent().ok_or_else(|| anyhow!("Invalid path"))?;
         fs::create_dir_all(parent)
             .with_context(|| format!("Failed to create directory {:?}", parent))?;
-        
+
         let yaml = serde_yaml::to_string(self)
             .with_context(|| "Failed to serialize participants to YAML")?;
         fs::write(&path, yaml)
@@ -77,12 +77,18 @@ fn detect_reference_version(aligned_file: &str) -> Option<String> {
 
     let check_ebv = Command::new("sh")
         .arg("-c")
-        .arg(format!("samtools view -H {} | grep -c 'SN:chrEBV'", aligned_file))
+        .arg(format!(
+            "samtools view -H {} | grep -c 'SN:chrEBV'",
+            aligned_file
+        ))
         .output();
 
     let check_ki270 = Command::new("sh")
         .arg("-c")
-        .arg(format!("samtools view -H {} | grep -c 'SN:KI270'", aligned_file))
+        .arg(format!(
+            "samtools view -H {} | grep -c 'SN:KI270'",
+            aligned_file
+        ))
         .output();
 
     match (check_ebv, check_ki270) {
@@ -95,7 +101,7 @@ fn detect_reference_version(aligned_file: &str) -> Option<String> {
                 .trim()
                 .parse::<i32>()
                 .unwrap_or(0);
-            
+
             if ebv_count > 0 || ki270_count > 0 {
                 Some("GRCh38".to_string())
             } else {
@@ -123,17 +129,12 @@ fn get_index_file_path(file_path: &str, is_aligned: bool) -> String {
 }
 
 fn normalize_path(path: &str) -> Result<String> {
-    let path_buf = PathBuf::from(path);
-    if path_buf.is_absolute() {
-        Ok(path.to_string())
-    } else {
-        Ok(path.to_string())
-    }
+    Ok(path.to_string())
 }
 
 pub async fn add(id: Option<String>, aligned: Option<String>) -> Result<()> {
     println!("{}", "Adding new participant...".green().bold());
-    
+
     if !check_samtools_installed() {
         warn!("samtools is not installed. Index creation will not be available.");
         println!("{}", "Warning: samtools is not installed. You won't be able to create index files automatically.".yellow());
@@ -151,9 +152,12 @@ pub async fn add(id: Option<String>, aligned: Option<String>) -> Result<()> {
 
     if participants_file.participants.contains_key(&participant_id) {
         let overwrite = Confirm::new()
-            .with_prompt(format!("Participant '{}' already exists. Overwrite?", participant_id))
+            .with_prompt(format!(
+                "Participant '{}' already exists. Overwrite?",
+                participant_id
+            ))
             .interact()?;
-        
+
         if !overwrite {
             println!("Cancelled.");
             return Ok(());
@@ -180,7 +184,7 @@ pub async fn add(id: Option<String>, aligned: Option<String>) -> Result<()> {
 
     let aligned_index = get_index_file_path(&aligned_file, true);
     let aligned_index_exists = Path::new(&aligned_index).exists();
-    
+
     if aligned_index_exists {
         println!("✓ Index file found: {}", aligned_index.green());
     } else {
@@ -203,12 +207,12 @@ pub async fn add(id: Option<String>, aligned: Option<String>) -> Result<()> {
             .with_prompt("Enter aligned index file path")
             .default(aligned_index.clone())
             .interact_text()?;
-        
+
         if !Path::new(&custom_index).exists() && check_samtools_installed() {
             let create_index = Confirm::new()
                 .with_prompt("Index file doesn't exist. Create it after setup?")
                 .interact()?;
-            
+
             if create_index {
                 index_jobs.push((aligned_file.clone(), true));
             }
@@ -234,7 +238,7 @@ pub async fn add(id: Option<String>, aligned: Option<String>) -> Result<()> {
         .items(&ref_version_choices)
         .default(default_selection)
         .interact()?;
-    
+
     let ref_version = ref_version_choices[ref_version_idx].to_string();
 
     let ref_file = Input::<String>::new()
@@ -250,7 +254,7 @@ pub async fn add(id: Option<String>, aligned: Option<String>) -> Result<()> {
 
     let ref_index = get_index_file_path(&ref_file, false);
     let ref_index_exists = Path::new(&ref_index).exists();
-    
+
     if ref_index_exists {
         println!("✓ Reference index found: {}", ref_index.green());
     } else {
@@ -273,12 +277,12 @@ pub async fn add(id: Option<String>, aligned: Option<String>) -> Result<()> {
             .with_prompt("Enter reference index file path")
             .default(ref_index.clone())
             .interact_text()?;
-        
+
         if !Path::new(&custom_index).exists() && check_samtools_installed() {
             let create_index = Confirm::new()
                 .with_prompt("Reference index doesn't exist. Create it after setup?")
                 .interact()?;
-            
+
             if create_index {
                 index_jobs.push((ref_file.clone(), false));
             }
@@ -295,23 +299,26 @@ pub async fn add(id: Option<String>, aligned: Option<String>) -> Result<()> {
         aligned_index: normalize_path(&final_aligned_index)?,
     };
 
-    participants_file.participants.insert(participant_id.clone(), participant);
+    participants_file
+        .participants
+        .insert(participant_id.clone(), participant);
     participants_file.save()?;
 
-    println!("{}", format!("✓ Participant '{}' added successfully!", participant_id).green().bold());
+    println!(
+        "{}",
+        format!("✓ Participant '{}' added successfully!", participant_id)
+            .green()
+            .bold()
+    );
 
     if !index_jobs.is_empty() && check_samtools_installed() {
         println!("\n{}", "Creating index files...".cyan().bold());
         for (file, is_aligned) in index_jobs {
             println!("Indexing: {}", file);
             let result = if is_aligned {
-                Command::new("samtools")
-                    .args(&["index", &file])
-                    .output()
+                Command::new("samtools").args(["index", &file]).output()
             } else {
-                Command::new("samtools")
-                    .args(&["faidx", &file])
-                    .output()
+                Command::new("samtools").args(["faidx", &file]).output()
             };
 
             match result {
@@ -334,7 +341,7 @@ pub async fn add(id: Option<String>, aligned: Option<String>) -> Result<()> {
 
 pub async fn list() -> Result<()> {
     let participants_file = ParticipantsFile::load()?;
-    
+
     if participants_file.participants.is_empty() {
         println!("{}", "No participants found.".yellow());
         println!("Use 'bv participant add' to add a participant.");
@@ -359,7 +366,7 @@ pub async fn list() -> Result<()> {
 
 pub async fn delete(id: String) -> Result<()> {
     let mut participants_file = ParticipantsFile::load()?;
-    
+
     if !participants_file.participants.contains_key(&id) {
         return Err(anyhow!("Participant '{}' not found", id));
     }
@@ -367,7 +374,7 @@ pub async fn delete(id: String) -> Result<()> {
     let confirm = Confirm::new()
         .with_prompt(format!("Delete participant '{}'?", id))
         .interact()?;
-    
+
     if !confirm {
         println!("Cancelled.");
         return Ok(());
@@ -375,14 +382,21 @@ pub async fn delete(id: String) -> Result<()> {
 
     participants_file.participants.remove(&id);
     participants_file.save()?;
-    
-    println!("{}", format!("✓ Participant '{}' deleted successfully!", id).green().bold());
+
+    println!(
+        "{}",
+        format!("✓ Participant '{}' deleted successfully!", id)
+            .green()
+            .bold()
+    );
     Ok(())
 }
 
 pub async fn validate(id: Option<String>) -> Result<()> {
     if !check_samtools_installed() {
-        return Err(anyhow!("samtools is not installed. Please install samtools first."));
+        return Err(anyhow!(
+            "samtools is not installed. Please install samtools first."
+        ));
     }
 
     let check_seqkit = Command::new("which")
@@ -392,11 +406,13 @@ pub async fn validate(id: Option<String>) -> Result<()> {
         .unwrap_or(false);
 
     if !check_seqkit {
-        return Err(anyhow!("seqkit is not installed. Please install seqkit first."));
+        return Err(anyhow!(
+            "seqkit is not installed. Please install seqkit first."
+        ));
     }
 
     let participants_file = ParticipantsFile::load()?;
-    
+
     let participants_to_validate: Vec<(String, Participant)> = match id {
         Some(ref id) => {
             let participant = participants_file
@@ -420,11 +436,11 @@ pub async fn validate(id: Option<String>) -> Result<()> {
 
     for (id, participant) in participants_to_validate {
         println!("Validating participant: {}", id.cyan());
-        
+
         let aligned_result = Command::new("samtools")
-            .args(&["quickcheck", "-v", &participant.aligned])
+            .args(["quickcheck", "-v", &participant.aligned])
             .output();
-        
+
         match aligned_result {
             Ok(output) if output.status.success() => {
                 println!("  ✓ Aligned file is valid: {}", participant.aligned.green());
@@ -438,15 +454,18 @@ pub async fn validate(id: Option<String>) -> Result<()> {
                 all_valid = false;
             }
             Err(e) => {
-                println!("  ✗ Failed to validate aligned file: {}", e.to_string().red());
+                println!(
+                    "  ✗ Failed to validate aligned file: {}",
+                    e.to_string().red()
+                );
                 all_valid = false;
             }
         }
 
         let ref_result = Command::new("seqkit")
-            .args(&["stats", &participant.r#ref])
+            .args(["stats", &participant.r#ref])
             .output();
-        
+
         match ref_result {
             Ok(output) if output.status.success() => {
                 println!("  ✓ Reference file is valid: {}", participant.r#ref.green());
@@ -466,21 +485,36 @@ pub async fn validate(id: Option<String>) -> Result<()> {
                 all_valid = false;
             }
             Err(e) => {
-                println!("  ✗ Failed to validate reference file: {}", e.to_string().red());
+                println!(
+                    "  ✗ Failed to validate reference file: {}",
+                    e.to_string().red()
+                );
                 all_valid = false;
             }
         }
 
         if !Path::new(&participant.aligned_index).exists() {
-            println!("  ⚠ Aligned index file not found: {}", participant.aligned_index.yellow());
+            println!(
+                "  ⚠ Aligned index file not found: {}",
+                participant.aligned_index.yellow()
+            );
         } else {
-            println!("  ✓ Aligned index file exists: {}", participant.aligned_index.green());
+            println!(
+                "  ✓ Aligned index file exists: {}",
+                participant.aligned_index.green()
+            );
         }
 
         if !Path::new(&participant.ref_index).exists() {
-            println!("  ⚠ Reference index file not found: {}", participant.ref_index.yellow());
+            println!(
+                "  ⚠ Reference index file not found: {}",
+                participant.ref_index.yellow()
+            );
         } else {
-            println!("  ✓ Reference index file exists: {}", participant.ref_index.green());
+            println!(
+                "  ✓ Reference index file exists: {}",
+                participant.ref_index.green()
+            );
         }
 
         println!();
