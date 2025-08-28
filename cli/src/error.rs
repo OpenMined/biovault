@@ -13,17 +13,17 @@ pub enum Error {
     #[error("Workflow file not found: {0}")]
     WorkflowMissing(String),
 
-    #[error("Patient file does not exist: {0}")]
-    PatientFileMissing(String),
+    #[error("Participant file does not exist: {0}")]
+    ParticipantFileMissing(String),
 
-    #[error("Patient not found: {0}")]
-    PatientNotFound(String),
+    #[error("Participant not found: {0}")]
+    ParticipantNotFound(String),
 
-    #[error("Patient not found in patient file: {0}")]
-    PatientNotFoundInFile(String),
+    #[error("Participant not found in participant file: {0}")]
+    ParticipantNotFoundInFile(String),
 
-    #[error("No patients specified")]
-    NoPatientsSpecified,
+    #[error("No participants specified")]
+    NoParticipantsSpecified,
 
     #[error("Templates not found. Please run 'bv init' first")]
     TemplatesNotFound,
@@ -37,7 +37,7 @@ pub enum Error {
     #[error("HTTP request failed with status: {0}")]
     HttpRequestFailed(String),
 
-    #[error("{0} patient(s) failed processing")]
+    #[error("{0} participant(s) failed processing")]
     ProcessingFailed(usize),
 
     #[error(transparent)]

@@ -14,7 +14,7 @@ struct ProjectConfig {
     #[serde(default, deserialize_with = "deserialize_string_or_vec")]
     assets: Vec<String>,
     #[serde(default)]
-    patients: Vec<String>,
+    participants: Vec<String>,
 }
 
 fn deserialize_string_or_vec<'de, D>(deserializer: D) -> std::result::Result<Vec<String>, D::Error>
@@ -56,7 +56,7 @@ where
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct PatientData {
+struct ParticipantData {
     ref_version: String,
     #[serde(rename = "ref")]
     ref_path: String,
@@ -66,15 +66,15 @@ struct PatientData {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct PatientFile {
-    patient: std::collections::HashMap<String, PatientData>,
+struct ParticipantFile {
+    participant: std::collections::HashMap<String, ParticipantData>,
 }
 
 pub struct RunParams {
     pub project_folder: String,
-    pub patient_file: String,
-    pub patients: Option<Vec<String>>,
-    pub patient: Option<String>,
+    pub participant_file: String,
+    pub participants: Option<Vec<String>>,
+    pub participant: Option<String>,
     pub all: bool,
     pub test: bool,
     pub dry_run: bool,
@@ -118,43 +118,43 @@ pub async fn execute(params: RunParams) -> anyhow::Result<()> {
     let project_config: ProjectConfig =
         serde_yaml::from_str(&project_content).context("Failed to parse project.yaml")?;
 
-    // Parse patient file
-    let patient_file_path = PathBuf::from(&params.patient_file);
-    if !patient_file_path.exists() {
-        return Err(Error::PatientFileMissing(params.patient_file.clone()).into());
+    // Parse participant file
+    let participant_file_path = PathBuf::from(&params.participant_file);
+    if !participant_file_path.exists() {
+        return Err(Error::ParticipantFileMissing(params.participant_file.clone()).into());
     }
 
-    // Get the directory containing the patient file for resolving relative paths
-    let patient_dir = patient_file_path
+    // Get the directory containing the participant file for resolving relative paths
+    let participant_dir = participant_file_path
         .parent()
-        .ok_or_else(|| anyhow::anyhow!("Could not determine patient file directory"))?;
+        .ok_or_else(|| anyhow::anyhow!("Could not determine participant file directory"))?;
 
-    let patient_content = fs::read_to_string(&patient_file_path).with_context(|| {
+    let participant_content = fs::read_to_string(&participant_file_path).with_context(|| {
         format!(
-            "Failed to read patient file from {}",
-            patient_file_path.display()
+            "Failed to read participant file from {}",
+            participant_file_path.display()
         )
     })?;
-    let patient_data: PatientFile =
-        serde_yaml::from_str(&patient_content).context("Failed to parse patient file")?;
+    let participant_data: ParticipantFile =
+        serde_yaml::from_str(&participant_content).context("Failed to parse participant file")?;
 
-    // Determine which patients to process
-    let patients_to_run = determine_patients(
-        &patient_data,
+    // Determine which participants to process
+    let participants_to_run = determine_participants(
+        &participant_data,
         &project_config,
-        params.patients,
-        params.patient,
+        params.participants,
+        params.participant,
         params.all,
         params.test,
     )?;
 
-    if patients_to_run.is_empty() {
-        println!("No patients to process");
+    if participants_to_run.is_empty() {
+        println!("No participants to process");
         return Ok(());
     }
 
-    println!("Processing {} patient(s):", patients_to_run.len());
-    for p in &patients_to_run {
+    println!("Processing {} participant(s):", participants_to_run.len());
+    for p in &participants_to_run {
         println!("  - {}", p);
     }
 
@@ -208,23 +208,28 @@ pub async fn execute(params: RunParams) -> anyhow::Result<()> {
         )
     })?;
 
-    // Process each patient
+    // Process each participant
     let mut success_count = 0;
     let mut fail_count = 0;
 
-    for patient_id in patients_to_run {
+    for participant_id in participants_to_run {
         println!("\n{}", "=".repeat(60));
-        println!("Processing patient: {}", patient_id);
+        println!("Processing participant: {}", participant_id);
         println!("{}", "=".repeat(60));
 
-        // Get patient data
-        let patient_info = patient_data
-            .patient
-            .get(&patient_id)
-            .ok_or_else(|| anyhow::anyhow!("Patient {} not found in patient file", patient_id))?;
+        // Get participant data
+        let participant_info = participant_data
+            .participant
+            .get(&participant_id)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Participant {} not found in participant file",
+                    participant_id
+                )
+            })?;
 
-        // Create results directory for this patient
-        let results_dir = project_path.join("results").join(&patient_id);
+        // Create results directory for this participant
+        let results_dir = project_path.join("results").join(&participant_id);
         if !results_dir.exists() {
             fs::create_dir_all(&results_dir).with_context(|| {
                 format!(
@@ -242,16 +247,16 @@ pub async fn execute(params: RunParams) -> anyhow::Result<()> {
             )
         })?;
 
-        // Resolve patient data paths relative to patient file location
-        let ref_path = patient_dir.join(&patient_info.ref_path);
-        let ref_index_path = patient_dir.join(&patient_info.ref_index);
-        let aligned_path = patient_dir.join(&patient_info.aligned);
-        let aligned_index_path = patient_dir.join(&patient_info.aligned_index);
+        // Resolve participant data paths relative to participant file location
+        let ref_path = participant_dir.join(&participant_info.ref_path);
+        let ref_index_path = participant_dir.join(&participant_info.ref_index);
+        let aligned_path = participant_dir.join(&participant_info.aligned);
+        let aligned_index_path = participant_dir.join(&participant_info.aligned_index);
 
         // Verify that resolved paths exist and canonicalize them
         if !ref_path.exists() {
             return Err(Error::FileNotFound {
-                file: patient_info.ref_path.clone(),
+                file: participant_info.ref_path.clone(),
                 details: format!("resolved to {}", ref_path.display()),
             }
             .into());
@@ -265,7 +270,7 @@ pub async fn execute(params: RunParams) -> anyhow::Result<()> {
 
         if !ref_index_path.exists() {
             return Err(Error::FileNotFound {
-                file: patient_info.ref_index.clone(),
+                file: participant_info.ref_index.clone(),
                 details: format!("resolved to {}", ref_index_path.display()),
             }
             .into());
@@ -279,7 +284,7 @@ pub async fn execute(params: RunParams) -> anyhow::Result<()> {
 
         if !aligned_path.exists() {
             return Err(Error::FileNotFound {
-                file: patient_info.aligned.clone(),
+                file: participant_info.aligned.clone(),
                 details: format!("resolved to {}", aligned_path.display()),
             }
             .into());
@@ -293,7 +298,7 @@ pub async fn execute(params: RunParams) -> anyhow::Result<()> {
 
         if !aligned_index_path.exists() {
             return Err(Error::FileNotFound {
-                file: patient_info.aligned_index.clone(),
+                file: participant_info.aligned_index.clone(),
                 details: format!("resolved to {}", aligned_index_path.display()),
             }
             .into());
@@ -313,10 +318,10 @@ pub async fn execute(params: RunParams) -> anyhow::Result<()> {
 
         cmd.arg("run")
             .arg(&temp_template)
-            .arg("--patient_id")
-            .arg(&patient_id)
+            .arg("--participant_id")
+            .arg(&participant_id)
             .arg("--ref_version")
-            .arg(&patient_info.ref_version)
+            .arg(&participant_info.ref_version)
             .arg("--ref")
             .arg(ref_path.to_string_lossy().as_ref())
             .arg("--ref_index")
@@ -364,7 +369,7 @@ pub async fn execute(params: RunParams) -> anyhow::Result<()> {
             let output = cmd.output().context("Failed to execute nextflow command")?;
 
             if output.status.success() {
-                println!("✓ Successfully processed patient: {}", patient_id);
+                println!("✓ Successfully processed participant: {}", participant_id);
                 success_count += 1;
 
                 // Print stdout if available
@@ -373,7 +378,7 @@ pub async fn execute(params: RunParams) -> anyhow::Result<()> {
                     println!("{}", String::from_utf8_lossy(&output.stdout));
                 }
             } else {
-                println!("✗ Failed to process patient: {}", patient_id);
+                println!("✗ Failed to process participant: {}", participant_id);
                 fail_count += 1;
 
                 // Print stderr if available
@@ -400,59 +405,59 @@ pub async fn execute(params: RunParams) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn determine_patients(
-    patient_data: &PatientFile,
+fn determine_participants(
+    participant_data: &ParticipantFile,
     project_config: &ProjectConfig,
-    patients_arg: Option<Vec<String>>,
-    patient_arg: Option<String>,
+    participants_arg: Option<Vec<String>>,
+    participant_arg: Option<String>,
     all: bool,
     test: bool,
 ) -> anyhow::Result<Vec<String>> {
     // Priority 1: Test mode
     if test {
-        if !patient_data.patient.contains_key("TEST") {
-            return Err(Error::PatientNotFoundInFile("TEST".to_string()).into());
+        if !participant_data.participant.contains_key("TEST") {
+            return Err(Error::ParticipantNotFoundInFile("TEST".to_string()).into());
         }
         return Ok(vec!["TEST".to_string()]);
     }
 
-    // Priority 2: Command-line patient override (single)
-    if let Some(patient_id) = patient_arg {
-        if !patient_data.patient.contains_key(&patient_id) {
-            return Err(Error::PatientNotFoundInFile(patient_id.clone()).into());
+    // Priority 2: Command-line participant override (single)
+    if let Some(participant_id) = participant_arg {
+        if !participant_data.participant.contains_key(&participant_id) {
+            return Err(Error::ParticipantNotFoundInFile(participant_id.clone()).into());
         }
-        return Ok(vec![patient_id]);
+        return Ok(vec![participant_id]);
     }
 
-    // Priority 3: Command-line patients override (multiple)
-    if let Some(patient_list) = patients_arg {
-        for patient_id in &patient_list {
-            if !patient_data.patient.contains_key(patient_id) {
-                return Err(Error::PatientNotFoundInFile(patient_id.clone()).into());
+    // Priority 3: Command-line participants override (multiple)
+    if let Some(participant_list) = participants_arg {
+        for participant_id in &participant_list {
+            if !participant_data.participant.contains_key(participant_id) {
+                return Err(Error::ParticipantNotFoundInFile(participant_id.clone()).into());
             }
         }
-        return Ok(patient_list);
+        return Ok(participant_list);
     }
 
-    // Priority 4: All patients
+    // Priority 4: All participants
     if all {
-        return Ok(patient_data.patient.keys().cloned().collect());
+        return Ok(participant_data.participant.keys().cloned().collect());
     }
 
-    // Priority 5: Project-defined patients
-    if !project_config.patients.is_empty() {
-        for patient_id in &project_config.patients {
-            if !patient_data.patient.contains_key(patient_id) {
-                return Err(Error::PatientNotFoundInFile(format!(
+    // Priority 5: Project-defined participants
+    if !project_config.participants.is_empty() {
+        for participant_id in &project_config.participants {
+            if !participant_data.participant.contains_key(participant_id) {
+                return Err(Error::ParticipantNotFoundInFile(format!(
                     "{} (from project.yaml)",
-                    patient_id
+                    participant_id
                 ))
                 .into());
             }
         }
-        return Ok(project_config.patients.clone());
+        return Ok(project_config.participants.clone());
     }
 
-    // No patients specified
-    Err(Error::NoPatientsSpecified.into())
+    // No participants specified
+    Err(Error::NoParticipantsSpecified.into())
 }

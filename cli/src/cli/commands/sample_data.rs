@@ -15,11 +15,11 @@ const SAMPLE_DATA_YAML: &str = include_str!("../../sample_data.yaml");
 
 #[derive(Debug, Serialize, Deserialize)]
 struct SampleDataConfig {
-    sample_data_urls: HashMap<String, PatientData>,
+    sample_data_urls: HashMap<String, ParticipantData>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-struct PatientData {
+struct ParticipantData {
     ref_version: String,
     #[serde(rename = "ref")]
     ref_url: String,
@@ -37,12 +37,12 @@ struct PatientData {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct PatientsFile {
-    patient: HashMap<String, PatientRecord>,
+struct ParticipantsFile {
+    participant: HashMap<String, ParticipantRecord>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct PatientRecord {
+struct ParticipantRecord {
     ref_version: String,
     #[serde(rename = "ref")]
     ref_path: String,
@@ -51,14 +51,14 @@ struct PatientRecord {
     aligned_index: String,
 }
 
-pub async fn fetch(patient_ids: Option<Vec<String>>, all: bool) -> anyhow::Result<()> {
+pub async fn fetch(participant_ids: Option<Vec<String>>, all: bool) -> anyhow::Result<()> {
     let config: SampleDataConfig = serde_yaml::from_str(SAMPLE_DATA_YAML)
         .context("Failed to parse embedded sample data configuration")?;
 
-    let patients_to_fetch = determine_patients_to_fetch(&config, patient_ids, all)?;
+    let participants_to_fetch = determine_participants_to_fetch(&config, participant_ids, all)?;
 
-    if patients_to_fetch.is_empty() {
-        println!("No patients specified to fetch");
+    if participants_to_fetch.is_empty() {
+        println!("No participants specified to fetch");
         return Ok(());
     }
 
@@ -74,60 +74,62 @@ pub async fn fetch(patient_ids: Option<Vec<String>>, all: bool) -> anyhow::Resul
     fs::create_dir_all(&reference_dir).context("Failed to create reference directory")?;
 
     println!(
-        "Fetching sample data for {} patient(s):",
-        patients_to_fetch.len()
+        "Fetching sample data for {} participant(s):",
+        participants_to_fetch.len()
     );
-    for id in &patients_to_fetch {
+    for id in &participants_to_fetch {
         println!("  - {}", id);
     }
     println!();
 
-    let patients_file_path = sample_data_dir.join("patients.yaml");
-    let mut patients_file = load_or_create_patients_file(&patients_file_path)?;
+    let participants_file_path = sample_data_dir.join("participants.yaml");
+    let mut participants_file = load_or_create_participants_file(&participants_file_path)?;
 
-    for patient_id in patients_to_fetch {
+    for participant_id in participants_to_fetch {
         println!("\n{}", "=".repeat(60));
-        println!("Fetching data for patient: {}", patient_id);
+        println!("Fetching data for participant: {}", participant_id);
         println!("{}", "=".repeat(60));
 
-        let patient_data = config
+        let participant_data = config
             .sample_data_urls
-            .get(&patient_id)
-            .ok_or_else(|| anyhow::anyhow!("Patient {} not found in configuration", patient_id))?;
+            .get(&participant_id)
+            .ok_or_else(|| {
+                anyhow::anyhow!("Participant {} not found in configuration", participant_id)
+            })?;
 
-        let patient_dir = sample_data_dir.join(&patient_id);
-        fs::create_dir_all(&patient_dir).context("Failed to create patient directory")?;
+        let participant_dir = sample_data_dir.join(&participant_id);
+        fs::create_dir_all(&participant_dir).context("Failed to create participant directory")?;
 
         // Extract filenames from URLs
-        let ref_filename = extract_filename_from_url(&patient_data.ref_url)?;
-        let ref_index_filename = extract_filename_from_url(&patient_data.ref_index)?;
-        let aligned_filename = extract_filename_from_url(&patient_data.aligned)?;
-        let aligned_index_filename = extract_filename_from_url(&patient_data.aligned_index)?;
+        let ref_filename = extract_filename_from_url(&participant_data.ref_url)?;
+        let ref_index_filename = extract_filename_from_url(&participant_data.ref_index)?;
+        let aligned_filename = extract_filename_from_url(&participant_data.aligned)?;
+        let aligned_index_filename = extract_filename_from_url(&participant_data.aligned_index)?;
 
         let downloads = vec![
             (
-                &patient_data.ref_url,
+                &participant_data.ref_url,
                 reference_dir.join(&ref_filename),
                 "Reference genome",
-                &patient_data.ref_b3sum,
+                &participant_data.ref_b3sum,
             ),
             (
-                &patient_data.ref_index,
+                &participant_data.ref_index,
                 reference_dir.join(&ref_index_filename),
                 "Reference index",
-                &patient_data.ref_index_b3sum,
+                &participant_data.ref_index_b3sum,
             ),
             (
-                &patient_data.aligned,
-                patient_dir.join(&aligned_filename),
+                &participant_data.aligned,
+                participant_dir.join(&aligned_filename),
                 "Aligned CRAM",
-                &patient_data.aligned_b3sum,
+                &participant_data.aligned_b3sum,
             ),
             (
-                &patient_data.aligned_index,
-                patient_dir.join(&aligned_index_filename),
+                &participant_data.aligned_index,
+                participant_dir.join(&aligned_index_filename),
                 "CRAM index",
-                &patient_data.aligned_index_b3sum,
+                &participant_data.aligned_index_b3sum,
             ),
         ];
 
@@ -184,26 +186,26 @@ pub async fn fetch(patient_ids: Option<Vec<String>>, all: bool) -> anyhow::Resul
             }
         }
 
-        let patient_record = PatientRecord {
-            ref_version: patient_data.ref_version.clone(),
+        let participant_record = ParticipantRecord {
+            ref_version: participant_data.ref_version.clone(),
             ref_path: format!("./reference/{}", ref_filename),
             ref_index: format!("./reference/{}", ref_index_filename),
-            aligned: format!("./{}/{}", patient_id, aligned_filename),
-            aligned_index: format!("./{}/{}", patient_id, aligned_index_filename),
+            aligned: format!("./{}/{}", participant_id, aligned_filename),
+            aligned_index: format!("./{}/{}", participant_id, aligned_index_filename),
         };
 
-        patients_file
-            .patient
-            .insert(patient_id.clone(), patient_record);
+        participants_file
+            .participant
+            .insert(participant_id.clone(), participant_record);
 
-        save_patients_file(&patients_file_path, &patients_file)?;
-        println!("  ✓ Updated patients.yaml");
+        save_participants_file(&participants_file_path, &participants_file)?;
+        println!("  ✓ Updated participants.yaml");
     }
 
     println!("\n{}", "=".repeat(60));
     println!("✓ Sample data fetch complete!");
     println!("  Data location: {}", sample_data_dir.display());
-    println!("  Patients file: {}", patients_file_path.display());
+    println!("  Participants file: {}", participants_file_path.display());
     println!("{}", "=".repeat(60));
 
     Ok(())
@@ -277,39 +279,41 @@ fn verify_file_checksum(path: &Path, expected_b3sum: &str) -> anyhow::Result<boo
     Ok(actual == expected_b3sum)
 }
 
-fn determine_patients_to_fetch(
+fn determine_participants_to_fetch(
     config: &SampleDataConfig,
-    patient_ids: Option<Vec<String>>,
+    participant_ids: Option<Vec<String>>,
     all: bool,
 ) -> anyhow::Result<Vec<String>> {
     if all {
         Ok(config.sample_data_urls.keys().cloned().collect())
-    } else if let Some(ids) = patient_ids {
+    } else if let Some(ids) = participant_ids {
         for id in &ids {
             if !config.sample_data_urls.contains_key(id) {
-                return Err(Error::PatientNotFound(id.clone()).into());
+                return Err(Error::ParticipantNotFound(id.clone()).into());
             }
         }
         Ok(ids)
     } else {
-        Err(Error::NoPatientsSpecified.into())
+        Err(Error::NoParticipantsSpecified.into())
     }
 }
 
-fn load_or_create_patients_file(path: &Path) -> anyhow::Result<PatientsFile> {
+fn load_or_create_participants_file(path: &Path) -> anyhow::Result<ParticipantsFile> {
     if path.exists() {
-        let content = fs::read_to_string(path).context("Failed to read existing patients.yaml")?;
-        Ok(serde_yaml::from_str(&content).context("Failed to parse existing patients.yaml")?)
+        let content =
+            fs::read_to_string(path).context("Failed to read existing participants.yaml")?;
+        Ok(serde_yaml::from_str(&content).context("Failed to parse existing participants.yaml")?)
     } else {
-        Ok(PatientsFile {
-            patient: HashMap::new(),
+        Ok(ParticipantsFile {
+            participant: HashMap::new(),
         })
     }
 }
 
-fn save_patients_file(path: &Path, patients: &PatientsFile) -> anyhow::Result<()> {
-    let yaml = serde_yaml::to_string(patients).context("Failed to serialize patients data")?;
-    fs::write(path, yaml).context("Failed to write patients.yaml")?;
+fn save_participants_file(path: &Path, participants: &ParticipantsFile) -> anyhow::Result<()> {
+    let yaml =
+        serde_yaml::to_string(participants).context("Failed to serialize participants data")?;
+    fs::write(path, yaml).context("Failed to write participants.yaml")?;
     Ok(())
 }
 
@@ -377,8 +381,8 @@ pub async fn list() -> anyhow::Result<()> {
     println!("Available sample data:");
     println!("{}", "=".repeat(60));
 
-    for (patient_id, data) in &config.sample_data_urls {
-        println!("\nPatient ID: {}", patient_id);
+    for (participant_id, data) in &config.sample_data_urls {
+        println!("\nParticipant ID: {}", participant_id);
         println!("  ref_version: {}", data.ref_version);
         println!("  ref: {}", data.ref_url);
         println!("  ref_index: {}", data.ref_index);
@@ -387,7 +391,7 @@ pub async fn list() -> anyhow::Result<()> {
     }
 
     println!("\n{}", "=".repeat(60));
-    println!("Use 'bv sample-data fetch <PATIENT_ID>' to download");
+    println!("Use 'bv sample-data fetch <PARTICIPANT_ID>' to download");
     println!("Use 'bv sample-data fetch --all' to download all samples");
 
     Ok(())
