@@ -1,6 +1,7 @@
 pub mod check;
 pub mod info;
 pub mod init;
+pub mod participant;
 pub mod project;
 pub mod run;
 pub mod sample_data;

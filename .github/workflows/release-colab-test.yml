@@ -12,6 +12,10 @@ on:
       - '.github/workflows/release-colab-test.yml'
       - '.github/workflows/reusable-colab-test.yml'
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   call-colab-test:
     name: Run Colab Test

@@ -1,6 +1,6 @@
 workflow USER {
     take:
-      patient_id_ch
+      participant_id_ch
       ref_ch
       ref_index_ch
       aligned_ch
@@ -10,7 +10,7 @@ workflow USER {
       results_dir
     main:
       // your code here
-      println "Patient ID Channel: ${patient_id_ch}"
+      println "Participant ID Channel: ${participant_id_ch}"
       println "Reference Channel: ${ref_ch}"
       println "Reference Index Channel: ${ref_index_ch}"
       println "Aligned Channel: ${aligned_ch}"

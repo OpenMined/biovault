@@ -55,23 +55,23 @@ enum Commands {
         #[arg(help = "Path to project directory")]
         project_folder: String,
 
-        #[arg(help = "Path to patient file (YAML)")]
-        patient_file: String,
+        #[arg(help = "Path to participant file (YAML)")]
+        participant_file: String,
 
         #[arg(
             long,
             value_delimiter = ',',
-            help = "Comma-separated list of patient IDs"
+            help = "Comma-separated list of participant IDs"
         )]
-        patients: Option<Vec<String>>,
+        participants: Option<Vec<String>>,
 
-        #[arg(long, help = "Process single patient")]
-        patient: Option<String>,
+        #[arg(long, help = "Process single participant")]
+        participant: Option<String>,
 
-        #[arg(long, help = "Process all patients in file")]
+        #[arg(long, help = "Process all participants in file")]
         all: bool,
 
-        #[arg(long, help = "Run TEST patient only")]
+        #[arg(long, help = "Run TEST participant only")]
         test: bool,
 
         #[arg(long, help = "Show commands without executing")]
@@ -92,6 +92,12 @@ enum Commands {
         #[command(subcommand)]
         command: SampleDataCommands,
     },
+
+    #[command(about = "Manage participants")]
+    Participant {
+        #[command(subcommand)]
+        command: ParticipantCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -110,8 +116,11 @@ enum ProjectCommands {
 enum SampleDataCommands {
     #[command(about = "Fetch sample data")]
     Fetch {
-        #[arg(value_delimiter = ',', help = "Patient IDs to fetch (comma-separated)")]
-        patient_ids: Option<Vec<String>>,
+        #[arg(
+            value_delimiter = ',',
+            help = "Participant IDs to fetch (comma-separated)"
+        )]
+        participant_ids: Option<Vec<String>>,
 
         #[arg(long, help = "Fetch all available sample data")]
         all: bool,
@@ -119,6 +128,33 @@ enum SampleDataCommands {
 
     #[command(about = "List available sample data")]
     List,
+}
+
+#[derive(Subcommand)]
+enum ParticipantCommands {
+    #[command(about = "Add a new participant")]
+    Add {
+        #[arg(long, help = "Participant ID")]
+        id: Option<String>,
+
+        #[arg(long, help = "Aligned file path (.cram, .bam, or .sam)")]
+        aligned: Option<String>,
+    },
+
+    #[command(about = "List all participants")]
+    List,
+
+    #[command(about = "Delete a participant")]
+    Delete {
+        #[arg(help = "Participant ID to delete")]
+        id: String,
+    },
+
+    #[command(about = "Validate participant files")]
+    Validate {
+        #[arg(help = "Participant ID to validate (validates all if not specified)")]
+        id: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -153,9 +189,9 @@ async fn main() -> Result<()> {
         },
         Commands::Run {
             project_folder,
-            patient_file,
-            patients,
-            patient,
+            participant_file,
+            participants,
+            participant,
             all,
             test,
             dry_run,
@@ -165,9 +201,9 @@ async fn main() -> Result<()> {
         } => {
             commands::run::execute(commands::run::RunParams {
                 project_folder,
-                patient_file,
-                patients,
-                patient,
+                participant_file,
+                participants,
+                participant,
                 all,
                 test,
                 dry_run,
@@ -178,11 +214,28 @@ async fn main() -> Result<()> {
             .await?;
         }
         Commands::SampleData { command } => match command {
-            SampleDataCommands::Fetch { patient_ids, all } => {
-                commands::sample_data::fetch(patient_ids, all).await?;
+            SampleDataCommands::Fetch {
+                participant_ids,
+                all,
+            } => {
+                commands::sample_data::fetch(participant_ids, all).await?;
             }
             SampleDataCommands::List => {
                 commands::sample_data::list().await?;
+            }
+        },
+        Commands::Participant { command } => match command {
+            ParticipantCommands::Add { id, aligned } => {
+                commands::participant::add(id, aligned).await?;
+            }
+            ParticipantCommands::List => {
+                commands::participant::list().await?;
+            }
+            ParticipantCommands::Delete { id } => {
+                commands::participant::delete(id).await?;
+            }
+            ParticipantCommands::Validate { id } => {
+                commands::participant::validate(id).await?;
             }
         },
     }

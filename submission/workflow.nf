@@ -1,6 +1,6 @@
 workflow USER {
     take:
-      patient_id_ch
+      participant_id_ch
       ref_ch
       ref_index_ch
       aligned_ch
@@ -20,7 +20,7 @@ workflow USER {
       def out = interpret_eyes(assets_dir_ch, call_region_ch)
 
       out.msg
-        .map { "\n===== Eye Color Interpretation for Patient: ${patient_id_ch.getVal()} =====\n${it}\n====================================\n" }
+        .map { "\n===== Eye Color Interpretation for Participant: ${participant_id_ch.getVal()} =====\n${it}\n====================================\n" }
         .view()
 }
 
