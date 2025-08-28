@@ -1,3 +1,4 @@
+pub mod biobank;
 pub mod check;
 pub mod info;
 pub mod init;

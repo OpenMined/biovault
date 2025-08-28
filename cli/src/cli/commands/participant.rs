@@ -18,19 +18,17 @@ pub struct Participant {
     pub aligned_index: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct ParticipantsFile {
     pub participants: HashMap<String, Participant>,
 }
 
 impl ParticipantsFile {
-    fn new() -> Self {
-        Self {
-            participants: HashMap::new(),
-        }
+    pub fn new() -> Self {
+        Self::default()
     }
 
-    fn load() -> Result<Self> {
+    pub fn load() -> anyhow::Result<Self> {
         let path = get_participants_file_path()?;
         if !path.exists() {
             Ok(Self::new())

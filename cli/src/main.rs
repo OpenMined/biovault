@@ -98,6 +98,12 @@ enum Commands {
         #[command(subcommand)]
         command: ParticipantCommands,
     },
+
+    #[command(about = "Manage biobank data publishing")]
+    Biobank {
+        #[command(subcommand)]
+        command: BiobankCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -154,6 +160,27 @@ enum ParticipantCommands {
     Validate {
         #[arg(help = "Participant ID to validate (validates all if not specified)")]
         id: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum BiobankCommands {
+    #[command(about = "Publish participants to SyftBox")]
+    Publish {
+        #[arg(long, help = "Participant ID to publish")]
+        participant_id: Option<String>,
+
+        #[arg(long, help = "Publish all participants")]
+        all: bool,
+    },
+
+    #[command(about = "Unpublish participants from SyftBox")]
+    Unpublish {
+        #[arg(long, help = "Participant ID to unpublish")]
+        participant_id: Option<String>,
+
+        #[arg(long, help = "Unpublish all participants")]
+        all: bool,
     },
 }
 
@@ -236,6 +263,20 @@ async fn main() -> Result<()> {
             }
             ParticipantCommands::Validate { id } => {
                 commands::participant::validate(id).await?;
+            }
+        },
+        Commands::Biobank { command } => match command {
+            BiobankCommands::Publish {
+                participant_id,
+                all,
+            } => {
+                commands::biobank::publish(participant_id, all).await?;
+            }
+            BiobankCommands::Unpublish {
+                participant_id,
+                all,
+            } => {
+                commands::biobank::unpublish(participant_id, all).await?;
             }
         },
     }
