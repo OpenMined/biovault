@@ -9,7 +9,7 @@ curl -sSL https://raw.githubusercontent.com/openmined/biovault/main/install.sh |
 - [x] CLI Tool
 - [ ] data format
 - [ ] wizard
-    - create patient record
+    - create participant record
     - [x] checks for dependencies
     - [x] bv setup
     - [x] setup dependencies
@@ -19,12 +19,12 @@ curl -sSL https://raw.githubusercontent.com/openmined/biovault/main/install.sh |
         - docker
     - [x] fetch mock data
     - submit analysis
-    - bv patient create
-    - bv patient list
-    - bv patient remove
+    - bv participant create
+    - bv participant list
+    - bv participant remove
 
 - [x] bv project create
-- [x] bv run ./project patient.yaml
+- [x] bv run ./project participant.yaml
 - [ ] bv update
 - [ ] installer check existing install and version
 - [ ] toggle docker mode

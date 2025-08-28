@@ -1,7 +1,7 @@
 nextflow.enable.dsl=2
 
-// patient id
-params.patient_id = params.patient_id ?: null
+// participant id
+params.participant_id = params.participant_id ?: null
 
 // reference genome in fasta format
 params.ref  = params.ref  ?: null
@@ -20,7 +20,7 @@ params.results_dir = params.results_dir ?: null
 // workflow file
 params.work_flow_file = params.work_flow_file ?: null
 
-patient_id_ch    = Channel.value(params.patient_id)
+participant_id_ch    = Channel.value(params.participant_id)
 ref_ch           = Channel.fromPath(params.ref)
 ref_index_ch     = Channel.fromPath(params.ref_index)
 aligned_ch       = Channel.fromPath(params.aligned)
@@ -31,7 +31,7 @@ work_flow_file   = Channel.fromPath(params.work_flow_file)
 
 // EXAMPLE
 // nextflow run template.nf \
-//     --patient_id NA07357 \
+//     --participant_id NA07357 \
 //     --ref_version grch38 \
 //     --ref ./data/reference/GRCh38_full_analysis_set_plus_decoy_hla.fa \
 //     --ref_index ./data/reference/GRCh38_full_analysis_set_plus_decoy_hla.fa.fai \
@@ -46,7 +46,7 @@ include { USER } from "${params.work_flow_file}"
 
 workflow {
   USER(
-    patient_id_ch,
+    participant_id_ch,
     ref_ch,
     ref_index_ch,
     aligned_ch,
