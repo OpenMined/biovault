@@ -42,6 +42,27 @@ pub async fn execute(email: &str) -> Result<()> {
         println!("✓ BioVault initialized successfully!");
         println!("  Configuration saved to: {}", config_file.display());
         println!("  Email: {}", email);
+
+        // Create env/default directory and copy templates
+        let env_dir = biovault_dir.join("env").join("default");
+        if !env_dir.exists() {
+            fs::create_dir_all(&env_dir)?;
+            info!("Created environment directory: {:?}", env_dir);
+        }
+
+        // Copy template.nf
+        let template_nf_content = include_str!("../../templates/template.nf");
+        let template_nf_path = env_dir.join("template.nf");
+        fs::write(&template_nf_path, template_nf_content)?;
+        info!("Created template.nf at: {:?}", template_nf_path);
+
+        // Copy nextflow.config
+        let nextflow_config_content = include_str!("../../templates/nextflow.config");
+        let nextflow_config_path = env_dir.join("nextflow.config");
+        fs::write(&nextflow_config_path, nextflow_config_content)?;
+        info!("Created nextflow.config at: {:?}", nextflow_config_path);
+
+        println!("✓ Nextflow templates installed to: {}", env_dir.display());
     }
 
     Ok(())

@@ -96,12 +96,10 @@ fn test_init_command() {
         } else {
             std::env::remove_var("USERPROFILE");
         }
+    } else if let Some(home) = original_home {
+        std::env::set_var("HOME", home);
     } else {
-        if let Some(home) = original_home {
-            std::env::set_var("HOME", home);
-        } else {
-            std::env::remove_var("HOME");
-        }
+        std::env::remove_var("HOME");
     }
 }
 
@@ -161,12 +159,10 @@ fn test_init_command_existing_config() {
         } else {
             std::env::remove_var("USERPROFILE");
         }
+    } else if let Some(home) = original_home {
+        std::env::set_var("HOME", home);
     } else {
-        if let Some(home) = original_home {
-            std::env::set_var("HOME", home);
-        } else {
-            std::env::remove_var("HOME");
-        }
+        std::env::remove_var("HOME");
     }
 }
 
