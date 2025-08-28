@@ -286,11 +286,13 @@ pub async fn unpublish(participant_id: Option<String>, all: bool) -> Result<()> 
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // TODO: Will be used when biobank read commands are implemented
 pub enum ReadMode {
     Normal,
     Mock,
 }
 
+#[allow(dead_code)] // TODO: Will be used when biobank read commands are implemented
 pub fn read_participant_with_mode(
     participant_file: &Path,
     participant_id: &str,
