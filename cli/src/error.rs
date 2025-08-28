@@ -40,6 +40,15 @@ pub enum Error {
     #[error("{0} participant(s) failed processing")]
     ProcessingFailed(usize),
 
+    #[error("BioVault not initialized. Please run 'bv init' first")]
+    NotInitialized,
+
+    #[error("SyftBox config file not found: {0}")]
+    SyftBoxConfigMissing(String),
+
+    #[error("Datasites directory not found: {0}")]
+    DatasitesDirMissing(String),
+
     #[error(transparent)]
     Anyhow(#[from] anyhow::Error),
 
@@ -48,4 +57,7 @@ pub enum Error {
 
     #[error(transparent)]
     Yaml(#[from] serde_yaml::Error),
+
+    #[error(transparent)]
+    Json(#[from] serde_json::Error),
 }

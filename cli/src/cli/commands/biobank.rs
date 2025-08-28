@@ -3,13 +3,14 @@ use colored::Colorize;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use serde_yaml::Value as YamlValue;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use tracing::debug;
 
 use crate::cli::commands::participant::{Participant, ParticipantsFile};
-use crate::config::get_config;
+use crate::config::{get_config, Config};
+use crate::error::Error;
 
 const PUBLIC_TEMPLATE_PATH: &str = include_str!("../../participants.public.template.yaml");
 
@@ -388,6 +389,153 @@ pub fn read_participant_with_mode(
     Ok(result)
 }
 
+// Biobank list command structures and implementation
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BiobankParticipants {
+    pub participants: BTreeMap<String, BiobankParticipant>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BiobankParticipant {
+    pub ref_version: String,
+    #[serde(rename = "ref")]
+    pub reference: Option<String>,
+    pub ref_index: Option<String>,
+    pub aligned: Option<String>,
+    pub aligned_index: Option<String>,
+}
+
+#[derive(Debug)]
+pub struct BioBankInfo {
+    pub email: String,
+    pub participants: BiobankParticipants,
+}
+
+pub async fn list(override_path: Option<PathBuf>) -> crate::error::Result<()> {
+    let config = Config::load()?;
+
+    let data_dir = if let Some(path) = override_path {
+        path
+    } else {
+        config.get_syftbox_data_dir()?
+    };
+
+    let datasites_dir = data_dir.join("datasites");
+
+    if !datasites_dir.exists() {
+        return Err(Error::DatasitesDirMissing(
+            datasites_dir.display().to_string(),
+        ));
+    }
+
+    let biobanks = find_biobanks(&datasites_dir)?;
+
+    if biobanks.is_empty() {
+        println!("No biobanks found in {}", datasites_dir.display());
+        return Ok(());
+    }
+
+    println!("BioBanks (sorted alphabetically)\n");
+
+    for biobank in biobanks {
+        println!("--------------------------------");
+        println!("{}", biobank.email);
+        println!(
+            "Number of Participants: {}",
+            biobank.participants.participants.len()
+        );
+        println!("\nParticipants:");
+
+        for (participant_id, participant) in &biobank.participants.participants {
+            println!("{} ({})", participant_id, participant.ref_version);
+            println!(
+                "url: syft://{}/private/biovault/participants.yaml#participants/{}",
+                biobank.email, participant_id
+            );
+            println!();
+        }
+    }
+
+    println!("--------------------------------");
+
+    Ok(())
+}
+
+fn find_biobanks(datasites_dir: &Path) -> Result<Vec<BioBankInfo>> {
+    let mut biobanks = Vec::new();
+
+    let pattern = format!(
+        "{}/**/**/public/biovault/participants.yaml",
+        datasites_dir.display()
+    );
+    debug!("Searching for biobank files with pattern: {}", pattern);
+
+    for entry in glob::glob(&pattern)? {
+        match entry {
+            Ok(path) => {
+                debug!("Found participants file: {}", path.display());
+
+                if let Some(email) = extract_email_from_path(&path, datasites_dir) {
+                    match load_biobank_participants(&path) {
+                        Ok(participants) => {
+                            biobanks.push(BioBankInfo {
+                                email,
+                                participants,
+                            });
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "Warning: Failed to load participants from {}: {}",
+                                path.display(),
+                                e
+                            );
+                        }
+                    }
+                } else {
+                    eprintln!(
+                        "Warning: Could not extract email from path: {}",
+                        path.display()
+                    );
+                }
+            }
+            Err(e) => {
+                eprintln!("Warning: Error accessing path: {}", e);
+            }
+        }
+    }
+
+    biobanks.sort_by(|a, b| a.email.cmp(&b.email));
+
+    Ok(biobanks)
+}
+
+fn extract_email_from_path(path: &Path, datasites_dir: &Path) -> Option<String> {
+    let relative_path = path.strip_prefix(datasites_dir).ok()?;
+    let components: Vec<&str> = relative_path
+        .components()
+        .filter_map(|c| c.as_os_str().to_str())
+        .collect();
+
+    // Path structure: datasites/email/public/biovault/participants.yaml
+    // After strip_prefix: email/public/biovault/participants.yaml
+    // We want the email which is at index 0
+    if !components.is_empty() {
+        Some(components[0].to_string())
+    } else {
+        None
+    }
+}
+
+fn load_biobank_participants(path: &Path) -> Result<BiobankParticipants> {
+    let content = fs::read_to_string(path)
+        .with_context(|| format!("Failed to read participants file: {}", path.display()))?;
+
+    let participants: BiobankParticipants = serde_yaml::from_str(&content)
+        .with_context(|| format!("Failed to parse participants file: {}", path.display()))?;
+
+    Ok(participants)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -395,10 +543,8 @@ mod tests {
     use tempfile::TempDir;
 
     // Helper function to create a test config
-    fn create_test_config(syftbox_data_dir: &Path, email: &str) -> Result<()> {
-        let config_dir = dirs::home_dir()
-            .ok_or_else(|| anyhow!("Could not determine home directory"))?
-            .join(".biovault");
+    fn create_test_config(syftbox_data_dir: &Path, email: &str, test_home: &Path) -> Result<()> {
+        let config_dir = test_home.join(".biovault");
         fs::create_dir_all(&config_dir)?;
 
         let syftbox_config_path = syftbox_data_dir.join("syftbox_config.json");
@@ -417,15 +563,14 @@ mod tests {
         };
 
         let config_path = config_dir.join("config.yaml");
-        fs::write(&config_path, serde_yaml::to_string(&config)?)?;
+        config.save(&config_path)?;
 
         Ok(())
     }
 
     // Helper to create test participants file
-    fn create_test_participants_file() -> Result<()> {
-        let home = dirs::home_dir().ok_or_else(|| anyhow!("Could not determine home directory"))?;
-        let participants_dir = home.join(".biovault");
+    fn create_test_participants_file(test_home: &Path) -> Result<()> {
+        let participants_dir = test_home.join(".biovault");
         fs::create_dir_all(&participants_dir)?;
 
         let participants = ParticipantsFile {
@@ -464,19 +609,26 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn test_publish_and_unpublish() {
         let temp_dir = TempDir::new().unwrap();
         let email = "test@example.com";
 
-        // Setup test environment
+        // Set test home to temp dir
+        std::env::set_var("BIOVAULT_TEST_HOME", temp_dir.path());
+
+        // Setup test environment - create datasites for the email we're using
         let datasites_dir = temp_dir.path().join("datasites").join(email);
         fs::create_dir_all(&datasites_dir).unwrap();
 
-        create_test_config(temp_dir.path(), email).unwrap();
-        create_test_participants_file().unwrap();
+        create_test_config(temp_dir.path(), email, temp_dir.path()).unwrap();
+        create_test_participants_file(temp_dir.path()).unwrap();
 
         // Test publishing a single participant
         let result = publish(Some("TEST1".to_string()), false).await;
+        if let Err(ref e) = result {
+            eprintln!("Publish error: {}", e);
+        }
         assert!(result.is_ok());
 
         // Check that the public file was created
@@ -521,10 +673,8 @@ mod tests {
         assert!(!public_content.contains("TEST1:"));
         assert!(!public_content.contains("TEST2:"));
 
-        // Clean up
-        let config_dir = dirs::home_dir().unwrap().join(".biovault");
-        let _ = fs::remove_file(config_dir.join("config.yaml"));
-        let _ = fs::remove_file(config_dir.join("participants.yaml"));
+        // Clean up test environment variable
+        std::env::remove_var("BIOVAULT_TEST_HOME");
     }
 
     #[test]
@@ -666,5 +816,101 @@ participants:
         assert_eq!(result.get("ref_version").unwrap(), "GRCh38");
         assert_eq!(result.get("ref").unwrap(), "/path/to/reference.fa");
         assert_eq!(result.get("aligned").unwrap(), "/path/to/aligned.cram");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_list_biobanks() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let datasites_dir = temp_dir.path().join("datasites");
+
+        create_test_biobank(
+            &datasites_dir,
+            "alice@example.com",
+            vec![("PARTICIPANT1", "GRCh38"), ("PARTICIPANT2", "GRCh37")],
+        )?;
+
+        create_test_biobank(&datasites_dir, "bob@example.org", vec![("TEST", "GRCh38")])?;
+
+        create_test_biobank(
+            &datasites_dir,
+            "charlie@example.net",
+            vec![
+                ("SAMPLE1", "GRCh38"),
+                ("SAMPLE2", "GRCh38"),
+                ("SAMPLE3", "GRCh37"),
+            ],
+        )?;
+
+        std::env::set_var("BIOVAULT_TEST_HOME", temp_dir.path());
+
+        let config_dir = temp_dir.path().join(".biovault");
+        fs::create_dir_all(&config_dir)?;
+
+        let config = Config {
+            email: "test@example.com".to_string(),
+            syftbox_config: Some(
+                temp_dir
+                    .path()
+                    .join(".syftbox/config.json")
+                    .to_string_lossy()
+                    .to_string(),
+            ),
+        };
+        config.save(config_dir.join("config.yaml"))?;
+
+        let syftbox_dir = temp_dir.path().join(".syftbox");
+        fs::create_dir_all(&syftbox_dir)?;
+
+        let syftbox_config = serde_json::json!({
+            "data_dir": temp_dir.path().to_string_lossy()
+        });
+        fs::write(
+            syftbox_dir.join("config.json"),
+            serde_json::to_string_pretty(&syftbox_config)?,
+        )?;
+
+        let result = list(Some(temp_dir.path().to_path_buf())).await;
+        assert!(result.is_ok());
+
+        std::env::remove_var("BIOVAULT_TEST_HOME");
+
+        Ok(())
+    }
+
+    fn create_test_biobank(
+        datasites_dir: &Path,
+        email: &str,
+        participants: Vec<(&str, &str)>,
+    ) -> Result<()> {
+        let biobank_dir = datasites_dir
+            .join("example.com")
+            .join(email)
+            .join("public")
+            .join("biovault");
+        fs::create_dir_all(&biobank_dir)?;
+
+        let mut participants_map = BTreeMap::new();
+        for (id, ref_version) in participants {
+            participants_map.insert(
+                id.to_string(),
+                BiobankParticipant {
+                    ref_version: ref_version.to_string(),
+                    reference: None,
+                    ref_index: None,
+                    aligned: None,
+                    aligned_index: None,
+                },
+            );
+        }
+
+        let participants_data = BiobankParticipants {
+            participants: participants_map,
+        };
+
+        let yaml_content = serde_yaml::to_string(&participants_data)?;
+        fs::write(biobank_dir.join("participants.yaml"), yaml_content)?;
+
+        Ok(())
     }
 }

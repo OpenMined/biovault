@@ -1,12 +1,7 @@
+use crate::config::Config;
 use crate::Result;
-use serde::{Deserialize, Serialize};
 use std::fs;
 use tracing::info;
-
-#[derive(Debug, Serialize, Deserialize)]
-struct BioVaultConfig {
-    email: String,
-}
 
 pub async fn execute(email: &str) -> Result<()> {
     // For testing: allow overriding home directory via environment variable
@@ -32,12 +27,22 @@ pub async fn execute(email: &str) -> Result<()> {
         );
         println!("Skipping initialization.");
     } else {
-        let config = BioVaultConfig {
-            email: email.to_string(),
+        // Auto-detect SyftBox config if it exists
+        let syftbox_config = {
+            let default_syftbox = home_dir.join(".syftbox").join("config.json");
+            if default_syftbox.exists() {
+                Some(default_syftbox.to_string_lossy().to_string())
+            } else {
+                None
+            }
         };
 
-        let yaml_content = serde_yaml::to_string(&config)?;
-        fs::write(&config_file, yaml_content)?;
+        let config = Config {
+            email: email.to_string(),
+            syftbox_config,
+        };
+
+        config.save(&config_file)?;
 
         println!("✓ BioVault initialized successfully!");
         println!("  Configuration saved to: {}", config_file.display());

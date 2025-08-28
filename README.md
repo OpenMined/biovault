@@ -33,8 +33,17 @@ curl -sSL https://raw.githubusercontent.com/openmined/biovault/main/install.sh |
 - [ ] installer check existing install and version
 - [ ] toggle docker mode
 - [ ] include common modules like bcftools
+- [ ] download deduplicate hashing and symlinking
+- [ ] bv biobank list
+  - show public path?
 
 ## Data Formats
+
+- [ ] Change deep linking from:
+  syft://madhava@openmined.org/private/biovault/participants.yaml#participants/MADHAVA
+to:
+  syft://madhava@openmined.org/private/biovault/participants.yaml#participants.MADHAVA
+
 
 Participants in your biobank are kept in a private file like so:
 `~/.biobank/participants.yaml`
