@@ -1,4 +1,4 @@
-use crate::Result;
+use crate::error::Error;
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -17,7 +17,7 @@ pub struct SyftBoxConfig {
 }
 
 impl Config {
-    pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
+    pub fn from_file<P: AsRef<Path>>(path: P) -> crate::error::Result<Self> {
         let path = path.as_ref();
         let content = fs::read_to_string(path)
             .with_context(|| format!("Failed to read config file: {}", path.display()))?;
@@ -28,7 +28,7 @@ impl Config {
         Ok(config)
     }
 
-    pub fn save<P: AsRef<Path>>(&self, path: P) -> Result<()> {
+    pub fn save<P: AsRef<Path>>(&self, path: P) -> crate::error::Result<()> {
         let path = path.as_ref();
         let yaml_content = serde_yaml::to_string(&self)?;
         fs::write(path, yaml_content)
@@ -36,7 +36,7 @@ impl Config {
         Ok(())
     }
 
-    pub fn get_syftbox_data_dir(&self) -> Result<PathBuf> {
+    pub fn get_syftbox_data_dir(&self) -> crate::error::Result<PathBuf> {
         let syftbox_config_path = if let Some(ref path) = self.syftbox_config {
             PathBuf::from(path)
         } else {
@@ -46,11 +46,9 @@ impl Config {
         };
 
         if !syftbox_config_path.exists() {
-            return Err(anyhow::anyhow!(
-                "SyftBox config file not found at: {}",
-                syftbox_config_path.display()
-            )
-            .into());
+            return Err(Error::SyftBoxConfigMissing(
+                syftbox_config_path.display().to_string(),
+            ));
         }
 
         let content = fs::read_to_string(&syftbox_config_path).with_context(|| {
@@ -70,7 +68,7 @@ impl Config {
         Ok(PathBuf::from(syftbox_config.data_dir))
     }
 
-    pub fn get_config_path() -> Result<PathBuf> {
+    pub fn get_config_path() -> crate::error::Result<PathBuf> {
         let home_dir = if let Ok(test_home) = std::env::var("BIOVAULT_TEST_HOME") {
             PathBuf::from(test_home)
         } else {
@@ -79,12 +77,10 @@ impl Config {
         Ok(home_dir.join(".biovault").join("config.yaml"))
     }
 
-    pub fn load() -> Result<Self> {
+    pub fn load() -> crate::error::Result<Self> {
         let config_path = Self::get_config_path()?;
         if !config_path.exists() {
-            return Err(
-                anyhow::anyhow!("BioVault not initialized. Run 'bv init <email>' first.").into(),
-            );
+            return Err(Error::NotInitialized);
         }
         Self::from_file(config_path)
     }

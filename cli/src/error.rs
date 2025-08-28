@@ -54,4 +54,13 @@ pub enum Error {
 
     #[error(transparent)]
     Glob(#[from] glob::PatternError),
+
+    #[error("Datasites directory not found at: {0}")]
+    DatasitesDirMissing(String),
+
+    #[error("SyftBox config file not found at: {0}")]
+    SyftBoxConfigMissing(String),
+
+    #[error("BioVault not initialized. Run 'bv init <email>' first")]
+    NotInitialized,
 }

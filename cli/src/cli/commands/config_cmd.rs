@@ -1,8 +1,8 @@
 use crate::config::Config;
-use crate::Result;
+use crate::error::Error;
 use anyhow::Context;
 
-pub async fn show() -> Result<()> {
+pub async fn show() -> crate::error::Result<()> {
     let config = Config::load()?;
     let config_path = Config::get_config_path()?;
 
@@ -25,7 +25,7 @@ pub async fn show() -> Result<()> {
     Ok(())
 }
 
-pub async fn set_email(email: String) -> Result<()> {
+pub async fn set_email(email: String) -> crate::error::Result<()> {
     let mut config = Config::load()?;
     let config_path = Config::get_config_path()?;
 
@@ -36,18 +36,16 @@ pub async fn set_email(email: String) -> Result<()> {
     Ok(())
 }
 
-pub async fn set_syftbox(path: Option<String>) -> Result<()> {
+pub async fn set_syftbox(path: Option<String>) -> crate::error::Result<()> {
     let mut config = Config::load()?;
     let config_path = Config::get_config_path()?;
 
     if let Some(path) = path {
         let syftbox_path = std::path::PathBuf::from(&path);
         if !syftbox_path.exists() {
-            return Err(anyhow::anyhow!(
-                "SyftBox config file not found at: {}",
-                syftbox_path.display()
-            )
-            .into());
+            return Err(Error::SyftBoxConfigMissing(
+                syftbox_path.display().to_string(),
+            ));
         }
 
         let content = std::fs::read_to_string(&syftbox_path).with_context(|| {
@@ -84,7 +82,7 @@ mod tests {
     use tempfile::TempDir;
 
     #[tokio::test]
-    async fn test_config_operations() -> Result<()> {
+    async fn test_config_operations() -> crate::error::Result<()> {
         let temp_dir = TempDir::new()?;
         std::env::set_var("BIOVAULT_TEST_HOME", temp_dir.path());
 

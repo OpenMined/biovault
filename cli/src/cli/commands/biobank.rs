@@ -1,4 +1,5 @@
 use crate::config::Config;
+use crate::error::Error;
 use crate::Result;
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
@@ -28,7 +29,7 @@ pub struct BioBankInfo {
     pub participants: Participants,
 }
 
-pub async fn list(override_path: Option<PathBuf>) -> Result<()> {
+pub async fn list(override_path: Option<PathBuf>) -> crate::error::Result<()> {
     let config = Config::load()?;
 
     let data_dir = if let Some(path) = override_path {
@@ -40,11 +41,9 @@ pub async fn list(override_path: Option<PathBuf>) -> Result<()> {
     let datasites_dir = data_dir.join("datasites");
 
     if !datasites_dir.exists() {
-        return Err(anyhow::anyhow!(
-            "Datasites directory not found at: {}",
-            datasites_dir.display()
-        )
-        .into());
+        return Err(Error::DatasitesDirMissing(
+            datasites_dir.display().to_string(),
+        ));
     }
 
     let biobanks = find_biobanks(&datasites_dir)?;
