@@ -92,6 +92,12 @@ enum Commands {
         #[command(subcommand)]
         command: SampleDataCommands,
     },
+
+    #[command(about = "Manage participants")]
+    Participant {
+        #[command(subcommand)]
+        command: ParticipantCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -122,6 +128,33 @@ enum SampleDataCommands {
 
     #[command(about = "List available sample data")]
     List,
+}
+
+#[derive(Subcommand)]
+enum ParticipantCommands {
+    #[command(about = "Add a new participant")]
+    Add {
+        #[arg(long, help = "Participant ID")]
+        id: Option<String>,
+
+        #[arg(long, help = "Aligned file path (.cram, .bam, or .sam)")]
+        aligned: Option<String>,
+    },
+
+    #[command(about = "List all participants")]
+    List,
+
+    #[command(about = "Delete a participant")]
+    Delete {
+        #[arg(help = "Participant ID to delete")]
+        id: String,
+    },
+
+    #[command(about = "Validate participant files")]
+    Validate {
+        #[arg(help = "Participant ID to validate (validates all if not specified)")]
+        id: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -189,6 +222,20 @@ async fn main() -> Result<()> {
             }
             SampleDataCommands::List => {
                 commands::sample_data::list().await?;
+            }
+        },
+        Commands::Participant { command } => match command {
+            ParticipantCommands::Add { id, aligned } => {
+                commands::participant::add(id, aligned).await?;
+            }
+            ParticipantCommands::List => {
+                commands::participant::list().await?;
+            }
+            ParticipantCommands::Delete { id } => {
+                commands::participant::delete(id).await?;
+            }
+            ParticipantCommands::Validate { id } => {
+                commands::participant::validate(id).await?;
             }
         },
     }
