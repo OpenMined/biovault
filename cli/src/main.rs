@@ -92,6 +92,18 @@ enum Commands {
         #[command(subcommand)]
         command: SampleDataCommands,
     },
+
+    #[command(about = "Manage biobank data")]
+    Biobank {
+        #[command(subcommand)]
+        command: BiobankCommands,
+    },
+
+    #[command(about = "Manage BioVault configuration")]
+    Config {
+        #[command(subcommand)]
+        command: Option<ConfigCommands>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -122,6 +134,27 @@ enum SampleDataCommands {
 
     #[command(about = "List available sample data")]
     List,
+}
+
+#[derive(Subcommand)]
+enum BiobankCommands {
+    #[command(about = "List all biobanks in the SyftBox network")]
+    List,
+}
+
+#[derive(Subcommand)]
+enum ConfigCommands {
+    #[command(about = "Set email address")]
+    Email {
+        #[arg(help = "Email address")]
+        email: String,
+    },
+
+    #[command(about = "Set SyftBox config path")]
+    Syftbox {
+        #[arg(help = "Path to SyftBox config.json (omit to use default)")]
+        path: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -191,6 +224,25 @@ async fn main() -> Result<()> {
                 commands::sample_data::list().await?;
             }
         },
+        Commands::Biobank { command } => match command {
+            BiobankCommands::List => {
+                commands::biobank::list(None).await?;
+            }
+        },
+        Commands::Config { command } => {
+            if let Some(cmd) = command {
+                match cmd {
+                    ConfigCommands::Email { email } => {
+                        commands::config_cmd::set_email(email).await?;
+                    }
+                    ConfigCommands::Syftbox { path } => {
+                        commands::config_cmd::set_syftbox(path).await?;
+                    }
+                }
+            } else {
+                commands::config_cmd::show().await?;
+            }
+        }
     }
 
     Ok(())
