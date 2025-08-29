@@ -36,6 +36,7 @@ curl -sSL https://raw.githubusercontent.com/openmined/biovault/main/install.sh |
 - [ ] download deduplicate hashing and symlinking
 - [ ] bv biobank list
   - show public path?
+- [ ] windows symlinks plus tests
 
 ## Data Formats
 
