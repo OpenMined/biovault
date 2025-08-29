@@ -104,6 +104,12 @@ enum Commands {
         #[command(subcommand)]
         command: BiobankCommands,
     },
+
+    #[command(about = "Manage BioVault configuration")]
+    Config {
+        #[command(subcommand)]
+        command: Option<ConfigCommands>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -165,6 +171,9 @@ enum ParticipantCommands {
 
 #[derive(Subcommand)]
 enum BiobankCommands {
+    #[command(about = "List biobanks in SyftBox")]
+    List,
+
     #[command(about = "Publish participants to SyftBox")]
     Publish {
         #[arg(long, help = "Participant ID to publish")]
@@ -181,6 +190,21 @@ enum BiobankCommands {
 
         #[arg(long, help = "Unpublish all participants")]
         all: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum ConfigCommands {
+    #[command(about = "Set email address")]
+    Email {
+        #[arg(help = "Email address")]
+        email: String,
+    },
+
+    #[command(about = "Set SyftBox config path")]
+    Syftbox {
+        #[arg(help = "Path to SyftBox config.json (omit to use default)")]
+        path: Option<String>,
     },
 }
 
@@ -266,6 +290,9 @@ async fn main() -> Result<()> {
             }
         },
         Commands::Biobank { command } => match command {
+            BiobankCommands::List => {
+                commands::biobank::list(None).await?;
+            }
             BiobankCommands::Publish {
                 participant_id,
                 all,
@@ -279,6 +306,20 @@ async fn main() -> Result<()> {
                 commands::biobank::unpublish(participant_id, all).await?;
             }
         },
+        Commands::Config { command } => {
+            if let Some(cmd) = command {
+                match cmd {
+                    ConfigCommands::Email { email } => {
+                        commands::config_cmd::set_email(email).await?;
+                    }
+                    ConfigCommands::Syftbox { path } => {
+                        commands::config_cmd::set_syftbox(path).await?;
+                    }
+                }
+            } else {
+                commands::config_cmd::show().await?;
+            }
+        }
     }
 
     Ok(())
