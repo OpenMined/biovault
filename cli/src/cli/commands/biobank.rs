@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use tracing::debug;
 
 use crate::cli::commands::participant::{Participant, ParticipantsFile};
+use crate::cli::syft_url::SyftURL;
 use crate::config::{get_config, Config};
 use crate::error::Error;
 
@@ -146,7 +147,7 @@ fn load_public_participants(email: &str) -> Result<PublicParticipantsFile> {
             .with_context(|| format!("Failed to read public participants file at {:?}", path))?;
         let mut parsed: PublicParticipantsFile = serde_yaml::from_str(&contents)
             .with_context(|| "Failed to parse public participants YAML")?;
-        
+
         // Fill in missing fields for backward compatibility
         if parsed.datasite.is_empty() {
             parsed.datasite = email.to_string();
@@ -155,7 +156,7 @@ fn load_public_participants(email: &str) -> Result<PublicParticipantsFile> {
             parsed.public_url = format!("syft://{}/public/biovault/participants.yaml", email);
         }
         // http_relay_servers already has a default via serde
-        
+
         Ok(parsed)
     }
 }
@@ -171,19 +172,19 @@ fn save_public_participants(email: &str, file: &PublicParticipantsFile) -> Resul
 
     // Add datasite
     yaml_content.push_str(&format!("datasite: {}\n", email));
-    
+
     // Add http_relay_servers
     yaml_content.push_str("http_relay_servers:\n");
     for server in &file.http_relay_servers {
         yaml_content.push_str(&format!("  - {}\n", server));
     }
-    
+
     // Add public_url
     yaml_content.push_str(&format!(
         "public_url: \"syft://{}/public/biovault/participants.yaml\"\n",
         email
     ));
-    
+
     // Add private_url
     yaml_content.push_str(&format!(
         "private_url: \"syft://{}/private/biovault/participants.yaml\"\n\n",
@@ -239,7 +240,7 @@ pub async fn publish(
 
     let private_participants = load_private_participants()?;
     let mut public_participants = load_public_participants(email)?;
-    
+
     // Update http_relay_servers if provided
     if let Some(servers) = http_relay_servers {
         public_participants.http_relay_servers = servers;
@@ -438,12 +439,20 @@ pub fn read_participant_with_mode(
 
 // Biobank list command structures and implementation
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BiobankParticipants {
+pub struct BiobankFile {
+    #[serde(default)]
+    pub datasite: String,
+    #[serde(default = "default_http_relay_servers")]
+    pub http_relay_servers: Vec<String>,
+    #[serde(default)]
+    pub public_url: String,
     pub participants: BTreeMap<String, BiobankParticipant>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BiobankParticipant {
+    pub id: String,
+    pub url: String,
     pub ref_version: String,
     #[serde(rename = "ref")]
     pub reference: Option<String>,
@@ -455,7 +464,9 @@ pub struct BiobankParticipant {
 #[derive(Debug)]
 pub struct BioBankInfo {
     pub email: String,
-    pub participants: BiobankParticipants,
+    pub public_url: String,
+    pub http_relay_servers: Vec<String>,
+    pub participants: BTreeMap<String, BiobankParticipant>,
 }
 
 pub async fn list(override_path: Option<PathBuf>) -> crate::error::Result<()> {
@@ -485,25 +496,43 @@ pub async fn list(override_path: Option<PathBuf>) -> crate::error::Result<()> {
     println!("BioBanks (sorted alphabetically)\n");
 
     for biobank in biobanks {
-        println!("--------------------------------");
-        println!("{}", biobank.email);
-        println!(
-            "Number of Participants: {}",
-            biobank.participants.participants.len()
-        );
-        println!("\nParticipants:");
+        println!("Datasite: {}", biobank.email);
+        println!("Syft URL: {}", biobank.public_url);
+        println!("HTTP Relay URLs:");
 
-        for (participant_id, participant) in &biobank.participants.participants {
+        for server in &biobank.http_relay_servers {
+            if let Ok(syft_url) = SyftURL::parse(&biobank.public_url) {
+                let http_url = syft_url.to_http_relay_url(server);
+                println!("  - {}", http_url);
+            } else {
+                println!("  - Error: Invalid Syft URL format");
+            }
+        }
+
+        println!("\n\nNumber of Participants: {}", biobank.participants.len());
+        println!("Participants:\n");
+
+        for (participant_id, participant) in &biobank.participants {
             println!("{} ({})", participant_id, participant.ref_version);
-            println!(
-                "url: syft://{}/private/biovault/participants.yaml#participants/{}",
-                biobank.email, participant_id
-            );
+
+            // Try to parse the participant URL
+            if let Ok(syft_url) = SyftURL::parse(&participant.url) {
+                println!("Syft URL: {}", syft_url);
+            } else {
+                // If parsing fails, construct from public_url
+                if let Ok(base_url) = SyftURL::parse(&biobank.public_url) {
+                    let participant_url =
+                        base_url.with_fragment(format!("participants.{}", participant_id));
+                    println!("Syft URL: {}", participant_url);
+                } else {
+                    println!("Syft URL: Error - Invalid URL format");
+                }
+            }
             println!();
         }
-    }
 
-    println!("--------------------------------");
+        println!("--------------------------------");
+    }
 
     Ok(())
 }
@@ -523,19 +552,13 @@ fn find_biobanks(datasites_dir: &Path) -> Result<Vec<BioBankInfo>> {
                 debug!("Found participants file: {}", path.display());
 
                 if let Some(email) = extract_email_from_path(&path, datasites_dir) {
-                    match load_biobank_participants(&path) {
-                        Ok(participants) => {
-                            biobanks.push(BioBankInfo {
-                                email,
-                                participants,
-                            });
+                    match load_biobank_file(&path, &email) {
+                        Ok(biobank_info) => {
+                            biobanks.push(biobank_info);
                         }
                         Err(e) => {
-                            eprintln!(
-                                "Warning: Failed to load participants from {}: {}",
-                                path.display(),
-                                e
-                            );
+                            eprintln!("Invalid file at path: {}", path.display());
+                            eprintln!("  Error: {}", e);
                         }
                     }
                 } else {
@@ -573,14 +596,38 @@ fn extract_email_from_path(path: &Path, datasites_dir: &Path) -> Option<String> 
     }
 }
 
-fn load_biobank_participants(path: &Path) -> Result<BiobankParticipants> {
+fn load_biobank_file(path: &Path, email: &str) -> Result<BioBankInfo> {
     let content = fs::read_to_string(path)
         .with_context(|| format!("Failed to read participants file: {}", path.display()))?;
 
-    let participants: BiobankParticipants = serde_yaml::from_str(&content)
+    let mut biobank_file: BiobankFile = serde_yaml::from_str(&content)
         .with_context(|| format!("Failed to parse participants file: {}", path.display()))?;
 
-    Ok(participants)
+    // Fill in missing fields for backward compatibility
+    if biobank_file.datasite.is_empty() {
+        biobank_file.datasite = email.to_string();
+    }
+    if biobank_file.public_url.is_empty() {
+        biobank_file.public_url = format!("syft://{}/public/biovault/participants.yaml", email);
+    }
+
+    // Ensure participants have proper URL format with dot notation
+    for (id, participant) in biobank_file.participants.iter_mut() {
+        if participant.url.is_empty() || participant.url.contains("#participants/") {
+            // Convert old slash format to dot notation or set default
+            participant.url = format!(
+                "syft://{}/public/biovault/participants.yaml#participants.{}",
+                email, id
+            );
+        }
+    }
+
+    Ok(BioBankInfo {
+        email: biobank_file.datasite.clone(),
+        public_url: biobank_file.public_url,
+        http_relay_servers: biobank_file.http_relay_servers,
+        participants: biobank_file.participants,
+    })
 }
 
 #[cfg(test)]
@@ -694,7 +741,10 @@ mod tests {
         assert!(public_content.contains("{url}.ref"));
         assert!(public_content.contains(&format!("datasite: {}", email)));
         assert!(public_content.contains("http_relay_servers:\n  - syftbox.net"));
-        assert!(public_content.contains(&format!("public_url: \"syft://{}/public/biovault/participants.yaml\"", email)));
+        assert!(public_content.contains(&format!(
+            "public_url: \"syft://{}/public/biovault/participants.yaml\"",
+            email
+        )));
 
         // Test publishing all participants
         let result = publish(None, true, None).await;
@@ -706,14 +756,18 @@ mod tests {
         // Both TEST1 and TEST2 use GRCh38, so both should have mock references
         assert!(public_content.contains("mock: *mock_data_grch38"));
         assert!(public_content.contains("mock_data_grch38: &mock_data_grch38"));
-        
+
         // Test publishing with custom HTTP relay servers
-        let custom_servers = vec!["relay1.example.com".to_string(), "relay2.example.com".to_string()];
+        let custom_servers = vec![
+            "relay1.example.com".to_string(),
+            "relay2.example.com".to_string(),
+        ];
         let result = publish(Some("TEST1".to_string()), false, Some(custom_servers)).await;
         assert!(result.is_ok());
-        
+
         let public_content = fs::read_to_string(&public_path).unwrap();
-        assert!(public_content.contains("http_relay_servers:\n  - relay1.example.com\n  - relay2.example.com"));
+        assert!(public_content
+            .contains("http_relay_servers:\n  - relay1.example.com\n  - relay2.example.com"));
 
         // Test unpublishing a single participant
         let result = unpublish(Some("TEST1".to_string()), false).await;
@@ -953,6 +1007,11 @@ participants:
             participants_map.insert(
                 id.to_string(),
                 BiobankParticipant {
+                    id: id.to_string(),
+                    url: format!(
+                        "syft://{}/public/biovault/participants.yaml#participants.{}",
+                        email, id
+                    ),
                     ref_version: ref_version.to_string(),
                     reference: None,
                     ref_index: None,
@@ -962,11 +1021,14 @@ participants:
             );
         }
 
-        let participants_data = BiobankParticipants {
+        let biobank_file = BiobankFile {
+            datasite: email.to_string(),
+            http_relay_servers: vec!["syftbox.net".to_string()],
+            public_url: format!("syft://{}/public/biovault/participants.yaml", email),
             participants: participants_map,
         };
 
-        let yaml_content = serde_yaml::to_string(&participants_data)?;
+        let yaml_content = serde_yaml::to_string(&biobank_file)?;
         fs::write(biobank_dir.join("participants.yaml"), yaml_content)?;
 
         Ok(())

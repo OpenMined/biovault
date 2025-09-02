@@ -181,8 +181,12 @@ enum BiobankCommands {
 
         #[arg(long, help = "Publish all participants")]
         all: bool,
-        
-        #[arg(long, help = "HTTP relay servers (defaults to syftbox.net)", value_delimiter = ',')]
+
+        #[arg(
+            long,
+            help = "HTTP relay servers (defaults to syftbox.net)",
+            value_delimiter = ','
+        )]
         http_relay_servers: Option<Vec<String>>,
     },
 
