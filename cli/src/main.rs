@@ -181,6 +181,9 @@ enum BiobankCommands {
 
         #[arg(long, help = "Publish all participants")]
         all: bool,
+        
+        #[arg(long, help = "HTTP relay servers (defaults to syftbox.net)", value_delimiter = ',')]
+        http_relay_servers: Option<Vec<String>>,
     },
 
     #[command(about = "Unpublish participants from SyftBox")]
@@ -296,8 +299,9 @@ async fn main() -> Result<()> {
             BiobankCommands::Publish {
                 participant_id,
                 all,
+                http_relay_servers,
             } => {
-                commands::biobank::publish(participant_id, all).await?;
+                commands::biobank::publish(participant_id, all, http_relay_servers).await?;
             }
             BiobankCommands::Unpublish {
                 participant_id,

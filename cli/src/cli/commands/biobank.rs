@@ -31,9 +31,19 @@ pub struct PublicParticipant {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PublicParticipantsFile {
     pub private_url: String,
+    #[serde(default)]
+    pub datasite: String,
+    #[serde(default = "default_http_relay_servers")]
+    pub http_relay_servers: Vec<String>,
+    #[serde(default)]
+    pub public_url: String,
     pub participants: HashMap<String, PublicParticipant>,
     #[serde(flatten)]
     pub mock_data: HashMap<String, YamlValue>,
+}
+
+fn default_http_relay_servers() -> Vec<String> {
+    vec!["syftbox.net".to_string()]
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -125,14 +135,27 @@ fn load_public_participants(email: &str) -> Result<PublicParticipantsFile> {
 
         Ok(PublicParticipantsFile {
             private_url: format!("syft://{}/private/biovault/participants.yaml", email),
+            datasite: email.to_string(),
+            http_relay_servers: vec!["syftbox.net".to_string()],
+            public_url: format!("syft://{}/public/biovault/participants.yaml", email),
             participants: HashMap::new(),
             mock_data,
         })
     } else {
         let contents = fs::read_to_string(&path)
             .with_context(|| format!("Failed to read public participants file at {:?}", path))?;
-        let parsed: PublicParticipantsFile = serde_yaml::from_str(&contents)
+        let mut parsed: PublicParticipantsFile = serde_yaml::from_str(&contents)
             .with_context(|| "Failed to parse public participants YAML")?;
+        
+        // Fill in missing fields for backward compatibility
+        if parsed.datasite.is_empty() {
+            parsed.datasite = email.to_string();
+        }
+        if parsed.public_url.is_empty() {
+            parsed.public_url = format!("syft://{}/public/biovault/participants.yaml", email);
+        }
+        // http_relay_servers already has a default via serde
+        
         Ok(parsed)
     }
 }
@@ -146,6 +169,21 @@ fn save_public_participants(email: &str, file: &PublicParticipantsFile) -> Resul
     // Build YAML content manually to support proper anchor references
     let mut yaml_content = String::new();
 
+    // Add datasite
+    yaml_content.push_str(&format!("datasite: {}\n", email));
+    
+    // Add http_relay_servers
+    yaml_content.push_str("http_relay_servers:\n");
+    for server in &file.http_relay_servers {
+        yaml_content.push_str(&format!("  - {}\n", server));
+    }
+    
+    // Add public_url
+    yaml_content.push_str(&format!(
+        "public_url: \"syft://{}/public/biovault/participants.yaml\"\n",
+        email
+    ));
+    
     // Add private_url
     yaml_content.push_str(&format!(
         "private_url: \"syft://{}/private/biovault/participants.yaml\"\n\n",
@@ -185,7 +223,11 @@ fn save_public_participants(email: &str, file: &PublicParticipantsFile) -> Resul
     Ok(())
 }
 
-pub async fn publish(participant_id: Option<String>, all: bool) -> Result<()> {
+pub async fn publish(
+    participant_id: Option<String>,
+    all: bool,
+    http_relay_servers: Option<Vec<String>>,
+) -> Result<()> {
     let config = get_config()?;
     let email = &config.email;
 
@@ -197,6 +239,11 @@ pub async fn publish(participant_id: Option<String>, all: bool) -> Result<()> {
 
     let private_participants = load_private_participants()?;
     let mut public_participants = load_public_participants(email)?;
+    
+    // Update http_relay_servers if provided
+    if let Some(servers) = http_relay_servers {
+        public_participants.http_relay_servers = servers;
+    }
 
     let participants_to_publish: Vec<(String, Participant)> = if all {
         private_participants.participants.into_iter().collect()
@@ -625,7 +672,7 @@ mod tests {
         create_test_participants_file(temp_dir.path()).unwrap();
 
         // Test publishing a single participant
-        let result = publish(Some("TEST1".to_string()), false).await;
+        let result = publish(Some("TEST1".to_string()), false, None).await;
         if let Err(ref e) = result {
             eprintln!("Publish error: {}", e);
         }
@@ -645,9 +692,12 @@ mod tests {
         assert!(public_content.contains("mock_data_grch38: &mock_data_grch38"));
         assert!(public_content.contains("{root.private_url}#participants.TEST1"));
         assert!(public_content.contains("{url}.ref"));
+        assert!(public_content.contains(&format!("datasite: {}", email)));
+        assert!(public_content.contains("http_relay_servers:\n  - syftbox.net"));
+        assert!(public_content.contains(&format!("public_url: \"syft://{}/public/biovault/participants.yaml\"", email)));
 
         // Test publishing all participants
-        let result = publish(None, true).await;
+        let result = publish(None, true, None).await;
         assert!(result.is_ok());
 
         let public_content = fs::read_to_string(&public_path).unwrap();
@@ -656,6 +706,14 @@ mod tests {
         // Both TEST1 and TEST2 use GRCh38, so both should have mock references
         assert!(public_content.contains("mock: *mock_data_grch38"));
         assert!(public_content.contains("mock_data_grch38: &mock_data_grch38"));
+        
+        // Test publishing with custom HTTP relay servers
+        let custom_servers = vec!["relay1.example.com".to_string(), "relay2.example.com".to_string()];
+        let result = publish(Some("TEST1".to_string()), false, Some(custom_servers)).await;
+        assert!(result.is_ok());
+        
+        let public_content = fs::read_to_string(&public_path).unwrap();
+        assert!(public_content.contains("http_relay_servers:\n  - relay1.example.com\n  - relay2.example.com"));
 
         // Test unpublishing a single participant
         let result = unpublish(Some("TEST1".to_string()), false).await;
