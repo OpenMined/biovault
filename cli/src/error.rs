@@ -31,12 +31,6 @@ pub enum Error {
     #[error("File not found: {file}: {details}")]
     FileNotFound { file: String, details: String },
 
-    #[error("Checksum verification failed for {0}")]
-    ChecksumFailed(String),
-
-    #[error("HTTP request failed with status: {0}")]
-    HttpRequestFailed(String),
-
     #[error("{0} participant(s) failed processing")]
     ProcessingFailed(usize),
 

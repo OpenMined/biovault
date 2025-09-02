@@ -1,15 +1,12 @@
+use crate::cli::download_cache::{
+    ChecksumPolicy, ChecksumPolicyType, DownloadCache, DownloadOptions,
+};
 use crate::error::Error;
 use anyhow::Context;
-use blake3;
-use indicatif::{ProgressBar, ProgressStyle};
-use reqwest;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
-use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use tokio::fs::File;
-use tokio::io::AsyncWriteExt;
 
 const SAMPLE_DATA_YAML: &str = include_str!("../../sample_data.yaml");
 
@@ -85,6 +82,9 @@ pub async fn fetch(participant_ids: Option<Vec<String>>, all: bool) -> anyhow::R
     let participants_file_path = sample_data_dir.join("participants.yaml");
     let mut participants_file = load_or_create_participants_file(&participants_file_path)?;
 
+    // Initialize download cache
+    let mut download_cache = DownloadCache::new(None)?;
+
     for participant_id in participants_to_fetch {
         println!("\n{}", "=".repeat(60));
         println!("Fetching data for participant: {}", participant_id);
@@ -134,56 +134,30 @@ pub async fn fetch(participant_ids: Option<Vec<String>>, all: bool) -> anyhow::R
         ];
 
         for (url, target_path, description, expected_b3sum) in downloads {
-            if target_path.exists() {
-                println!("  ✓ {} already exists at:", description);
-                println!("    {}", target_path.display());
-                if !expected_b3sum.is_empty() {
-                    print!("    Verifying BLAKE3 checksum... ");
-                    std::io::stdout().flush().unwrap();
-                    match verify_file_checksum(&target_path, expected_b3sum) {
-                        Ok(true) => println!("✓ Valid"),
-                        Ok(false) => {
-                            println!("✗ Invalid checksum!");
-                            println!("    Expected: {}", expected_b3sum);
-                            if let Ok(actual) = calculate_blake3(&target_path) {
-                                println!("    Actual:   {}", actual);
-                            }
-                            return Err(Error::ChecksumFailed(description.to_string()).into());
-                        }
-                        Err(e) => {
-                            println!("⚠ Could not verify: {}", e);
-                        }
-                    }
+            println!(
+                "\n  Processing {}: {}",
+                description,
+                target_path.file_name().unwrap().to_string_lossy()
+            );
+
+            // Set up download options based on whether we have a checksum
+            let options = if !expected_b3sum.is_empty() {
+                DownloadOptions {
+                    checksum_policy: ChecksumPolicy {
+                        policy_type: ChecksumPolicyType::Required,
+                        expected_hash: Some(expected_b3sum.to_string()),
+                    },
+                    ..Default::default()
                 }
             } else {
-                println!("  ↓ Downloading {} to:", description);
-                println!("    {}", target_path.display());
-                download_file(url, &target_path)
-                    .await
-                    .with_context(|| format!("Failed to download {}", description))?;
-                println!("    ✓ Download complete");
+                DownloadOptions::default()
+            };
 
-                if !expected_b3sum.is_empty() {
-                    print!("    Verifying BLAKE3 checksum... ");
-                    std::io::stdout().flush().unwrap();
-                    match verify_file_checksum(&target_path, expected_b3sum) {
-                        Ok(true) => println!("✓ Valid"),
-                        Ok(false) => {
-                            println!("✗ Invalid checksum!");
-                            println!("    Expected: {}", expected_b3sum);
-                            if let Ok(actual) = calculate_blake3(&target_path) {
-                                println!("    Actual:   {}", actual);
-                            }
-                            // Delete the corrupted file
-                            let _ = fs::remove_file(&target_path);
-                            return Err(Error::ChecksumFailed(description.to_string()).into());
-                        }
-                        Err(e) => {
-                            println!("⚠ Could not verify: {}", e);
-                        }
-                    }
-                }
-            }
+            // Use the download cache
+            download_cache
+                .download_with_cache(url, &target_path, options)
+                .await
+                .with_context(|| format!("Failed to download {}", description))?;
         }
 
         let participant_record = ParticipantRecord {
@@ -225,60 +199,6 @@ fn extract_filename_from_url(url: &str) -> anyhow::Result<String> {
         .to_string())
 }
 
-fn calculate_blake3(path: &Path) -> anyhow::Result<String> {
-    // For large files, blake3::Hasher::update_rayon provides parallel hashing
-    let mut file = fs::File::open(path)
-        .with_context(|| format!("Failed to open file for checksum: {}", path.display()))?;
-
-    // Get file size to decide strategy
-    let metadata = file.metadata()?;
-    let file_size = metadata.len();
-
-    if file_size > 100 * 1024 * 1024 {
-        // For files > 100MB, use parallel hashing
-        let mut hasher = blake3::Hasher::new();
-        let mut buffer = vec![0; 64 * 1024 * 1024]; // 64MB buffer for parallel processing
-
-        loop {
-            let bytes_read = file
-                .read(&mut buffer)
-                .with_context(|| format!("Failed to read file for checksum: {}", path.display()))?;
-
-            if bytes_read == 0 {
-                break;
-            }
-
-            // Use rayon-enabled parallel update for large chunks
-            hasher.update_rayon(&buffer[..bytes_read]);
-        }
-
-        Ok(hasher.finalize().to_hex().to_string())
-    } else {
-        // For smaller files, use regular update
-        let mut hasher = blake3::Hasher::new();
-        let mut buffer = vec![0; 8 * 1024 * 1024]; // 8MB buffer
-
-        loop {
-            let bytes_read = file
-                .read(&mut buffer)
-                .with_context(|| format!("Failed to read file for checksum: {}", path.display()))?;
-
-            if bytes_read == 0 {
-                break;
-            }
-
-            hasher.update(&buffer[..bytes_read]);
-        }
-
-        Ok(hasher.finalize().to_hex().to_string())
-    }
-}
-
-fn verify_file_checksum(path: &Path, expected_b3sum: &str) -> anyhow::Result<bool> {
-    let actual = calculate_blake3(path)?;
-    Ok(actual == expected_b3sum)
-}
-
 fn determine_participants_to_fetch(
     config: &SampleDataConfig,
     participant_ids: Option<Vec<String>>,
@@ -314,63 +234,6 @@ fn save_participants_file(path: &Path, participants: &ParticipantsFile) -> anyho
     let yaml =
         serde_yaml::to_string(participants).context("Failed to serialize participants data")?;
     fs::write(path, yaml).context("Failed to write participants.yaml")?;
-    Ok(())
-}
-
-async fn download_file(url: &str, target_path: &Path) -> anyhow::Result<()> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(3600))
-        .build()
-        .context("Failed to create HTTP client")?;
-
-    let response = client
-        .get(url)
-        .send()
-        .await
-        .context("Failed to send request")?;
-
-    if !response.status().is_success() {
-        return Err(Error::HttpRequestFailed(response.status().to_string()).into());
-    }
-
-    let total_size = response.content_length().unwrap_or(0);
-
-    let pb =
-        if total_size > 0 {
-            let pb = ProgressBar::new(total_size);
-            pb.set_style(ProgressStyle::default_bar()
-            .template("    [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})")
-            .expect("Failed to set progress bar template")
-            .progress_chars("#>-"));
-            Some(pb)
-        } else {
-            println!("    Downloading (size unknown)...");
-            None
-        };
-
-    let mut file = File::create(target_path)
-        .await
-        .context("Failed to create target file")?;
-
-    let mut downloaded = 0u64;
-    let mut stream = response.bytes_stream();
-
-    while let Some(chunk) = futures_util::StreamExt::next(&mut stream).await {
-        let chunk = chunk.context("Failed to read chunk")?;
-        file.write_all(&chunk)
-            .await
-            .context("Failed to write chunk to file")?;
-
-        downloaded += chunk.len() as u64;
-        if let Some(ref pb) = pb {
-            pb.set_position(downloaded);
-        }
-    }
-
-    if let Some(pb) = pb {
-        pb.finish_and_clear();
-    }
-
     Ok(())
 }
 
