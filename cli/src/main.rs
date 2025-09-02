@@ -55,24 +55,14 @@ enum Commands {
         #[arg(help = "Path to project directory")]
         project_folder: String,
 
-        #[arg(help = "Path to participant file (YAML)")]
-        participant_file: String,
+        #[arg(help = "Participant source: local file path, Syft URL, or HTTP URL (with optional #fragment)")]
+        participant_source: String,
 
-        #[arg(
-            long,
-            value_delimiter = ',',
-            help = "Comma-separated list of participant IDs"
-        )]
-        participants: Option<Vec<String>>,
-
-        #[arg(long, help = "Process single participant")]
-        participant: Option<String>,
-
-        #[arg(long, help = "Process all participants in file")]
-        all: bool,
-
-        #[arg(long, help = "Run TEST participant only")]
+        #[arg(long, help = "Use mock data if available")]
         test: bool,
+
+        #[arg(long, help = "Auto-confirm file downloads")]
+        download: bool,
 
         #[arg(long, help = "Show commands without executing")]
         dry_run: bool,
@@ -247,11 +237,9 @@ async fn main() -> Result<()> {
         },
         Commands::Run {
             project_folder,
-            participant_file,
-            participants,
-            participant,
-            all,
+            participant_source,
             test,
+            download,
             dry_run,
             with_docker,
             work_dir,
@@ -259,11 +247,9 @@ async fn main() -> Result<()> {
         } => {
             commands::run::execute(commands::run::RunParams {
                 project_folder,
-                participant_file,
-                participants,
-                participant,
-                all,
+                participant_source,
                 test,
+                download,
                 dry_run,
                 with_docker,
                 work_dir,

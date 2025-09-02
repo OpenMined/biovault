@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use uuid::Uuid;
 
 const SAMPLE_DATA_YAML: &str = include_str!("../../sample_data.yaml");
 
@@ -153,11 +154,51 @@ pub async fn fetch(participant_ids: Option<Vec<String>>, all: bool) -> anyhow::R
                 DownloadOptions::default()
             };
 
+            // Download to a temporary location (will be cached)
+            let temp_filename = target_path.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("download");
+            let temp_path = std::env::temp_dir().join(format!("bv_{}_{}", temp_filename, Uuid::new_v4()));
+            
             // Use the download cache
             download_cache
-                .download_with_cache(url, &target_path, options)
+                .download_with_cache(url, &temp_path, options)
                 .await
                 .with_context(|| format!("Failed to download {}", description))?;
+            
+            // The file is now in cache, create a symlink to it
+            if !expected_b3sum.is_empty() {
+                let cache_base = home_dir.join(".biovault").join("data").join("cache");
+                let cache_path = cache_base.join("by-hash").join(expected_b3sum);
+                
+                // Remove any existing file or symlink at target
+                if target_path.exists() || target_path.is_symlink() {
+                    fs::remove_file(&target_path).ok();
+                }
+                
+                // Create symlink to cache
+                #[cfg(unix)]
+                {
+                    std::os::unix::fs::symlink(&cache_path, &target_path)
+                        .with_context(|| format!("Failed to create symlink for {}", description))?;
+                }
+                #[cfg(windows)]
+                {
+                    std::os::windows::fs::symlink_file(&cache_path, &target_path)
+                        .with_context(|| format!("Failed to create symlink for {}", description))?;
+                }
+                
+                println!("    ✓ Linked to cache (saving disk space)");
+            } else {
+                // If no checksum, we need to copy the file from temp to target
+                // This shouldn't happen in practice since all sample data has checksums
+                fs::rename(&temp_path, &target_path)
+                    .or_else(|_| fs::copy(&temp_path, &target_path).map(|_| ()))
+                    .with_context(|| format!("Failed to move {} to target", description))?;
+            }
+            
+            // Clean up temp file if it exists
+            fs::remove_file(&temp_path).ok();
         }
 
         let participant_record = ParticipantRecord {
