@@ -13,26 +13,14 @@ pub enum Error {
     #[error("Workflow file not found: {0}")]
     WorkflowMissing(String),
 
-    #[error("Participant file does not exist: {0}")]
-    ParticipantFileMissing(String),
-
     #[error("Participant not found: {0}")]
     ParticipantNotFound(String),
-
-    #[error("Participant not found in participant file: {0}")]
-    ParticipantNotFoundInFile(String),
 
     #[error("No participants specified")]
     NoParticipantsSpecified,
 
     #[error("Templates not found. Please run 'bv init' first")]
     TemplatesNotFound,
-
-    #[error("File not found: {file}: {details}")]
-    FileNotFound { file: String, details: String },
-
-    #[error("{0} participant(s) failed processing")]
-    ProcessingFailed(usize),
 
     #[error("BioVault not initialized. Please run 'bv init' first")]
     NotInitialized,

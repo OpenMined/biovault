@@ -33,7 +33,7 @@ curl -sSL https://raw.githubusercontent.com/openmined/biovault/main/install.sh |
 - [ ] installer check existing install and version
 - [ ] toggle docker mode
 - [ ] include common modules like bcftools
-- [ ] download deduplicate hashing and symlinking
+- [x] download deduplicate hashing and symlinking
 - [ ] bv biobank list
   - show public path?
 - [ ] windows symlinks plus tests

@@ -55,24 +55,16 @@ enum Commands {
         #[arg(help = "Path to project directory")]
         project_folder: String,
 
-        #[arg(help = "Path to participant file (YAML)")]
-        participant_file: String,
-
         #[arg(
-            long,
-            value_delimiter = ',',
-            help = "Comma-separated list of participant IDs"
+            help = "Participant source: local file path, Syft URL, or HTTP URL (with optional #fragment)"
         )]
-        participants: Option<Vec<String>>,
+        participant_source: String,
 
-        #[arg(long, help = "Process single participant")]
-        participant: Option<String>,
-
-        #[arg(long, help = "Process all participants in file")]
-        all: bool,
-
-        #[arg(long, help = "Run TEST participant only")]
+        #[arg(long, help = "Use mock data if available")]
         test: bool,
+
+        #[arg(long, help = "Auto-confirm file downloads")]
+        download: bool,
 
         #[arg(long, help = "Show commands without executing")]
         dry_run: bool,
@@ -181,6 +173,13 @@ enum BiobankCommands {
 
         #[arg(long, help = "Publish all participants")]
         all: bool,
+
+        #[arg(
+            long,
+            help = "HTTP relay servers (defaults to syftbox.net)",
+            value_delimiter = ','
+        )]
+        http_relay_servers: Option<Vec<String>>,
     },
 
     #[command(about = "Unpublish participants from SyftBox")]
@@ -240,11 +239,9 @@ async fn main() -> Result<()> {
         },
         Commands::Run {
             project_folder,
-            participant_file,
-            participants,
-            participant,
-            all,
+            participant_source,
             test,
+            download,
             dry_run,
             with_docker,
             work_dir,
@@ -252,11 +249,9 @@ async fn main() -> Result<()> {
         } => {
             commands::run::execute(commands::run::RunParams {
                 project_folder,
-                participant_file,
-                participants,
-                participant,
-                all,
+                participant_source,
                 test,
+                download,
                 dry_run,
                 with_docker,
                 work_dir,
@@ -296,8 +291,9 @@ async fn main() -> Result<()> {
             BiobankCommands::Publish {
                 participant_id,
                 all,
+                http_relay_servers,
             } => {
-                commands::biobank::publish(participant_id, all).await?;
+                commands::biobank::publish(participant_id, all, http_relay_servers).await?;
             }
             BiobankCommands::Unpublish {
                 participant_id,
