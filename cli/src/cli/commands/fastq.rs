@@ -3,11 +3,12 @@ use blake3::Hasher;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::time::Instant;
 use regex::Regex;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashSet, HashMap};
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use chrono::{DateTime, FixedOffset};
 
 #[derive(Debug, Clone)]
 struct FastqFile {
@@ -59,13 +60,29 @@ struct FastqStats {
     gc_content: f64,
 }
 
+#[derive(Debug, Clone)]
+struct NanoporeMetadata {
+    runid: String,
+    flow_cell_id: String,
+    start_time: DateTime<FixedOffset>,
+    protocol_group_id: String,
+    sample_id: String,
+    basecall_model: String,
+}
+
 pub async fn combine(
     input_folder: String, 
     output_file: String,
     validate: Option<bool>,
 ) -> Result<()> {
     let input_path = Path::new(&input_folder);
-    let output_path = Path::new(&output_file);
+    
+    // Auto-generate output filename if output_file is a directory
+    let output_path = if output_file.ends_with('/') || (Path::new(&output_file).exists() && Path::new(&output_file).is_dir()) {
+        generate_output_filename(input_path, &output_file)?
+    } else {
+        PathBuf::from(&output_file)
+    };
     
     if !input_path.exists() {
         return Err(anyhow!("Input folder does not exist: {}", input_folder));
@@ -83,10 +100,20 @@ pub async fn combine(
     println!("Scanning for FASTQ files in: {}", input_folder);
     
     // Find all FASTQ files
-    let fastq_files = find_fastq_files(input_path)?;
+    let mut fastq_files = find_fastq_files(input_path)?;
     
     if fastq_files.is_empty() {
         return Err(anyhow!("No FASTQ files found in {}", input_folder));
+    }
+    
+    // Check for and remove duplicate files
+    let duplicates = check_for_duplicates(&fastq_files);
+    if !duplicates.is_empty() {
+        println!("\n⚠️  Duplicate files detected (will be skipped):");
+        for dup in &duplicates {
+            println!("  - {}", dup.display());
+        }
+        fastq_files.retain(|f| !duplicates.contains(&f.path));
     }
     
     // Group files by base name
@@ -132,8 +159,23 @@ pub async fn combine(
         
         if compression_types.len() > 1 {
             println!("  ⚠️  Multiple compression types detected:");
-            for ct in &compression_types {
-                println!("    - {:?}", ct);
+            let mut compression_files: HashMap<CompressionType, Vec<String>> = HashMap::new();
+            for file in files {
+                let file_name = file.path.file_name().unwrap().to_string_lossy().to_string();
+                compression_files.entry(file.compression.clone())
+                    .or_insert_with(Vec::new)
+                    .push(file_name);
+            }
+            for (ct, file_list) in &compression_files {
+                println!("    - {:?}:", ct);
+                for (i, file) in file_list.iter().enumerate() {
+                    if i < 3 {
+                        println!("        {}", file);
+                    } else if i == 3 {
+                        println!("        ... and {} more", file_list.len() - 3);
+                        break;
+                    }
+                }
             }
             return Err(anyhow!("Cannot combine files with different compression types"));
         }
@@ -143,6 +185,35 @@ pub async fn combine(
     let all_files: Vec<FastqFile> = grouped_files.into_iter()
         .flat_map(|(_, files)| files)
         .collect();
+    
+    // Parse Nanopore metadata from first file of each group
+    println!("\n🔬 Checking for Oxford Nanopore metadata...");
+    let metadata_map = parse_nanopore_metadata(&all_files)?;
+    
+    if !metadata_map.is_empty() {
+        display_nanopore_summary(&metadata_map)?;
+        
+        // Check for multiple sample IDs
+        let sample_ids: HashSet<String> = metadata_map.values()
+            .filter_map(|m| m.as_ref())
+            .map(|m| m.sample_id.clone())
+            .collect();
+        
+        if sample_ids.len() > 1 {
+            println!("\n⚠️  Warning: Multiple sample IDs detected:");
+            for id in &sample_ids {
+                println!("    - {}", id);
+            }
+            print!("❓ Do you want to continue combining these files? (y/n): ");
+            io::stdout().flush()?;
+            
+            let mut input = String::new();
+            io::stdin().read_line(&mut input)?;
+            if input.trim().to_lowercase() != "y" {
+                return Err(anyhow!("Aborted: Multiple sample IDs detected"));
+            }
+        }
+    }
     
     println!("\n📊 Summary:");
     println!("  Total files: {}", all_files.len());
@@ -209,17 +280,18 @@ pub async fn combine(
         
         // Save validation stats to file
         let stats_file = output_path.with_extension("pre_combine_stats.txt");
-        save_stats_to_file(&stats_map, &stats_file)?;
+        let file_hashes = generate_file_hashes(&all_files)?;
+        save_stats_to_file(&stats_map, &stats_file, Some(&file_hashes))?;
         println!("📄 Validation stats saved to: {}", stats_file.display());
     }
     
     // Combine files
     println!("\n🔗 Combining FASTQ files...");
-    combine_fastq_files(&all_files, output_path)?;
+    combine_fastq_files(&all_files, &output_path)?;
     
     // Generate Blake3 hash
     println!("\n🔐 Generating Blake3 hash...");
-    let hash = generate_blake3_hash(output_path)?;
+    let hash = generate_blake3_hash(&output_path)?;
     let hash_file = output_path.with_extension("blake3");
     fs::write(&hash_file, hash)?;
     println!("📄 Blake3 hash saved to: {}", hash_file.display());
@@ -228,7 +300,7 @@ pub async fn combine(
     if should_validate {
         println!("\n🔍 Validating combined file...");
         
-        let combined_stats = validate_fastq_file(output_path)?;
+        let combined_stats = validate_fastq_file(&output_path)?;
         
         // Compare stats
         let total_expected_seqs: u64 = stats_map.values().map(|s| s.num_seqs).sum();
@@ -248,7 +320,10 @@ pub async fn combine(
         let final_stats_file = output_path.with_extension("stats.txt");
         let mut final_stats = BTreeMap::new();
         final_stats.insert(output_path.to_path_buf(), combined_stats);
-        save_stats_to_file(&final_stats, &final_stats_file)?;
+        let combined_hash = generate_blake3_hash(&output_path)?;
+        let mut final_hashes = BTreeMap::new();
+        final_hashes.insert(output_path.to_path_buf(), combined_hash.clone());
+        save_stats_to_file(&final_stats, &final_stats_file, Some(&final_hashes))?;
         println!("📄 Final stats saved to: {}", final_stats_file.display());
     }
     
@@ -412,7 +487,7 @@ fn parse_seqkit_stats(output: &str) -> Result<FastqStats> {
     })
 }
 
-fn save_stats_to_file(stats: &BTreeMap<PathBuf, FastqStats>, path: &Path) -> Result<()> {
+fn save_stats_to_file(stats: &BTreeMap<PathBuf, FastqStats>, path: &Path, hashes: Option<&BTreeMap<PathBuf, String>>) -> Result<()> {
     let mut file = File::create(path)?;
     
     writeln!(file, "FASTQ Validation Statistics")?;
@@ -430,6 +505,11 @@ fn save_stats_to_file(stats: &BTreeMap<PathBuf, FastqStats>, path: &Path) -> Res
         writeln!(file, "  Avg length: {:.2}", stats.avg_len)?;
         writeln!(file, "  Max length: {}", stats.max_len)?;
         writeln!(file, "  GC content: {:.2}%", stats.gc_content)?;
+        if let Some(h) = hashes {
+            if let Some(hash) = h.get(file_path) {
+                writeln!(file, "  Blake3 hash: {}", hash)?;
+            }
+        }
         writeln!(file)?;
         
         total_seqs += stats.num_seqs;
@@ -453,7 +533,7 @@ fn combine_fastq_files(files: &[FastqFile], output_path: &Path) -> Result<()> {
         return Err(anyhow!("Cannot combine files with different compression types"));
     }
     
-    let compression = files.first().unwrap().compression.clone();
+    let _compression = files.first().unwrap().compression.clone();
     
     // Calculate total bytes to process
     let total_bytes: u64 = files.iter().map(|f| f.size).sum();
@@ -544,4 +624,163 @@ fn format_size(size: u64) -> String {
     } else {
         format!("{:.2} {}", size_f, UNITS[unit_idx])
     }
+}
+
+fn check_for_duplicates(files: &[FastqFile]) -> HashSet<PathBuf> {
+    let mut seen = HashSet::new();
+    let mut duplicates = HashSet::new();
+    
+    for file in files {
+        let canonical = file.path.canonicalize().unwrap_or(file.path.clone());
+        if !seen.insert(canonical.clone()) {
+            duplicates.insert(file.path.clone());
+        }
+    }
+    
+    duplicates
+}
+
+fn generate_output_filename(input_path: &Path, output_dir: &str) -> Result<PathBuf> {
+    let files = find_fastq_files(input_path)?;
+    if files.is_empty() {
+        return Err(anyhow!("No FASTQ files found to generate output filename"));
+    }
+    
+    let groups = group_files_by_base(&files);
+    let first_group = groups.iter().next()
+        .ok_or_else(|| anyhow!("No file groups found"))?;
+    
+    let base_name = &first_group.0;
+    let first_file = &first_group.1[0];
+    
+    let extension = match first_file.compression {
+        CompressionType::Gzip => ".all.fastq.gz",
+        CompressionType::Bzip2 => ".all.fastq.bz2",
+        CompressionType::Xz => ".all.fastq.xz",
+        CompressionType::Zip => ".all.fastq.zip",
+        CompressionType::Zstd => ".all.fastq.zst",
+        CompressionType::None => ".all.fastq",
+    };
+    
+    let output_file = format!("{}{}", base_name, extension);
+    let output_path = Path::new(output_dir).join(output_file);
+    
+    println!("📝 Auto-generated output filename: {}", output_path.display());
+    Ok(output_path)
+}
+
+fn generate_file_hashes(files: &[FastqFile]) -> Result<BTreeMap<PathBuf, String>> {
+    let mut hashes = BTreeMap::new();
+    
+    println!("\n🔐 Generating Blake3 hashes for input files...");
+    let pb = ProgressBar::new(files.len() as u64);
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template("{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} {msg}")
+            .unwrap()
+            .progress_chars("#>-")
+    );
+    
+    for (idx, file) in files.iter().enumerate() {
+        pb.set_position(idx as u64);
+        pb.set_message(format!("Hashing {}", file.path.file_name().unwrap().to_string_lossy()));
+        
+        let hash = generate_blake3_hash(&file.path)?;
+        hashes.insert(file.path.clone(), hash);
+    }
+    
+    pb.finish_with_message("Hashes generated");
+    Ok(hashes)
+}
+
+fn parse_nanopore_metadata(files: &[FastqFile]) -> Result<BTreeMap<PathBuf, Option<NanoporeMetadata>>> {
+    let mut metadata_map = BTreeMap::new();
+    
+    for file in files {
+        let metadata = parse_single_file_metadata(&file.path)?;
+        metadata_map.insert(file.path.clone(), metadata);
+    }
+    
+    Ok(metadata_map)
+}
+
+fn parse_single_file_metadata(path: &Path) -> Result<Option<NanoporeMetadata>> {
+    let file = File::open(path)?;
+    let reader: Box<dyn BufRead> = if path.to_string_lossy().ends_with(".gz") {
+        Box::new(BufReader::new(flate2::read::GzDecoder::new(file)))
+    } else {
+        Box::new(BufReader::new(file))
+    };
+    
+    let mut lines = reader.lines();
+    if let Some(Ok(header)) = lines.next() {
+        if header.starts_with('@') {
+            return parse_nanopore_header(&header);
+        }
+    }
+    
+    Ok(None)
+}
+
+fn parse_nanopore_header(header: &str) -> Result<Option<NanoporeMetadata>> {
+    let re = Regex::new(r"runid=(\S+).*flow_cell_id=(\S+).*start_time=(\S+).*protocol_group_id=(\S+).*sample_id=(\S+).*basecall_model_version_id=(\S+)")?;
+    
+    if let Some(caps) = re.captures(header) {
+        let start_time = DateTime::parse_from_rfc3339(&caps[3])
+            .or_else(|_| DateTime::parse_from_str(&caps[3], "%Y-%m-%dT%H:%M:%S%.f%:z"))?;
+        
+        Ok(Some(NanoporeMetadata {
+            runid: caps[1].to_string(),
+            flow_cell_id: caps[2].to_string(),
+            start_time,
+            protocol_group_id: caps[4].to_string(),
+            sample_id: caps[5].to_string(),
+            basecall_model: caps[6].to_string(),
+        }))
+    } else {
+        Ok(None)
+    }
+}
+
+fn display_nanopore_summary(metadata_map: &BTreeMap<PathBuf, Option<NanoporeMetadata>>) -> Result<()> {
+    let valid_metadata: Vec<_> = metadata_map.values()
+        .filter_map(|m| m.as_ref())
+        .collect();
+    
+    if valid_metadata.is_empty() {
+        return Ok(());
+    }
+    
+    println!("\n🧬 Oxford Nanopore Metadata Summary:");
+    println!("{}", "=".repeat(50));
+    
+    let runids: HashSet<_> = valid_metadata.iter().map(|m| &m.runid).collect();
+    println!("  Run IDs found: {}", runids.len());
+    for runid in &runids {
+        println!("    - {}", runid);
+    }
+    
+    let flow_cells: HashSet<_> = valid_metadata.iter().map(|m| &m.flow_cell_id).collect();
+    println!("  Flow cells: {:?}", flow_cells);
+    
+    let start_times: Vec<_> = valid_metadata.iter().map(|m| m.start_time).collect();
+    if let (Some(first), Some(last)) = (start_times.iter().min(), start_times.iter().max()) {
+        println!("  First start time: {}", first);
+        println!("  Last start time: {}", last);
+        let duration = last.signed_duration_since(*first);
+        println!("  Duration span: {} hours {} minutes", 
+            duration.num_hours(), 
+            duration.num_minutes() % 60);
+    }
+    
+    let protocol_groups: HashSet<_> = valid_metadata.iter().map(|m| &m.protocol_group_id).collect();
+    println!("  Protocol groups: {:?}", protocol_groups);
+    
+    let sample_ids: HashSet<_> = valid_metadata.iter().map(|m| &m.sample_id).collect();
+    println!("  Sample IDs: {:?}", sample_ids);
+    
+    let models: HashSet<_> = valid_metadata.iter().map(|m| &m.basecall_model).collect();
+    println!("  Basecall models: {:?}", models);
+    
+    Ok(())
 }
