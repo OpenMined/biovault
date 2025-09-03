@@ -147,3 +147,63 @@ resources:
   schema: org.openmined.biovault.participants-list-v1.0.0-beta.1
   schema_ref: ./resources/schemas/org.openmined.biovault.participants-list-v1.0.0-beta.1.yaml
 ```
+
+
+
+## fastq combine
+A utility to help combine large folders of fastq files.
+- Checks for duplicates, mismatches and missing files
+- Detects ONT metadata
+- Suggests output filename
+- Generates stats of input files using seqkit
+- Verifies stats match on output file
+- Creates blake3 hash file
+
+Real Example:
+
+```
+bv fastq combine /Users/madhavajay/dev/carigenetics/onedrive/Fastqs/fastq_pass /Users/madhavajay/dev/carigenetics/combined
+```
+
+```
+Scanning for FASTQ files in: /Users/madhavajay/dev/carigenetics/onedrive/Fastqs/fastq_pass
+
+📁 File group: PBE09234_pass_2ce5fdd6_00ebc536
+  Files: 433 (sequences 0-432)
+  Total size: 23.69 GB
+
+📁 File group: PBE09980_pass_290adfbe_f615b940
+  Files: 378 (sequences 0-377)
+  Total size: 83.84 GB
+
+🔬 Checking for Oxford Nanopore metadata...
+
+🧬 Oxford Nanopore Metadata Summary:
+==================================================
+  Run IDs found: 2
+    - f615b940c5828ce0638002a4f0eb7f2ac23a6e16
+    - 00ebc53629f8efdcca95471907a7c16cc0f4df12
+  Flow cells: {"PBE09234", "PBE09980"}
+  First start time: 2025-07-28 17:14:55.040747 -03:00
+  Last start time: 2025-08-02 12:16:28.661769 -03:00
+  Duration span: 115 hours 1 minutes
+  Protocol groups: {"EntirelyYou"}
+  Sample IDs: {"ENT0001"}
+  Basecall models: {"dna_r10.4.1_e8.2_400bps_hac@v4.3.0"}
+
+📊 Summary:
+  Total files: 811
+  Total size: 107.54 GB
+
+❓ '/Users/madhavajay/dev/carigenetics/combined' doesn't exist and has no extension. Create as directory? (y/n): y
+📁 Created output directory: /Users/madhavajay/dev/carigenetics/combined
+
+📝 Suggested output filename: /Users/madhavajay/dev/carigenetics/combined/PBE09234-PBE09980-ENT0001-ONT-20250802-all.fastq.gz
+Accept this filename? (y/n/e to edit): e
+Enter new filename (without path) [PBE09234-PBE09980-ENT0001-ONT-20250802-all.fastq.gz]: MadhavaJay-WGS-carigenetics-PBE09234-PBE09980-ENT0001-ONT-20250802-all.fastq.gz
+Using filename: /Users/madhavajay/dev/carigenetics/combined/MadhavaJay-WGS-carigenetics-PBE09234-PBE09980-ENT0001-ONT-20250802-all.fastq.gz
+
+❓ Do you want to validate all files before combining? (y/n): y
+
+
+```
