@@ -74,15 +74,11 @@ pub async fn combine(
     input_folder: String, 
     output_file: String,
     validate: Option<bool>,
+    stats_format: Option<String>,
 ) -> Result<()> {
     let input_path = Path::new(&input_folder);
     
-    // Auto-generate output filename if output_file is a directory
-    let output_path = if output_file.ends_with('/') || (Path::new(&output_file).exists() && Path::new(&output_file).is_dir()) {
-        generate_output_filename(input_path, &output_file)?
-    } else {
-        PathBuf::from(&output_file)
-    };
+    // Temporarily moved - will be after metadata parsing
     
     if !input_path.exists() {
         return Err(anyhow!("Input folder does not exist: {}", input_folder));
@@ -90,11 +86,6 @@ pub async fn combine(
     
     if !input_path.is_dir() {
         return Err(anyhow!("Input path is not a directory: {}", input_folder));
-    }
-    
-    // Create output directory if it doesn't exist
-    if let Some(parent) = output_path.parent() {
-        fs::create_dir_all(parent)?;
     }
     
     println!("Scanning for FASTQ files in: {}", input_folder);
@@ -106,14 +97,25 @@ pub async fn combine(
         return Err(anyhow!("No FASTQ files found in {}", input_folder));
     }
     
-    // Check for and remove duplicate files
-    let duplicates = check_for_duplicates(&fastq_files);
-    if !duplicates.is_empty() {
-        println!("\n⚠️  Duplicate files detected (will be skipped):");
-        for dup in &duplicates {
-            println!("  - {}", dup.display());
+    // Early duplicate detection based on file size (quick check)
+    let size_duplicates = check_size_duplicates(&fastq_files);
+    if !size_duplicates.is_empty() {
+        println!("\n⚠️  Potential duplicate files detected (same size):");
+        for (size, files) in &size_duplicates {
+            if files.len() > 1 {
+                println!("  Size {}: {} files", format_size(*size), files.len());
+                for file in files {
+                    println!("    - {}", file.path.file_name().unwrap().to_string_lossy());
+                }
+            }
         }
-        fastq_files.retain(|f| !duplicates.contains(&f.path));
+        print!("\n❓ Do you want to continue despite potential duplicates? (y/n): ");
+        io::stdout().flush()?;
+        let mut input = String::new();
+        io::stdin().read_line(&mut input)?;
+        if input.trim().to_lowercase() != "y" {
+            return Err(anyhow!("Aborted: Potential duplicate files detected"));
+        }
     }
     
     // Group files by base name
@@ -220,6 +222,58 @@ pub async fn combine(
     let total_size: u64 = all_files.iter().map(|f| f.size).sum();
     println!("  Total size: {}", format_size(total_size));
     
+    // Determine if output is a directory or file
+    let output_path = {
+        let out_path = Path::new(&output_file);
+        
+        // Check if it's explicitly a directory (ends with /)
+        if output_file.ends_with('/') {
+            // Create directory if it doesn't exist
+            if !out_path.exists() {
+                fs::create_dir_all(&output_file)?;
+                println!("📁 Created output directory: {}", output_file);
+            }
+            generate_output_filename_with_metadata(&all_files, &output_file, &metadata_map)?
+        }
+        // Check if it exists and is a directory
+        else if out_path.exists() && out_path.is_dir() {
+            generate_output_filename_with_metadata(&all_files, &output_file, &metadata_map)?
+        }
+        // If it doesn't exist and has no extension, ask if it should be a directory
+        else if !out_path.exists() && !output_file.contains('.') {
+            print!("\n❓ '{}' doesn't exist and has no extension. Create as directory? (y/n): ", output_file);
+            io::stdout().flush()?;
+            
+            let mut input = String::new();
+            io::stdin().read_line(&mut input)?;
+            
+            if input.trim().to_lowercase() == "y" {
+                fs::create_dir_all(&output_file)?;
+                println!("📁 Created output directory: {}", output_file);
+                generate_output_filename_with_metadata(&all_files, &output_file, &metadata_map)?
+            } else {
+                // Treat as a file without extension
+                PathBuf::from(&output_file)
+            }
+        }
+        // Otherwise treat as a file
+        else {
+            PathBuf::from(&output_file)
+        }
+    };
+    
+    // Create output directory if it doesn't exist
+    if let Some(parent) = output_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    
+    // Check if output file already exists
+    if output_path.exists() {
+        println!("\n❌ Error: Output file already exists: {}", output_path.display());
+        println!("   Please remove the existing file or choose a different output location.");
+        return Err(anyhow!("Output file already exists"));
+    }
+    
     // Check if user wants to validate
     let should_validate = if let Some(v) = validate {
         v
@@ -278,10 +332,37 @@ pub async fn combine(
         
         println!("✅ All files validated successfully!");
         
-        // Save validation stats to file
-        let stats_file = output_path.with_extension("pre_combine_stats.txt");
+        // Generate hashes and check for content duplicates
         let file_hashes = generate_file_hashes(&all_files)?;
-        save_stats_to_file(&stats_map, &stats_file, Some(&file_hashes))?;
+        let content_duplicates = check_content_duplicates(&file_hashes);
+        if !content_duplicates.is_empty() {
+            println!("\n⚠️  DUPLICATE FILES DETECTED (identical content):");
+            for (hash, files) in &content_duplicates {
+                if files.len() > 1 {
+                    println!("  Blake3: {}...", &hash[..16]);
+                    for file in files {
+                        println!("    - {}", file.display());
+                    }
+                }
+            }
+            print!("❓ Continue anyway? (y/n): ");
+            io::stdout().flush()?;
+            let mut input = String::new();
+            io::stdin().read_line(&mut input)?;
+            if input.trim().to_lowercase() != "y" {
+                return Err(anyhow!("Aborted: Duplicate files detected"));
+            }
+        }
+        
+        // Save validation stats to file
+        let format = stats_format.as_deref().unwrap_or("tsv");
+        let ext = match format {
+            "yaml" => "stats.yaml",
+            "json" => "stats.json",
+            _ => "stats.tsv",
+        };
+        let stats_file = output_path.with_extension(format!("pre_combine_{}", ext));
+        save_stats_to_file(&stats_map, &stats_file, Some(&file_hashes), format)?;
         println!("📄 Validation stats saved to: {}", stats_file.display());
     }
     
@@ -289,11 +370,11 @@ pub async fn combine(
     println!("\n🔗 Combining FASTQ files...");
     combine_fastq_files(&all_files, &output_path)?;
     
-    // Generate Blake3 hash
+    // Generate Blake3 hash (only once)
     println!("\n🔐 Generating Blake3 hash...");
-    let hash = generate_blake3_hash(&output_path)?;
+    let final_hash = generate_blake3_hash(&output_path)?;
     let hash_file = output_path.with_extension("blake3");
-    fs::write(&hash_file, hash)?;
+    fs::write(&hash_file, &final_hash)?;
     println!("📄 Blake3 hash saved to: {}", hash_file.display());
     
     // Validate combined file if validation was requested
@@ -302,32 +383,66 @@ pub async fn combine(
         
         let combined_stats = validate_fastq_file(&output_path)?;
         
-        // Compare stats
-        let total_expected_seqs: u64 = stats_map.values().map(|s| s.num_seqs).sum();
+        // Calculate input stats
+        let total_input_seqs: u64 = stats_map.values().map(|s| s.num_seqs).sum();
+        let input_file_count = stats_map.len();
         
-        if combined_stats.num_seqs != total_expected_seqs {
-            println!("⚠️  Warning: Sequence count mismatch!");
-            println!("  Expected: {} sequences", total_expected_seqs);
-            println!("  Got: {} sequences", combined_stats.num_seqs);
+        // Get actual file sizes (not sequence lengths)
+        let total_input_size: u64 = all_files.iter().map(|f| f.size).sum();
+        
+        // Get output file size
+        let output_metadata = fs::metadata(&output_path)?;
+        let output_size = output_metadata.len();
+        
+        // Display comparison
+        println!("\n📊 Validation Summary:");
+        println!("───────────────────────────────────────────");
+        println!("INPUT:");
+        println!("  Files: {} files", input_file_count);
+        println!("  Total size: {}", format_size(total_input_size));
+        println!("  Total sequences: {}", total_input_seqs);
+        println!();
+        println!("OUTPUT:");
+        println!("  Files: 1 file");
+        println!("  Total size: {}", format_size(output_size));
+        println!("  Total sequences: {}", combined_stats.num_seqs);
+        println!("───────────────────────────────────────────");
+        
+        // Check if sequences match
+        if combined_stats.num_seqs != total_input_seqs {
+            println!("\n❌ ERROR: Sequence count mismatch!");
+            println!("   Expected {} sequences but found {}", total_input_seqs, combined_stats.num_seqs);
+            println!("   Missing {} sequences", 
+                if total_input_seqs > combined_stats.num_seqs {
+                    total_input_seqs - combined_stats.num_seqs
+                } else {
+                    combined_stats.num_seqs - total_input_seqs
+                }
+            );
+            return Err(anyhow!("Combined file validation failed: sequence count mismatch"));
         } else {
-            println!("✅ Combined file validation successful!");
-            println!("  Total sequences: {}", combined_stats.num_seqs);
-            println!("  Average length: {:.2}", combined_stats.avg_len);
-            println!("  GC content: {:.2}%", combined_stats.gc_content);
+            println!("\n✅ Validation successful: Input and output sequence counts match!");
+            println!("   Average length: {:.2} bp", combined_stats.avg_len);
+            println!("   GC content: {:.2}%", combined_stats.gc_content);
         }
         
-        // Save final stats
-        let final_stats_file = output_path.with_extension("stats.txt");
+        // Save final stats (reuse the hash already calculated)
+        let format = stats_format.as_deref().unwrap_or("tsv");
+        let ext = match format {
+            "yaml" => "stats.yaml",
+            "json" => "stats.json",
+            _ => "stats.tsv",
+        };
+        let final_stats_file = output_path.with_extension(ext);
         let mut final_stats = BTreeMap::new();
         final_stats.insert(output_path.to_path_buf(), combined_stats);
-        let combined_hash = generate_blake3_hash(&output_path)?;
         let mut final_hashes = BTreeMap::new();
-        final_hashes.insert(output_path.to_path_buf(), combined_hash.clone());
-        save_stats_to_file(&final_stats, &final_stats_file, Some(&final_hashes))?;
-        println!("📄 Final stats saved to: {}", final_stats_file.display());
+        final_hashes.insert(output_path.to_path_buf(), final_hash.clone());
+        save_stats_to_file(&final_stats, &final_stats_file, Some(&final_hashes), format)?;
+        println!("\n📄 Final stats saved to: {}", final_stats_file.display());
     }
     
-    println!("\n✨ FASTQ files successfully combined to: {}", output_file);
+    println!("\n✨ FASTQ files successfully combined to: {}", output_path.display());
     
     Ok(())
 }
@@ -487,38 +602,105 @@ fn parse_seqkit_stats(output: &str) -> Result<FastqStats> {
     })
 }
 
-fn save_stats_to_file(stats: &BTreeMap<PathBuf, FastqStats>, path: &Path, hashes: Option<&BTreeMap<PathBuf, String>>) -> Result<()> {
+fn save_stats_to_file(stats: &BTreeMap<PathBuf, FastqStats>, path: &Path, hashes: Option<&BTreeMap<PathBuf, String>>, format: &str) -> Result<()> {
+    match format {
+        "yaml" => save_stats_yaml(stats, path, hashes),
+        "json" => save_stats_json(stats, path, hashes),
+        _ => save_stats_tsv(stats, path, hashes),
+    }
+}
+
+fn save_stats_tsv(stats: &BTreeMap<PathBuf, FastqStats>, path: &Path, hashes: Option<&BTreeMap<PathBuf, String>>) -> Result<()> {
     let mut file = File::create(path)?;
     
-    writeln!(file, "FASTQ Validation Statistics")?;
-    writeln!(file, "{}", "=".repeat(50))?;
-    writeln!(file)?;
+    // Write header
+    writeln!(file, "file\tsequences\ttotal_length\tmin_length\tavg_length\tmax_length\tgc_content\tblake3_hash")?;
     
-    let mut total_seqs = 0u64;
-    let mut total_len = 0u64;
-    
+    // Write data rows
     for (file_path, stats) in stats {
-        writeln!(file, "File: {}", file_path.display())?;
-        writeln!(file, "  Sequences: {}", stats.num_seqs)?;
-        writeln!(file, "  Total length: {}", stats.total_len)?;
-        writeln!(file, "  Min length: {}", stats.min_len)?;
-        writeln!(file, "  Avg length: {:.2}", stats.avg_len)?;
-        writeln!(file, "  Max length: {}", stats.max_len)?;
-        writeln!(file, "  GC content: {:.2}%", stats.gc_content)?;
-        if let Some(h) = hashes {
-            if let Some(hash) = h.get(file_path) {
-                writeln!(file, "  Blake3 hash: {}", hash)?;
-            }
-        }
-        writeln!(file)?;
+        let hash = hashes.and_then(|h| h.get(file_path))
+            .map(|h| h.as_str())
+            .unwrap_or("");
         
-        total_seqs += stats.num_seqs;
-        total_len += stats.total_len;
+        writeln!(file, "{}\t{}\t{}\t{}\t{:.2}\t{}\t{:.2}\t{}",
+            file_path.display(),
+            stats.num_seqs,
+            stats.total_len,
+            stats.min_len,
+            stats.avg_len,
+            stats.max_len,
+            stats.gc_content,
+            hash
+        )?;
     }
     
-    writeln!(file, "{}", "=".repeat(50))?;
-    writeln!(file, "Total sequences: {}", total_seqs)?;
-    writeln!(file, "Total length: {}", total_len)?;
+    Ok(())
+}
+
+fn save_stats_yaml(stats: &BTreeMap<PathBuf, FastqStats>, path: &Path, hashes: Option<&BTreeMap<PathBuf, String>>) -> Result<()> {
+    use serde::Serialize;
+    
+    #[derive(Serialize)]
+    struct StatsEntry {
+        file: String,
+        sequences: u64,
+        total_length: u64,
+        min_length: u64,
+        avg_length: f64,
+        max_length: u64,
+        gc_content: f64,
+        blake3_hash: Option<String>,
+    }
+    
+    let entries: Vec<StatsEntry> = stats.iter().map(|(file_path, stats)| {
+        StatsEntry {
+            file: file_path.display().to_string(),
+            sequences: stats.num_seqs,
+            total_length: stats.total_len,
+            min_length: stats.min_len,
+            avg_length: stats.avg_len,
+            max_length: stats.max_len,
+            gc_content: stats.gc_content,
+            blake3_hash: hashes.and_then(|h| h.get(file_path).cloned()),
+        }
+    }).collect();
+    
+    let yaml = serde_yaml::to_string(&entries)?;
+    fs::write(path, yaml)?;
+    
+    Ok(())
+}
+
+fn save_stats_json(stats: &BTreeMap<PathBuf, FastqStats>, path: &Path, hashes: Option<&BTreeMap<PathBuf, String>>) -> Result<()> {
+    use serde::Serialize;
+    
+    #[derive(Serialize)]
+    struct StatsEntry {
+        file: String,
+        sequences: u64,
+        total_length: u64,
+        min_length: u64,
+        avg_length: f64,
+        max_length: u64,
+        gc_content: f64,
+        blake3_hash: Option<String>,
+    }
+    
+    let entries: Vec<StatsEntry> = stats.iter().map(|(file_path, stats)| {
+        StatsEntry {
+            file: file_path.display().to_string(),
+            sequences: stats.num_seqs,
+            total_length: stats.total_len,
+            min_length: stats.min_len,
+            avg_length: stats.avg_len,
+            max_length: stats.max_len,
+            gc_content: stats.gc_content,
+            blake3_hash: hashes.and_then(|h| h.get(file_path).cloned()),
+        }
+    }).collect();
+    
+    let json = serde_json::to_string_pretty(&entries)?;
+    fs::write(path, json)?;
     
     Ok(())
 }
@@ -533,8 +715,13 @@ fn combine_fastq_files(files: &[FastqFile], output_path: &Path) -> Result<()> {
         return Err(anyhow!("Cannot combine files with different compression types"));
     }
     
-    let _compression = files.first().unwrap().compression.clone();
+    let compression = files.first().unwrap().compression.clone();
     
+    // Just use direct concatenation - it's faster and preserves original compression
+    combine_fastq_files_direct(files, output_path, compression)
+}
+
+fn combine_fastq_files_direct(files: &[FastqFile], output_path: &Path, _compression: CompressionType) -> Result<()> {
     // Calculate total bytes to process
     let total_bytes: u64 = files.iter().map(|f| f.size).sum();
     
@@ -577,10 +764,10 @@ fn combine_fastq_files(files: &[FastqFile], output_path: &Path) -> Result<()> {
         format_size(bytes_processed)
     };
     
-    pb.finish_with_message(format!("Files combined - {} in {:.1}s ({})", 
+    pb.finish_with_message(format!("Files combined - {} in {:.1}s ({}/s)", 
         format_size(bytes_processed), 
         elapsed.as_secs_f32(),
-        throughput + "/s"
+        throughput
     ));
     
     Ok(())
@@ -626,46 +813,124 @@ fn format_size(size: u64) -> String {
     }
 }
 
-fn check_for_duplicates(files: &[FastqFile]) -> HashSet<PathBuf> {
-    let mut seen = HashSet::new();
-    let mut duplicates = HashSet::new();
+fn check_size_duplicates(files: &[FastqFile]) -> HashMap<u64, Vec<&FastqFile>> {
+    let mut size_map: HashMap<u64, Vec<&FastqFile>> = HashMap::new();
     
     for file in files {
-        let canonical = file.path.canonicalize().unwrap_or(file.path.clone());
-        if !seen.insert(canonical.clone()) {
-            duplicates.insert(file.path.clone());
-        }
+        size_map.entry(file.size)
+            .or_insert_with(Vec::new)
+            .push(file);
     }
     
-    duplicates
+    // Only keep sizes with multiple files
+    size_map.retain(|_, files| files.len() > 1);
+    size_map
 }
 
-fn generate_output_filename(input_path: &Path, output_dir: &str) -> Result<PathBuf> {
-    let files = find_fastq_files(input_path)?;
+fn check_content_duplicates(hashes: &BTreeMap<PathBuf, String>) -> HashMap<String, Vec<PathBuf>> {
+    let mut hash_map: HashMap<String, Vec<PathBuf>> = HashMap::new();
+    
+    for (path, hash) in hashes {
+        hash_map.entry(hash.clone())
+            .or_insert_with(Vec::new)
+            .push(path.clone());
+    }
+    
+    // Only keep hashes with multiple files
+    hash_map.retain(|_, files| files.len() > 1);
+    hash_map
+}
+
+fn generate_output_filename_with_metadata(files: &[FastqFile], output_dir: &str, metadata_map: &BTreeMap<PathBuf, Option<NanoporeMetadata>>) -> Result<PathBuf> {
     if files.is_empty() {
         return Err(anyhow!("No FASTQ files found to generate output filename"));
     }
     
-    let groups = group_files_by_base(&files);
-    let first_group = groups.iter().next()
-        .ok_or_else(|| anyhow!("No file groups found"))?;
+    let valid_metadata: Vec<_> = metadata_map.values()
+        .filter_map(|m| m.as_ref())
+        .collect();
     
-    let base_name = &first_group.0;
-    let first_file = &first_group.1[0];
-    
+    let first_file = &files[0];
     let extension = match first_file.compression {
-        CompressionType::Gzip => ".all.fastq.gz",
-        CompressionType::Bzip2 => ".all.fastq.bz2",
-        CompressionType::Xz => ".all.fastq.xz",
-        CompressionType::Zip => ".all.fastq.zip",
-        CompressionType::Zstd => ".all.fastq.zst",
-        CompressionType::None => ".all.fastq",
+        CompressionType::Gzip => "fastq.gz",
+        CompressionType::Bzip2 => "fastq.bz2",
+        CompressionType::Xz => "fastq.xz",
+        CompressionType::Zip => "fastq.zip",
+        CompressionType::Zstd => "fastq.zst",
+        CompressionType::None => "fastq",
     };
     
-    let output_file = format!("{}{}", base_name, extension);
-    let output_path = Path::new(output_dir).join(output_file);
+    let suggested_name = if !valid_metadata.is_empty() {
+        // Extract unique values
+        let mut flow_cells: Vec<String> = valid_metadata.iter()
+            .map(|m| m.flow_cell_id.clone())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        flow_cells.sort();
+        
+        let mut sample_ids: Vec<String> = valid_metadata.iter()
+            .map(|m| m.sample_id.clone())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        sample_ids.sort();
+        
+        // Get the latest date
+        let latest_time = valid_metadata.iter()
+            .map(|m| m.start_time)
+            .max()
+            .unwrap();
+        let date_str = latest_time.format("%Y%m%d").to_string();
+        
+        // Build filename: flowcells-samples-ONT-date-all.extension
+        format!("{}-{}-ONT-{}-all.{}",
+            flow_cells.join("-"),
+            sample_ids.join("-"),
+            date_str,
+            extension
+        )
+    } else {
+        // Fallback to base name if no metadata
+        let groups = group_files_by_base(&files);
+        let first_group = groups.iter().next()
+            .ok_or_else(|| anyhow!("No file groups found"))?;
+        let base_name = &first_group.0;
+        format!("{}.all.{}", base_name, extension)
+    };
     
-    println!("📝 Auto-generated output filename: {}", output_path.display());
+    let mut output_path = Path::new(output_dir).join(&suggested_name);
+    
+    println!("\n📝 Suggested output filename: {}", output_path.display());
+    print!("Accept this filename? (y/n/e to edit): ");
+    io::stdout().flush()?;
+    
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    let choice = input.trim().to_lowercase();
+    
+    if choice == "n" {
+        return Err(anyhow!("Filename generation cancelled"));
+    } else if choice == "e" {
+        print!("Enter new filename (without path) [{}]: ", suggested_name);
+        io::stdout().flush()?;
+        input.clear();
+        io::stdin().read_line(&mut input)?;
+        let new_name = input.trim();
+        
+        // Use suggested name if user just presses enter
+        let final_name = if new_name.is_empty() {
+            &suggested_name
+        } else {
+            new_name
+        };
+        
+        output_path = Path::new(output_dir).join(final_name);
+        println!("Using filename: {}", output_path.display());
+    } else if choice != "y" {
+        println!("Using suggested filename: {}", output_path.display());
+    }
+    
     Ok(output_path)
 }
 
@@ -715,7 +980,11 @@ fn parse_single_file_metadata(path: &Path) -> Result<Option<NanoporeMetadata>> {
     let mut lines = reader.lines();
     if let Some(Ok(header)) = lines.next() {
         if header.starts_with('@') {
-            return parse_nanopore_header(&header);
+            // Try to parse, but don't fail if it doesn't match
+            match parse_nanopore_header(&header) {
+                Ok(metadata) => return Ok(metadata),
+                Err(_) => return Ok(None), // Not a Nanopore file or different format
+            }
         }
     }
     
@@ -723,19 +992,48 @@ fn parse_single_file_metadata(path: &Path) -> Result<Option<NanoporeMetadata>> {
 }
 
 fn parse_nanopore_header(header: &str) -> Result<Option<NanoporeMetadata>> {
-    let re = Regex::new(r"runid=(\S+).*flow_cell_id=(\S+).*start_time=(\S+).*protocol_group_id=(\S+).*sample_id=(\S+).*basecall_model_version_id=(\S+)")?;
+    // More flexible regex that captures fields individually
+    let runid_re = Regex::new(r"runid=(\S+)")?;
+    let flow_cell_re = Regex::new(r"flow_cell_id=(\S+)")?;
+    let start_time_re = Regex::new(r"start_time=(\S+)")?;
+    let protocol_re = Regex::new(r"protocol_group_id=(\S+)")?;
+    let sample_re = Regex::new(r"sample_id=(\S+)")?;
+    let model_re = Regex::new(r"basecall_model_version_id=(\S+)")?;
     
-    if let Some(caps) = re.captures(header) {
-        let start_time = DateTime::parse_from_rfc3339(&caps[3])
-            .or_else(|_| DateTime::parse_from_str(&caps[3], "%Y-%m-%dT%H:%M:%S%.f%:z"))?;
+    // Check if all required fields are present
+    if let (Some(runid_cap), Some(flow_cap), Some(time_cap), Some(proto_cap), Some(sample_cap), Some(model_cap)) = 
+        (runid_re.captures(header), flow_cell_re.captures(header), start_time_re.captures(header),
+         protocol_re.captures(header), sample_re.captures(header), model_re.captures(header)) {
+        
+        let time_str = &time_cap[1];
+        // Try multiple date formats
+        let start_time_result = DateTime::parse_from_rfc3339(time_str)
+            .or_else(|_| DateTime::parse_from_str(time_str, "%Y-%m-%dT%H:%M:%S%.f%:z"))
+            .or_else(|_| DateTime::parse_from_str(time_str, "%Y-%m-%dT%H:%M:%S%.f%#z"))
+            .or_else(|_| {
+                // Try with manual timezone parsing for formats like -03:00
+                if let Some(idx) = time_str.rfind(|c: char| c == '+' || c == '-') {
+                    let (dt_part, tz_part) = time_str.split_at(idx);
+                    let full_str = format!("{}{}", dt_part, tz_part);
+                    DateTime::parse_from_str(&full_str, "%Y-%m-%dT%H:%M:%S%.f%:z")
+                } else {
+                    // Return an error that will be handled below
+                    DateTime::parse_from_str("invalid", "%Y-%m-%dT%H:%M:%S%.f%:z")
+                }
+            });
+        
+        let start_time = match start_time_result {
+            Ok(dt) => dt,
+            Err(_) => return Ok(None), // Can't parse date, not a valid Nanopore file
+        };
         
         Ok(Some(NanoporeMetadata {
-            runid: caps[1].to_string(),
-            flow_cell_id: caps[2].to_string(),
+            runid: runid_cap[1].to_string(),
+            flow_cell_id: flow_cap[1].to_string(),
             start_time,
-            protocol_group_id: caps[4].to_string(),
-            sample_id: caps[5].to_string(),
-            basecall_model: caps[6].to_string(),
+            protocol_group_id: proto_cap[1].to_string(),
+            sample_id: sample_cap[1].to_string(),
+            basecall_model: model_cap[1].to_string(),
         }))
     } else {
         Ok(None)
