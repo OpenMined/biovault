@@ -55,7 +55,9 @@ enum Commands {
         #[arg(help = "Path to project directory")]
         project_folder: String,
 
-        #[arg(help = "Participant source: local file path, Syft URL, or HTTP URL (with optional #fragment)")]
+        #[arg(
+            help = "Participant source: local file path, Syft URL, or HTTP URL (with optional #fragment)"
+        )]
         participant_source: String,
 
         #[arg(long, help = "Use mock data if available")]

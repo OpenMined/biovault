@@ -1,4 +1,6 @@
-use crate::cli::download_cache::{ChecksumPolicy, ChecksumPolicyType, DownloadCache, DownloadOptions};
+use crate::cli::download_cache::{
+    ChecksumPolicy, ChecksumPolicyType, DownloadCache, DownloadOptions,
+};
 use crate::cli::syft_url::SyftURL;
 use crate::error::Error;
 use anyhow::{anyhow, Context};
@@ -108,7 +110,10 @@ impl ParticipantSource {
         } else {
             // Local file path
             let (path, fragment) = if let Some(hash_pos) = source.find('#') {
-                (source[..hash_pos].to_string(), Some(source[hash_pos + 1..].to_string()))
+                (
+                    source[..hash_pos].to_string(),
+                    Some(source[hash_pos + 1..].to_string()),
+                )
             } else {
                 (source.to_string(), None)
             };
@@ -117,7 +122,9 @@ impl ParticipantSource {
     }
 }
 
-async fn fetch_participant_file(source: &ParticipantSource) -> anyhow::Result<(String, Option<String>)> {
+async fn fetch_participant_file(
+    source: &ParticipantSource,
+) -> anyhow::Result<(String, Option<String>)> {
     match source {
         ParticipantSource::LocalFile(path, fragment) => {
             if !path.exists() {
@@ -131,30 +138,43 @@ async fn fetch_participant_file(source: &ParticipantSource) -> anyhow::Result<(S
             // Convert to HTTP URL and fetch
             // For now, use the first relay server
             let http_url = syft_url.to_http_relay_url("syftbox.net");
-            fetch_http_content(&http_url).await.map(|content| (content, syft_url.fragment.clone()))
+            fetch_http_content(&http_url)
+                .await
+                .map(|content| (content, syft_url.fragment.clone()))
         }
         ParticipantSource::HttpUrl(url) => {
             let (main_url, fragment) = if let Some(hash_pos) = url.find('#') {
-                (url[..hash_pos].to_string(), Some(url[hash_pos + 1..].to_string()))
+                (
+                    url[..hash_pos].to_string(),
+                    Some(url[hash_pos + 1..].to_string()),
+                )
             } else {
                 (url.clone(), None)
             };
-            fetch_http_content(&main_url).await.map(|content| (content, fragment))
+            fetch_http_content(&main_url)
+                .await
+                .map(|content| (content, fragment))
         }
     }
 }
 
 async fn fetch_http_content(url: &str) -> anyhow::Result<String> {
     println!("Fetching participant file from: {}", url.cyan());
-    
-    let response = reqwest::get(url).await
+
+    let response = reqwest::get(url)
+        .await
         .with_context(|| format!("Failed to fetch URL: {}", url))?;
-    
+
     if !response.status().is_success() {
-        return Err(anyhow!("HTTP request failed with status: {}", response.status()));
+        return Err(anyhow!(
+            "HTTP request failed with status: {}",
+            response.status()
+        ));
     }
-    
-    response.text().await
+
+    response
+        .text()
+        .await
         .with_context(|| format!("Failed to read response from: {}", url))
 }
 
@@ -163,27 +183,29 @@ fn extract_participant_data(
     fragment: Option<String>,
     use_mock: bool,
 ) -> anyhow::Result<(ParticipantData, Option<String>)> {
-    let yaml: YamlValue = serde_yaml::from_str(yaml_content)
-        .with_context(|| "Failed to parse participant YAML")?;
-    
+    let yaml: YamlValue =
+        serde_yaml::from_str(yaml_content).with_context(|| "Failed to parse participant YAML")?;
+
     // Parse fragment to get participant ID
     let participant_id = if let Some(ref frag) = fragment {
         // Expected format: "participants.MADHAVA"
         if frag.starts_with("participants.") {
             frag.strip_prefix("participants.").unwrap().to_string()
         } else {
-            return Err(anyhow!("Invalid fragment format. Expected: participants.ID"));
+            return Err(anyhow!(
+                "Invalid fragment format. Expected: participants.ID"
+            ));
         }
     } else {
         return Err(anyhow!("No participant specified in fragment"));
     };
-    
+
     // Navigate to the participant
     let participant_yaml = yaml
         .get("participants")
         .and_then(|p| p.get(&participant_id))
         .ok_or_else(|| anyhow!("Participant '{}' not found", participant_id))?;
-    
+
     if use_mock {
         // Check for mock field
         if let Some(mock_yaml) = participant_yaml.get("mock") {
@@ -192,21 +214,24 @@ fn extract_participant_data(
             let mut mock_data: ParticipantData = serde_yaml::from_value(mock_yaml.clone())
                 .with_context(|| "Failed to parse mock data")?;
             mock_data.id = participant_id;
-            
+
             // Determine mock data key based on ref_version
             let mock_key = format!("mock_data_{}", mock_data.ref_version.to_lowercase());
-            
+
             return Ok((mock_data, Some(mock_key)));
         } else {
-            println!("{}", "Warning: --test flag set but no mock data available for this participant".yellow());
+            println!(
+                "{}",
+                "Warning: --test flag set but no mock data available for this participant".yellow()
+            );
         }
     }
-    
+
     // Parse regular participant data
     let mut participant: ParticipantData = serde_yaml::from_value(participant_yaml.clone())
         .with_context(|| format!("Failed to parse participant data for '{}'", participant_id))?;
     participant.id = participant_id;
-    
+
     Ok((participant, None))
 }
 
@@ -218,12 +243,12 @@ async fn ensure_files_exist(
 ) -> anyhow::Result<ParticipantData> {
     let mut local_participant = participant.clone();
     let mut cache = DownloadCache::new(None)?;
-    
+
     // Get cache directory for checking
     let home = dirs::home_dir().ok_or_else(|| anyhow!("Could not determine home directory"))?;
     let cache_base = home.join(".biovault").join("data").join("cache");
     let downloads_base = home.join(".biovault").join("data").join("downloads");
-    
+
     // Create downloads directory based on source
     let participant_downloads_dir = match source {
         ParticipantSource::SyftUrl(syft_url) => {
@@ -268,9 +293,7 @@ async fn ensure_files_exist(
         }
         ParticipantSource::LocalFile(path, _) => {
             // For local files, use filename (without extension) and participant_id
-            let filename = path.file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("local");
+            let filename = path.file_stem().and_then(|s| s.to_str()).unwrap_or("local");
             if let Some(mock_key) = mock_key {
                 downloads_base.join(filename).join(mock_key)
             } else {
@@ -278,25 +301,41 @@ async fn ensure_files_exist(
             }
         }
     };
-    
+
     fs::create_dir_all(&participant_downloads_dir)?;
-    
+
     // Helper function to extract filename from URL
     fn extract_filename(url: &str) -> String {
-        url.split('/').last().unwrap_or("unknown").to_string()
+        url.split('/').next_back().unwrap_or("unknown").to_string()
     }
-    
+
     // List of files to check/download
     let files_to_check = vec![
-        ("reference", participant.ref_path.clone(), participant.ref_b3sum.clone()),
-        ("reference index", participant.ref_index.clone(), participant.ref_index_b3sum.clone()),
-        ("aligned", participant.aligned.clone(), participant.aligned_b3sum.clone()),
-        ("aligned index", participant.aligned_index.clone(), participant.aligned_index_b3sum.clone()),
+        (
+            "reference",
+            participant.ref_path.clone(),
+            participant.ref_b3sum.clone(),
+        ),
+        (
+            "reference index",
+            participant.ref_index.clone(),
+            participant.ref_index_b3sum.clone(),
+        ),
+        (
+            "aligned",
+            participant.aligned.clone(),
+            participant.aligned_b3sum.clone(),
+        ),
+        (
+            "aligned index",
+            participant.aligned_index.clone(),
+            participant.aligned_index_b3sum.clone(),
+        ),
     ];
-    
+
     let mut downloads_needed = Vec::new();
     let mut cached_paths: HashMap<String, (PathBuf, String)> = HashMap::new();
-    
+
     // First check what needs downloading
     for (name, url, b3sum) in &files_to_check {
         // Check if it's a URL
@@ -327,20 +366,20 @@ async fn ensure_files_exist(
             }
         }
     }
-    
+
     // Create symlinks for cached files with proper filenames
     if !cached_paths.is_empty() {
         println!("Using cached files with proper filenames:");
     }
-    
+
     for (name, (cache_path, filename)) in cached_paths {
         let symlink_path = participant_downloads_dir.join(&filename);
-        
+
         // Remove existing symlink if it exists
         if symlink_path.exists() || symlink_path.is_symlink() {
             fs::remove_file(&symlink_path).ok();
         }
-        
+
         // Create symlink to cache
         #[cfg(unix)]
         {
@@ -352,25 +391,29 @@ async fn ensure_files_exist(
             std::os::windows::fs::symlink_file(&cache_path, &symlink_path)
                 .with_context(|| format!("Failed to create symlink for {}", name))?;
         }
-        
+
         println!("  • {} → {}", name.green(), symlink_path.display());
-        
+
         // Update participant paths with symlink paths
         match name.as_str() {
             "reference" => local_participant.ref_path = symlink_path.to_string_lossy().to_string(),
-            "reference index" => local_participant.ref_index = symlink_path.to_string_lossy().to_string(),
+            "reference index" => {
+                local_participant.ref_index = symlink_path.to_string_lossy().to_string()
+            }
             "aligned" => local_participant.aligned = symlink_path.to_string_lossy().to_string(),
-            "aligned index" => local_participant.aligned_index = symlink_path.to_string_lossy().to_string(),
+            "aligned index" => {
+                local_participant.aligned_index = symlink_path.to_string_lossy().to_string()
+            }
             _ => {}
         }
     }
-    
+
     if !downloads_needed.is_empty() {
         println!("\nThe following files need to be downloaded:");
         for (name, url, _) in &downloads_needed {
             println!("  - {} from {}", name.cyan(), url);
         }
-        
+
         let should_download = if auto_download {
             true
         } else {
@@ -379,23 +422,23 @@ async fn ensure_files_exist(
                 .default(true)
                 .interact()?
         };
-        
+
         if !should_download {
             return Err(anyhow!("File downloads cancelled by user"));
         }
-        
+
         // Download files and update paths
         for (name, url, b3sum) in &downloads_needed {
             println!("Downloading {}...", name.green());
-            
+
             // Extract filename from URL
-            let filename = extract_filename(&url);
+            let filename = extract_filename(url);
             let symlink_path = participant_downloads_dir.join(&filename);
-            
+
             // Create a temporary path for download
             let temp_dir = tempfile::tempdir()?;
             let temp_path = temp_dir.path().join(&filename);
-            
+
             // Set up download options
             let checksum_policy = if let Some(hash) = b3sum {
                 ChecksumPolicy {
@@ -408,25 +451,25 @@ async fn ensure_files_exist(
                     expected_hash: None,
                 }
             };
-            
+
             let options = DownloadOptions {
                 checksum_policy,
                 show_progress: true,
                 cache_strategy: Default::default(),
             };
-            
+
             // Download (will be stored in cache)
-            let _downloaded_path = cache.download_with_cache(&url, &temp_path, options).await?;
-            
+            let _downloaded_path = cache.download_with_cache(url, &temp_path, options).await?;
+
             // After download, the file is in cache. Create symlink with proper filename
             if let Some(hash) = b3sum {
                 let cache_path = cache_base.join("by-hash").join(hash);
-                
+
                 // Remove existing symlink if it exists
                 if symlink_path.exists() || symlink_path.is_symlink() {
                     fs::remove_file(&symlink_path).ok();
                 }
-                
+
                 // Create symlink to cache
                 #[cfg(unix)]
                 {
@@ -438,25 +481,31 @@ async fn ensure_files_exist(
                     std::os::windows::fs::symlink_file(&cache_path, &symlink_path)
                         .with_context(|| format!("Failed to create symlink for {}", name))?;
                 }
-                
+
                 println!("  • {} → {}", name.green(), symlink_path.display());
             } else {
                 // If no checksum, copy the temp file to downloads directory
                 fs::copy(&temp_path, &symlink_path)?;
                 println!("  • {} → {}", name.green(), symlink_path.display());
             }
-            
+
             // Update the participant data with symlink paths
             match name.as_str() {
-                "reference" => local_participant.ref_path = symlink_path.to_string_lossy().to_string(),
-                "reference index" => local_participant.ref_index = symlink_path.to_string_lossy().to_string(),
+                "reference" => {
+                    local_participant.ref_path = symlink_path.to_string_lossy().to_string()
+                }
+                "reference index" => {
+                    local_participant.ref_index = symlink_path.to_string_lossy().to_string()
+                }
                 "aligned" => local_participant.aligned = symlink_path.to_string_lossy().to_string(),
-                "aligned index" => local_participant.aligned_index = symlink_path.to_string_lossy().to_string(),
+                "aligned index" => {
+                    local_participant.aligned_index = symlink_path.to_string_lossy().to_string()
+                }
                 _ => {}
             }
         }
     }
-    
+
     Ok(local_participant)
 }
 
@@ -480,25 +529,27 @@ pub async fn execute(params: RunParams) -> anyhow::Result<()> {
     if !workflow_file.exists() {
         return Err(Error::WorkflowMissing(params.project_folder.clone()).into());
     }
-    
+
     // Read project config
-    let config_content = fs::read_to_string(&project_yaml)
-        .context("Failed to read project.yaml")?;
-    let config: ProjectConfig = serde_yaml::from_str(&config_content)
-        .context("Failed to parse project.yaml")?;
+    let config_content =
+        fs::read_to_string(&project_yaml).context("Failed to read project.yaml")?;
+    let config: ProjectConfig =
+        serde_yaml::from_str(&config_content).context("Failed to parse project.yaml")?;
 
     // Parse participant source
     let source = ParticipantSource::parse(&params.participant_source)?;
-    
+
     // Fetch participant file
     let (yaml_content, fragment) = fetch_participant_file(&source).await?;
-    
+
     // Extract participant data
-    let (mut participant, mock_key) = extract_participant_data(&yaml_content, fragment, params.test)?;
-    
+    let (mut participant, mock_key) =
+        extract_participant_data(&yaml_content, fragment, params.test)?;
+
     // Ensure all required files exist (download if needed)
-    participant = ensure_files_exist(&participant, params.download, &source, mock_key.as_deref()).await?;
-    
+    participant =
+        ensure_files_exist(&participant, params.download, &source, mock_key.as_deref()).await?;
+
     // Get BioVault environment directory
     let home_dir = if let Ok(test_home) = std::env::var("BIOVAULT_TEST_HOME") {
         PathBuf::from(test_home)
@@ -506,63 +557,65 @@ pub async fn execute(params: RunParams) -> anyhow::Result<()> {
         dirs::home_dir().ok_or_else(|| anyhow!("Could not determine home directory"))?
     };
     let env_dir = home_dir.join(".biovault").join("env").join("default");
-    
+
     // Check if templates exist
     let template_nf = env_dir.join("template.nf");
     let nextflow_config = env_dir.join("nextflow.config");
-    
+
     if !template_nf.exists() || !nextflow_config.exists() {
         return Err(Error::TemplatesNotFound.into());
     }
-    
+
     // Create temporary directory for execution
     let temp_dir = TempDir::new()?;
-    
+
     // Copy template.nf and nextflow.config to temp directory
     let temp_template = temp_dir.path().join("template.nf");
     let temp_config = temp_dir.path().join("nextflow.config");
     fs::copy(&template_nf, &temp_template).context("Failed to copy template.nf")?;
     fs::copy(&nextflow_config, &temp_config).context("Failed to copy nextflow.config")?;
-    
+
     // Determine assets directory
     let assets_dir = if !config.assets.is_empty() {
         project_path.join(&config.assets[0])
     } else {
         project_path.join("assets")
     };
-    
+
     // Create assets directory if it doesn't exist
     if !assets_dir.exists() {
         fs::create_dir_all(&assets_dir)?;
     }
-    
+
     // Get absolute path for assets directory
-    let assets_dir = assets_dir.canonicalize()
+    let assets_dir = assets_dir
+        .canonicalize()
         .context("Failed to resolve assets directory path")?;
-    
+
     // Create results directory for this participant
     let results_dir = project_path.join("results").join(&participant.id);
     if !results_dir.exists() {
         fs::create_dir_all(&results_dir)?;
     }
-    
+
     // Get absolute path for results directory
-    let results_dir = results_dir.canonicalize()
+    let results_dir = results_dir
+        .canonicalize()
         .context("Failed to resolve results directory path")?;
-    
+
     info!(
         "Running workflow '{}' from project '{}'",
         config.workflow, config.name
     );
-    
+
     println!("Processing participant: {}", participant.id.cyan());
 
     // Build Nextflow command
     let mut cmd = Command::new("nextflow");
-    
+
     // Set working directory to project directory
     cmd.current_dir(&project_path);
-    
+
     cmd.arg("run")
         .arg(&temp_template)
         .arg("--participant_id")
@@ -603,7 +656,7 @@ pub async fn execute(params: RunParams) -> anyhow::Result<()> {
 
     // Print the command that will be executed
     println!("\n{}", "Nextflow command:".green().bold());
-    
+
     // Build command string for display
     let mut cmd_str = String::from("nextflow");
     for arg in cmd.get_args() {
