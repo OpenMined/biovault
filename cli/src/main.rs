@@ -110,6 +110,12 @@ enum Commands {
         #[command(subcommand)]
         command: Option<ConfigCommands>,
     },
+
+    #[command(about = "FASTQ file operations")]
+    Fastq {
+        #[command(subcommand)]
+        command: FastqCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -205,6 +211,24 @@ enum ConfigCommands {
     Syftbox {
         #[arg(help = "Path to SyftBox config.json (omit to use default)")]
         path: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum FastqCommands {
+    #[command(about = "Combine multiple FASTQ files into one")]
+    Combine {
+        #[arg(help = "Input folder containing FASTQ files")]
+        input_folder: String,
+
+        #[arg(help = "Output file path")]
+        output_file: String,
+
+        #[arg(long, help = "Validate files before combining")]
+        validate: bool,
+
+        #[arg(long, help = "Skip validation prompt and use default")]
+        no_prompt: bool,
     },
 }
 
@@ -320,6 +344,21 @@ async fn main() -> Result<()> {
                 commands::config_cmd::show().await?;
             }
         }
+        Commands::Fastq { command } => match command {
+            FastqCommands::Combine {
+                input_folder,
+                output_file,
+                validate,
+                no_prompt,
+            } => {
+                let should_validate = if no_prompt {
+                    Some(validate)
+                } else {
+                    None
+                };
+                commands::fastq::combine(input_folder, output_file, should_validate).await?;
+            }
+        },
     }
 
     Ok(())

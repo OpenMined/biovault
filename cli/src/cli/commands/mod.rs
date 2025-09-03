@@ -1,6 +1,7 @@
 pub mod biobank;
 pub mod check;
 pub mod config_cmd;
+pub mod fastq;
 pub mod info;
 pub mod init;
 pub mod participant;

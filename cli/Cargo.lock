@@ -175,6 +175,7 @@ dependencies = [
  "hex",
  "indicatif",
  "predicates",
+ "regex",
  "reqwest",
  "serde",
  "serde_json",
