@@ -230,7 +230,11 @@ enum FastqCommands {
         #[arg(long, help = "Skip validation prompt and use default")]
         no_prompt: bool,
 
-        #[arg(long, default_value = "tsv", help = "Stats output format (tsv, yaml, json)")]
+        #[arg(
+            long,
+            default_value = "tsv",
+            help = "Stats output format (tsv, yaml, json)"
+        )]
         stats_format: String,
     },
 }
@@ -355,12 +359,14 @@ async fn main() -> Result<()> {
                 no_prompt,
                 stats_format,
             } => {
-                let should_validate = if no_prompt {
-                    Some(validate)
-                } else {
-                    None
-                };
-                commands::fastq::combine(input_folder, output_file, should_validate, Some(stats_format)).await?;
+                let should_validate = if no_prompt { Some(validate) } else { None };
+                commands::fastq::combine(
+                    input_folder,
+                    output_file,
+                    should_validate,
+                    Some(stats_format),
+                )
+                .await?;
             }
         },
     }
