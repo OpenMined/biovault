@@ -86,6 +86,19 @@ impl Config {
         let config = Self::from_file(config_path)?;
         Ok(config)
     }
+
+    pub fn get_datasite_path(&self) -> crate::error::Result<PathBuf> {
+        let data_dir = self.get_syftbox_data_dir()?;
+        Ok(data_dir.join("datasites").join(&self.email))
+    }
+
+    pub fn get_shared_submissions_path(&self) -> crate::error::Result<PathBuf> {
+        let datasite_path = self.get_datasite_path()?;
+        Ok(datasite_path
+            .join("shared")
+            .join("biovault")
+            .join("submissions"))
+    }
 }
 
 pub fn get_config() -> anyhow::Result<Config> {

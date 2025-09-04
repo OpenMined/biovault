@@ -195,6 +195,7 @@ Scanning for FASTQ files in: /Users/madhavajay/dev/carigenetics/onedrive/Fastqs/
   Total files: 811
   Total size: 107.54 GB
 
+
 ❓ '/Users/madhavajay/dev/carigenetics/combined' doesn't exist and has no extension. Create as directory? (y/n): y
 📁 Created output directory: /Users/madhavajay/dev/carigenetics/combined
 
@@ -205,5 +206,37 @@ Using filename: /Users/madhavajay/dev/carigenetics/combined/MadhavaJay-WGS-carig
 
 ❓ Do you want to validate all files before combining? (y/n): y
 
+🔍 Validating FASTQ files...
+  [########################################] 811/811 Validation complete       ✅ All files validated successfully!
 
+🔐 Generating Blake3 hashes for input files...
+  [########################################] 811/811 Hashes generated          📄 Validation stats saved to: /Users/madhavajay/dev/carigenetics/combined/MadhavaJay-WGS-carigenetics-PBE09234-PBE09980-ENT0001-ONT-20250802-all.fastq.pre_combine_stats.tsv
+
+🔗 Combining FASTQ files...
+  [########################################] 107.54 GiB/107.54 GiB 1.36 GiB/s | ETA: 0s | Files combined - 107.54 GB in 78.9s (1.38 GB/s)
+🔐 Generating Blake3 hash...
+📄 Blake3 hash saved to: /Users/madhavajay/dev/carigenetics/combined/MadhavaJay-WGS-carigenetics-PBE09234-PBE09980-ENT0001-ONT-20250802-all.fastq.blake3
+
+🔍 Validating combined file...
+
+📊 Validation Summary:
+───────────────────────────────────────────
+INPUT:
+  Files: 811 files
+  Total size: 107.54 GB
+  Total sequences: 22262236
+
+OUTPUT:
+  Files: 1 file
+  Total size: 107.54 GB
+  Total sequences: 22262236
+───────────────────────────────────────────
+
+✅ Validation successful: Input and output sequence counts match!
+   Average length: 4683.90 bp
+   GC content: 83.28%
+
+📄 Final stats saved to: /Users/madhavajay/dev/carigenetics/combined/MadhavaJay-WGS-carigenetics-PBE09234-PBE09980-ENT0001-ONT-20250802-all.fastq.stats.tsv
+
+✨ FASTQ files successfully combined to: /Users/madhavajay/dev/carigenetics/combined/MadhavaJay-WGS-carigenetics-PBE09234-PBE09980-ENT0001-ONT-20250802-all.fastq.gz
 ```
