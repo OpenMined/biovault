@@ -3,9 +3,7 @@ use clap::{Parser, Subcommand};
 use tracing::info;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
-mod cli;
-mod config;
-mod error;
+use biovault::cli;
 
 use cli::commands;
 
@@ -107,6 +105,17 @@ enum Commands {
     Fastq {
         #[command(subcommand)]
         command: FastqCommands,
+    },
+
+    #[command(about = "Submit a project to another biobank via SyftBox")]
+    Submit {
+        #[arg(help = "Path to project directory (use '.' for current directory)")]
+        project_path: String,
+
+        #[arg(
+            help = "Destination: either a datasite email (e.g., user@domain.com) or full Syft URL (e.g., syft://user@domain.com/public/biovault/participants.yaml#participants.ID)"
+        )]
+        destination: String,
     },
 }
 
@@ -365,6 +374,12 @@ async fn main() -> Result<()> {
                 .await?;
             }
         },
+        Commands::Submit {
+            project_path,
+            destination,
+        } => {
+            commands::submit::submit(project_path, destination).await?;
+        }
     }
 
     Ok(())
