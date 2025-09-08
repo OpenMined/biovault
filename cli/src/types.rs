@@ -69,3 +69,23 @@ impl ProjectYaml {
         Ok(())
     }
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InboxSubmission {
+    pub name: String,
+    pub author: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub datasites: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub participants: Option<Vec<String>>,
+    pub syft_url: String,
+    pub status: String,
+}
+
+impl InboxSubmission {
+    pub fn from_file(path: &PathBuf) -> anyhow::Result<Self> {
+        let content = std::fs::read_to_string(path)?;
+        let submission: InboxSubmission = serde_yaml::from_str(&content)?;
+        Ok(submission)
+    }
+}

@@ -117,6 +117,23 @@ enum Commands {
         )]
         destination: String,
     },
+
+    #[command(about = "List or view submitted projects in inbox")]
+    Inbox {
+        #[arg(
+            help = "Reference to show details: index (1,2,3...), partial hash (33b4f3), or project name"
+        )]
+        reference: Option<String>,
+
+        #[arg(short, long, help = "Interactive mode with arrow key navigation")]
+        interactive: bool,
+
+        #[arg(long, help = "Show all submissions including rejected ones")]
+        all: bool,
+
+        #[arg(long, help = "Show full details for each submission")]
+        full: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -379,6 +396,20 @@ async fn main() -> Result<()> {
             destination,
         } => {
             commands::submit::submit(project_path, destination).await?;
+        }
+        Commands::Inbox {
+            reference,
+            interactive,
+            all,
+            full,
+        } => {
+            if interactive {
+                commands::inbox::interactive(all).await?;
+            } else if let Some(ref_str) = reference {
+                commands::inbox::show(&ref_str, all).await?;
+            } else {
+                commands::inbox::list(all, full).await?;
+            }
         }
     }
 
