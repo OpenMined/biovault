@@ -1,12 +1,13 @@
 use crate::error::Result;
 use crate::types::InboxSubmission;
 use colored::Colorize;
-use dialoguer::{theme::ColorfulTheme, Select};
+use dialoguer::{theme::ColorfulTheme, Confirm, MultiSelect, Select};
+use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use walkdir::WalkDir;
 
 pub async fn list(show_all: bool, show_full: bool) -> Result<()> {
-    // Get inbox directory
     let inbox_path = get_inbox_path()?;
 
     if !inbox_path.exists() {
@@ -14,10 +15,8 @@ pub async fn list(show_all: bool, show_full: bool) -> Result<()> {
         return Ok(());
     }
 
-    // Collect all inbox submissions
     let mut submissions = Vec::new();
 
-    // Walk through inbox directory structure: ~/.biovault/inbox/{sender_email}/{project_name}-yyyy-mm-dd-hash.yaml
     for entry in WalkDir::new(&inbox_path)
         .min_depth(2)
         .max_depth(2)
@@ -29,22 +28,18 @@ pub async fn list(show_all: bool, show_full: bool) -> Result<()> {
     {
         let path = entry.path();
 
-        // Extract sender email from path
         let sender = path
             .parent()
             .and_then(|p| p.file_name())
             .and_then(|n| n.to_str())
             .unwrap_or("unknown");
 
-        // Try to load submission
         match InboxSubmission::from_file(&path.to_path_buf()) {
             Ok(submission) => {
-                // Filter out rejected unless --all is specified
                 if !show_all && submission.status == "rejected" {
                     continue;
                 }
 
-                // Extract date from filename (format: name-yyyy-mm-dd-hash.yaml)
                 let filename = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
 
                 let date_str = extract_date_from_filename(filename);
@@ -66,10 +61,8 @@ pub async fn list(show_all: bool, show_full: bool) -> Result<()> {
         return Ok(());
     }
 
-    // Sort by date (newest first)
     submissions.sort_by(|a, b| b.3.cmp(&a.3));
 
-    // Display submissions
     let filtered_text = if !show_all { " active" } else { "" };
     println!(
         "📬 {}{} submission(s) in inbox:\n",
@@ -78,12 +71,10 @@ pub async fn list(show_all: bool, show_full: bool) -> Result<()> {
     );
 
     if show_full {
-        // Full detailed view
         for (i, (sender, submission, path, _date)) in submissions.iter().enumerate() {
             display_full_submission(i + 1, sender, submission, path);
         }
     } else {
-        // Concise table view
         display_concise_list(&submissions);
     }
 
@@ -91,7 +82,6 @@ pub async fn list(show_all: bool, show_full: bool) -> Result<()> {
 }
 
 fn display_concise_list(submissions: &[(String, InboxSubmission, PathBuf, String)]) {
-    // Print header
     println!(
         "{:<4} {:<12} {:<20} {:<25} {:<15} {:<30}",
         "#".bold(),
@@ -108,6 +98,7 @@ fn display_concise_list(submissions: &[(String, InboxSubmission, PathBuf, String
             "pending" => "⏳",
             "approved" => "✅",
             "rejected" => "❌",
+            "reviewing" => "🔍",
             _ => "❓",
         };
 
@@ -122,7 +113,6 @@ fn display_concise_list(submissions: &[(String, InboxSubmission, PathBuf, String
             .and_then(|s| s.to_str())
             .unwrap_or("unknown");
 
-        // Truncate long names for better formatting
         let project_name = if submission.name.len() > 18 {
             format!("{}...", &submission.name[..15])
         } else {
@@ -159,6 +149,7 @@ fn display_full_submission(index: usize, sender: &str, submission: &InboxSubmiss
         "pending" => "⏳",
         "approved" => "✅",
         "rejected" => "❌",
+        "reviewing" => "🔍",
         _ => "❓",
     };
 
@@ -186,7 +177,6 @@ fn display_full_submission(index: usize, sender: &str, submission: &InboxSubmiss
 
     println!("   Syft URL: {}", submission.syft_url.dimmed());
 
-    // Extract filename for display
     if let Some(filename) = path.file_stem().and_then(|s| s.to_str()) {
         println!("   ID: {}", filename.dimmed());
     }
@@ -195,29 +185,22 @@ fn display_full_submission(index: usize, sender: &str, submission: &InboxSubmiss
 }
 
 fn extract_date_from_filename(filename: &str) -> String {
-    // Expected format: name-yyyy-mm-dd-hash
-    // The hash is 8 characters, so we look for date pattern before it
     if filename.len() < 19 {
-        // Minimum: x-yyyy-mm-dd-xxxxxxxx
         return "unknown".to_string();
     }
 
-    // Split by dash and look from the end
     let parts: Vec<&str> = filename.split('-').collect();
     if parts.len() < 4 {
         return "unknown".to_string();
     }
 
-    // The last part is the hash, the 3 before it should be the date
     let len = parts.len();
 
-    // Validate that we have year-month-day pattern
     if let (Ok(year), Ok(month), Ok(day)) = (
         parts[len - 4].parse::<u32>(),
         parts[len - 3].parse::<u32>(),
         parts[len - 2].parse::<u32>(),
     ) {
-        // Basic validation
         if (2020..=2100).contains(&year) && (1..=12).contains(&month) && (1..=31).contains(&day) {
             return format!("{:04}-{:02}-{:02}", year, month, day);
         }
@@ -240,6 +223,7 @@ fn format_status(status: &str) -> String {
         "pending" => status.yellow().to_string(),
         "approved" => status.green().to_string(),
         "rejected" => status.red().to_string(),
+        "reviewing" => status.blue().to_string(),
         _ => status.to_string(),
     }
 }
@@ -252,7 +236,6 @@ pub async fn show(reference: &str, show_all: bool) -> Result<()> {
         return Ok(());
     }
 
-    // Try to parse as number first
     if let Ok(index) = reference.parse::<usize>() {
         if index > 0 && index <= submissions.len() {
             show_submission_detail(&submissions[index - 1]);
@@ -267,16 +250,13 @@ pub async fn show(reference: &str, show_all: bool) -> Result<()> {
         }
     }
 
-    // Try to match by partial hash or name
     let reference_lower = reference.to_lowercase();
     let matches: Vec<_> = submissions
         .iter()
         .filter(|(_, submission, path, _)| {
-            // Check if it matches the project name
             if submission.name.to_lowercase().contains(&reference_lower) {
                 return true;
             }
-            // Check if it matches partial ID/hash
             if let Some(filename) = path.file_stem().and_then(|s| s.to_str()) {
                 if filename.to_lowercase().contains(&reference_lower) {
                     return true;
@@ -317,15 +297,29 @@ pub async fn show(reference: &str, show_all: bool) -> Result<()> {
 }
 
 pub async fn interactive(show_all: bool) -> Result<()> {
-    let submissions = load_submissions(show_all)?;
-
-    if submissions.is_empty() {
-        println!("📭 No submissions found");
-        return Ok(());
-    }
+    let mut show_rejected = show_all;
+    let mut current_index = 0;
 
     loop {
-        // Create display items for selection
+        let submissions = load_submissions(show_rejected)?;
+
+        if submissions.is_empty() {
+            println!("📭 No submissions found");
+            if !show_rejected {
+                let toggle = Confirm::with_theme(&ColorfulTheme::default())
+                    .with_prompt("Show rejected submissions?")
+                    .default(false)
+                    .interact()
+                    .map_err(|e| anyhow::anyhow!("Confirmation error: {}", e))?;
+
+                if toggle {
+                    show_rejected = true;
+                    continue;
+                }
+            }
+            return Ok(());
+        }
+
         let items: Vec<String> = submissions
             .iter()
             .map(|(sender, submission, path, date)| {
@@ -333,6 +327,7 @@ pub async fn interactive(show_all: bool) -> Result<()> {
                     "pending" => "⏳",
                     "approved" => "✅",
                     "rejected" => "❌",
+                    "reviewing" => "🔍",
                     _ => "❓",
                 };
 
@@ -353,33 +348,158 @@ pub async fn interactive(show_all: bool) -> Result<()> {
             })
             .collect();
 
-        // Add exit option
         let mut menu_items = items.clone();
+        menu_items.push(format!(
+            "🔄 Toggle view (currently: {})",
+            if show_rejected { "all" } else { "active only" }
+        ));
+        menu_items.push("⚡ Batch actions".to_string());
         menu_items.push("📤 Exit".to_string());
 
         let selection = Select::with_theme(&ColorfulTheme::default())
-            .with_prompt("📬 Select submission to view details (↑↓ to navigate, Enter to select, Esc to exit)")
+            .with_prompt(
+                "📬 Select submission or action (↑↓ to navigate, Enter to select, Esc to exit)",
+            )
             .items(&menu_items)
-            .default(0)
+            .default(current_index.min(menu_items.len() - 1))
             .interact_opt()
             .map_err(|e| anyhow::anyhow!("Selection error: {}", e))?;
 
         match selection {
             Some(index) if index < submissions.len() => {
+                current_index = index;
                 println!();
-                show_submission_detail(&submissions[index]);
+
+                let selected_submission = &submissions[index];
+                show_submission_detail(selected_submission);
 
                 println!("\n{}", "─".repeat(80));
-                println!("Press Enter to continue...");
-                let mut _input = String::new();
-                std::io::stdin()
-                    .read_line(&mut _input)
-                    .map_err(|e| anyhow::anyhow!("Failed to read input: {}", e))?;
+
+                let actions = vec![
+                    "📋 Back to list",
+                    "❌ Reject submission",
+                    "🔍 Mark for review",
+                    "🧪 Test with mock data",
+                    "📁 Show files",
+                ];
+
+                let action = Select::with_theme(&ColorfulTheme::default())
+                    .with_prompt("Choose action")
+                    .items(&actions)
+                    .default(0)
+                    .interact_opt()
+                    .map_err(|e| anyhow::anyhow!("Selection error: {}", e))?;
+
+                match action {
+                    Some(0) => continue,
+                    Some(1) => {
+                        reject_submission(selected_submission)?;
+                        println!("✅ Submission marked as rejected");
+                    }
+                    Some(2) => {
+                        review_submission(selected_submission)?;
+                        println!("✅ Submission marked for review");
+                    }
+                    Some(3) => {
+                        test_submission(selected_submission).await?;
+                    }
+                    Some(4) => {
+                        show_submission_files(selected_submission)?;
+                    }
+                    _ => continue,
+                }
+            }
+            Some(index) if index == submissions.len() => {
+                show_rejected = !show_rejected;
+                current_index = 0;
+            }
+            Some(index) if index == submissions.len() + 1 => {
+                batch_actions(&submissions, show_rejected)?;
+                current_index = 0;
             }
             _ => {
-                // Exit selected or cancelled
                 println!("👋 Exiting inbox");
                 break;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn batch_actions(
+    submissions: &[(String, InboxSubmission, PathBuf, String)],
+    _show_rejected: bool,
+) -> Result<()> {
+    let items: Vec<String> = submissions
+        .iter()
+        .enumerate()
+        .map(|(i, (sender, submission, _path, date))| {
+            let status_icon = match submission.status.as_str() {
+                "pending" => "⏳",
+                "approved" => "✅",
+                "rejected" => "❌",
+                "reviewing" => "🔍",
+                _ => "❓",
+            };
+            format!(
+                "{}. {} {} - {} from {}",
+                i + 1,
+                status_icon,
+                submission.name,
+                date,
+                sender
+            )
+        })
+        .collect();
+
+    let selections = MultiSelect::with_theme(&ColorfulTheme::default())
+        .with_prompt("Select submissions for batch action (Space to select, Enter to confirm)")
+        .items(&items)
+        .interact_opt()
+        .map_err(|e| anyhow::anyhow!("Selection error: {}", e))?;
+
+    if let Some(indices) = selections {
+        if indices.is_empty() {
+            println!("No submissions selected");
+            return Ok(());
+        }
+
+        let actions = vec![
+            "❌ Reject selected",
+            "🔍 Mark selected for review",
+            "🧪 Test selected with mock data",
+            "Cancel",
+        ];
+
+        let action = Select::with_theme(&ColorfulTheme::default())
+            .with_prompt("Choose batch action")
+            .items(&actions)
+            .default(0)
+            .interact_opt()
+            .map_err(|e| anyhow::anyhow!("Selection error: {}", e))?;
+
+        match action {
+            Some(0) => {
+                for &idx in &indices {
+                    reject_submission(&submissions[idx])?;
+                }
+                println!("✅ {} submission(s) marked as rejected", indices.len());
+            }
+            Some(1) => {
+                for &idx in &indices {
+                    review_submission(&submissions[idx])?;
+                }
+                println!("✅ {} submission(s) marked for review", indices.len());
+            }
+            Some(2) => {
+                for &idx in &indices {
+                    println!("\nTesting submission {}...", idx + 1);
+                    drop(test_submission(&submissions[idx]));
+                }
+            }
+            _ => {
+                println!("Batch action cancelled");
             }
         }
     }
@@ -431,7 +551,6 @@ fn load_submissions(show_all: bool) -> Result<Vec<(String, InboxSubmission, Path
         }
     }
 
-    // Sort by date (newest first)
     submissions.sort_by(|a, b| b.3.cmp(&a.3));
 
     Ok(submissions)
@@ -444,6 +563,7 @@ fn show_submission_detail(submission_data: &(String, InboxSubmission, PathBuf, S
         "pending" => "⏳",
         "approved" => "✅",
         "rejected" => "❌",
+        "reviewing" => "🔍",
         _ => "❓",
     };
 
@@ -486,7 +606,6 @@ fn show_submission_detail(submission_data: &(String, InboxSubmission, PathBuf, S
     if let Some(filename) = path.file_stem().and_then(|s| s.to_str()) {
         println!("🆔 ID:          {}", filename.dimmed());
 
-        // Show short ID for easy reference
         if filename.len() > 8 {
             let short_id = &filename[filename.len() - 8..];
             println!("🏷️  Short ID:    {}", short_id.yellow());
@@ -494,4 +613,305 @@ fn show_submission_detail(submission_data: &(String, InboxSubmission, PathBuf, S
     }
 
     println!("{}", "═".repeat(80));
+}
+
+fn show_submission_files(
+    submission_data: &(String, InboxSubmission, PathBuf, String),
+) -> Result<()> {
+    let (_sender, _submission, path, _date) = submission_data;
+
+    let submission_dir = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("Invalid submission path"))?;
+
+    println!("\n📁 Files in submission directory:");
+    println!("{}", "─".repeat(40));
+
+    for entry in WalkDir::new(submission_dir)
+        .max_depth(3)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        if entry.file_type().is_file() {
+            let relative_path = entry
+                .path()
+                .strip_prefix(submission_dir)
+                .unwrap_or(entry.path());
+            println!("  📄 {}", relative_path.display());
+        }
+    }
+
+    println!("{}", "─".repeat(40));
+    println!("Press Enter to continue...");
+    let mut _input = String::new();
+    std::io::stdin().read_line(&mut _input)?;
+
+    Ok(())
+}
+
+pub async fn reject(reference: Option<String>) -> Result<()> {
+    if let Some(ref_str) = reference {
+        let submissions = load_submissions(true)?;
+
+        if let Ok(index) = ref_str.parse::<usize>() {
+            if index > 0 && index <= submissions.len() {
+                reject_submission(&submissions[index - 1])?;
+                println!("✅ Submission marked as rejected");
+                return Ok(());
+            }
+        }
+
+        let reference_lower = ref_str.to_lowercase();
+        let matches: Vec<_> = submissions
+            .iter()
+            .filter(|(_, submission, path, _)| {
+                if submission.name.to_lowercase().contains(&reference_lower) {
+                    return true;
+                }
+                if let Some(filename) = path.file_stem().and_then(|s| s.to_str()) {
+                    if filename.to_lowercase().contains(&reference_lower) {
+                        return true;
+                    }
+                }
+                false
+            })
+            .collect();
+
+        match matches.len() {
+            0 => {
+                println!("❌ No submission found matching: {}", ref_str);
+            }
+            1 => {
+                reject_submission(matches[0])?;
+                println!("✅ Submission marked as rejected");
+            }
+            _ => {
+                println!(
+                    "⚠️  Multiple submissions match '{}'. Please be more specific.",
+                    ref_str
+                );
+            }
+        }
+    } else {
+        println!("❌ Please specify a submission reference (index, hash, or name)");
+    }
+
+    Ok(())
+}
+
+pub async fn review(reference: Option<String>) -> Result<()> {
+    if let Some(ref_str) = reference {
+        let submissions = load_submissions(true)?;
+
+        if let Ok(index) = ref_str.parse::<usize>() {
+            if index > 0 && index <= submissions.len() {
+                review_submission(&submissions[index - 1])?;
+                println!("✅ Submission marked for review");
+                return Ok(());
+            }
+        }
+
+        let reference_lower = ref_str.to_lowercase();
+        let matches: Vec<_> = submissions
+            .iter()
+            .filter(|(_, submission, path, _)| {
+                if submission.name.to_lowercase().contains(&reference_lower) {
+                    return true;
+                }
+                if let Some(filename) = path.file_stem().and_then(|s| s.to_str()) {
+                    if filename.to_lowercase().contains(&reference_lower) {
+                        return true;
+                    }
+                }
+                false
+            })
+            .collect();
+
+        match matches.len() {
+            0 => {
+                println!("❌ No submission found matching: {}", ref_str);
+            }
+            1 => {
+                review_submission(matches[0])?;
+                println!("✅ Submission marked for review");
+            }
+            _ => {
+                println!(
+                    "⚠️  Multiple submissions match '{}'. Please be more specific.",
+                    ref_str
+                );
+            }
+        }
+    } else {
+        println!("❌ Please specify a submission reference (index, hash, or name)");
+    }
+
+    Ok(())
+}
+
+pub async fn test(reference: Option<String>) -> Result<()> {
+    if let Some(ref_str) = reference {
+        let submissions = load_submissions(true)?;
+
+        if let Ok(index) = ref_str.parse::<usize>() {
+            if index > 0 && index <= submissions.len() {
+                test_submission(&submissions[index - 1]).await?;
+                return Ok(());
+            }
+        }
+
+        let reference_lower = ref_str.to_lowercase();
+        let matches: Vec<_> = submissions
+            .iter()
+            .filter(|(_, submission, path, _)| {
+                if submission.name.to_lowercase().contains(&reference_lower) {
+                    return true;
+                }
+                if let Some(filename) = path.file_stem().and_then(|s| s.to_str()) {
+                    if filename.to_lowercase().contains(&reference_lower) {
+                        return true;
+                    }
+                }
+                false
+            })
+            .collect();
+
+        match matches.len() {
+            0 => {
+                println!("❌ No submission found matching: {}", ref_str);
+            }
+            1 => {
+                test_submission(matches[0]).await?;
+            }
+            _ => {
+                println!(
+                    "⚠️  Multiple submissions match '{}'. Please be more specific.",
+                    ref_str
+                );
+            }
+        }
+    } else {
+        println!("❌ Please specify a submission reference (index, hash, or name)");
+    }
+
+    Ok(())
+}
+
+fn reject_submission(submission_data: &(String, InboxSubmission, PathBuf, String)) -> Result<()> {
+    let (_sender, mut submission, path, _date) = submission_data.clone();
+
+    submission.status = "rejected".to_string();
+
+    let yaml = serde_yaml::to_string(&submission)?;
+    fs::write(&path, yaml)?;
+
+    Ok(())
+}
+
+fn review_submission(submission_data: &(String, InboxSubmission, PathBuf, String)) -> Result<()> {
+    let (_sender, mut submission, path, _date) = submission_data.clone();
+
+    submission.status = "reviewing".to_string();
+
+    let yaml = serde_yaml::to_string(&submission)?;
+    fs::write(&path, yaml)?;
+
+    Ok(())
+}
+
+async fn test_submission(
+    submission_data: &(String, InboxSubmission, PathBuf, String),
+) -> Result<()> {
+    let (_sender, submission, path, _date) = submission_data;
+
+    println!("🧪 Testing submission: {}", submission.name.bold());
+
+    let submission_dir = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("Invalid submission path"))?;
+
+    let workflow_file = submission_dir.join("workflow.nf");
+    if !workflow_file.exists() {
+        println!("❌ No workflow.nf file found in submission");
+        return Ok(());
+    }
+
+    if let Some(participants) = &submission.participants {
+        if participants.is_empty() {
+            println!("❌ No participants specified in submission");
+            return Ok(());
+        }
+
+        let participant = if participants.len() == 1 {
+            &participants[0]
+        } else {
+            println!("Select participant to test with:");
+            let selection = Select::with_theme(&ColorfulTheme::default())
+                .items(participants)
+                .default(0)
+                .interact()
+                .map_err(|e| anyhow::anyhow!("Selection error: {}", e))?;
+            &participants[selection]
+        };
+
+        println!("🔬 Running test with participant: {}", participant.cyan());
+
+        let home_dir = dirs::home_dir()
+            .ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
+        let mock_data_path = home_dir
+            .join(".biovault")
+            .join("data")
+            .join("sample")
+            .join(participant);
+
+        if !mock_data_path.exists() {
+            println!("⚠️  No mock data found for participant: {}", participant);
+            println!("   Expected path: {}", mock_data_path.display());
+
+            let download = Confirm::with_theme(&ColorfulTheme::default())
+                .with_prompt("Download sample data for this participant?")
+                .default(true)
+                .interact()
+                .map_err(|e| anyhow::anyhow!("Confirmation error: {}", e))?;
+
+            if download {
+                println!("📥 Downloading sample data for {}...", participant);
+                Command::new("bv")
+                    .args(["sample-data", "fetch", participant])
+                    .status()
+                    .map_err(|e| anyhow::anyhow!("Failed to download sample data: {}", e))?;
+            } else {
+                return Ok(());
+            }
+        }
+
+        let output_dir = submission_dir.join("test_output");
+        fs::create_dir_all(&output_dir)?;
+
+        println!("🚀 Running nextflow workflow...");
+        println!("   Input: {}", mock_data_path.display());
+        println!("   Output: {}", output_dir.display());
+
+        let status = Command::new("nextflow")
+            .arg("run")
+            .arg(&workflow_file)
+            .arg("--input")
+            .arg(&mock_data_path)
+            .arg("--output")
+            .arg(&output_dir)
+            .current_dir(submission_dir)
+            .status()
+            .map_err(|e| anyhow::anyhow!("Failed to run nextflow: {}", e))?;
+
+        if status.success() {
+            println!("✅ Test completed successfully!");
+            println!("   Results saved to: {}", output_dir.display());
+        } else {
+            println!("❌ Test failed with exit code: {:?}", status.code());
+        }
+    } else {
+        println!("❌ No participants specified in submission");
+    }
+
+    Ok(())
 }
