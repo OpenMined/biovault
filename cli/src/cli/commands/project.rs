@@ -67,13 +67,7 @@ pub async fn create(name: Option<String>, folder: Option<String>) -> Result<()> 
     }
 
     // Get email from config
-    // For testing: allow overriding home directory via environment variable
-    let home_dir = if let Ok(test_home) = std::env::var("BIOVAULT_TEST_HOME") {
-        std::path::PathBuf::from(test_home)
-    } else {
-        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?
-    };
-    let config_file = home_dir.join(".biovault").join("config.yaml");
+    let config_file = crate::config::Config::get_config_path()?;
 
     let email = if config_file.exists() {
         let config = Config::from_file(&config_file)?;

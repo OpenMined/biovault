@@ -56,12 +56,7 @@ impl ParticipantsFile {
 }
 
 fn get_participants_file_path() -> Result<PathBuf> {
-    let home = if let Ok(test_home) = std::env::var("BIOVAULT_TEST_HOME") {
-        PathBuf::from(test_home)
-    } else {
-        dirs::home_dir().ok_or_else(|| anyhow!("Could not determine home directory"))?
-    };
-    Ok(home.join(".biovault").join("participants.yaml"))
+    Ok(crate::config::get_biovault_home()?.join("participants.yaml"))
 }
 
 fn check_samtools_installed() -> bool {

@@ -1,6 +1,5 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use tracing::info;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 use biovault::cli;
@@ -29,8 +28,10 @@ struct Cli {
 enum Commands {
     #[command(about = "Initialize a new BioVault repository")]
     Init {
-        #[arg(help = "Email address for the vault configuration")]
-        email: String,
+        #[arg(
+            help = "Email address for the vault configuration (optional, will detect from SYFTBOX_EMAIL)"
+        )]
+        email: Option<String>,
     },
 
     #[command(about = "Show system information")]
@@ -116,6 +117,26 @@ enum Commands {
             help = "Destination: either a datasite email (e.g., user@domain.com) or full Syft URL (e.g., syft://user@domain.com/public/biovault/participants.yaml#participants.ID)"
         )]
         destination: String,
+    },
+
+    #[command(about = "List or view submitted projects in inbox")]
+    Inbox {
+        #[command(subcommand)]
+        action: Option<InboxActions>,
+
+        #[arg(
+            help = "Reference to show details: index (1,2,3...), partial hash (33b4f3), or project name"
+        )]
+        reference: Option<String>,
+
+        #[arg(short, long, help = "Interactive mode with arrow key navigation")]
+        interactive: bool,
+
+        #[arg(long, help = "Show all submissions including rejected ones")]
+        all: bool,
+
+        #[arg(long, help = "Show full details for each submission")]
+        full: bool,
     },
 }
 
@@ -223,6 +244,27 @@ enum ConfigCommands {
 }
 
 #[derive(Subcommand)]
+enum InboxActions {
+    #[command(about = "Reject a submission")]
+    Reject {
+        #[arg(help = "Reference: index (1,2,3...), partial hash, or project name")]
+        reference: String,
+    },
+
+    #[command(about = "Mark a submission for review")]
+    Review {
+        #[arg(help = "Reference: index (1,2,3...), partial hash, or project name")]
+        reference: String,
+    },
+
+    #[command(about = "Test a submission with mock data")]
+    Test {
+        #[arg(help = "Reference: index (1,2,3...), partial hash, or project name")]
+        reference: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum FastqCommands {
     #[command(about = "Combine multiple FASTQ files into one")]
     Combine {
@@ -260,8 +302,7 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Commands::Init { email } => {
-            info!("Initializing BioVault with email: {}", email);
-            commands::init::execute(&email).await?;
+            commands::init::execute(email.as_deref()).await?;
         }
         Commands::Info => {
             commands::info::execute().await?;
@@ -379,6 +420,33 @@ async fn main() -> Result<()> {
             destination,
         } => {
             commands::submit::submit(project_path, destination).await?;
+        }
+        Commands::Inbox {
+            action,
+            reference,
+            interactive,
+            all,
+            full,
+        } => {
+            if let Some(action) = action {
+                match action {
+                    InboxActions::Reject { reference } => {
+                        commands::inbox::reject(Some(reference)).await?;
+                    }
+                    InboxActions::Review { reference } => {
+                        commands::inbox::review(Some(reference)).await?;
+                    }
+                    InboxActions::Test { reference } => {
+                        commands::inbox::test(Some(reference)).await?;
+                    }
+                }
+            } else if interactive {
+                commands::inbox::interactive(all).await?;
+            } else if let Some(ref_str) = reference {
+                commands::inbox::show(&ref_str, all).await?;
+            } else {
+                commands::inbox::list(all, full).await?;
+            }
         }
     }
 

@@ -245,9 +245,9 @@ async fn ensure_files_exist(
     let mut cache = DownloadCache::new(None)?;
 
     // Get cache directory for checking
-    let home = dirs::home_dir().ok_or_else(|| anyhow!("Could not determine home directory"))?;
-    let cache_base = home.join(".biovault").join("data").join("cache");
-    let downloads_base = home.join(".biovault").join("data").join("downloads");
+    let cache_base = crate::config::get_cache_dir()?;
+    let biovault_home = crate::config::get_biovault_home()?;
+    let downloads_base = biovault_home.join("data").join("downloads");
 
     // Create downloads directory based on source
     let participant_downloads_dir = match source {
@@ -463,7 +463,7 @@ async fn ensure_files_exist(
 
             // After download, the file is in cache. Create symlink with proper filename
             if let Some(hash) = b3sum {
-                let cache_path = cache_base.join("by-hash").join(hash);
+                let cache_path = crate::config::get_cache_dir()?.join("by-hash").join(hash);
 
                 // Remove existing symlink if it exists
                 if symlink_path.exists() || symlink_path.is_symlink() {
@@ -551,12 +551,8 @@ pub async fn execute(params: RunParams) -> anyhow::Result<()> {
         ensure_files_exist(&participant, params.download, &source, mock_key.as_deref()).await?;
 
     // Get BioVault environment directory
-    let home_dir = if let Ok(test_home) = std::env::var("BIOVAULT_TEST_HOME") {
-        PathBuf::from(test_home)
-    } else {
-        dirs::home_dir().ok_or_else(|| anyhow!("Could not determine home directory"))?
-    };
-    let env_dir = home_dir.join(".biovault").join("env").join("default");
+    let biovault_home = crate::config::get_biovault_home()?;
+    let env_dir = biovault_home.join("env").join("default");
 
     // Check if templates exist
     let template_nf = env_dir.join("template.nf");

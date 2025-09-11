@@ -39,9 +39,8 @@ impl DownloadCache {
         let cache_dir = if let Some(dir) = cache_dir {
             dir
         } else {
-            let home =
-                dirs::home_dir().ok_or_else(|| anyhow!("Could not determine home directory"))?;
-            home.join(".biovault").join("data").join("cache")
+            // Use the shared cache directory
+            crate::config::get_cache_dir()?
         };
 
         fs::create_dir_all(&cache_dir).with_context(|| {

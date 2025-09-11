@@ -2,6 +2,7 @@ use crate::error::Error;
 use crate::Result;
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
+use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -38,13 +39,12 @@ impl Config {
     }
 
     pub fn get_syftbox_data_dir(&self) -> crate::error::Result<PathBuf> {
-        let syftbox_config_path = if let Some(ref path) = self.syftbox_config {
-            PathBuf::from(path)
-        } else {
-            let home_dir = dirs::home_dir()
-                .ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
-            home_dir.join(".syftbox").join("config.json")
-        };
+        // Check for SYFTBOX_DATA_DIR environment variable first
+        if let Ok(data_dir) = env::var("SYFTBOX_DATA_DIR") {
+            return Ok(PathBuf::from(data_dir));
+        }
+
+        let syftbox_config_path = self.get_syftbox_config_path()?;
 
         if !syftbox_config_path.exists() {
             return Err(Error::SyftBoxConfigMissing(
@@ -70,12 +70,26 @@ impl Config {
     }
 
     pub fn get_config_path() -> crate::error::Result<PathBuf> {
-        let home_dir = if let Ok(test_home) = std::env::var("BIOVAULT_TEST_HOME") {
-            PathBuf::from(test_home)
-        } else {
-            dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?
-        };
-        Ok(home_dir.join(".biovault").join("config.yaml"))
+        Ok(get_biovault_home()?.join("config.yaml"))
+    }
+
+    pub fn get_syftbox_config_path(&self) -> crate::error::Result<PathBuf> {
+        // Priority order:
+        // 1. SYFTBOX_CONFIG_PATH env var
+        // 2. Config specified in BioVault config
+        // 3. ~/.syftbox/config.json (default)
+
+        if let Ok(config_path) = env::var("SYFTBOX_CONFIG_PATH") {
+            return Ok(PathBuf::from(config_path));
+        }
+
+        if let Some(ref path) = self.syftbox_config {
+            return Ok(PathBuf::from(path));
+        }
+
+        let home_dir = dirs::home_dir()
+            .ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
+        Ok(home_dir.join(".syftbox").join("config.json"))
     }
 
     pub fn load() -> crate::error::Result<Self> {
@@ -107,4 +121,53 @@ pub fn get_config() -> anyhow::Result<Config> {
         Ok(config) => Ok(config),
         Err(e) => Err(anyhow::anyhow!("{}", e)),
     }
+}
+
+/// Get the BioVault home directory
+/// Priority order:
+/// 1. BIOVAULT_HOME env var
+/// 2. SYFTBOX_DATA_DIR/.biovault (if in virtualenv)
+/// 3. BIOVAULT_TEST_HOME (for tests)
+/// 4. ~/.biovault (default)
+pub fn get_biovault_home() -> anyhow::Result<PathBuf> {
+    // Check for explicit BIOVAULT_HOME
+    if let Ok(biovault_home) = env::var("BIOVAULT_HOME") {
+        return Ok(PathBuf::from(biovault_home));
+    }
+
+    // Check for SyftBox virtualenv
+    if let Ok(syftbox_data_dir) = env::var("SYFTBOX_DATA_DIR") {
+        return Ok(PathBuf::from(syftbox_data_dir).join(".biovault"));
+    }
+
+    // Check for test environment
+    if let Ok(test_home) = env::var("BIOVAULT_TEST_HOME") {
+        return Ok(PathBuf::from(test_home).join(".biovault"));
+    }
+
+    // Default to home directory
+    let home_dir =
+        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
+    Ok(home_dir.join(".biovault"))
+}
+
+/// Get the shared cache directory
+/// Priority order:
+/// 1. BIOVAULT_CACHE_DIR env var
+/// 2. ~/.biovault/data/cache (default shared)
+pub fn get_cache_dir() -> anyhow::Result<PathBuf> {
+    // Check for explicit cache directory
+    if let Ok(cache_dir) = env::var("BIOVAULT_CACHE_DIR") {
+        return Ok(PathBuf::from(cache_dir));
+    }
+
+    // Always use the shared cache in user's home directory
+    let home_dir =
+        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
+    Ok(home_dir.join(".biovault").join("data").join("cache"))
+}
+
+/// Check if running in a SyftBox virtualenv
+pub fn is_syftbox_env() -> bool {
+    env::var("SYFTBOX_DATA_DIR").is_ok() || env::var("SYFTBOX_EMAIL").is_ok()
 }
