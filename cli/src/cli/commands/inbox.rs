@@ -210,12 +210,7 @@ fn extract_date_from_filename(filename: &str) -> String {
 }
 
 fn get_inbox_path() -> Result<PathBuf> {
-    let home_dir = if let Ok(test_home) = std::env::var("BIOVAULT_TEST_HOME") {
-        PathBuf::from(test_home)
-    } else {
-        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?
-    };
-    Ok(home_dir.join(".biovault").join("inbox"))
+    Ok(crate::config::get_biovault_home()?.join("inbox"))
 }
 
 fn format_status(status: &str) -> String {

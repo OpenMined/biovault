@@ -6,7 +6,7 @@ use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use uuid::Uuid;
 
 const SAMPLE_DATA_YAML: &str = include_str!("../../sample_data.yaml");
@@ -60,13 +60,8 @@ pub async fn fetch(participant_ids: Option<Vec<String>>, all: bool) -> anyhow::R
         return Ok(());
     }
 
-    let home_dir = if let Ok(test_home) = std::env::var("BIOVAULT_TEST_HOME") {
-        PathBuf::from(test_home)
-    } else {
-        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?
-    };
-
-    let sample_data_dir = home_dir.join(".biovault").join("data").join("sample");
+    let biovault_home = crate::config::get_biovault_home()?;
+    let sample_data_dir = biovault_home.join("data").join("sample");
     let reference_dir = sample_data_dir.join("reference");
 
     fs::create_dir_all(&reference_dir).context("Failed to create reference directory")?;
@@ -170,7 +165,7 @@ pub async fn fetch(participant_ids: Option<Vec<String>>, all: bool) -> anyhow::R
 
             // The file is now in cache, create a symlink to it
             if !expected_b3sum.is_empty() {
-                let cache_base = home_dir.join(".biovault").join("data").join("cache");
+                let cache_base = crate::config::get_cache_dir()?;
                 let cache_path = cache_base.join("by-hash").join(expected_b3sum);
 
                 // Remove any existing file or symlink at target

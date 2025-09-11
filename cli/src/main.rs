@@ -1,6 +1,5 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use tracing::info;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 use biovault::cli;
@@ -29,8 +28,10 @@ struct Cli {
 enum Commands {
     #[command(about = "Initialize a new BioVault repository")]
     Init {
-        #[arg(help = "Email address for the vault configuration")]
-        email: String,
+        #[arg(
+            help = "Email address for the vault configuration (optional, will detect from SYFTBOX_EMAIL)"
+        )]
+        email: Option<String>,
     },
 
     #[command(about = "Show system information")]
@@ -301,8 +302,7 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Commands::Init { email } => {
-            info!("Initializing BioVault with email: {}", email);
-            commands::init::execute(&email).await?;
+            commands::init::execute(email.as_deref()).await?;
         }
         Commands::Info => {
             commands::info::execute().await?;
