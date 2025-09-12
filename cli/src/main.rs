@@ -138,6 +138,12 @@ enum Commands {
         #[arg(long, help = "Show full details for each submission")]
         full: bool,
     },
+
+    #[command(about = "Manage messages via SyftBox RPC")]
+    Message {
+        #[command(subcommand)]
+        command: MessageCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -287,6 +293,27 @@ enum FastqCommands {
         )]
         stats_format: String,
     },
+}
+
+#[derive(Subcommand)]
+enum MessageCommands {
+    #[command(about = "Send a message to another datasite")]
+    Send {
+        #[arg(help = "Recipient email address")]
+        recipient: String,
+
+        #[arg(help = "Message content")]
+        message: String,
+    },
+
+    #[command(about = "Check for incoming messages")]
+    Check,
+
+    #[command(about = "List all messages (requests and responses)")]
+    List,
+
+    #[command(about = "Initialize the message endpoint")]
+    Init,
 }
 
 #[tokio::main]
@@ -448,6 +475,38 @@ async fn main() -> Result<()> {
                 commands::inbox::list(all, full).await?;
             }
         }
+        Commands::Message { command } => match command {
+            MessageCommands::Send { recipient, message } => {
+                let config = biovault::config::Config::load()?;
+                commands::messages::send_message(&config, &recipient, &message)?;
+            }
+            MessageCommands::Check => {
+                let config = biovault::config::Config::load()?;
+                let messages = commands::messages::check_messages(&config)?;
+
+                if messages.is_empty() {
+                    println!("No new messages");
+                } else {
+                    for (sender, payload) in messages {
+                        println!("📨 Message from: {}", sender);
+                        println!("   Content: {}", payload.message);
+                        if let Some(ts) = payload.timestamp {
+                            println!("   Time: {}", ts);
+                        }
+                        println!();
+                    }
+                }
+            }
+            MessageCommands::List => {
+                let config = biovault::config::Config::load()?;
+                commands::messages::list_messages(&config)?;
+            }
+            MessageCommands::Init => {
+                let config = biovault::config::Config::load()?;
+                commands::messages::init_message_endpoint(&config)?;
+                println!("Message endpoint initialized successfully");
+            }
+        },
     }
 
     Ok(())
