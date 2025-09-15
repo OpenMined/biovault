@@ -1,8 +1,0 @@
----
-name: eye_color
-author: madhava@openmined.org
-workflow: workflow.nf
-assets: assets
-patients:
-  - NA07357
-  - MADHAVA

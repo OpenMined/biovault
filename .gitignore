@@ -216,4 +216,5 @@ submission/results/*
 
 **/.nextflow/*
 **/work/*
+**/results/*
 **/.nextflow.log*
