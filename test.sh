@@ -1,1 +1,1 @@
-cd cli && cargo fmt && cargo clippy && cargo test -- --test-threads=1
+cd cli && cargo fmt && cargo clippy && cargo test

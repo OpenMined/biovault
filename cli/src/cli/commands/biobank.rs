@@ -708,8 +708,14 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let email = "test@example.com";
 
-        // Set test home to temp dir
-        std::env::set_var("BIOVAULT_TEST_HOME", temp_dir.path());
+        // Isolate config and paths to this test thread
+        crate::config::set_test_biovault_home(temp_dir.path().join(".biovault"));
+        // Provide an in-memory config for calls to get_config()
+        let syftbox_config_path = temp_dir.path().join("syftbox_config.json");
+        crate::config::set_test_config(crate::config::Config {
+            email: email.to_string(),
+            syftbox_config: Some(syftbox_config_path.to_string_lossy().to_string()),
+        });
 
         // Setup test environment - create datasites for the email we're using
         let datasites_dir = temp_dir.path().join("datasites").join(email);
@@ -785,8 +791,9 @@ mod tests {
         assert!(!public_content.contains("TEST1:"));
         assert!(!public_content.contains("TEST2:"));
 
-        // Clean up test environment variable
-        std::env::remove_var("BIOVAULT_TEST_HOME");
+        // Clear test overrides
+        crate::config::clear_test_config();
+        crate::config::clear_test_biovault_home();
     }
 
     #[test]
@@ -954,7 +961,7 @@ participants:
             ],
         )?;
 
-        std::env::set_var("BIOVAULT_TEST_HOME", temp_dir.path());
+        crate::config::set_test_biovault_home(temp_dir.path().join(".biovault"));
 
         let config_dir = temp_dir.path().join(".biovault");
         fs::create_dir_all(&config_dir)?;
@@ -985,7 +992,7 @@ participants:
         let result = list(Some(temp_dir.path().to_path_buf())).await;
         assert!(result.is_ok());
 
-        std::env::remove_var("BIOVAULT_TEST_HOME");
+        crate::config::clear_test_biovault_home();
 
         Ok(())
     }

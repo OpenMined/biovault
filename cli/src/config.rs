@@ -2,9 +2,16 @@ use crate::error::Error;
 use crate::Result;
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
+use std::cell::RefCell;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+
+thread_local! {
+    static TEST_CONFIG: RefCell<Option<Config>> = const { RefCell::new(None) };
+    static TEST_SYFTBOX_DATA_DIR: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+    static TEST_BIOVAULT_HOME: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -39,6 +46,11 @@ impl Config {
     }
 
     pub fn get_syftbox_data_dir(&self) -> crate::error::Result<PathBuf> {
+        // Thread-local test override takes highest priority
+        if let Some(dir) = TEST_SYFTBOX_DATA_DIR.with(|p| p.borrow().clone()) {
+            return Ok(dir);
+        }
+
         // Check for SYFTBOX_DATA_DIR environment variable first
         if let Ok(data_dir) = env::var("SYFTBOX_DATA_DIR") {
             return Ok(PathBuf::from(data_dir));
@@ -116,6 +128,11 @@ impl Config {
 }
 
 pub fn get_config() -> anyhow::Result<Config> {
+    // Thread-local test override first
+    if let Some(cfg) = TEST_CONFIG.with(|c| c.borrow().clone()) {
+        return Ok(cfg);
+    }
+
     // Use the Config method which respects BIOVAULT_TEST_HOME
     match Config::load() {
         Ok(config) => Ok(config),
@@ -130,6 +147,10 @@ pub fn get_config() -> anyhow::Result<Config> {
 /// 3. BIOVAULT_TEST_HOME (for tests)
 /// 4. ~/.biovault (default)
 pub fn get_biovault_home() -> anyhow::Result<PathBuf> {
+    // Thread-local test override first
+    if let Some(home) = TEST_BIOVAULT_HOME.with(|h| h.borrow().clone()) {
+        return Ok(home);
+    }
     // Check for explicit BIOVAULT_HOME
     if let Ok(biovault_home) = env::var("BIOVAULT_HOME") {
         return Ok(PathBuf::from(biovault_home));
@@ -170,4 +191,42 @@ pub fn get_cache_dir() -> anyhow::Result<PathBuf> {
 /// Check if running in a SyftBox virtualenv
 pub fn is_syftbox_env() -> bool {
     env::var("SYFTBOX_DATA_DIR").is_ok() || env::var("SYFTBOX_EMAIL").is_ok()
+}
+
+// Test utilities to isolate config and paths per test thread.
+// Safe to call from tests; no-ops in normal usage if unset.
+pub fn set_test_config(config: Config) {
+    TEST_CONFIG.with(|c| {
+        *c.borrow_mut() = Some(config);
+    });
+}
+
+pub fn clear_test_config() {
+    TEST_CONFIG.with(|c| {
+        *c.borrow_mut() = None;
+    });
+}
+
+pub fn set_test_syftbox_data_dir<P: Into<PathBuf>>(path: P) {
+    TEST_SYFTBOX_DATA_DIR.with(|p| {
+        *p.borrow_mut() = Some(path.into());
+    });
+}
+
+pub fn clear_test_syftbox_data_dir() {
+    TEST_SYFTBOX_DATA_DIR.with(|p| {
+        *p.borrow_mut() = None;
+    });
+}
+
+pub fn set_test_biovault_home<P: Into<PathBuf>>(path: P) {
+    TEST_BIOVAULT_HOME.with(|h| {
+        *h.borrow_mut() = Some(path.into());
+    });
+}
+
+pub fn clear_test_biovault_home() {
+    TEST_BIOVAULT_HOME.with(|h| {
+        *h.borrow_mut() = None;
+    });
 }

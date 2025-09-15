@@ -285,7 +285,7 @@ mod tests {
     #[test]
     fn test_init_message_endpoint() -> Result<()> {
         let temp_dir = TempDir::new()?;
-        std::env::set_var("SYFTBOX_DATA_DIR", temp_dir.path());
+        crate::config::set_test_syftbox_data_dir(temp_dir.path());
         let config = create_test_config();
 
         let app = init_message_endpoint(&config)?;
@@ -297,7 +297,7 @@ mod tests {
     #[test]
     fn test_send_and_check_messages() -> Result<()> {
         let temp_dir = TempDir::new()?;
-        std::env::set_var("SYFTBOX_DATA_DIR", temp_dir.path());
+        crate::config::set_test_syftbox_data_dir(temp_dir.path());
         let config = create_test_config();
 
         // Create recipient's endpoint directory first
