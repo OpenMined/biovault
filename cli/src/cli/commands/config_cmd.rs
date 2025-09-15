@@ -85,7 +85,7 @@ mod tests {
     #[serial_test::serial]
     async fn test_config_operations() -> crate::error::Result<()> {
         let temp_dir = TempDir::new()?;
-        std::env::set_var("BIOVAULT_TEST_HOME", temp_dir.path());
+        crate::config::set_test_biovault_home(temp_dir.path().join(".biovault"));
 
         let config_dir = temp_dir.path().join(".biovault");
         fs::create_dir_all(&config_dir)?;
@@ -118,7 +118,7 @@ mod tests {
         let final_config = Config::load()?;
         assert!(final_config.syftbox_config.is_some());
 
-        std::env::remove_var("BIOVAULT_TEST_HOME");
+        crate::config::clear_test_biovault_home();
         Ok(())
     }
 }
