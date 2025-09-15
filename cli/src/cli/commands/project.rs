@@ -8,6 +8,7 @@ use std::process::Command;
 use walkdir::WalkDir;
 
 pub async fn create(name: Option<String>, folder: Option<String>) -> Result<()> {
+    // Determine project name
     let project_name = if let Some(n) = name {
         n
     } else {
@@ -17,6 +18,7 @@ pub async fn create(name: Option<String>, folder: Option<String>) -> Result<()> 
         input.trim().to_string()
     };
 
+    // Determine folder path (default to ./<name>)
     let project_folder = folder.unwrap_or_else(|| format!("./{}", project_name));
     let project_path = Path::new(&project_folder);
 
@@ -27,45 +29,37 @@ pub async fn create(name: Option<String>, folder: Option<String>) -> Result<()> 
         )));
     }
 
+    // Create folders
     fs::create_dir_all(project_path)?;
+    fs::create_dir_all(project_path.join("assets"))?;
 
-    // Create a basic nextflow.config
-    let config_content = format!(
-        r#"// BioVault Project: {}
-params {{
-    input = ""
-    output = "./results"
-}}
+    // Load user email from config (if available)
+    let email = match crate::config::Config::load() {
+        Ok(cfg) => cfg.email,
+        Err(_) => std::env::var("SYFTBOX_EMAIL").unwrap_or_else(|_| "".to_string()),
+    };
 
-process {{
-    container = 'biocontainers/samtools:v1.9-4-deb_cv1'
-}}
-"#,
-        project_name
-    );
+    // Write project.yaml from template
+    let tmpl = include_str!("../../templates/project.yaml");
+    let project_yaml = tmpl
+        .replace("{project_name}", &project_name)
+        .replace("{email}", &email);
+    fs::write(project_path.join("project.yaml"), project_yaml)?;
 
-    fs::write(project_path.join("nextflow.config"), config_content)?;
-
-    // Create a basic main.nf
-    let workflow_content = r#"#!/usr/bin/env nextflow
-
-workflow {
-    // Add your workflow steps here
-    println "Running BioVault project workflow"
-}
-"#;
-
-    fs::write(project_path.join("main.nf"), workflow_content)?;
+    // Write workflow.nf from template (scaffold)
+    let workflow_tmpl = include_str!("../../templates/workflow.nf");
+    fs::write(project_path.join("workflow.nf"), workflow_tmpl)?;
 
     println!(
         "✅ Created project '{}' in {}",
         project_name, project_folder
     );
-    println!("   - nextflow.config");
-    println!("   - main.nf");
+    println!("   - project.yaml");
+    println!("   - workflow.nf");
+    println!("   - assets/ (empty)");
     println!("\nNext steps:");
     println!("   1. cd {}", project_folder);
-    println!("   2. Edit main.nf to define your workflow");
+    println!("   2. Edit workflow.nf in your project");
     println!("   3. Run with: bv run . <participants>");
 
     Ok(())
