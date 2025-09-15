@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use tempfile::TempDir;
+// use tempfile::TempDir; // no longer needed since we don't copy templates
 use tracing::{debug, info};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -99,6 +99,7 @@ enum ParticipantSource {
     LocalFile(PathBuf, Option<String>), // path, fragment
     SyftUrl(SyftURL),
     HttpUrl(String),
+    SampleDataId(String),
 }
 
 impl ParticipantSource {
@@ -108,7 +109,19 @@ impl ParticipantSource {
         } else if source.starts_with("http://") || source.starts_with("https://") {
             Ok(ParticipantSource::HttpUrl(source.to_string()))
         } else {
-            // Local file path
+            // Check if this matches a known sample data ID
+            #[derive(serde::Deserialize)]
+            struct SampleDataConfig {
+                sample_data_urls: std::collections::HashMap<String, serde_yaml::Value>,
+            }
+            let sample_yaml = include_str!("../../sample_data.yaml");
+            if let Ok(cfg) = serde_yaml::from_str::<SampleDataConfig>(sample_yaml) {
+                if cfg.sample_data_urls.contains_key(source) {
+                    return Ok(ParticipantSource::SampleDataId(source.to_string()));
+                }
+            }
+
+            // Otherwise treat as local file path
             let (path, fragment) = if let Some(hash_pos) = source.find('#') {
                 (
                     source[..hash_pos].to_string(),
@@ -154,6 +167,112 @@ async fn fetch_participant_file(
             fetch_http_content(&main_url)
                 .await
                 .map(|content| (content, fragment))
+        }
+        ParticipantSource::SampleDataId(sample_id) => {
+            // Ensure sample data is fetched
+            crate::cli::commands::sample_data::fetch(Some(vec![sample_id.clone()]), false, true)
+                .await?;
+
+            // Load sample_data.yaml to get URLs and compute filenames
+            #[derive(serde::Deserialize)]
+            struct SampleEntry {
+                ref_version: String,
+                #[serde(rename = "ref")]
+                ref_url: String,
+                ref_index: String,
+                aligned: serde_yaml::Value,
+                aligned_index: String,
+            }
+            #[derive(serde::Deserialize)]
+            struct SampleDataConfig {
+                sample_data_urls: std::collections::HashMap<String, SampleEntry>,
+            }
+
+            let sample_yaml = include_str!("../../sample_data.yaml");
+            let cfg: SampleDataConfig = serde_yaml::from_str(sample_yaml)
+                .context("Failed to parse embedded sample data configuration")?;
+            let entry = cfg
+                .sample_data_urls
+                .get(sample_id)
+                .ok_or_else(|| anyhow!("Sample data '{}' not found", sample_id))?;
+
+            // Compute local absolute paths under biovault sample data dir
+            let biovault_home = crate::config::get_biovault_home()?;
+            let sample_data_dir = biovault_home.join("data").join("sample");
+            let reference_dir = sample_data_dir.join("reference");
+            let participant_dir = sample_data_dir.join(sample_id);
+
+            // Extract filenames from URLs
+            fn filename_from_url(url: &str) -> String {
+                url.rsplit('/')
+                    .next()
+                    .unwrap_or("")
+                    .split('#')
+                    .next()
+                    .unwrap()
+                    .split('?')
+                    .next()
+                    .unwrap()
+                    .to_string()
+            }
+
+            let ref_filename = filename_from_url(&entry.ref_url);
+            let ref_index_filename = filename_from_url(&entry.ref_index);
+
+            // Determine aligned file final name
+            let aligned_abs_path = match &entry.aligned {
+                serde_yaml::Value::String(url) => participant_dir.join(filename_from_url(url)),
+                serde_yaml::Value::Sequence(seq) if !seq.is_empty() => {
+                    // multiple parts, derive base name from first
+                    if let Some(serde_yaml::Value::String(first_url)) = seq.first() {
+                        let first_name = filename_from_url(first_url);
+                        let base_name = if first_name.ends_with(".tar.gz.aa") {
+                            first_name.trim_end_matches(".aa").to_string()
+                        } else {
+                            first_name
+                        };
+                        let cram_name = base_name.trim_end_matches(".tar.gz").to_string();
+                        participant_dir.join(cram_name)
+                    } else {
+                        anyhow::bail!("Invalid aligned URL list in sample data");
+                    }
+                }
+                _ => anyhow::bail!("Invalid 'aligned' field in sample data"),
+            };
+
+            let aligned_index_abs = if !entry.aligned_index.is_empty() {
+                participant_dir.join(filename_from_url(&entry.aligned_index))
+            } else {
+                PathBuf::new()
+            };
+
+            // Build a minimal participants YAML that our existing parser expects
+            let mut yaml = String::new();
+            yaml.push_str("participants:\n");
+            yaml.push_str(&format!("  {}:\n", sample_id));
+            yaml.push_str(&format!("    ref_version: {}\n", entry.ref_version));
+            yaml.push_str(&format!(
+                "    ref: {}\n",
+                reference_dir.join(ref_filename).to_string_lossy()
+            ));
+            yaml.push_str(&format!(
+                "    ref_index: {}\n",
+                reference_dir.join(ref_index_filename).to_string_lossy()
+            ));
+            yaml.push_str(&format!(
+                "    aligned: {}\n",
+                aligned_abs_path.to_string_lossy()
+            ));
+            if !aligned_index_abs.as_os_str().is_empty() {
+                yaml.push_str(&format!(
+                    "    aligned_index: {}\n",
+                    aligned_index_abs.to_string_lossy()
+                ));
+            } else {
+                yaml.push_str("    aligned_index: \n");
+            }
+
+            Ok((yaml, Some(format!("participants.{}", sample_id))))
         }
     }
 }
@@ -299,6 +418,10 @@ async fn ensure_files_exist(
             } else {
                 downloads_base.join(filename).join(&participant.id)
             }
+        }
+        ParticipantSource::SampleDataId(_) => {
+            // Use a dedicated directory for sample data
+            downloads_base.join("sample").join(&participant.id)
         }
     };
 
@@ -562,14 +685,9 @@ pub async fn execute(params: RunParams) -> anyhow::Result<()> {
         return Err(Error::TemplatesNotFound.into());
     }
 
-    // Create temporary directory for execution
-    let temp_dir = TempDir::new()?;
-
-    // Copy template.nf and nextflow.config to temp directory
-    let temp_template = temp_dir.path().join("template.nf");
-    let temp_config = temp_dir.path().join("nextflow.config");
-    fs::copy(&template_nf, &temp_template).context("Failed to copy template.nf")?;
-    fs::copy(&nextflow_config, &temp_config).context("Failed to copy nextflow.config")?;
+    // Use templates directly from env dir instead of copying to temp
+    let temp_template = template_nf;
+    let temp_config = nextflow_config;
 
     // Determine assets directory
     let assets_dir = if !config.assets.is_empty() {

@@ -87,7 +87,11 @@ struct ParticipantRecord {
     aligned_index: String,
 }
 
-pub async fn fetch(participant_ids: Option<Vec<String>>, all: bool) -> anyhow::Result<()> {
+pub async fn fetch(
+    participant_ids: Option<Vec<String>>,
+    all: bool,
+    quiet: bool,
+) -> anyhow::Result<()> {
     let config: SampleDataConfig = serde_yaml::from_str(SAMPLE_DATA_YAML)
         .context("Failed to parse embedded sample data configuration")?;
 
@@ -104,14 +108,16 @@ pub async fn fetch(participant_ids: Option<Vec<String>>, all: bool) -> anyhow::R
 
     fs::create_dir_all(&reference_dir).context("Failed to create reference directory")?;
 
-    println!(
-        "Fetching sample data for {} participant(s):",
-        participants_to_fetch.len()
-    );
-    for id in &participants_to_fetch {
-        println!("  - {}", id);
+    if !quiet {
+        println!(
+            "Fetching sample data for {} participant(s):",
+            participants_to_fetch.len()
+        );
+        for id in &participants_to_fetch {
+            println!("  - {}", id);
+        }
+        println!();
     }
-    println!();
 
     let participants_file_path = sample_data_dir.join("participants.yaml");
     let mut participants_file = load_or_create_participants_file(&participants_file_path)?;
@@ -120,9 +126,11 @@ pub async fn fetch(participant_ids: Option<Vec<String>>, all: bool) -> anyhow::R
     let mut download_cache = DownloadCache::new(None)?;
 
     for participant_id in participants_to_fetch {
-        println!("\n{}", "=".repeat(60));
-        println!("Fetching data for participant: {}", participant_id);
-        println!("{}", "=".repeat(60));
+        if !quiet {
+            println!("\n{}", "=".repeat(60));
+            println!("Fetching data for participant: {}", participant_id);
+            println!("{}", "=".repeat(60));
+        }
 
         let participant_data = config
             .sample_data_urls
@@ -210,14 +218,16 @@ pub async fn fetch(participant_ids: Option<Vec<String>>, all: bool) -> anyhow::R
         };
 
         for (url, target_path, description, expected_b3sum) in &downloads {
-            println!(
-                "\n  Processing {}: {}",
-                description,
-                target_path.file_name().unwrap().to_string_lossy()
-            );
+            if !quiet {
+                println!(
+                    "\n  Processing {}: {}",
+                    description,
+                    target_path.file_name().unwrap().to_string_lossy()
+                );
+            }
 
             // Set up download options based on whether we have a checksum
-            let options = if !expected_b3sum.is_empty() {
+            let mut options = if !expected_b3sum.is_empty() {
                 DownloadOptions {
                     checksum_policy: ChecksumPolicy {
                         policy_type: ChecksumPolicyType::Required,
@@ -228,6 +238,7 @@ pub async fn fetch(participant_ids: Option<Vec<String>>, all: bool) -> anyhow::R
             } else {
                 DownloadOptions::default()
             };
+            options.show_progress = !quiet;
 
             // Download to a temporary location (will be cached)
             let temp_filename = target_path
@@ -265,7 +276,9 @@ pub async fn fetch(participant_ids: Option<Vec<String>>, all: bool) -> anyhow::R
                         .with_context(|| format!("Failed to create symlink for {}", description))?;
                 }
 
-                println!("    ✓ Linked to cache (saving disk space)");
+                if !quiet {
+                    println!("    ✓ Linked to cache (saving disk space)");
+                }
             } else {
                 // If no checksum, we need to copy the file from temp to target
                 // This shouldn't happen in practice since all sample data has checksums
@@ -281,7 +294,9 @@ pub async fn fetch(participant_ids: Option<Vec<String>>, all: bool) -> anyhow::R
         // Process split tar files if needed
         let final_aligned_filename = if aligned_urls.len() > 1 {
             // We have multiple parts, need to combine them
-            println!("\n  Combining split archive parts...");
+            if !quiet {
+                println!("\n  Combining split archive parts...");
+            }
 
             // Determine the base filename (remove .aa, .ab suffixes)
             let first_part = extract_filename_from_url(&aligned_urls[0])?;
@@ -314,10 +329,14 @@ pub async fn fetch(participant_ids: Option<Vec<String>>, all: bool) -> anyhow::R
                 }
             }
 
-            println!("    ✓ Combined archive parts into {}", base_name);
+            if !quiet {
+                println!("    ✓ Combined archive parts into {}", base_name);
+            }
 
             // Extract the tar.gz to get the final CRAM file
-            println!("  Extracting archive...");
+            if !quiet {
+                println!("  Extracting archive...");
+            }
             let output = std::process::Command::new("tar")
                 .args(["xzf", base_name])
                 .current_dir(&temp_extract_dir)
@@ -338,7 +357,9 @@ pub async fn fetch(participant_ids: Option<Vec<String>>, all: bool) -> anyhow::R
             // Check if we have the expected checksum for the final CRAM
             // Note: For split files, we might want to add a field for the final CRAM checksum
             // For now, we'll compute it and cache it
-            println!("  Computing checksum for extracted CRAM...");
+            if !quiet {
+                println!("  Computing checksum for extracted CRAM...");
+            }
             let cram_hash = crate::cli::download_cache::calculate_blake3(&extracted_cram_path)
                 .context("Failed to compute CRAM checksum")?;
             println!("    CRAM blake3: {}", cram_hash);
@@ -356,9 +377,13 @@ pub async fn fetch(participant_ids: Option<Vec<String>>, all: bool) -> anyhow::R
                         Ok(())
                     })
                     .context("Failed to move CRAM to cache")?;
-                println!("    ✓ Cached extracted CRAM file");
+                if !quiet {
+                    println!("    ✓ Cached extracted CRAM file");
+                }
             } else {
-                println!("    ✓ CRAM already in cache");
+                if !quiet {
+                    println!("    ✓ CRAM already in cache");
+                }
                 fs::remove_file(&extracted_cram_path).ok();
             }
 
@@ -417,14 +442,18 @@ pub async fn fetch(participant_ids: Option<Vec<String>>, all: bool) -> anyhow::R
             .insert(participant_id.clone(), participant_record);
 
         save_participants_file(&participants_file_path, &participants_file)?;
-        println!("  ✓ Updated participants.yaml");
+        if !quiet {
+            println!("  ✓ Updated participants.yaml");
+        }
     }
 
-    println!("\n{}", "=".repeat(60));
-    println!("✓ Sample data fetch complete!");
-    println!("  Data location: {}", sample_data_dir.display());
-    println!("  Participants file: {}", participants_file_path.display());
-    println!("{}", "=".repeat(60));
+    if !quiet {
+        println!("\n{}", "=".repeat(60));
+        println!("✓ Sample data fetch complete!");
+        println!("  Data location: {}", sample_data_dir.display());
+        println!("  Participants file: {}", participants_file_path.display());
+        println!("{}", "=".repeat(60));
+    }
 
     Ok(())
 }
