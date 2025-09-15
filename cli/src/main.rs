@@ -306,16 +306,46 @@ enum MessageCommands {
 
         #[arg(help = "Message content")]
         message: String,
+
+        #[arg(short = 's', long = "subject", help = "Optional message subject")]
+        subject: Option<String>,
     },
 
-    #[command(about = "Check for incoming messages")]
-    Check,
+    #[command(about = "Reply to a message")]
+    Reply {
+        #[arg(help = "Message ID to reply to")]
+        message_id: String,
 
-    #[command(about = "List all messages (requests and responses)")]
-    List,
+        #[arg(help = "Reply content")]
+        body: String,
+    },
 
-    #[command(about = "Initialize the message endpoint")]
-    Init,
+    #[command(about = "Read a specific message")]
+    Read {
+        #[arg(help = "Message ID to read")]
+        message_id: String,
+    },
+
+    #[command(about = "Delete a message")]
+    Delete {
+        #[arg(help = "Message ID to delete")]
+        message_id: String,
+    },
+
+    #[command(about = "List messages")]
+    List {
+        #[arg(short = 'u', long = "unread", help = "Show only unread messages")]
+        unread: bool,
+    },
+
+    #[command(about = "View a message thread")]
+    Thread {
+        #[arg(help = "Thread ID to view")]
+        thread_id: String,
+    },
+
+    #[command(about = "Sync messages (check for new and update ACKs)")]
+    Sync,
 }
 
 #[tokio::main]
@@ -484,35 +514,42 @@ async fn main() -> Result<()> {
             }
         }
         Commands::Message { command } => match command {
-            MessageCommands::Send { recipient, message } => {
+            MessageCommands::Send {
+                recipient,
+                message,
+                subject,
+            } => {
                 let config = biovault::config::Config::load()?;
-                commands::messages::send_message(&config, &recipient, &message)?;
+                commands::messages::send_message(
+                    &config,
+                    &recipient,
+                    &message,
+                    subject.as_deref(),
+                )?;
             }
-            MessageCommands::Check => {
+            MessageCommands::Reply { message_id, body } => {
                 let config = biovault::config::Config::load()?;
-                let messages = commands::messages::check_messages(&config)?;
-
-                if messages.is_empty() {
-                    println!("No new messages");
-                } else {
-                    for (sender, payload) in messages {
-                        println!("📨 Message from: {}", sender);
-                        println!("   Content: {}", payload.message);
-                        if let Some(ts) = payload.timestamp {
-                            println!("   Time: {}", ts);
-                        }
-                        println!();
-                    }
-                }
+                commands::messages::reply_message(&config, &message_id, &body)?;
             }
-            MessageCommands::List => {
+            MessageCommands::Read { message_id } => {
                 let config = biovault::config::Config::load()?;
-                commands::messages::list_messages(&config)?;
+                commands::messages::read_message(&config, &message_id)?;
             }
-            MessageCommands::Init => {
+            MessageCommands::Delete { message_id } => {
                 let config = biovault::config::Config::load()?;
-                commands::messages::init_message_endpoint(&config)?;
-                println!("Message endpoint initialized successfully");
+                commands::messages::delete_message(&config, &message_id)?;
+            }
+            MessageCommands::List { unread } => {
+                let config = biovault::config::Config::load()?;
+                commands::messages::list_messages(&config, unread)?;
+            }
+            MessageCommands::Thread { thread_id } => {
+                let config = biovault::config::Config::load()?;
+                commands::messages::view_thread(&config, &thread_id)?;
+            }
+            MessageCommands::Sync => {
+                let config = biovault::config::Config::load()?;
+                commands::messages::sync_messages(&config)?;
             }
         },
     }
