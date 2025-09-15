@@ -43,6 +43,9 @@ SyftBox requires setup and authentication.
 
 ## Tutorials:
 - [1) Hello World](tutorials/1_hello_world.md)
+- [2) Submit Your Project](tutorials/2_submit_your_project.md)
+- [3) Create a Biobank](tutorials/3_create_biobank.md)
+
 
 
 ## CLI Overview

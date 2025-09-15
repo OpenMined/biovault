@@ -1,9 +1,13 @@
+use crate::cli::commands::messages::init_message_system;
 use crate::cli::syft_url::SyftURL;
 use crate::config::Config;
 use crate::error::{Error, Result};
+use crate::messages::{Message, MessageType};
 use crate::types::{ProjectYaml, SyftPermissions};
 use anyhow::Context;
 use chrono::Local;
+use dialoguer::{Confirm, Editor};
+use serde_json::json;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -91,13 +95,20 @@ pub async fn submit(project_path: String, destination: String) -> Result<()> {
             .filter(|e| e.file_type().is_file())
         {
             let path = entry.path();
+            // Relative path from project root (for hashes)
             let relative_path = path
                 .strip_prefix(&project_dir)
                 .unwrap_or(path)
                 .to_string_lossy()
                 .to_string();
+            // Relative path from assets dir (for YAML assets list)
+            let assets_rel = path
+                .strip_prefix(&assets_dir)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .to_string();
 
-            asset_files.push(relative_path.clone());
+            asset_files.push(assets_rel);
             let file_hash = hash_file(path)?;
             b3_hashes.insert(relative_path, file_hash);
         }
@@ -200,6 +211,80 @@ pub async fn submit(project_path: String, destination: String) -> Result<()> {
     }
     println!("  Location: {}", submission_path.display());
     println!("  Hash: {}", short_hash);
+
+    // Build a syft:// URL for the saved submission so the receiver can locate it
+    let datasite_root = config.get_datasite_path()?;
+    let rel_from_datasite = submission_path
+        .strip_prefix(&datasite_root)
+        .unwrap_or(&submission_path)
+        .to_string_lossy()
+        .to_string();
+    let submission_syft_url = format!("syft://{}/{}", config.email, rel_from_datasite);
+
+    // Prepare default message body and allow user to override
+    let default_body = "I would like to run the following project.".to_string();
+    let use_custom = Confirm::new()
+        .with_prompt("Write a custom message body?")
+        .default(false)
+        .interact()
+        .unwrap_or(false);
+
+    let mut body = if use_custom {
+        match Editor::new().edit(&default_body) {
+            Ok(Some(content)) if !content.trim().is_empty() => content,
+            _ => default_body.clone(),
+        }
+    } else {
+        default_body.clone()
+    };
+
+    // Add handy paths for the recipient to copy/paste
+    let sender_local_path = submission_path.to_string_lossy().to_string();
+    let receiver_local_path_template = format!(
+        "$SYFTBOX_DATA_DIR/datasites/{}/shared/biovault/submissions/{}",
+        config.email, submission_folder_name
+    );
+    body.push_str(&format!(
+        "\n\nSubmission location references:\n- syft URL: {}\n- Sender local path: {}\n- Receiver local path (template): {}\n",
+        submission_syft_url, sender_local_path, receiver_local_path_template
+    ));
+
+    // Construct metadata for the message
+    let metadata = json!({
+        "project": project,
+        "project_location": submission_syft_url,
+        // Receiver guidance about which of their participants to use
+        "participants": "With your participants: ALL",
+        // Date component used in the submission folder name
+        "date": date_str,
+        // Explicit list of asset files (if any)
+        "assets": project.assets.clone().unwrap_or_default(),
+        // Helpful paths for receiver tooling
+        "sender_local_path": sender_local_path,
+        "receiver_local_path_template": receiver_local_path_template,
+    });
+
+    // Initialize messaging system and send a project message
+    let (db, sync) = init_message_system(&config)?;
+
+    let mut msg = Message::new(config.email.clone(), datasite_email.clone(), body);
+    msg.subject = Some(format!("Project Request - {}", project.name));
+    msg.message_type = MessageType::Project {
+        project_name: project.name.clone(),
+        submission_id: submission_folder_name.clone(),
+        files_hash: Some(project_hash.clone()),
+    };
+    msg.metadata = Some(metadata);
+
+    db.insert_message(&msg)?;
+    // Try to send immediately; if offline, it will remain queued locally
+    let _ = sync.send_message(&msg.id);
+
+    println!("✉️  Project message prepared for {}", datasite_email);
+    if let Some(subj) = &msg.subject {
+        println!("  Subject: {}", subj);
+    }
+    println!("  Submission URL: {}", submission_syft_url);
 
     Ok(())
 }

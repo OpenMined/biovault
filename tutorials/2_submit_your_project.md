@@ -132,6 +132,54 @@ This will submit your project to the biobank on `madhava@openmined.org` and spec
 bv submit ./eye-color syft://madhava@openmined.org/public/biovault/participants.yaml#participants.MADHAVA
 ```
 
-9) coming soon
+9) Check your messages
+You can check your messages with:
+```
+bv message list
+```
+
+Or use the interactive inbox tool:
+```
+bv inbox
+```
+
+10) Approved
+Once your project has been approved you will get a reply message.
+
+```
+bv message list
+```
+```
+📬 Messages:
+─────────────
+
+📥 [6552edc0]
+  From: me@madhavajay.com
+  To: madhava@openmined.org
+  Subject: Project approved
+  Date: 2025-09-15 23:59:56 +10:00
+  Body: Your project has been approved.
+  ↩️  Reply to: f4ffa14d-34a0-46e5-9c11-24100b210689
+```
+
+Now check the contents:
+```
+bv message read 6552edc0
+BioVault messaging initialized for madhava@openmined.org
+
+📧 Message Details
+═══════════════════
+ID: 6552edc0-31e7-4659-8ccc-d4c13c721963
+From: me@madhavajay.com
+To: madhava@openmined.org
+Subject: Project approved
+Date: 2025-09-15 23:59:56 +10:00
+Reply to: f4ffa14d-34a0-46e5-9c11-24100b210689
+Thread: f4ffa14d-34a0-46e5-9c11-24100b210689
+
+Body:
+─────
+Your project has been approved.
+```
 
 How to create a test biobank: [3_create_biobank.md](3_create_biobank.md).

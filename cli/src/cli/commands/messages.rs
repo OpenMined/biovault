@@ -1,6 +1,15 @@
+use crate::cli::commands::run::{execute as run_execute, RunParams};
+use crate::cli::syft_url::SyftURL;
 use crate::config::Config;
 use crate::messages::{Message, MessageDb, MessageSync};
+use crate::types::ProjectYaml;
+use crate::types::SyftPermissions;
 use anyhow::Result;
+use colored::Colorize;
+use dialoguer::{Confirm, Input, Select};
+use serde_json::json;
+use std::fs;
+use std::path::Path;
 use std::path::PathBuf;
 
 const MESSAGE_ENDPOINT: &str = "/message";
@@ -172,6 +181,17 @@ pub fn list_messages(config: &Config, unread_only: bool) -> Result<()> {
         };
         println!("  Body: {}", preview);
 
+        // If this is a project message with metadata, try quick verification
+        if let Some(meta) = &msg.metadata {
+            if msg.message_type.to_string() == "project" {
+                match verify_project_from_metadata(config, meta) {
+                    Ok((true, note)) => println!("  Project Verify: OK{}", note),
+                    Ok((false, note)) => println!("  Project Verify: FAIL{}", note),
+                    Err(e) => println!("  Project Verify: UNVERIFIED ({})", e),
+                }
+            }
+        }
+
         if msg.parent_id.is_some() {
             println!("  ↩️  Reply to: {}", msg.parent_id.as_ref().unwrap());
         }
@@ -181,7 +201,7 @@ pub fn list_messages(config: &Config, unread_only: bool) -> Result<()> {
 }
 
 /// Read a specific message
-pub fn read_message(config: &Config, message_id: &str) -> Result<()> {
+pub async fn read_message(config: &Config, message_id: &str) -> Result<()> {
     let (db, sync) = init_message_system(config)?;
 
     // Quietly sync first in case there are new messages
@@ -217,7 +237,556 @@ pub fn read_message(config: &Config, message_id: &str) -> Result<()> {
     println!("─────");
     println!("{}", msg.body);
 
+    // If this is a project message with metadata, attempt verification and show details
+    if let Some(meta) = &msg.metadata {
+        if msg.message_type.to_string() == "project" {
+            println!("\nProject Verification:");
+            println!("──────────────────────");
+            match verify_project_from_metadata(config, meta) {
+                Ok((true, note)) => println!("Status: OK{}", note),
+                Ok((false, note)) => println!("Status: FAIL{}", note),
+                Err(e) => println!("Status: UNVERIFIED ({})", e),
+            }
+
+            println!("\nDetails:");
+            println!("────────");
+            if let Some(loc) = meta.get("project_location").and_then(|v| v.as_str()) {
+                println!("Project location: {}", loc.cyan());
+                if let Ok(p) = resolve_syft_url_to_path(config, loc) {
+                    println!("Local path: {}", p.display());
+                }
+            }
+            if let Some(date) = meta.get("date").and_then(|v| v.as_str()) {
+                println!("Date: {}", date);
+            }
+            if let Some(project) = meta.get("project") {
+                if let Some(participants) = project.get("participants").and_then(|v| v.as_array()) {
+                    if !participants.is_empty() {
+                        let parts: Vec<String> = participants
+                            .iter()
+                            .filter_map(|p| p.as_str().map(|s| s.to_string()))
+                            .collect();
+                        println!("Desired participants: {}", parts.join(", "));
+                    }
+                }
+                if let Some(assets) = project.get("assets").and_then(|v| v.as_array()) {
+                    if !assets.is_empty() {
+                        println!("Assets:");
+                        for a in assets {
+                            if let Some(s) = a.as_str() {
+                                println!("  - {}", s);
+                            }
+                        }
+                    }
+                }
+            }
+
+            if let Some(status) = meta.get("remote_status").and_then(|v| v.as_str()) {
+                println!("Remote status: {}", status);
+                if let Some(reason) = meta.get("remote_reason").and_then(|v| v.as_str()) {
+                    if !reason.is_empty() {
+                        println!("Reason: {}", reason);
+                    }
+                }
+                if status == "approved" {
+                    if let Some(path_str) = meta.get("results_path").and_then(|v| v.as_str()) {
+                        let results = std::path::PathBuf::from(path_str);
+                        println!("Results location: {}", results.display());
+                        if results.exists() {
+                            println!("Results tree:");
+                            print_dir_tree(&results, 3)?;
+                        }
+                    } else if let Some(loc) = meta.get("project_location").and_then(|v| v.as_str())
+                    {
+                        if let Ok(root) = resolve_syft_url_to_path(config, loc) {
+                            let results = root.join("results");
+                            println!("Results location: {}", results.display());
+                            if results.exists() {
+                                println!("Results tree:");
+                                print_dir_tree(&results, 3)?;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Offer actions to the recipient (show regardless of read status)
+            if msg.to == config.email {
+                println!("\nActions:");
+                println!("────────");
+                let actions = vec![
+                    "Reject",
+                    "Review",
+                    "Approve (run if needed, release results)",
+                    "Run on test data",
+                    "Run on real data",
+                    "Back",
+                ];
+                let choice = Select::new()
+                    .with_prompt("Choose an action")
+                    .items(&actions)
+                    .default(5)
+                    .interact_opt()?;
+
+                if let Some(idx) = choice {
+                    match idx {
+                        0 => reject_project(config, &msg)?,
+                        1 => review_project(config, &msg)?,
+                        2 => approve_project(config, &msg).await?,
+                        3 => run_project_test(config, &msg).await?,
+                        4 => run_project_real(config, &msg).await?,
+                        _ => {}
+                    }
+                }
+            }
+
+            // Sender-side archive action after approval to revoke write and mark done
+            if msg.from == config.email {
+                println!("\nSender Actions:");
+                println!("───────────────");
+                let actions = vec!["Archive (finalize and revoke write)", "Back"];
+                let choice = Select::new()
+                    .with_prompt("Choose an action")
+                    .items(&actions)
+                    .default(1)
+                    .interact_opt()?;
+                if let Some(0) = choice {
+                    archive_project(config, &msg)?;
+                }
+            }
+        }
+        // If this is a status update reply, show status and results info directly
+        if let crate::messages::MessageType::Request { request_type, .. } = &msg.message_type {
+            if request_type == "status" {
+                println!("\nStatus Update:");
+                println!("──────────────");
+                if let Some(update) = meta.get("status_update") {
+                    if let Some(status) = update.get("status").and_then(|v| v.as_str()) {
+                        println!("Status: {}", status);
+                    }
+                    if let Some(reason) = update.get("reason").and_then(|v| v.as_str()) {
+                        if !reason.is_empty() {
+                            println!("Note: {}", reason);
+                        }
+                    }
+                }
+                if let Some(path_str) = meta.get("results_path").and_then(|v| v.as_str()) {
+                    let results = std::path::PathBuf::from(path_str);
+                    println!("Results location: {}", results.display());
+                    if results.exists() {
+                        println!("Results tree:");
+                        print_dir_tree(&results, 3)?;
+                    }
+                }
+            }
+        }
+    }
+
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum ProjectAction {
+    Reject,
+    Review,
+    Approve,
+    RunTest,
+    RunReal,
+}
+
+/// Public entrypoint so other commands (like inbox) can trigger project triage actions
+pub async fn perform_project_action(
+    config: &Config,
+    message_id: &str,
+    action: ProjectAction,
+) -> anyhow::Result<()> {
+    let (db, _sync) = init_message_system(config)?;
+    let msg = db
+        .get_message(message_id)?
+        .ok_or_else(|| anyhow::anyhow!("Message not found: {}", message_id))?;
+
+    match action {
+        ProjectAction::Reject => reject_project(config, &msg)?,
+        ProjectAction::Review => review_project(config, &msg)?,
+        ProjectAction::Approve => approve_project(config, &msg).await?,
+        ProjectAction::RunTest => run_project_test(config, &msg).await?,
+        ProjectAction::RunReal => run_project_real(config, &msg).await?,
+    }
+    Ok(())
+}
+
+fn archive_project(config: &Config, msg: &Message) -> anyhow::Result<()> {
+    // Update syft.pub.yaml by removing the results write rule
+    let meta = msg
+        .metadata
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("missing metadata"))?;
+    let project_location = meta
+        .get("project_location")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("missing project_location"))?;
+    let root = resolve_syft_url_to_path(config, project_location)?;
+    let perm_path = root.join("syft.pub.yaml");
+    if perm_path.exists() {
+        let content = fs::read_to_string(&perm_path)?;
+        let mut perms: SyftPermissions = serde_yaml::from_str(&content)?;
+        perms.rules.retain(|r| r.pattern != "results/**/*");
+        perms.save(&perm_path)?;
+        println!("Revoked write permissions to results for the recipient.");
+    } else {
+        println!(
+            "Warning: permission file not found at {}",
+            perm_path.display()
+        );
+    }
+
+    // Mark the message as archived
+    let (db, _) = init_message_system(config)?;
+    if let Some(mut full) = db.get_message(&msg.id)? {
+        full.status = crate::messages::MessageStatus::Archived;
+        db.update_message(&full)?;
+        println!("Message archived.");
+    }
+    Ok(())
+}
+
+fn sender_project_root(
+    config: &Config,
+    meta: &serde_json::Value,
+) -> anyhow::Result<(PathBuf, String)> {
+    let project_location = meta
+        .get("project_location")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("missing project_location"))?;
+    let path = resolve_syft_url_to_path(config, project_location)?;
+    let folder = Path::new(project_location)
+        .components()
+        .next_back()
+        .and_then(|c| match c {
+            std::path::Component::Normal(os) => os.to_str(),
+            _ => None,
+        })
+        .unwrap_or("submission")
+        .to_string();
+    Ok((path, folder))
+}
+
+fn receiver_private_submissions_path(config: &Config) -> anyhow::Result<PathBuf> {
+    let data_dir = config.get_syftbox_data_dir()?;
+    Ok(data_dir
+        .join("datasites")
+        .join(&config.email)
+        .join("private")
+        .join("app_data")
+        .join("biovault")
+        .join("submissions"))
+}
+
+fn copy_dir_recursive(src: &Path, dst: &Path) -> anyhow::Result<()> {
+    fs::create_dir_all(dst)?;
+    for entry in walkdir::WalkDir::new(src)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        let rel = entry.path().strip_prefix(src).unwrap();
+        let out = dst.join(rel);
+        if entry.file_type().is_dir() {
+            fs::create_dir_all(&out)?;
+        } else {
+            // Skip any syft.pub.yaml files anywhere in the tree
+            if entry
+                .path()
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n == "syft.pub.yaml")
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            if let Some(parent) = out.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::copy(entry.path(), &out)?;
+        }
+    }
+    Ok(())
+}
+
+fn build_run_project_copy(config: &Config, msg: &Message) -> anyhow::Result<PathBuf> {
+    let meta = msg
+        .metadata
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("missing metadata"))?;
+    let (sender_root, folder_name) = sender_project_root(config, meta)?;
+    let dest_root = receiver_private_submissions_path(config)?;
+    let dest_path = dest_root.join(&folder_name);
+    if !dest_path.exists() {
+        copy_dir_recursive(&sender_root, &dest_path)?;
+    }
+    Ok(dest_path)
+}
+
+fn prompt_participant_source(default_source: &str) -> anyhow::Result<String> {
+    let input: String = Input::new()
+        .with_prompt("Participant source (syft://, file.yaml#fragment, or sample ID)")
+        .default(default_source.to_string())
+        .interact_text()?;
+    Ok(input)
+}
+
+fn normalize_participant_source_for_real(input: &str) -> anyhow::Result<String> {
+    // If it already looks like a URL/path/fragment, keep as-is
+    if input.contains("://")
+        || input.contains('/')
+        || input.contains(".yaml")
+        || input.contains('#')
+    {
+        return Ok(input.to_string());
+    }
+    // Otherwise treat as participant ID under local participants.yaml
+    let biovault_home = crate::config::get_biovault_home()?;
+    let participants_file = biovault_home.join("participants.yaml");
+    let file_str = participants_file.to_string_lossy();
+    Ok(format!("{}#participants.{}", file_str, input))
+}
+
+fn send_status_ack_with_meta(
+    config: &Config,
+    original: &Message,
+    status: &str,
+    body: Option<String>,
+    extra_metadata: Option<serde_json::Value>,
+) -> anyhow::Result<()> {
+    let (db, sync) = init_message_system(config)?;
+
+    let mut reply = Message::reply_to(
+        original,
+        config.email.clone(),
+        body.unwrap_or_else(|| status.to_string()),
+    );
+    reply.subject = Some(format!("Project {}", status));
+    reply.message_type = crate::messages::MessageType::Request {
+        request_type: "status".to_string(),
+        params: None,
+    };
+    let mut md = json!({
+        "status_update": {
+            "message_id": original.id,
+            "status": status,
+            "reason": reply.body,
+        }
+    });
+    if let Some(extra) = extra_metadata {
+        if let Some(obj) = md.as_object_mut() {
+            if let Some(extra_obj) = extra.as_object() {
+                for (k, v) in extra_obj.iter() {
+                    obj.insert(k.clone(), v.clone());
+                }
+            }
+        }
+    }
+    reply.metadata = Some(md);
+
+    db.insert_message(&reply)?;
+    let _ = sync.send_message(&reply.id);
+    Ok(())
+}
+
+fn reject_project(config: &Config, msg: &Message) -> anyhow::Result<()> {
+    let custom = Confirm::new()
+        .with_prompt("Add a rejection reason?")
+        .default(true)
+        .interact()
+        .unwrap_or(true);
+    let body = if custom {
+        Some(
+            Input::new()
+                .with_prompt("Reason")
+                .default("Sorry your request has been rejected.".to_string())
+                .interact_text()?,
+        )
+    } else {
+        Some("Sorry your request has been rejected.".to_string())
+    };
+    send_status_ack_with_meta(config, msg, "rejected", body, None)?;
+    println!("{}", "Sent rejection to sender.".yellow());
+    Ok(())
+}
+
+fn review_project(config: &Config, msg: &Message) -> anyhow::Result<()> {
+    send_status_ack_with_meta(
+        config,
+        msg,
+        "reviewing",
+        Some("Request is under review.".to_string()),
+        None,
+    )?;
+    println!("{}", "Marked as reviewing and notified sender.".yellow());
+    Ok(())
+}
+
+async fn run_project_test(config: &Config, msg: &Message) -> anyhow::Result<()> {
+    let dest = build_run_project_copy(config, msg)?;
+    let source = prompt_participant_source("NA06985")?;
+    let source_for_run = source.clone();
+    run_execute(RunParams {
+        project_folder: dest.to_string_lossy().to_string(),
+        participant_source: source_for_run,
+        test: true,
+        download: true,
+        dry_run: false,
+        with_docker: false,
+        work_dir: None,
+        resume: false,
+    })
+    .await?;
+    println!("{}", "Test run completed.".green());
+    // Show results directory and a tree of contents
+    print_results_location_and_tree(&dest, &source, true)?;
+    Ok(())
+}
+
+async fn run_project_real(config: &Config, msg: &Message) -> anyhow::Result<()> {
+    let dest = build_run_project_copy(config, msg)?;
+    let biovault_home = crate::config::get_biovault_home()?;
+    let participants_file = biovault_home.join("participants.yaml");
+    let default_source = if participants_file.exists() {
+        format!("{}#participants.ALL", participants_file.to_string_lossy())
+    } else {
+        "participants.yaml#participants.ALL".to_string()
+    };
+    let raw = prompt_participant_source(&default_source)?;
+    let source = normalize_participant_source_for_real(&raw)?;
+    let source_for_run = source.clone();
+    run_execute(RunParams {
+        project_folder: dest.to_string_lossy().to_string(),
+        participant_source: source_for_run,
+        test: false,
+        download: false,
+        dry_run: false,
+        with_docker: false,
+        work_dir: None,
+        resume: false,
+    })
+    .await?;
+    println!("{}", "Real data run completed.".green());
+    // Show results directory and a tree of contents
+    print_results_location_and_tree(&dest, &source, false)?;
+    Ok(())
+}
+
+async fn approve_project(config: &Config, msg: &Message) -> anyhow::Result<()> {
+    let dest = build_run_project_copy(config, msg)?;
+    let results_dir = dest.join("results-real");
+    let needs_run = !results_dir.exists()
+        || fs::read_dir(&results_dir)
+            .map(|mut i| i.next().is_none())
+            .unwrap_or(true);
+    if needs_run {
+        println!("No results found. Running on real data before approval...");
+        run_project_real(config, msg).await?;
+    }
+
+    // Release results to sender shared location
+    let meta = msg
+        .metadata
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("missing metadata"))?;
+    let (sender_root, _folder) = sender_project_root(config, meta)?;
+    let sender_results = sender_root.join("results");
+    copy_dir_recursive(&results_dir, &sender_results)?;
+
+    // Optional approval message
+    let add_note = Confirm::new()
+        .with_prompt("Add a message to approval?")
+        .default(false)
+        .interact()
+        .unwrap_or(false);
+    let body = if add_note {
+        Some(
+            Input::new()
+                .with_prompt("Message")
+                .default("Your project has been approved.".to_string())
+                .interact_text()?,
+        )
+    } else {
+        Some("Your project has been approved.".to_string())
+    };
+
+    // Include results_path in the status update so sender can see it directly
+    let extra = json!({ "results_path": sender_results.to_string_lossy().to_string() });
+    send_status_ack_with_meta(config, msg, "approved", body, Some(extra))?;
+    println!(
+        "{}",
+        "Approved, results released, and sender notified.".green()
+    );
+    Ok(())
+}
+
+fn extract_participant_id(source: &str) -> Option<String> {
+    if let Some(pos) = source.find('#') {
+        let frag = &source[pos + 1..];
+        if let Some(rest) = frag.strip_prefix("participants.") {
+            return Some(rest.to_string());
+        }
+    }
+    // If it doesn't look like a path/URL and has no fragment, treat the whole string as the ID
+    if !(source.contains("://")
+        || source.contains('/')
+        || source.contains(".yaml")
+        || source.contains('#'))
+    {
+        return Some(source.to_string());
+    }
+    None
+}
+
+fn print_results_location_and_tree(
+    project_root: &Path,
+    participant_source: &str,
+    is_test: bool,
+) -> anyhow::Result<()> {
+    let id = extract_participant_id(participant_source).unwrap_or_else(|| "ALL".to_string());
+    let base = if is_test {
+        "results-test"
+    } else {
+        "results-real"
+    };
+    let results_dir = project_root.join(base).join(&id);
+    println!("Results location: {}", results_dir.display());
+    if results_dir.exists() {
+        println!("Results tree:");
+        print_dir_tree(&results_dir, 3)?;
+    } else {
+        println!("Results folder not found yet at {}", results_dir.display());
+    }
+    Ok(())
+}
+
+fn print_dir_tree(root: &Path, max_depth: usize) -> anyhow::Result<()> {
+    fn walk(dir: &Path, depth: usize, max_depth: usize) -> anyhow::Result<()> {
+        if depth > max_depth {
+            return Ok(());
+        }
+        let mut entries: Vec<_> = fs::read_dir(dir)?
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .collect();
+        entries.sort();
+        for path in entries {
+            let indent = "  ".repeat(depth.saturating_sub(0));
+            let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+            if path.is_dir() {
+                println!("{}{}/", indent, name);
+                walk(&path, depth + 1, max_depth)?;
+            } else {
+                println!("{}{}", indent, name);
+            }
+        }
+        Ok(())
+    }
+    println!("{}/", root.display());
+    walk(root, 1, max_depth)
 }
 
 /// View a message thread
@@ -260,6 +829,74 @@ pub fn sync_messages(config: &Config) -> Result<()> {
     sync.sync()?;
 
     Ok(())
+}
+
+/// Resolve a syft:// URL to a local filesystem path within the SyftBox data dir
+fn resolve_syft_url_to_path(config: &Config, url: &str) -> anyhow::Result<PathBuf> {
+    let parsed = SyftURL::parse(url)?;
+    let data_dir = config.get_syftbox_data_dir()?;
+    Ok(data_dir
+        .join("datasites")
+        .join(parsed.email)
+        .join(parsed.path))
+}
+
+/// Verify a project message using embedded metadata
+/// Returns (is_ok, extra_note)
+fn verify_project_from_metadata(
+    config: &Config,
+    metadata: &serde_json::Value,
+) -> anyhow::Result<(bool, String)> {
+    // Extract the embedded project.yaml
+    let project_val = metadata
+        .get("project")
+        .ok_or_else(|| anyhow::anyhow!("missing project metadata"))?;
+
+    let project: ProjectYaml = serde_json::from_value(project_val.clone())
+        .map_err(|e| anyhow::anyhow!("invalid project metadata: {}", e))?;
+
+    // Extract project location syft URL
+    let project_location = metadata
+        .get("project_location")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("missing project_location syft URL"))?;
+
+    let root = resolve_syft_url_to_path(config, project_location)?;
+    if !root.exists() {
+        return Ok((false, format!(" (missing path: {})", root.display())));
+    }
+
+    // Need b3_hashes to verify
+    let Some(expected_hashes) = project.b3_hashes.clone() else {
+        return Ok((false, " (no hashes provided)".to_string()));
+    };
+
+    // Verify each expected file hash
+    let mut mismatches: Vec<String> = Vec::new();
+    for (rel, expected) in expected_hashes.iter() {
+        let file_path = root.join(rel);
+        if !file_path.exists() {
+            mismatches.push(format!("missing: {}", rel));
+            continue;
+        }
+        let bytes = std::fs::read(&file_path)
+            .map_err(|e| anyhow::anyhow!("failed to read {}: {}", file_path.display(), e))?;
+        let got = blake3::hash(&bytes).to_hex().to_string();
+        if got != *expected {
+            mismatches.push(format!("mismatch: {}", rel));
+        }
+    }
+
+    if mismatches.is_empty() {
+        Ok((true, String::new()))
+    } else {
+        let preview = if mismatches.len() > 3 {
+            format!(" ({} issues; first: {})", mismatches.len(), mismatches[0])
+        } else {
+            format!(" ({})", mismatches.join(", "))
+        };
+        Ok((false, preview))
+    }
 }
 
 #[cfg(test)]

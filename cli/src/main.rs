@@ -520,7 +520,7 @@ async fn main() -> Result<()> {
                 commands::inbox::list(&config, filters)?;
             } else {
                 // When both flags are provided, prefer interactive
-                commands::inbox::interactive(&config, None)?;
+                commands::inbox::interactive(&config, None).await?;
             }
         }
         Commands::Message { command } => match command {
@@ -543,7 +543,7 @@ async fn main() -> Result<()> {
             }
             MessageCommands::Read { message_id } => {
                 let config = biovault::config::Config::load()?;
-                commands::messages::read_message(&config, &message_id)?;
+                commands::messages::read_message(&config, &message_id).await?;
             }
             MessageCommands::Delete { message_id } => {
                 let config = biovault::config::Config::load()?;
