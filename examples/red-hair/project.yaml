@@ -1,5 +1,0 @@
-name: red-hair
-author: madhava@openmined.org
-workflow: workflow.nf
-assets:
-  - red_hair.py
