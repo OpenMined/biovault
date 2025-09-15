@@ -690,13 +690,17 @@ pub async fn execute(params: RunParams) -> anyhow::Result<()> {
     let temp_config = nextflow_config;
 
     // Determine assets directory
-    let assets_dir = if !config.assets.is_empty() {
-        project_path.join(&config.assets[0])
-    } else {
-        project_path.join("assets")
-    };
+    // Prefer the conventional 'assets' folder. If the first assets entry is an existing directory,
+    // use it; otherwise do NOT create a directory from a file name like 'eye_color.py'.
+    let mut assets_dir = project_path.join("assets");
+    if !config.assets.is_empty() {
+        let candidate = project_path.join(&config.assets[0]);
+        if candidate.is_dir() {
+            assets_dir = candidate;
+        }
+    }
 
-    // Create assets directory if it doesn't exist
+    // Create assets directory if it doesn't exist (only for directories)
     if !assets_dir.exists() {
         fs::create_dir_all(&assets_dir)?;
     }
@@ -707,7 +711,12 @@ pub async fn execute(params: RunParams) -> anyhow::Result<()> {
         .context("Failed to resolve assets directory path")?;
 
     // Create results directory for this participant
-    let results_dir = project_path.join("results").join(&participant.id);
+    let results_base = if params.test {
+        "results-test"
+    } else {
+        "results-real"
+    };
+    let results_dir = project_path.join(results_base).join(&participant.id);
     if !results_dir.exists() {
         fs::create_dir_all(&results_dir)?;
     }

@@ -159,7 +159,7 @@ pub fn list(config: &Config, filters: ListFilters) -> Result<()> {
 }
 
 /// Interactive mode for inbox
-pub fn interactive(config: &Config, initial_view: Option<String>) -> Result<()> {
+pub async fn interactive(config: &Config, initial_view: Option<String>) -> Result<()> {
     let db_path = super::messages::get_message_db_path(config)?;
     let db = MessageDb::new(&db_path)?;
 
@@ -316,7 +316,7 @@ pub fn interactive(config: &Config, initial_view: Option<String>) -> Result<()> 
                 if !messages.is_empty() {
                     let msg = &messages[selected];
                     disable_raw_mode_cmd()?;
-                    let _ = message_actions(config, &db, msg)?;
+                    let _ = message_actions(config, &db, msg).await?;
                     enable_raw_mode_cmd()?;
                 }
             }
@@ -329,18 +329,35 @@ pub fn interactive(config: &Config, initial_view: Option<String>) -> Result<()> 
 
 /// Handle actions for a selected message
 /// Returns false if user selected "Back", true otherwise
-fn message_actions(
+async fn message_actions(
     config: &Config,
     db: &MessageDb,
     msg: &crate::messages::Message,
 ) -> Result<bool> {
-    let actions = vec![
-        "Read",
-        "Reply",
-        "Delete",
-        "Mark as Read/Unread",
-        "Back to Messages",
-    ];
+    let mut actions = vec!["Read", "Reply", "Delete", "Mark as Read/Unread"];
+    // If project message addressed to this user, add triage actions inline
+    if let crate::messages::MessageType::Project { .. } = msg.message_type {
+        if msg.to == config.email {
+            actions.push("Run on test data");
+            actions.push("Run on real data");
+            actions.push("Reject");
+            actions.push("Review");
+            actions.push("Approve");
+        }
+        if msg.from == config.email {
+            actions.push("Archive (finalize and revoke write)");
+        }
+    }
+    actions.push("Back to Messages");
+    // Capture dynamic action indexes for later dispatch
+    let idx_run_test = actions.iter().position(|s| *s == "Run on test data");
+    let idx_run_real = actions.iter().position(|s| *s == "Run on real data");
+    let idx_reject = actions.iter().position(|s| *s == "Reject");
+    let idx_review = actions.iter().position(|s| *s == "Review");
+    let idx_approve = actions.iter().position(|s| *s == "Approve");
+    let idx_archive = actions
+        .iter()
+        .position(|s| *s == "Archive (finalize and revoke write)");
 
     let selection = Select::with_theme(&ColorfulTheme::default())
         .with_prompt("Select action")
@@ -351,7 +368,7 @@ fn message_actions(
     match selection {
         Some(0) => {
             // Read
-            super::messages::read_message(config, &msg.id)?;
+            super::messages::read_message(config, &msg.id).await?;
             println!("\nPress Enter to continue...");
             let mut input = String::new();
             io::stdin().read_line(&mut input)?;
@@ -400,11 +417,66 @@ fn message_actions(
             io::stdin().read_line(&mut input)?;
             Ok(false)
         }
-        Some(4) | None => {
-            // Back to messages or ESC pressed
+        // Dispatch dynamic actions if present
+        Some(idx) => {
+            use super::messages::{perform_project_action, ProjectAction};
+            if let Some(i) = idx_run_test {
+                if idx == i {
+                    perform_project_action(config, &msg.id, ProjectAction::RunTest).await?;
+                    println!("\nPress Enter to continue...");
+                    let mut input = String::new();
+                    io::stdin().read_line(&mut input)?;
+                    return Ok(false);
+                }
+            }
+            if let Some(i) = idx_run_real {
+                if idx == i {
+                    perform_project_action(config, &msg.id, ProjectAction::RunReal).await?;
+                    println!("\nPress Enter to continue...");
+                    let mut input = String::new();
+                    io::stdin().read_line(&mut input)?;
+                    return Ok(false);
+                }
+            }
+            if let Some(i) = idx_reject {
+                if idx == i {
+                    perform_project_action(config, &msg.id, ProjectAction::Reject).await?;
+                    println!("\nPress Enter to continue...");
+                    let mut input = String::new();
+                    io::stdin().read_line(&mut input)?;
+                    return Ok(false);
+                }
+            }
+            if let Some(i) = idx_review {
+                if idx == i {
+                    perform_project_action(config, &msg.id, ProjectAction::Review).await?;
+                    println!("\nPress Enter to continue...");
+                    let mut input = String::new();
+                    io::stdin().read_line(&mut input)?;
+                    return Ok(false);
+                }
+            }
+            if let Some(i) = idx_approve {
+                if idx == i {
+                    perform_project_action(config, &msg.id, ProjectAction::Approve).await?;
+                    println!("\nPress Enter to continue...");
+                    let mut input = String::new();
+                    io::stdin().read_line(&mut input)?;
+                    return Ok(false);
+                }
+            }
+            if let Some(i) = idx_archive {
+                if idx == i {
+                    super::messages::read_message(config, &msg.id).await?; // Archive via read view
+                    println!("\nPress Enter to continue...");
+                    let mut input = String::new();
+                    io::stdin().read_line(&mut input)?;
+                    return Ok(false);
+                }
+            }
             Ok(false)
         }
-        _ => Ok(false),
+        None => Ok(false),
     }
 }
 

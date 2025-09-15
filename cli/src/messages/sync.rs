@@ -159,6 +159,49 @@ impl MessageSync {
                 new_message_ids.push(msg.id.clone());
             }
 
+            // Process status-update requests to update original message metadata
+            // Status update: detect via metadata.status_update and update original message metadata
+            if let Some(meta) = &msg.metadata {
+                if let Some(update) = meta.get("status_update") {
+                    if let (Some(orig_id), Some(status)) = (
+                        update.get("message_id").and_then(|v| v.as_str()),
+                        update.get("status").and_then(|v| v.as_str()),
+                    ) {
+                        if let Some(mut orig) = self.db.get_message(orig_id)? {
+                            // Work on a cloned metadata value to avoid moving out of 'orig'
+                            let mut md = orig.metadata.clone().unwrap_or(serde_json::json!({}));
+                            // Ensure object shape
+                            if !md.is_object() {
+                                md = serde_json::json!({});
+                            }
+                            if let Some(obj) = md.as_object_mut() {
+                                obj.insert(
+                                    "remote_status".to_string(),
+                                    serde_json::Value::String(status.to_string()),
+                                );
+                                if let Some(reason) = update.get("reason").and_then(|v| v.as_str())
+                                {
+                                    obj.insert(
+                                        "remote_reason".to_string(),
+                                        serde_json::Value::String(reason.to_string()),
+                                    );
+                                }
+                                if let Some(results_path) =
+                                    meta.get("results_path").and_then(|v| v.as_str())
+                                {
+                                    obj.insert(
+                                        "results_path".to_string(),
+                                        serde_json::Value::String(results_path.to_string()),
+                                    );
+                                }
+                            }
+                            orig.metadata = Some(md);
+                            self.db.update_message(&orig)?;
+                        }
+                    }
+                }
+            }
+
             // Send ACK response
             let ack_response = RpcResponse::new(
                 &rpc_request,

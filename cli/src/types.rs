@@ -23,14 +23,26 @@ pub struct AccessControl {
 impl SyftPermissions {
     pub fn new_for_datasite(datasite_email: &str) -> Self {
         SyftPermissions {
-            rules: vec![PermissionRule {
-                pattern: "**".to_string(),
-                access: AccessControl {
-                    read: vec![datasite_email.to_string()],
-                    write: vec![],
-                    admin: vec![],
+            rules: vec![
+                // Global read for the recipient datasite
+                PermissionRule {
+                    pattern: "**".to_string(),
+                    access: AccessControl {
+                        read: vec![datasite_email.to_string()],
+                        write: vec![],
+                        admin: vec![],
+                    },
                 },
-            }],
+                // Allow recipient to write results back into this submission
+                PermissionRule {
+                    pattern: "results/**/*".to_string(),
+                    access: AccessControl {
+                        read: vec![datasite_email.to_string()],
+                        write: vec![datasite_email.to_string()],
+                        admin: vec![],
+                    },
+                },
+            ],
         }
     }
 
