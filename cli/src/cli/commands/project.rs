@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use walkdir::WalkDir;
 
-static EXAMPLES_DIR: Dir = include_dir!("$CARGO_MANIFEST_DIR/../examples");
+static EXAMPLES_DIR: Dir = include_dir!("../examples");
 
 pub async fn create(
     name: Option<String>,
