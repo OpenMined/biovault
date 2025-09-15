@@ -10,3 +10,20 @@ sample_data_urls:
     ref_index_b3sum: "002cf8e0066a2226616b5d9cc09994ac06831cd907e13e521bef6dc69403d147"
     aligned_b3sum: "4556b84f32e58e1a5c4d7238352e9fc0bcaabd2478250733252f2b76047ba3ca"
     aligned_index_b3sum: "6914d3c6842670bdde272b8cc4dfaf858a84f379e9e79d8b24c1a89d577262e2"
+
+  NA06985-chrY:
+    ref_version: GRCh38
+    ref: https://github.com/OpenMined/biovault-data/raw/main/cram/reference/GRCh38_chrY.fa
+    ref_index: https://github.com/OpenMined/biovault-data/raw/main/cram/reference/GRCh38_chrY.fa.fai
+    aligned:
+      - https://github.com/OpenMined/biovault-data/raw/main/cram/NA06985/NA06985.final.chrY.cram.tar.gz.aa
+      - https://github.com/OpenMined/biovault-data/raw/main/cram/NA06985/NA06985.final.chrY.cram.tar.gz.ab
+    aligned_index: https://raw.githubusercontent.com/OpenMined/biovault-data/refs/heads/main/cram/NA06985/NA06985.final.chrY.cram.crai
+    # BLAKE3 checksums for verification (much faster than SHA-256)
+    ref_b3sum: "e99264162b31a3f59e8cf2c1fc81c7b791f60e8fbf68425f70dcecae7e588e36"
+    ref_index_b3sum: "1000a2e4c9465af618eb7433883b203b8ab9f5702b9b9c1f9504a0214090a35a"
+    # Split file checksums for the tar.gz parts
+    aligned_b3sum:
+      - "fc07b607f8373f5bd832dc0d967deaa926b2eb2aee59968657f5c1e30457e3ad"
+      - "1d23cd4a5c8c16805e5a4af602c5c209a83c618f4f133e274bcdbb74d3be5f65"
+    aligned_index_b3sum: "f81bad3f1c7aeb1ed7b8cca3d911b57892f82c9b6a3e57786fcafe7ed64c74ae"
