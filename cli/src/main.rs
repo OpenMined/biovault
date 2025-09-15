@@ -403,7 +403,7 @@ async fn main() -> Result<()> {
                 participant_ids,
                 all,
             } => {
-                commands::sample_data::fetch(participant_ids, all).await?;
+                commands::sample_data::fetch(participant_ids, all, false).await?;
             }
             SampleDataCommands::List => {
                 commands::sample_data::list().await?;

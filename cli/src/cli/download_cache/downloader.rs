@@ -67,15 +67,22 @@ impl DownloadCache {
         target_path: &Path,
         options: DownloadOptions,
     ) -> Result<PathBuf> {
-        println!("📦 Processing: {}", url);
+        let verbose = options.show_progress;
+        if verbose {
+            println!("📦 Processing: {}", url);
+        }
 
         // Check if we have the expected hash in cache
         if let Some(ref expected_hash) = options.checksum_policy.expected_hash {
             if let Some(_hash_entry) = self.manifest.get_by_hash(expected_hash) {
                 let cache_path = self.cache_dir.join("by-hash").join(expected_hash);
                 if cache_path.exists() {
-                    println!("  ✓ Found in cache (hash: {}...)", &expected_hash[..8]);
-                    println!("  ✓ Cache hit! Using cached version");
+                    if verbose {
+                        println!("  ✓ Found in cache (hash: {}...)", &expected_hash[..8]);
+                    }
+                    if verbose {
+                        println!("  ✓ Cache hit! Using cached version");
+                    }
 
                     // Update last accessed time
                     self.manifest.update_last_accessed(expected_hash);
@@ -104,7 +111,9 @@ impl DownloadCache {
 
                 if cache_path.exists() {
                     if options.cache_strategy.check_remote {
-                        println!("  ↻ Checking if remote file has changed...");
+                        if verbose {
+                            println!("  ↻ Checking if remote file has changed...");
+                        }
 
                         // Perform HEAD request to check if file changed
                         let client = reqwest::Client::new();
@@ -132,11 +141,15 @@ impl DownloadCache {
                         };
 
                         if !has_changed {
-                            println!("  ✓ Remote file unchanged");
-                            println!(
-                                "  ✓ Cache hit! Using cached version (hash: {}...)",
-                                &current_hash[..8]
-                            );
+                            if verbose {
+                                println!("  ✓ Remote file unchanged");
+                            }
+                            if verbose {
+                                println!(
+                                    "  ✓ Cache hit! Using cached version (hash: {}...)",
+                                    &current_hash[..8]
+                                );
+                            }
 
                             // Update manifest
                             self.manifest.update_last_accessed(&current_hash);
@@ -152,10 +165,12 @@ impl DownloadCache {
                         }
                     } else {
                         // Not checking remote, use cached version
-                        println!(
-                            "  ✓ Cache hit! Using cached version (hash: {}...)",
-                            &current_hash[..8]
-                        );
+                        if verbose {
+                            println!(
+                                "  ✓ Cache hit! Using cached version (hash: {}...)",
+                                &current_hash[..8]
+                            );
+                        }
 
                         self.manifest.update_last_accessed(&current_hash);
                         self.manifest.increment_reference_count(&current_hash);
@@ -172,7 +187,9 @@ impl DownloadCache {
             };
 
         if should_revalidate {
-            println!("  ↓ Cache miss - downloading file...");
+            if verbose {
+                println!("  ↓ Cache miss - downloading file...");
+            }
 
             // Download to temporary location
             let temp_path = self
@@ -186,10 +203,14 @@ impl DownloadCache {
                 .await?;
 
             // Calculate hash
-            print!("  ⟳ Computing BLAKE3 checksum... ");
-            std::io::Write::flush(&mut std::io::stdout())?;
+            if verbose {
+                print!("  ⟳ Computing BLAKE3 checksum... ");
+                std::io::Write::flush(&mut std::io::stdout())?;
+            }
             let actual_hash = calculate_blake3(&temp_path)?;
-            println!("done ({}...)", &actual_hash[..8]);
+            if verbose {
+                println!("done ({}...)", &actual_hash[..8]);
+            }
 
             // Validate checksum if required
             match options.checksum_policy.policy_type {
@@ -206,16 +227,26 @@ impl DownloadCache {
                             &actual_hash[..8]
                         ));
                     }
-                    println!("  ✓ Checksum verified");
+                    if verbose {
+                        println!("  ✓ Checksum verified");
+                    }
                 }
                 ChecksumPolicyType::Preferred => {
                     if let Some(expected) = &options.checksum_policy.expected_hash {
                         if &actual_hash != expected {
-                            println!("  ⚠ Warning: Checksum mismatch!");
-                            println!("    Expected: {}...", &expected[..8]);
-                            println!("    Got:      {}...", &actual_hash[..8]);
-                            println!("  ⚠ Continuing anyway (policy: preferred)");
-                        } else {
+                            if verbose {
+                                println!("  ⚠ Warning: Checksum mismatch!");
+                            }
+                            if verbose {
+                                println!("    Expected: {}...", &expected[..8]);
+                            }
+                            if verbose {
+                                println!("    Got:      {}...", &actual_hash[..8]);
+                            }
+                            if verbose {
+                                println!("  ⚠ Continuing anyway (policy: preferred)");
+                            }
+                        } else if verbose {
                             println!("  ✓ Checksum verified");
                         }
                     }
@@ -231,11 +262,15 @@ impl DownloadCache {
 
             if cache_path.exists() {
                 // File already in cache (possibly from another URL)
-                println!("  ✓ File already in cache with same content");
+                if verbose {
+                    println!("  ✓ File already in cache with same content");
+                }
                 fs::remove_file(&temp_path)?;
             } else {
                 fs::rename(&temp_path, &cache_path)?;
-                println!("  ✓ Added to cache");
+                if verbose {
+                    println!("  ✓ Added to cache");
+                }
             }
 
             // Update manifest
@@ -252,7 +287,9 @@ impl DownloadCache {
 
             // Link or copy to target
             link_or_copy(&cache_path, target_path)?;
-            println!("  ✓ File ready at: {}", target_path.display());
+            if verbose {
+                println!("  ✓ File ready at: {}", target_path.display());
+            }
 
             Ok(target_path.to_path_buf())
         } else {
