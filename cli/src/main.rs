@@ -171,6 +171,15 @@ enum ProjectCommands {
 
         #[arg(long, help = "Folder path (defaults to ./{name})")]
         folder: Option<String>,
+
+        #[arg(long = "haplo-y", help = "Use embedded haplo-y example template")]
+        haplo_y: bool,
+
+        #[arg(long = "eye-color", help = "Use embedded eye-color example template")]
+        eye_color: bool,
+
+        #[arg(long = "red-hair", help = "Use embedded red-hair example template")]
+        red_hair: bool,
     },
 }
 
@@ -372,8 +381,14 @@ async fn main() -> Result<()> {
             commands::setup::execute().await?;
         }
         Commands::Project { command } => match command {
-            ProjectCommands::Create { name, folder } => {
-                commands::project::create(name, folder).await?;
+            ProjectCommands::Create {
+                name,
+                folder,
+                haplo_y,
+                eye_color,
+                red_hair,
+            } => {
+                commands::project::create(name, folder, haplo_y, eye_color, red_hair).await?;
             }
         },
         Commands::Run {

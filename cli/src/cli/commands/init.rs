@@ -126,6 +126,26 @@ pub async fn execute(email: Option<&str>) -> Result<()> {
         info!("Created nextflow.config at: {:?}", nextflow_config_path);
 
         println!("✓ Nextflow templates installed to: {}", env_dir.display());
+
+        // Initialize SyftBox RPC folders for messaging if SyftBox is configured
+        match config.get_syftbox_data_dir() {
+            Ok(data_dir) => {
+                let app = crate::syftbox::SyftBoxApp::new(&data_dir, &config.email, "biovault")?;
+                // Ensure the message endpoint exists
+                let _ = app.register_endpoint("/message")?;
+                println!(
+                    "✓ SyftBox RPC initialized for messaging at: {}",
+                    app.rpc_dir.display()
+                );
+            }
+            Err(e) => {
+                // Not fatal: user might not be in a SyftBox env yet
+                println!(
+                    "⚠️  Skipped SyftBox RPC init (no data dir): {}\n    Hint: set SYFTBOX_DATA_DIR or configure ~/.syftbox/config.json and re-run 'bv init'",
+                    e
+                );
+            }
+        }
     }
 
     Ok(())

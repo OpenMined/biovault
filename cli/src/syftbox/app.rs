@@ -72,7 +72,7 @@ impl SyftBoxApp {
                     self.app_data_dir
                 )
             })?;
-            println!("Created app_data directory: {:?}", self.app_data_dir);
+            // quiet: avoid noisy output in normal operations
         }
 
         // Create app-level permission file if it doesn't exist
@@ -84,14 +84,14 @@ impl SyftBoxApp {
                     app_permission_file
                 )
             })?;
-            println!("Created app permission file: {:?}", app_permission_file);
+            // quiet
         }
 
         // Create RPC directory if it doesn't exist
         if !self.rpc_dir.exists() {
             fs::create_dir_all(&self.rpc_dir)
                 .with_context(|| format!("Failed to create RPC directory: {:?}", self.rpc_dir))?;
-            println!("Created RPC directory: {:?}", self.rpc_dir);
+            // quiet
         }
 
         // Create RPC permission file if it doesn't exist
@@ -103,7 +103,7 @@ impl SyftBoxApp {
                     rpc_permission_file
                 )
             })?;
-            println!("Created RPC permission file: {:?}", rpc_permission_file);
+            // quiet
         }
 
         Ok(())
@@ -124,7 +124,7 @@ impl SyftBoxApp {
             fs::create_dir_all(&endpoint_dir).with_context(|| {
                 format!("Failed to create endpoint directory: {:?}", endpoint_dir)
             })?;
-            println!("Registered endpoint: {}", endpoint_name);
+            // quiet
         }
 
         Ok(endpoint_dir)
