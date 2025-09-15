@@ -1,7 +1,7 @@
 use super::check::DependencyConfig;
 use crate::Result;
 use std::env;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 #[derive(Debug)]
 enum SystemType {
@@ -154,7 +154,12 @@ async fn setup_google_colab() -> Result<()> {
                     if all_succeeded {
                         if let Some(verify_cmd) = &env_config.verify_command {
                             print!("   Verifying installation... ");
-                            let output = Command::new("sh").arg("-c").arg(verify_cmd).output();
+                            let output = Command::new("sh")
+                                .arg("-c")
+                                .arg(verify_cmd)
+                                .stdout(Stdio::piped())
+                                .stderr(Stdio::piped())
+                                .output();
 
                             if let Ok(output) = output {
                                 if output.status.success() {
@@ -267,6 +272,8 @@ async fn setup_macos() -> Result<()> {
                         let verified = Command::new("sh")
                             .arg("-c")
                             .arg(verify_cmd)
+                            .stdout(Stdio::null())
+                            .stderr(Stdio::null())
                             .status()
                             .map(|s| s.success())
                             .unwrap_or(false);
@@ -305,7 +312,12 @@ async fn setup_macos() -> Result<()> {
 
                     for cmd in install_commands {
                         println!("   Running: {}", cmd);
-                        let output = Command::new("sh").arg("-c").arg(cmd).output();
+                        let output = Command::new("sh")
+                            .arg("-c")
+                            .arg(cmd)
+                            .stdout(Stdio::piped())
+                            .stderr(Stdio::piped())
+                            .output();
                         match output {
                             Ok(output) => {
                                 if output.status.success() {
@@ -478,6 +490,8 @@ async fn setup_arch() -> Result<()> {
                         let verified = Command::new("sh")
                             .arg("-c")
                             .arg(verify_cmd)
+                            .stdout(Stdio::null())
+                            .stderr(Stdio::null())
                             .status()
                             .map(|s| s.success())
                             .unwrap_or(false);
@@ -528,6 +542,8 @@ async fn setup_arch() -> Result<()> {
                             let ok = Command::new("sh")
                                 .arg("-c")
                                 .arg(verify_cmd)
+                                .stdout(Stdio::null())
+                                .stderr(Stdio::null())
                                 .status()
                                 .map(|s| s.success())
                                 .unwrap_or(false);
