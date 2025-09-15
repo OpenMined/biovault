@@ -5,6 +5,7 @@ pub mod fastq;
 pub mod inbox;
 pub mod info;
 pub mod init;
+pub mod messages;
 pub mod participant;
 pub mod project;
 pub mod run;
