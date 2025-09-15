@@ -113,6 +113,10 @@ impl Config {
         Ok(config)
     }
 
+    pub fn get_biovault_dir(&self) -> crate::error::Result<PathBuf> {
+        Ok(get_biovault_home()?)
+    }
+
     pub fn get_datasite_path(&self) -> crate::error::Result<PathBuf> {
         let data_dir = self.get_syftbox_data_dir()?;
         Ok(data_dir.join("datasites").join(&self.email))

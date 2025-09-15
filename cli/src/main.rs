@@ -121,24 +121,38 @@ enum Commands {
         destination: String,
     },
 
-    #[command(about = "List or view submitted projects in inbox")]
+    #[command(about = "View and manage inbox messages")]
     Inbox {
-        #[command(subcommand)]
-        action: Option<InboxActions>,
-
-        #[arg(
-            help = "Reference to show details: index (1,2,3...), partial hash (33b4f3), or project name"
-        )]
-        reference: Option<String>,
-
-        #[arg(short, long, help = "Interactive mode with arrow key navigation")]
+        #[arg(short = 'i', long, help = "Interactive mode (default)")]
         interactive: bool,
 
-        #[arg(long, help = "Show all submissions including rejected ones")]
+        #[arg(long, help = "Plain, non-interactive list output")]
+        plain: bool,
+
+        #[arg(short = 's', long, help = "Show sent messages")]
+        sent: bool,
+
+        #[arg(short = 'a', long, help = "Show all messages (including deleted)")]
         all: bool,
 
-        #[arg(long, help = "Show full details for each submission")]
-        full: bool,
+        #[arg(short = 'u', long, help = "Show only unread messages")]
+        unread: bool,
+
+        #[arg(short = 'p', long, help = "Show project submissions")]
+        projects: bool,
+
+        #[arg(
+            short = 't',
+            long,
+            help = "Filter by message type (text/project/request)"
+        )]
+        message_type: Option<String>,
+
+        #[arg(short = 'f', long, help = "Filter by sender")]
+        from: Option<String>,
+
+        #[arg(long, help = "Search messages by content")]
+        search: Option<String>,
     },
 
     #[command(about = "Manage messages via SyftBox RPC")]
@@ -252,27 +266,6 @@ enum ConfigCommands {
 }
 
 #[derive(Subcommand)]
-enum InboxActions {
-    #[command(about = "Reject a submission")]
-    Reject {
-        #[arg(help = "Reference: index (1,2,3...), partial hash, or project name")]
-        reference: String,
-    },
-
-    #[command(about = "Mark a submission for review")]
-    Review {
-        #[arg(help = "Reference: index (1,2,3...), partial hash, or project name")]
-        reference: String,
-    },
-
-    #[command(about = "Test a submission with mock data")]
-    Test {
-        #[arg(help = "Reference: index (1,2,3...), partial hash, or project name")]
-        reference: String,
-    },
-}
-
-#[derive(Subcommand)]
 enum FastqCommands {
     #[command(about = "Combine multiple FASTQ files into one")]
     Combine {
@@ -306,16 +299,46 @@ enum MessageCommands {
 
         #[arg(help = "Message content")]
         message: String,
+
+        #[arg(short = 's', long = "subject", help = "Optional message subject")]
+        subject: Option<String>,
     },
 
-    #[command(about = "Check for incoming messages")]
-    Check,
+    #[command(about = "Reply to a message")]
+    Reply {
+        #[arg(help = "Message ID to reply to")]
+        message_id: String,
 
-    #[command(about = "List all messages (requests and responses)")]
-    List,
+        #[arg(help = "Reply content")]
+        body: String,
+    },
 
-    #[command(about = "Initialize the message endpoint")]
-    Init,
+    #[command(about = "Read a specific message")]
+    Read {
+        #[arg(help = "Message ID to read")]
+        message_id: String,
+    },
+
+    #[command(about = "Delete a message")]
+    Delete {
+        #[arg(help = "Message ID to delete")]
+        message_id: String,
+    },
+
+    #[command(about = "List messages")]
+    List {
+        #[arg(short = 'u', long = "unread", help = "Show only unread messages")]
+        unread: bool,
+    },
+
+    #[command(about = "View a message thread")]
+    Thread {
+        #[arg(help = "Thread ID to view")]
+        thread_id: String,
+    },
+
+    #[command(about = "Sync messages (check for new and update ACKs)")]
+    Sync,
 }
 
 #[tokio::main]
@@ -457,62 +480,71 @@ async fn main() -> Result<()> {
             commands::submit::submit(project_path, destination).await?;
         }
         Commands::Inbox {
-            action,
-            reference,
             interactive,
+            plain,
+            sent,
             all,
-            full,
+            unread,
+            projects,
+            message_type,
+            from,
+            search,
         } => {
-            if let Some(action) = action {
-                match action {
-                    InboxActions::Reject { reference } => {
-                        commands::inbox::reject(Some(reference)).await?;
-                    }
-                    InboxActions::Review { reference } => {
-                        commands::inbox::review(Some(reference)).await?;
-                    }
-                    InboxActions::Test { reference } => {
-                        commands::inbox::test(Some(reference)).await?;
-                    }
-                }
-            } else if interactive {
-                commands::inbox::interactive(all).await?;
-            } else if let Some(ref_str) = reference {
-                commands::inbox::show(&ref_str, all).await?;
+            let config = biovault::config::Config::load()?;
+            // Default behavior: interactive unless --plain is provided
+            if plain && !interactive {
+                let filters = commands::inbox::ListFilters {
+                    sent,
+                    all,
+                    unread,
+                    projects,
+                    message_type,
+                    from,
+                    search,
+                };
+                commands::inbox::list(&config, filters)?;
             } else {
-                commands::inbox::list(all, full).await?;
+                // When both flags are provided, prefer interactive
+                commands::inbox::interactive(&config, None)?;
             }
         }
         Commands::Message { command } => match command {
-            MessageCommands::Send { recipient, message } => {
+            MessageCommands::Send {
+                recipient,
+                message,
+                subject,
+            } => {
                 let config = biovault::config::Config::load()?;
-                commands::messages::send_message(&config, &recipient, &message)?;
+                commands::messages::send_message(
+                    &config,
+                    &recipient,
+                    &message,
+                    subject.as_deref(),
+                )?;
             }
-            MessageCommands::Check => {
+            MessageCommands::Reply { message_id, body } => {
                 let config = biovault::config::Config::load()?;
-                let messages = commands::messages::check_messages(&config)?;
-
-                if messages.is_empty() {
-                    println!("No new messages");
-                } else {
-                    for (sender, payload) in messages {
-                        println!("📨 Message from: {}", sender);
-                        println!("   Content: {}", payload.message);
-                        if let Some(ts) = payload.timestamp {
-                            println!("   Time: {}", ts);
-                        }
-                        println!();
-                    }
-                }
+                commands::messages::reply_message(&config, &message_id, &body)?;
             }
-            MessageCommands::List => {
+            MessageCommands::Read { message_id } => {
                 let config = biovault::config::Config::load()?;
-                commands::messages::list_messages(&config)?;
+                commands::messages::read_message(&config, &message_id)?;
             }
-            MessageCommands::Init => {
+            MessageCommands::Delete { message_id } => {
                 let config = biovault::config::Config::load()?;
-                commands::messages::init_message_endpoint(&config)?;
-                println!("Message endpoint initialized successfully");
+                commands::messages::delete_message(&config, &message_id)?;
+            }
+            MessageCommands::List { unread } => {
+                let config = biovault::config::Config::load()?;
+                commands::messages::list_messages(&config, unread)?;
+            }
+            MessageCommands::Thread { thread_id } => {
+                let config = biovault::config::Config::load()?;
+                commands::messages::view_thread(&config, &thread_id)?;
+            }
+            MessageCommands::Sync => {
+                let config = biovault::config::Config::load()?;
+                commands::messages::sync_messages(&config)?;
             }
         },
     }

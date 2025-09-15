@@ -44,6 +44,7 @@ semver = "1.0"
 self_update = { version = "0.41", default-features = false, features = ["archive-tar", "compression-flate2", "rustls"] }
 rand = "0.8"
 base64 = "0.22"
+rusqlite = { version = "0.32", features = ["bundled", "chrono"] }
 
 [dev-dependencies]
 assert_cmd = "2.0"

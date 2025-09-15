@@ -1,271 +1,263 @@
 use crate::config::Config;
-use crate::syftbox::rpc::{check_requests, process_request, send_response};
-use crate::syftbox::{RpcRequest, RpcResponse, SyftBoxApp};
+use crate::messages::{Message, MessageDb, MessageSync};
 use anyhow::Result;
-use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 const MESSAGE_ENDPOINT: &str = "/message";
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MessagePayload {
-    pub message: String,
-    pub from: Option<String>,
-    pub timestamp: Option<String>,
+/// Get the path to the message database
+pub fn get_message_db_path(config: &Config) -> Result<PathBuf> {
+    let biovault_dir = config.get_biovault_dir()?;
+    let db_path = biovault_dir.join("data").join("messages.db");
+
+    // Ensure the data directory exists
+    if let Some(parent) = db_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    Ok(db_path)
 }
 
-/// Initialize the message endpoint for BioVault
-pub fn init_message_endpoint(config: &Config) -> Result<SyftBoxApp> {
-    let data_dir = config.get_syftbox_data_dir()?;
-    let app = SyftBoxApp::new(&data_dir, &config.email, "biovault")?;
+/// Initialize the message system
+pub fn init_message_system(config: &Config) -> Result<(MessageDb, MessageSync)> {
+    let db_path = get_message_db_path(config)?;
+    let db = MessageDb::new(&db_path)?;
 
-    // Register the message endpoint
+    let data_dir = config.get_syftbox_data_dir()?;
+    let app = crate::syftbox::SyftBoxApp::new(&data_dir, &config.email, "biovault")?;
     app.register_endpoint(MESSAGE_ENDPOINT)?;
 
-    println!("BioVault RPC initialized for {}", config.email);
-    println!(
-        "Message endpoint registered at: {}",
-        app.build_syft_url(MESSAGE_ENDPOINT)
+    let sync = MessageSync::new(&db_path, app)?;
+
+    println!("BioVault messaging initialized for {}", config.email);
+
+    Ok((db, sync))
+}
+
+/// Send a message
+pub fn send_message(
+    config: &Config,
+    recipient: &str,
+    body: &str,
+    subject: Option<&str>,
+) -> Result<()> {
+    let (db, sync) = init_message_system(config)?;
+
+    // Quietly sync first to check for any pending ACKs
+    let _ = sync.sync_quiet();
+
+    // Create the message
+    let mut msg = Message::new(
+        config.email.clone(),
+        recipient.to_string(),
+        body.to_string(),
     );
 
-    Ok(app)
+    if let Some(subj) = subject {
+        msg.subject = Some(subj.to_string());
+    }
+
+    // Save to local database
+    db.insert_message(&msg)?;
+
+    // Send via RPC
+    sync.send_message(&msg.id)?;
+
+    println!("✉️  Message sent to {}", recipient);
+    if let Some(subj) = &msg.subject {
+        println!("   Subject: {}", subj);
+    }
+
+    Ok(())
 }
 
-/// Check for incoming messages
-pub fn check_messages(config: &Config) -> Result<Vec<(String, MessagePayload)>> {
-    let app = init_message_endpoint(config)?;
-    let requests = check_requests(&app, MESSAGE_ENDPOINT)?;
+/// Reply to a message
+pub fn reply_message(config: &Config, message_id: &str, body: &str) -> Result<()> {
+    let (db, sync) = init_message_system(config)?;
 
-    let mut messages = Vec::new();
+    // Quietly sync first to ensure we have the latest messages
+    let _ = sync.sync_quiet();
 
-    for (request_path, request) in requests {
-        // Extract sender from request
-        let sender = request.sender.clone();
+    // Get the original message
+    let original = db
+        .get_message(message_id)?
+        .ok_or_else(|| anyhow::anyhow!("Message not found: {}", message_id))?;
 
-        // Try to parse the message payload
-        match request.body_as_json::<MessagePayload>() {
-            Ok(payload) => {
-                messages.push((sender.clone(), payload));
+    // Create reply
+    let reply = Message::reply_to(&original, config.email.clone(), body.to_string());
 
-                // Send acknowledgment response
-                let response = RpcResponse::ok_json(
-                    &request,
-                    config.email.clone(),
-                    &serde_json::json!({
-                        "status": "received",
-                        "message": "Message received successfully"
-                    }),
-                )?;
+    // Save to local database
+    db.insert_message(&reply)?;
 
-                send_response(&app, MESSAGE_ENDPOINT, &request_path, &response)?;
-            }
-            Err(e) => {
-                eprintln!("Failed to parse message from {}: {}", sender, e);
+    // Send via RPC
+    sync.send_message(&reply.id)?;
 
-                // Send error response
-                let error_response = RpcResponse::error(
-                    &request,
-                    config.email.clone(),
-                    400,
-                    "Invalid message format",
-                );
+    println!("↩️  Reply sent to {}", reply.to);
 
-                send_response(&app, MESSAGE_ENDPOINT, &request_path, &error_response)?;
-            }
-        }
-    }
-
-    if !messages.is_empty() {
-        println!("Received {} new message(s)", messages.len());
-    }
-
-    Ok(messages)
+    Ok(())
 }
 
-/// Send a message to another datasite
-pub fn send_message(config: &Config, recipient_email: &str, message: &str) -> Result<()> {
-    let data_dir = config.get_syftbox_data_dir()?;
+/// Delete a message
+pub fn delete_message(config: &Config, message_id: &str) -> Result<()> {
+    let (db, _) = init_message_system(config)?;
 
-    // Build path to recipient's BioVault RPC directory
-    let recipient_app_dir = data_dir
-        .join("datasites")
-        .join(recipient_email)
-        .join("app_data")
-        .join("biovault");
+    // First get the message to ensure it exists and get the full ID
+    let msg = db
+        .get_message(message_id)?
+        .ok_or_else(|| anyhow::anyhow!("Message not found: {}", message_id))?;
 
-    let recipient_rpc_dir = recipient_app_dir.join("rpc");
+    // Now delete with the full ID
+    db.delete_message(&msg.id)?;
 
-    // Check if recipient has BioVault app directory
-    if !recipient_app_dir.exists() {
-        return Err(anyhow::anyhow!(
-            "Recipient {} has not installed BioVault. Directory not found: {:?}",
-            recipient_email,
-            recipient_app_dir
-        ));
+    println!(
+        "🗑️  Message deleted: {} ({})",
+        &msg.id[..8],
+        msg.display_subject()
+    );
+
+    Ok(())
+}
+
+/// List messages
+pub fn list_messages(config: &Config, unread_only: bool) -> Result<()> {
+    let (db, sync) = init_message_system(config)?;
+
+    // Quietly sync to get latest messages and show notification if new
+    let (_new_msg_ids, count) = sync.sync_quiet()?;
+    if count > 0 {
+        println!("🆕 {} new message(s) received", count);
     }
 
-    // Create app-level permission file if it doesn't exist
-    let app_permission_file = recipient_app_dir.join("syft.pub.yaml");
-    if !app_permission_file.exists() {
-        std::fs::write(
-            &app_permission_file,
-            crate::syftbox::app::DEFAULT_APP_PERMISSION_CONTENT,
-        )?;
-        println!("Created app permission file: {:?}", app_permission_file);
-    }
-
-    // Create RPC directory if it doesn't exist
-    if !recipient_rpc_dir.exists() {
-        std::fs::create_dir_all(&recipient_rpc_dir)?;
-        println!(
-            "Created RPC directory for recipient: {:?}",
-            recipient_rpc_dir
-        );
-
-        // Create permission file for RPC directory
-        let rpc_permission_file = recipient_rpc_dir.join("syft.pub.yaml");
-        if !rpc_permission_file.exists() {
-            std::fs::write(
-                &rpc_permission_file,
-                crate::syftbox::app::DEFAULT_RPC_PERMISSION_CONTENT,
-            )?;
-            println!("Created RPC permission file: {:?}", rpc_permission_file);
-        }
-    }
-
-    // Create the message endpoint directory if it doesn't exist
-    let recipient_endpoint_dir = recipient_rpc_dir.join("message");
-    if !recipient_endpoint_dir.exists() {
-        std::fs::create_dir_all(&recipient_endpoint_dir)?;
-        println!(
-            "Created message endpoint for recipient: {:?}",
-            recipient_endpoint_dir
-        );
-    }
-
-    // Create the message payload
-    let payload = MessagePayload {
-        message: message.to_string(),
-        from: Some(config.email.clone()),
-        timestamp: Some(chrono::Utc::now().to_rfc3339()),
+    let messages = if unread_only {
+        db.list_unread_messages()?
+    } else {
+        db.list_messages(Some(50))?
     };
 
-    let payload_json = serde_json::to_vec(&payload)?;
+    if messages.is_empty() {
+        if unread_only {
+            println!("No unread messages");
+        } else {
+            println!("No messages");
+        }
+        return Ok(());
+    }
 
-    // Build the recipient's syft URL
-    let recipient_url = format!("syft://{}/app_data/biovault/rpc/message", recipient_email);
+    println!("\n📬 Messages:");
+    println!("─────────────");
 
-    // Create the request
-    let request = RpcRequest::new(
-        config.email.clone(),
-        recipient_url,
-        "POST".to_string(),
-        payload_json,
-    );
+    for msg in messages {
+        let status_icon = match msg.status {
+            crate::messages::MessageStatus::Draft => "📝",
+            crate::messages::MessageStatus::Sent => "📤",
+            crate::messages::MessageStatus::Received => "📥",
+            crate::messages::MessageStatus::Read => "👁️",
+            crate::messages::MessageStatus::Deleted => "🗑️",
+            crate::messages::MessageStatus::Archived => "📁",
+        };
 
-    // Write the request directly to the recipient's endpoint
-    let request_filename = format!("{}.request", request.id);
-    let request_path = recipient_endpoint_dir.join(request_filename);
+        println!("\n{} [{}]", status_icon, &msg.id[..8]);
+        println!("  From: {}", msg.from);
+        println!("  To: {}", msg.to);
+        println!("  Subject: {}", msg.display_subject());
+        // Convert to local time
+        let local_time = msg.created_at.with_timezone(&chrono::Local);
+        println!("  Date: {}", local_time.format("%Y-%m-%d %H:%M:%S %Z"));
 
-    let request_json = serde_json::to_string_pretty(&request)?;
-    std::fs::write(&request_path, request_json)?;
+        // Show first 100 chars of body
+        let preview = if msg.body.len() > 100 {
+            format!("{}...", &msg.body[..100])
+        } else {
+            msg.body.clone()
+        };
+        println!("  Body: {}", preview);
 
-    println!(
-        "Message sent to {} (request ID: {})",
-        recipient_email, request.id
-    );
-    println!("Request file: {:?}", request_path);
-
-    Ok(())
-}
-
-/// Process incoming messages with a custom handler
-pub fn process_messages<F>(config: &Config, handler: F) -> Result<()>
-where
-    F: Fn(&str, &MessagePayload) -> Result<String>,
-{
-    let app = init_message_endpoint(config)?;
-    let requests = check_requests(&app, MESSAGE_ENDPOINT)?;
-
-    for (request_path, request) in requests {
-        let sender = request.sender.clone();
-
-        process_request(
-            &app,
-            MESSAGE_ENDPOINT,
-            &request_path,
-            &request,
-            |req| match req.body_as_json::<MessagePayload>() {
-                Ok(payload) => match handler(&sender, &payload) {
-                    Ok(response_message) => RpcResponse::ok_json(
-                        req,
-                        config.email.clone(),
-                        &serde_json::json!({
-                            "status": "processed",
-                            "response": response_message
-                        }),
-                    ),
-                    Err(e) => Ok(RpcResponse::error(
-                        req,
-                        config.email.clone(),
-                        500,
-                        &format!("Error processing message: {}", e),
-                    )),
-                },
-                Err(e) => Ok(RpcResponse::error(
-                    req,
-                    config.email.clone(),
-                    400,
-                    &format!("Invalid message format: {}", e),
-                )),
-            },
-        )?;
+        if msg.parent_id.is_some() {
+            println!("  ↩️  Reply to: {}", msg.parent_id.as_ref().unwrap());
+        }
     }
 
     Ok(())
 }
 
-/// List all messages (requests and responses) in the message endpoint
-pub fn list_messages(config: &Config) -> Result<()> {
-    let app = init_message_endpoint(config)?;
+/// Read a specific message
+pub fn read_message(config: &Config, message_id: &str) -> Result<()> {
+    let (db, sync) = init_message_system(config)?;
 
-    // Check for incoming requests
-    let requests = check_requests(&app, MESSAGE_ENDPOINT)?;
+    // Quietly sync first in case there are new messages
+    let _ = sync.sync_quiet();
 
-    if !requests.is_empty() {
-        println!("\n📥 Incoming Messages (Requests):");
-        for (_, request) in requests {
-            println!("  ID: {}", request.id);
-            println!("  From: {}", request.sender);
-            println!("  Created: {}", request.created);
+    let msg = db
+        .get_message(message_id)?
+        .ok_or_else(|| anyhow::anyhow!("Message not found: {}", message_id))?;
 
-            if let Ok(payload) = request.body_as_json::<MessagePayload>() {
-                println!("  Message: {}", payload.message);
-            }
-            println!();
-        }
-    } else {
-        println!("No incoming messages");
+    // Mark as read if it was received
+    if msg.status == crate::messages::MessageStatus::Received {
+        db.mark_as_read(message_id)?;
     }
 
-    // Check for responses to messages we sent
-    let responses = crate::syftbox::rpc::check_responses(&app, MESSAGE_ENDPOINT)?;
+    println!("\n📧 Message Details");
+    println!("═══════════════════");
+    println!("ID: {}", msg.id);
+    println!("From: {}", msg.from);
+    println!("To: {}", msg.to);
+    println!("Subject: {}", msg.display_subject());
+    let local_time = msg.created_at.with_timezone(&chrono::Local);
+    println!("Date: {}", local_time.format("%Y-%m-%d %H:%M:%S %Z"));
 
-    if !responses.is_empty() {
-        println!("\n📤 Message Responses:");
-        for (_, response) in responses {
-            println!("  ID: {}", response.id);
-            println!("  From: {}", response.sender);
-            println!("  Status: {}", response.status_code);
-            println!("  Created: {}", response.created);
-
-            if let Ok(body) = response.body_as_string() {
-                println!("  Response: {}", body);
-            }
-            println!();
-        }
-    } else {
-        println!("No message responses");
+    if let Some(parent_id) = &msg.parent_id {
+        println!("Reply to: {}", parent_id);
     }
+
+    if let Some(thread_id) = &msg.thread_id {
+        println!("Thread: {}", thread_id);
+    }
+
+    println!("\nBody:");
+    println!("─────");
+    println!("{}", msg.body);
+
+    Ok(())
+}
+
+/// View a message thread
+pub fn view_thread(config: &Config, thread_id: &str) -> Result<()> {
+    let (db, sync) = init_message_system(config)?;
+
+    // Quietly sync to get latest messages in thread
+    let _ = sync.sync_quiet();
+
+    let messages = db.get_thread_messages(thread_id)?;
+
+    if messages.is_empty() {
+        println!("No messages found in thread: {}", thread_id);
+        return Ok(());
+    }
+
+    println!("\n💬 Thread: {}", thread_id);
+    println!("═══════════════════════════");
+
+    for msg in messages {
+        let local_time = msg.created_at.with_timezone(&chrono::Local);
+        println!("\n[{}] {}", local_time.format("%Y-%m-%d %H:%M"), msg.from);
+
+        if let Some(subj) = &msg.subject {
+            println!("Subject: {}", subj);
+        }
+
+        println!("{}", msg.body);
+        println!("─────────────────────");
+    }
+
+    Ok(())
+}
+
+/// Sync messages (check for new incoming and update ACKs)
+pub fn sync_messages(config: &Config) -> Result<()> {
+    let (_, sync) = init_message_system(config)?;
+
+    println!("🔄 Syncing messages...");
+    sync.sync()?;
 
     Ok(())
 }
@@ -283,51 +275,67 @@ mod tests {
     }
 
     #[test]
-    fn test_init_message_endpoint() -> Result<()> {
+    fn test_init_message_system() -> Result<()> {
         let temp_dir = TempDir::new()?;
         crate::config::set_test_syftbox_data_dir(temp_dir.path());
+        crate::config::set_test_biovault_home(temp_dir.path().join(".biovault_test"));
         let config = create_test_config();
 
-        let app = init_message_endpoint(&config)?;
-        assert!(app.endpoint_exists(MESSAGE_ENDPOINT));
+        // Initialize the message system
+        let db_path = get_message_db_path(&config)?;
+        let db = MessageDb::new(&db_path)?;
+
+        // Test that we can list messages (should be empty in fresh test DB)
+        let messages = db.list_messages(None)?;
+        assert_eq!(messages.len(), 0);
 
         Ok(())
     }
 
     #[test]
-    fn test_send_and_check_messages() -> Result<()> {
+    fn test_message_crud() -> Result<()> {
         let temp_dir = TempDir::new()?;
         crate::config::set_test_syftbox_data_dir(temp_dir.path());
+        crate::config::set_test_biovault_home(temp_dir.path().join(".biovault_test"));
         let config = create_test_config();
 
-        // Create recipient's endpoint directory first
-        let recipient_rpc_dir = temp_dir
-            .path()
-            .join("datasites")
-            .join("recipient@example.com")
-            .join("app_data")
-            .join("biovault")
-            .join("rpc")
-            .join("message");
-        std::fs::create_dir_all(&recipient_rpc_dir)?;
+        // Initialize just the database, not the full system (to avoid sync)
+        let db_path = get_message_db_path(&config)?;
+        let db = MessageDb::new(&db_path)?;
 
-        // Send a message
-        send_message(&config, "recipient@example.com", "Hello from test")?;
+        // Create a message
+        let msg = Message::new(
+            "test@example.com".to_string(),
+            "recipient@example.com".to_string(),
+            "Test message body".to_string(),
+        );
 
-        // The message should appear in the recipient's endpoint
-        let request_files: Vec<_> = std::fs::read_dir(&recipient_rpc_dir)?
-            .filter_map(|entry| entry.ok())
-            .filter(|entry| {
-                entry
-                    .path()
-                    .extension()
-                    .and_then(|ext| ext.to_str())
-                    .map(|ext| ext == "request")
-                    .unwrap_or(false)
-            })
-            .collect();
+        // Insert
+        db.insert_message(&msg)?;
 
-        assert_eq!(request_files.len(), 1);
+        // Read
+        let retrieved = db.get_message(&msg.id)?;
+        assert!(retrieved.is_some());
+        assert_eq!(retrieved.unwrap().body, "Test message body");
+
+        // List
+        let messages = db.list_messages(None)?;
+        assert_eq!(messages.len(), 1);
+
+        // Delete
+        db.delete_message(&msg.id)?;
+
+        // Verify it's marked as deleted (soft delete)
+        let deleted_msg = db.get_message(&msg.id)?;
+        assert!(deleted_msg.is_some());
+        assert_eq!(
+            deleted_msg.unwrap().status,
+            crate::messages::MessageStatus::Deleted
+        );
+
+        // Verify it doesn't show in normal list
+        let messages_after_delete = db.list_messages(None)?;
+        assert_eq!(messages_after_delete.len(), 0);
 
         Ok(())
     }
