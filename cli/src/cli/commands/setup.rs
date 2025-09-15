@@ -152,7 +152,7 @@ async fn setup_google_colab() -> Result<()> {
 
                     // Verify installation if verification command is provided
                     if all_succeeded {
-                    if let Some(verify_cmd) = &env_config.verify_command {
+                        if let Some(verify_cmd) = &env_config.verify_command {
                             print!("   Verifying installation... ");
                             let output = Command::new("sh")
                                 .arg("-c")
@@ -312,12 +312,12 @@ async fn setup_macos() -> Result<()> {
 
                     for cmd in install_commands {
                         println!("   Running: {}", cmd);
-                            let output = Command::new("sh")
-                                .arg("-c")
-                                .arg(cmd)
-                                .stdout(Stdio::piped())
-                                .stderr(Stdio::piped())
-                                .output();
+                        let output = Command::new("sh")
+                            .arg("-c")
+                            .arg(cmd)
+                            .stdout(Stdio::piped())
+                            .stderr(Stdio::piped())
+                            .output();
                         match output {
                             Ok(output) => {
                                 if output.status.success() {

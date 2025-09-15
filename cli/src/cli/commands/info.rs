@@ -1,8 +1,8 @@
 use crate::Result;
-use sysinfo::{Disks, System};
 use std::collections::HashMap;
 #[cfg(target_family = "unix")]
 use std::os::unix::fs::MetadataExt;
+use sysinfo::{Disks, System};
 
 pub async fn execute() -> Result<()> {
     let mut sys = System::new_all();
@@ -38,17 +38,8 @@ pub async fn execute() -> Result<()> {
 
     // Filesystems to ignore when reporting free space
     let virtual_fs: [&str; 11] = [
-        "tmpfs",
-        "devtmpfs",
-        "proc",
-        "sysfs",
-        "efivarfs",
-        "cgroup",
-        "cgroup2",
-        "overlay",
-        "squashfs",
-        "ramfs",
-        "zram",
+        "tmpfs", "devtmpfs", "proc", "sysfs", "efivarfs", "cgroup", "cgroup2", "overlay",
+        "squashfs", "ramfs", "zram",
     ];
 
     #[cfg(target_family = "unix")]
