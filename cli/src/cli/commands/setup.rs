@@ -7,6 +7,7 @@ use std::process::Command;
 enum SystemType {
     GoogleColab,
     MacOs,
+    ArchLinux,
     Unknown,
 }
 
@@ -25,11 +26,16 @@ pub async fn execute() -> Result<()> {
             println!("✓ Detected macOS environment");
             setup_macos().await?;
         }
+        SystemType::ArchLinux => {
+            println!("✓ Detected Arch Linux environment");
+            setup_arch().await?;
+        }
         SystemType::Unknown => {
             println!("ℹ️  System type not detected or not supported for automated setup");
             println!("   This command currently supports:");
             println!("   - Google Colab");
             println!("   - macOS (Homebrew)");
+            println!("   - Arch Linux (pacman)");
             println!("\n   For manual setup, please run: bv check");
         }
     }
@@ -46,6 +52,19 @@ fn detect_system() -> SystemType {
     // Detect macOS
     if std::env::consts::OS == "macos" {
         return SystemType::MacOs;
+    }
+
+    // Detect Arch Linux by presence of pacman on Linux
+    if std::env::consts::OS == "linux" {
+        let has_pacman = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("command -v pacman >/dev/null 2>&1")
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if has_pacman {
+            return SystemType::ArchLinux;
+        }
     }
 
     SystemType::Unknown
@@ -408,4 +427,149 @@ fn parse_java_version(output: &str) -> Option<u32> {
         }
     }
     None
+}
+
+async fn setup_arch() -> Result<()> {
+    use super::check::DependencyConfig;
+    use std::process::Command;
+
+    println!("\nSetting up Arch Linux environment...\n");
+
+    // Ensure pacman exists
+    let pacman_exists = Command::new("sh")
+        .arg("-c")
+        .arg("command -v pacman >/dev/null 2>&1")
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !pacman_exists {
+        println!("❌ pacman not found. This setup targets Arch Linux.");
+        println!("Please ensure you're on Arch/Manjaro with pacman available.");
+        return Ok(());
+    }
+
+    let deps_yaml = include_str!("../../deps.yaml");
+    let config: DependencyConfig = serde_yaml::from_str(deps_yaml)?;
+
+    let mut success_count = 0;
+    let mut skip_count = 0;
+    let mut fail_count = 0;
+
+    for dep in &config.dependencies {
+        if let Some(envs) = &dep.environments {
+            if let Some(env_cfg) = envs.get("arch") {
+                if env_cfg.skip {
+                    println!(
+                        "⏭️  Skipping {}: {}",
+                        dep.name,
+                        env_cfg
+                            .skip_reason
+                            .as_ref()
+                            .unwrap_or(&"Not needed on Arch".to_string())
+                    );
+                    skip_count += 1;
+                    continue;
+                }
+
+                if let Some(install_commands) = &env_cfg.install_commands {
+                    // Determine if installation is required
+                    let mut need_install = true;
+                    if let Some(verify_cmd) = &env_cfg.verify_command {
+                        let verified = Command::new("sh")
+                            .arg("-c")
+                            .arg(verify_cmd)
+                            .status()
+                            .map(|s| s.success())
+                            .unwrap_or(false);
+                        if verified {
+                            need_install = false;
+                        }
+                    } else if which::which(&dep.name).is_ok() {
+                        need_install = false;
+                    }
+
+                    if dep.name == "java" {
+                        if let Some(min_v) = dep.min_version {
+                            if let Some(current) = java_major_version() {
+                                if current >= min_v {
+                                    need_install = false;
+                                }
+                            }
+                        }
+                    }
+
+                    if !need_install {
+                        println!("✓ {} already meets requirements. Skipping.", dep.name);
+                        skip_count += 1;
+                        println!();
+                        continue;
+                    }
+
+                    println!("📦 Installing {}...", dep.name);
+                    println!("   {}", dep.description);
+
+                    let mut all_ok = true;
+                    for cmd in install_commands {
+                        println!("   Running: {}", cmd);
+                        let status = Command::new("sh").arg("-c").arg(cmd).status();
+                        match status {
+                            Ok(s) if s.success() => println!("   ✓ Command succeeded"),
+                            Ok(_) | Err(_) => {
+                                println!("   ❌ Command failed");
+                                all_ok = false;
+                                break;
+                            }
+                        }
+                    }
+
+                    if all_ok {
+                        if let Some(verify_cmd) = &env_cfg.verify_command {
+                            print!("   Verifying installation... ");
+                            let ok = Command::new("sh")
+                                .arg("-c")
+                                .arg(verify_cmd)
+                                .status()
+                                .map(|s| s.success())
+                                .unwrap_or(false);
+                            if ok {
+                                println!("✓");
+                                success_count += 1;
+                            } else {
+                                println!("❌ Verification failed");
+                                fail_count += 1;
+                            }
+                        } else {
+                            success_count += 1;
+                        }
+                    } else {
+                        fail_count += 1;
+                    }
+
+                    println!();
+                }
+            }
+        }
+    }
+
+    println!("\nNotes:");
+    println!("- For Docker on Arch, you may need to enable and start the daemon: 'sudo systemctl enable --now docker' and add your user to the docker group.");
+
+    println!("\nSyftBox:");
+    println!("The installer has been invoked in setup-only mode if needed.");
+    println!("If you want to set up later: syftbox login; syftbox");
+
+    println!("\n==========================");
+    println!("Setup Summary:");
+    println!("  ✓ Installed: {}", success_count);
+    println!("  ⏭️  Skipped: {}", skip_count);
+    if fail_count > 0 {
+        println!("  ❌ Failed: {}", fail_count);
+        println!("\n⚠️  Some installations failed. Please check the errors above.");
+    } else {
+        println!(
+            "\n✅ Setup completed successfully!\n   Run 'bv check' to verify all dependencies."
+        );
+    }
+
+    Ok(())
 }
