@@ -26,6 +26,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    #[command(about = "Check for updates and install the latest version")]
+    Update,
     #[command(about = "Initialize a new BioVault repository")]
     Init {
         #[arg(
@@ -300,7 +302,13 @@ async fn main() -> Result<()> {
         .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(filter_level)))
         .init();
 
+    // Random version check on startup (10% chance)
+    let _ = commands::update::check_and_notify_random().await;
+
     match cli.command {
+        Commands::Update => {
+            commands::update::execute().await?;
+        }
         Commands::Init { email } => {
             commands::init::execute(email.as_deref()).await?;
         }
