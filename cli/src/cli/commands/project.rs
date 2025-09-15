@@ -2,14 +2,47 @@ use crate::error::Result;
 use crate::types::InboxSubmission;
 use colored::Colorize;
 use dialoguer::{theme::ColorfulTheme, Confirm, MultiSelect, Select};
+use include_dir::{include_dir, Dir};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use walkdir::WalkDir;
 
-pub async fn create(name: Option<String>, folder: Option<String>) -> Result<()> {
+static EXAMPLES_DIR: Dir = include_dir!("$CARGO_MANIFEST_DIR/../examples");
+
+pub async fn create(
+    name: Option<String>,
+    folder: Option<String>,
+    haplo_y: bool,
+    eye_color: bool,
+    red_hair: bool,
+) -> Result<()> {
+    // Determine if a template flag was provided
+    let mut selected_template: Option<&str> = None;
+    if haplo_y {
+        selected_template = Some("haplo-y");
+    }
+    if eye_color {
+        if selected_template.is_some() {
+            return Err(crate::error::Error::Anyhow(anyhow::anyhow!(
+                "Multiple templates specified. Please choose only one of --haplo-y, --eye-color, or --red-hair"
+            )));
+        }
+        selected_template = Some("eye-color");
+    }
+    if red_hair {
+        if selected_template.is_some() {
+            return Err(crate::error::Error::Anyhow(anyhow::anyhow!(
+                "Multiple templates specified. Please choose only one of --haplo-y, --eye-color, or --red-hair"
+            )));
+        }
+        selected_template = Some("red-hair");
+    }
+
     // Determine project name
-    let project_name = if let Some(n) = name {
+    let project_name = if let Some(template) = selected_template {
+        template.to_string()
+    } else if let Some(n) = name {
         n
     } else {
         println!("Enter project name:");
@@ -29,38 +62,78 @@ pub async fn create(name: Option<String>, folder: Option<String>) -> Result<()> 
         )));
     }
 
-    // Create folders
+    // Create base folder
     fs::create_dir_all(project_path)?;
-    fs::create_dir_all(project_path.join("assets"))?;
 
-    // Load user email from config (if available)
-    let email = match crate::config::Config::load() {
-        Ok(cfg) => cfg.email,
-        Err(_) => std::env::var("SYFTBOX_EMAIL").unwrap_or_else(|_| "".to_string()),
-    };
+    if let Some(template) = selected_template {
+        // Copy embedded example directory recursively
+        let example_dir = EXAMPLES_DIR.get_dir(template).ok_or_else(|| {
+            crate::error::Error::Anyhow(anyhow::anyhow!(
+                "Embedded example '{}' not found",
+                template
+            ))
+        })?;
 
-    // Write project.yaml from template
-    let tmpl = include_str!("../../templates/project.yaml");
-    let project_yaml = tmpl
-        .replace("{project_name}", &project_name)
-        .replace("{email}", &email);
-    fs::write(project_path.join("project.yaml"), project_yaml)?;
+        copy_embedded_dir(example_dir, example_dir.path(), project_path)?;
+        println!(
+            "✅ Created project '{}' in {} from template '{}'",
+            project_name, project_folder, template
+        );
+    } else {
+        // Load user email from config (if available)
+        let email = match crate::config::Config::load() {
+            Ok(cfg) => cfg.email,
+            Err(_) => std::env::var("SYFTBOX_EMAIL").unwrap_or_else(|_| "".to_string()),
+        };
 
-    // Write workflow.nf from template (scaffold)
-    let workflow_tmpl = include_str!("../../templates/workflow.nf");
-    fs::write(project_path.join("workflow.nf"), workflow_tmpl)?;
+        // Write project.yaml from template
+        let tmpl = include_str!("../../templates/project.yaml");
+        let project_yaml = tmpl
+            .replace("{project_name}", &project_name)
+            .replace("{email}", &email);
+        fs::write(project_path.join("project.yaml"), project_yaml)?;
 
-    println!(
-        "✅ Created project '{}' in {}",
-        project_name, project_folder
-    );
-    println!("   - project.yaml");
-    println!("   - workflow.nf");
-    println!("   - assets/ (empty)");
-    println!("\nNext steps:");
-    println!("   1. cd {}", project_folder);
-    println!("   2. Edit workflow.nf in your project");
-    println!("   3. Run with: bv run . <participants>");
+        // Write workflow.nf from template (scaffold)
+        let workflow_tmpl = include_str!("../../templates/workflow.nf");
+        fs::write(project_path.join("workflow.nf"), workflow_tmpl)?;
+
+        // Ensure assets directory exists for scaffold
+        fs::create_dir_all(project_path.join("assets"))?;
+
+        println!(
+            "✅ Created project '{}' in {}",
+            project_name, project_folder
+        );
+        println!("   - project.yaml");
+        println!("   - workflow.nf");
+        println!("   - assets/ (empty)");
+        println!("\nNext steps:");
+        println!("   1. cd {}", project_folder);
+        println!("   2. Edit workflow.nf in your project");
+        println!("   3. Run with: bv run . <participants>");
+    }
+
+    Ok(())
+}
+
+fn copy_embedded_dir(dir: &Dir, base: &Path, dest_root: &Path) -> std::io::Result<()> {
+    // Ensure root exists
+    fs::create_dir_all(dest_root)?;
+
+    // Write files directly under this dir
+    for file in dir.files() {
+        let rel = file.path().strip_prefix(base).unwrap_or(file.path());
+        let out_path = dest_root.join(rel);
+        if let Some(parent) = out_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(out_path, file.contents())?;
+    }
+
+    // Recurse into subdirectories
+    for sub in dir.dirs() {
+        copy_embedded_dir(sub, base, dest_root)?;
+    }
 
     Ok(())
 }
