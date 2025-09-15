@@ -27,6 +27,9 @@ impl MessageDb {
                 subject TEXT,
                 body TEXT NOT NULL,
 
+                message_type TEXT DEFAULT 'text',
+                metadata TEXT,
+
                 status TEXT NOT NULL,
                 sync_status TEXT NOT NULL,
 
@@ -41,6 +44,29 @@ impl MessageDb {
             )",
             [],
         )?;
+
+        // Migration: Add message_type column if it doesn't exist
+        let has_message_type: bool = conn
+            .prepare("SELECT COUNT(*) FROM pragma_table_info('messages') WHERE name='message_type'")
+            .and_then(|mut stmt| stmt.query_row([], |row| row.get(0)))
+            .unwrap_or(false);
+
+        if !has_message_type {
+            conn.execute(
+                "ALTER TABLE messages ADD COLUMN message_type TEXT DEFAULT 'text'",
+                [],
+            )?;
+        }
+
+        // Migration: Add metadata column if it doesn't exist
+        let has_metadata: bool = conn
+            .prepare("SELECT COUNT(*) FROM pragma_table_info('messages') WHERE name='metadata'")
+            .and_then(|mut stmt| stmt.query_row([], |row| row.get(0)))
+            .unwrap_or(false);
+
+        if !has_metadata {
+            conn.execute("ALTER TABLE messages ADD COLUMN metadata TEXT", [])?;
+        }
 
         // Create indexes
         conn.execute(
@@ -63,20 +89,31 @@ impl MessageDb {
             "CREATE INDEX IF NOT EXISTS idx_created_at ON messages(created_at)",
             [],
         )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_message_type ON messages(message_type)",
+            [],
+        )?;
 
         Ok(Self { conn })
     }
 
     pub fn insert_message(&self, msg: &Message) -> Result<()> {
+        let metadata_json = msg
+            .metadata
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?;
+
         self.conn.execute(
             "INSERT INTO messages (
                 id, thread_id, parent_id,
                 from_address, to_address,
                 subject, body,
+                message_type, metadata,
                 status, sync_status,
                 created_at, sent_at, received_at, read_at,
                 rpc_request_id, rpc_ack_status, rpc_ack_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
             params![
                 msg.id,
                 msg.thread_id,
@@ -85,6 +122,8 @@ impl MessageDb {
                 msg.to,
                 msg.subject,
                 msg.body,
+                msg.message_type.to_string(),
+                metadata_json,
                 msg.status.to_string(),
                 msg.sync_status.to_string(),
                 msg.created_at.to_rfc3339(),
@@ -100,6 +139,12 @@ impl MessageDb {
     }
 
     pub fn update_message(&self, msg: &Message) -> Result<()> {
+        let metadata_json = msg
+            .metadata
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?;
+
         self.conn.execute(
             "UPDATE messages SET
                 thread_id = ?2,
@@ -108,15 +153,17 @@ impl MessageDb {
                 to_address = ?5,
                 subject = ?6,
                 body = ?7,
-                status = ?8,
-                sync_status = ?9,
-                created_at = ?10,
-                sent_at = ?11,
-                received_at = ?12,
-                read_at = ?13,
-                rpc_request_id = ?14,
-                rpc_ack_status = ?15,
-                rpc_ack_at = ?16
+                message_type = ?8,
+                metadata = ?9,
+                status = ?10,
+                sync_status = ?11,
+                created_at = ?12,
+                sent_at = ?13,
+                received_at = ?14,
+                read_at = ?15,
+                rpc_request_id = ?16,
+                rpc_ack_status = ?17,
+                rpc_ack_at = ?18
             WHERE id = ?1",
             params![
                 msg.id,
@@ -126,6 +173,8 @@ impl MessageDb {
                 msg.to,
                 msg.subject,
                 msg.body,
+                msg.message_type.to_string(),
+                metadata_json,
                 msg.status.to_string(),
                 msg.sync_status.to_string(),
                 msg.created_at.to_rfc3339(),
@@ -142,7 +191,12 @@ impl MessageDb {
 
     pub fn get_message(&self, id: &str) -> Result<Option<Message>> {
         // First try exact match
-        let mut stmt = self.conn.prepare("SELECT * FROM messages WHERE id = ?1")?;
+        let mut stmt = self.conn.prepare(
+            "SELECT id, thread_id, parent_id, from_address, to_address, subject, body,
+                    status, sync_status, created_at, sent_at, received_at, read_at,
+                    rpc_request_id, rpc_ack_status, rpc_ack_at, message_type, metadata
+             FROM messages WHERE id = ?1",
+        )?;
 
         let mut rows = stmt.query(params![id])?;
         if let Some(row) = rows.next()? {
@@ -152,9 +206,12 @@ impl MessageDb {
         // If not found and ID is short (partial), try prefix match
         if id.len() < 36 {
             // UUID is 36 chars with dashes
-            let mut stmt = self
-                .conn
-                .prepare("SELECT * FROM messages WHERE id LIKE ?1 || '%'")?;
+            let mut stmt = self.conn.prepare(
+                "SELECT id, thread_id, parent_id, from_address, to_address, subject, body,
+                        status, sync_status, created_at, sent_at, received_at, read_at,
+                        rpc_request_id, rpc_ack_status, rpc_ack_at, message_type, metadata
+                 FROM messages WHERE id LIKE ?1 || '%'",
+            )?;
 
             let mut rows = stmt.query(params![id])?;
             let mut matches = Vec::new();
@@ -177,9 +234,19 @@ impl MessageDb {
 
     pub fn list_messages(&self, limit: Option<usize>) -> Result<Vec<Message>> {
         let query = if let Some(limit) = limit {
-            format!("SELECT * FROM messages WHERE status != 'deleted' ORDER BY created_at DESC LIMIT {}", limit)
+            format!(
+                "SELECT id, thread_id, parent_id, from_address, to_address, subject, body,
+                            status, sync_status, created_at, sent_at, received_at, read_at,
+                            rpc_request_id, rpc_ack_status, rpc_ack_at, message_type, metadata
+                     FROM messages WHERE status != 'deleted' ORDER BY created_at DESC LIMIT {}",
+                limit
+            )
         } else {
-            "SELECT * FROM messages WHERE status != 'deleted' ORDER BY created_at DESC".to_string()
+            "SELECT id, thread_id, parent_id, from_address, to_address, subject, body,
+                    status, sync_status, created_at, sent_at, received_at, read_at,
+                    rpc_request_id, rpc_ack_status, rpc_ack_at, message_type, metadata
+             FROM messages WHERE status != 'deleted' ORDER BY created_at DESC"
+                .to_string()
         };
 
         let mut stmt = self.conn.prepare(&query)?;
@@ -193,9 +260,12 @@ impl MessageDb {
     }
 
     pub fn list_unread_messages(&self) -> Result<Vec<Message>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT * FROM messages WHERE status = 'received' ORDER BY created_at DESC")?;
+        let mut stmt = self.conn.prepare(
+            "SELECT id, thread_id, parent_id, from_address, to_address, subject, body,
+                    status, sync_status, created_at, sent_at, received_at, read_at,
+                    rpc_request_id, rpc_ack_status, rpc_ack_at, message_type, metadata
+             FROM messages WHERE status = 'received' ORDER BY created_at DESC",
+        )?;
 
         let rows = stmt.query_map([], |row| Ok(Self::row_to_message(row)))?;
 
@@ -208,7 +278,10 @@ impl MessageDb {
 
     pub fn get_thread_messages(&self, thread_id: &str) -> Result<Vec<Message>> {
         let mut stmt = self.conn.prepare(
-            "SELECT * FROM messages WHERE thread_id = ?1 AND status != 'deleted' ORDER BY created_at ASC"
+            "SELECT id, thread_id, parent_id, from_address, to_address, subject, body,
+                    status, sync_status, created_at, sent_at, received_at, read_at,
+                    rpc_request_id, rpc_ack_status, rpc_ack_at, message_type, metadata
+             FROM messages WHERE thread_id = ?1 AND status != 'deleted' ORDER BY created_at ASC",
         )?;
 
         let rows = stmt.query_map(params![thread_id], |row| Ok(Self::row_to_message(row)))?;
@@ -247,15 +320,134 @@ impl MessageDb {
     pub fn list_deleted_messages(&self, limit: Option<usize>) -> Result<Vec<Message>> {
         let query = if let Some(limit) = limit {
             format!(
-                "SELECT * FROM messages WHERE status = 'deleted' ORDER BY created_at DESC LIMIT {}",
+                "SELECT id, thread_id, parent_id, from_address, to_address, subject, body,
+                        status, sync_status, created_at, sent_at, received_at, read_at,
+                        rpc_request_id, rpc_ack_status, rpc_ack_at, message_type, metadata
+                 FROM messages WHERE status = 'deleted' ORDER BY created_at DESC LIMIT {}",
                 limit
             )
         } else {
-            "SELECT * FROM messages WHERE status = 'deleted' ORDER BY created_at DESC".to_string()
+            "SELECT id, thread_id, parent_id, from_address, to_address, subject, body,
+                    status, sync_status, created_at, sent_at, received_at, read_at,
+                    rpc_request_id, rpc_ack_status, rpc_ack_at, message_type, metadata
+             FROM messages WHERE status = 'deleted' ORDER BY created_at DESC"
+                .to_string()
         };
 
         let mut stmt = self.conn.prepare(&query)?;
         let rows = stmt.query_map([], |row| Ok(Self::row_to_message(row)))?;
+
+        let mut messages = Vec::new();
+        for row in rows {
+            messages.push(row??);
+        }
+        Ok(messages)
+    }
+
+    pub fn list_inbox_messages(&self, limit: Option<usize>) -> Result<Vec<Message>> {
+        let query = if let Some(limit) = limit {
+            format!(
+                "SELECT id, thread_id, parent_id, from_address, to_address, subject, body,
+                        status, sync_status, created_at, sent_at, received_at, read_at,
+                        rpc_request_id, rpc_ack_status, rpc_ack_at, message_type, metadata
+                 FROM messages WHERE status IN ('received', 'read') ORDER BY created_at DESC LIMIT {}",
+                limit
+            )
+        } else {
+            "SELECT id, thread_id, parent_id, from_address, to_address, subject, body,
+                    status, sync_status, created_at, sent_at, received_at, read_at,
+                    rpc_request_id, rpc_ack_status, rpc_ack_at, message_type, metadata
+             FROM messages WHERE status IN ('received', 'read') ORDER BY created_at DESC"
+                .to_string()
+        };
+
+        let mut stmt = self.conn.prepare(&query)?;
+        let rows = stmt.query_map([], |row| Ok(Self::row_to_message(row)))?;
+
+        let mut messages = Vec::new();
+        for row in rows {
+            messages.push(row??);
+        }
+        Ok(messages)
+    }
+
+    pub fn list_sent_messages(&self, limit: Option<usize>) -> Result<Vec<Message>> {
+        let query = if let Some(limit) = limit {
+            format!(
+                "SELECT id, thread_id, parent_id, from_address, to_address, subject, body,
+                        status, sync_status, created_at, sent_at, received_at, read_at,
+                        rpc_request_id, rpc_ack_status, rpc_ack_at, message_type, metadata
+                 FROM messages WHERE status IN ('sent', 'draft') ORDER BY created_at DESC LIMIT {}",
+                limit
+            )
+        } else {
+            "SELECT id, thread_id, parent_id, from_address, to_address, subject, body,
+                    status, sync_status, created_at, sent_at, received_at, read_at,
+                    rpc_request_id, rpc_ack_status, rpc_ack_at, message_type, metadata
+             FROM messages WHERE status IN ('sent', 'draft') ORDER BY created_at DESC"
+                .to_string()
+        };
+
+        let mut stmt = self.conn.prepare(&query)?;
+        let rows = stmt.query_map([], |row| Ok(Self::row_to_message(row)))?;
+
+        let mut messages = Vec::new();
+        for row in rows {
+            messages.push(row??);
+        }
+        Ok(messages)
+    }
+
+    pub fn list_messages_by_type(
+        &self,
+        message_type: &str,
+        limit: Option<usize>,
+    ) -> Result<Vec<Message>> {
+        let query = if let Some(limit) = limit {
+            format!(
+                "SELECT id, thread_id, parent_id, from_address, to_address, subject, body,
+                        status, sync_status, created_at, sent_at, received_at, read_at,
+                        rpc_request_id, rpc_ack_status, rpc_ack_at, message_type, metadata
+                 FROM messages WHERE message_type = ?1 AND status != 'deleted' ORDER BY created_at DESC LIMIT {}",
+                limit
+            )
+        } else {
+            "SELECT id, thread_id, parent_id, from_address, to_address, subject, body,
+                    status, sync_status, created_at, sent_at, received_at, read_at,
+                    rpc_request_id, rpc_ack_status, rpc_ack_at, message_type, metadata
+             FROM messages WHERE message_type = ?1 AND status != 'deleted' ORDER BY created_at DESC"
+                .to_string()
+        };
+
+        let mut stmt = self.conn.prepare(&query)?;
+        let rows = stmt.query_map(params![message_type], |row| Ok(Self::row_to_message(row)))?;
+
+        let mut messages = Vec::new();
+        for row in rows {
+            messages.push(row??);
+        }
+        Ok(messages)
+    }
+
+    pub fn search_messages(&self, search: &str, limit: Option<usize>) -> Result<Vec<Message>> {
+        let query = if let Some(limit) = limit {
+            format!(
+                "SELECT id, thread_id, parent_id, from_address, to_address, subject, body,
+                        status, sync_status, created_at, sent_at, received_at, read_at,
+                        rpc_request_id, rpc_ack_status, rpc_ack_at, message_type, metadata
+                 FROM messages WHERE (body LIKE ?1 OR subject LIKE ?1) AND status != 'deleted' ORDER BY created_at DESC LIMIT {}",
+                limit
+            )
+        } else {
+            "SELECT id, thread_id, parent_id, from_address, to_address, subject, body,
+                    status, sync_status, created_at, sent_at, received_at, read_at,
+                    rpc_request_id, rpc_ack_status, rpc_ack_at, message_type, metadata
+             FROM messages WHERE (body LIKE ?1 OR subject LIKE ?1) AND status != 'deleted' ORDER BY created_at DESC".to_string()
+        };
+
+        let search_pattern = format!("%{}%", search);
+        let mut stmt = self.conn.prepare(&query)?;
+        let rows = stmt.query_map(params![search_pattern], |row| Ok(Self::row_to_message(row)))?;
 
         let mut messages = Vec::new();
         for row in rows {
@@ -271,6 +463,26 @@ impl MessageDb {
     }
 
     fn row_to_message(row: &Row) -> Result<Message> {
+        // With our standardized SELECT columns, the order is:
+        // 0: id, 1: thread_id, 2: parent_id, 3: from_address, 4: to_address,
+        // 5: subject, 6: body, 7: status, 8: sync_status, 9: created_at,
+        // 10: sent_at, 11: received_at, 12: read_at, 13: rpc_request_id,
+        // 14: rpc_ack_status, 15: rpc_ack_at, 16: message_type, 17: metadata
+
+        // Parse message_type
+        let type_str: Option<String> = row.get(16)?;
+        let message_type = type_str
+            .map(|s| Self::parse_message_type(&s))
+            .transpose()?
+            .unwrap_or(crate::messages::MessageType::Text);
+
+        // Parse metadata JSON
+        let metadata_str: Option<String> = row.get(17)?;
+        let metadata = metadata_str
+            .and_then(|s| if s.is_empty() { None } else { Some(s) })
+            .map(|s| serde_json::from_str(&s))
+            .transpose()?;
+
         Ok(Message {
             id: row.get(0)?,
             thread_id: row.get(1)?,
@@ -279,6 +491,8 @@ impl MessageDb {
             to: row.get(4)?,
             subject: row.get(5)?,
             body: row.get(6)?,
+            message_type,
+            metadata,
             status: Self::parse_status(&row.get::<_, String>(7)?)?,
             sync_status: Self::parse_sync_status(&row.get::<_, String>(8)?)?,
             created_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(9)?)?
@@ -304,6 +518,23 @@ impl MessageDb {
         })
     }
 
+    fn parse_message_type(s: &str) -> Result<crate::messages::MessageType> {
+        use crate::messages::MessageType;
+        match s {
+            "text" => Ok(MessageType::Text),
+            "project" => Ok(MessageType::Project {
+                project_name: String::new(),
+                submission_id: String::new(),
+                files_hash: None,
+            }),
+            "request" => Ok(MessageType::Request {
+                request_type: String::new(),
+                params: None,
+            }),
+            _ => Ok(MessageType::Text), // Default to text for backwards compatibility
+        }
+    }
+
     fn parse_status(s: &str) -> Result<MessageStatus> {
         match s {
             "draft" => Ok(MessageStatus::Draft),
@@ -311,6 +542,7 @@ impl MessageDb {
             "received" => Ok(MessageStatus::Received),
             "read" => Ok(MessageStatus::Read),
             "deleted" => Ok(MessageStatus::Deleted),
+            "archived" => Ok(MessageStatus::Archived),
             _ => anyhow::bail!("Unknown message status: {}", s),
         }
     }

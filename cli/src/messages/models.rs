@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -13,6 +14,9 @@ pub struct Message {
 
     pub subject: Option<String>, // Optional, defaults to "(No Subject)"
     pub body: String,
+
+    pub message_type: MessageType,
+    pub metadata: Option<JsonValue>,
 
     pub status: MessageStatus,
     pub sync_status: SyncStatus,
@@ -38,6 +42,8 @@ impl Message {
             to,
             subject: None,
             body,
+            message_type: MessageType::Text,
+            metadata: None,
             status: MessageStatus::Draft,
             sync_status: SyncStatus::Local,
             created_at: Utc::now(),
@@ -59,6 +65,8 @@ impl Message {
             to: original.from.clone(), // Reply goes back to sender
             subject: None,             // Will be handled in display
             body,
+            message_type: MessageType::Text,
+            metadata: None,
             status: MessageStatus::Draft,
             sync_status: SyncStatus::Local,
             created_at: Utc::now(),
@@ -78,6 +86,31 @@ impl Message {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub enum MessageType {
+    #[default]
+    Text,
+    Project {
+        project_name: String,
+        submission_id: String,
+        files_hash: Option<String>,
+    },
+    Request {
+        request_type: String,
+        params: Option<JsonValue>,
+    },
+}
+
+impl std::fmt::Display for MessageType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MessageType::Text => write!(f, "text"),
+            MessageType::Project { .. } => write!(f, "project"),
+            MessageType::Request { .. } => write!(f, "request"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum MessageStatus {
     Draft,
@@ -85,6 +118,7 @@ pub enum MessageStatus {
     Received,
     Read,
     Deleted,
+    Archived,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -103,6 +137,7 @@ impl std::fmt::Display for MessageStatus {
             MessageStatus::Received => write!(f, "received"),
             MessageStatus::Read => write!(f, "read"),
             MessageStatus::Deleted => write!(f, "deleted"),
+            MessageStatus::Archived => write!(f, "archived"),
         }
     }
 }

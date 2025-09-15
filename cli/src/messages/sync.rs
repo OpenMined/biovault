@@ -8,7 +8,7 @@ use crate::syftbox::endpoint::Endpoint;
 use crate::syftbox::types::{RpcRequest, RpcResponse};
 
 use super::db::MessageDb;
-use super::models::{Message, MessageStatus, SyncStatus};
+use super::models::{Message, MessageStatus, MessageType, SyncStatus};
 
 #[derive(Debug, Serialize, Deserialize)]
 struct MessagePayload {
@@ -19,6 +19,8 @@ struct MessagePayload {
     to: String,
     subject: Option<String>,
     body: String,
+    message_type: String,
+    metadata: Option<serde_json::Value>,
     created_at: String,
 }
 
@@ -49,6 +51,8 @@ impl MessageSync {
             to: msg.to.clone(),
             subject: msg.subject.clone(),
             body: msg.body.clone(),
+            message_type: msg.message_type.to_string(),
+            metadata: msg.metadata.clone(),
             created_at: msg.created_at.to_rfc3339(),
         };
 
@@ -128,6 +132,20 @@ impl MessageSync {
             msg.thread_id = payload.thread_id;
             msg.parent_id = payload.parent_id;
             msg.subject = payload.subject;
+            // Parse message type from string
+            msg.message_type = match payload.message_type.as_str() {
+                "project" => MessageType::Project {
+                    project_name: String::new(),
+                    submission_id: String::new(),
+                    files_hash: None,
+                },
+                "request" => MessageType::Request {
+                    request_type: String::new(),
+                    params: None,
+                },
+                _ => MessageType::Text,
+            };
+            msg.metadata = payload.metadata;
             msg.status = MessageStatus::Received;
             msg.sync_status = SyncStatus::Synced;
             msg.received_at = Some(Utc::now());

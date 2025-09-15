@@ -6,7 +6,7 @@ use std::path::PathBuf;
 const MESSAGE_ENDPOINT: &str = "/message";
 
 /// Get the path to the message database
-fn get_message_db_path(config: &Config) -> Result<PathBuf> {
+pub fn get_message_db_path(config: &Config) -> Result<PathBuf> {
     let biovault_dir = config.get_biovault_dir()?;
     let db_path = biovault_dir.join("data").join("messages.db");
 
@@ -153,6 +153,7 @@ pub fn list_messages(config: &Config, unread_only: bool) -> Result<()> {
             crate::messages::MessageStatus::Received => "📥",
             crate::messages::MessageStatus::Read => "👁️",
             crate::messages::MessageStatus::Deleted => "🗑️",
+            crate::messages::MessageStatus::Archived => "📁",
         };
 
         println!("\n{} [{}]", status_icon, &msg.id[..8]);

@@ -121,24 +121,35 @@ enum Commands {
         destination: String,
     },
 
-    #[command(about = "List or view submitted projects in inbox")]
+    #[command(about = "View and manage inbox messages")]
     Inbox {
-        #[command(subcommand)]
-        action: Option<InboxActions>,
-
-        #[arg(
-            help = "Reference to show details: index (1,2,3...), partial hash (33b4f3), or project name"
-        )]
-        reference: Option<String>,
-
-        #[arg(short, long, help = "Interactive mode with arrow key navigation")]
+        #[arg(short = 'i', long, help = "Interactive mode with view switching")]
         interactive: bool,
 
-        #[arg(long, help = "Show all submissions including rejected ones")]
+        #[arg(short = 's', long, help = "Show sent messages")]
+        sent: bool,
+
+        #[arg(short = 'a', long, help = "Show all messages (including deleted)")]
         all: bool,
 
-        #[arg(long, help = "Show full details for each submission")]
-        full: bool,
+        #[arg(short = 'u', long, help = "Show only unread messages")]
+        unread: bool,
+
+        #[arg(short = 'p', long, help = "Show project submissions")]
+        projects: bool,
+
+        #[arg(
+            short = 't',
+            long,
+            help = "Filter by message type (text/project/request)"
+        )]
+        message_type: Option<String>,
+
+        #[arg(short = 'f', long, help = "Filter by sender")]
+        from: Option<String>,
+
+        #[arg(long, help = "Search messages by content")]
+        search: Option<String>,
     },
 
     #[command(about = "Manage messages via SyftBox RPC")]
@@ -248,27 +259,6 @@ enum ConfigCommands {
     Syftbox {
         #[arg(help = "Path to SyftBox config.json (omit to use default)")]
         path: Option<String>,
-    },
-}
-
-#[derive(Subcommand)]
-enum InboxActions {
-    #[command(about = "Reject a submission")]
-    Reject {
-        #[arg(help = "Reference: index (1,2,3...), partial hash, or project name")]
-        reference: String,
-    },
-
-    #[command(about = "Mark a submission for review")]
-    Review {
-        #[arg(help = "Reference: index (1,2,3...), partial hash, or project name")]
-        reference: String,
-    },
-
-    #[command(about = "Test a submission with mock data")]
-    Test {
-        #[arg(help = "Reference: index (1,2,3...), partial hash, or project name")]
-        reference: String,
     },
 }
 
@@ -487,30 +477,29 @@ async fn main() -> Result<()> {
             commands::submit::submit(project_path, destination).await?;
         }
         Commands::Inbox {
-            action,
-            reference,
             interactive,
+            sent,
             all,
-            full,
+            unread,
+            projects,
+            message_type,
+            from,
+            search,
         } => {
-            if let Some(action) = action {
-                match action {
-                    InboxActions::Reject { reference } => {
-                        commands::inbox::reject(Some(reference)).await?;
-                    }
-                    InboxActions::Review { reference } => {
-                        commands::inbox::review(Some(reference)).await?;
-                    }
-                    InboxActions::Test { reference } => {
-                        commands::inbox::test(Some(reference)).await?;
-                    }
-                }
-            } else if interactive {
-                commands::inbox::interactive(all).await?;
-            } else if let Some(ref_str) = reference {
-                commands::inbox::show(&ref_str, all).await?;
+            let config = biovault::config::Config::load()?;
+            if interactive {
+                commands::inbox::interactive(&config, None)?;
             } else {
-                commands::inbox::list(all, full).await?;
+                let filters = commands::inbox::ListFilters {
+                    sent,
+                    all,
+                    unread,
+                    projects,
+                    message_type,
+                    from,
+                    search,
+                };
+                commands::inbox::list(&config, filters)?;
             }
         }
         Commands::Message { command } => match command {
