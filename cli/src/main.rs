@@ -123,8 +123,11 @@ enum Commands {
 
     #[command(about = "View and manage inbox messages")]
     Inbox {
-        #[arg(short = 'i', long, help = "Interactive mode with view switching")]
+        #[arg(short = 'i', long, help = "Interactive mode (default)")]
         interactive: bool,
+
+        #[arg(long, help = "Plain, non-interactive list output")]
+        plain: bool,
 
         #[arg(short = 's', long, help = "Show sent messages")]
         sent: bool,
@@ -478,6 +481,7 @@ async fn main() -> Result<()> {
         }
         Commands::Inbox {
             interactive,
+            plain,
             sent,
             all,
             unread,
@@ -487,9 +491,8 @@ async fn main() -> Result<()> {
             search,
         } => {
             let config = biovault::config::Config::load()?;
-            if interactive {
-                commands::inbox::interactive(&config, None)?;
-            } else {
+            // Default behavior: interactive unless --plain is provided
+            if plain && !interactive {
                 let filters = commands::inbox::ListFilters {
                     sent,
                     all,
@@ -500,6 +503,9 @@ async fn main() -> Result<()> {
                     search,
                 };
                 commands::inbox::list(&config, filters)?;
+            } else {
+                // When both flags are provided, prefer interactive
+                commands::inbox::interactive(&config, None)?;
             }
         }
         Commands::Message { command } => match command {

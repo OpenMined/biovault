@@ -2,6 +2,56 @@ use crate::config::Config;
 use crate::messages::{MessageDb, MessageType};
 use anyhow::Result;
 use dialoguer::{theme::ColorfulTheme, Select};
+use std::io::Read;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Key {
+    Up,
+    Down,
+    Enter,
+    Esc,
+    Char(char),
+}
+
+fn enable_raw_mode_cmd() -> Result<()> {
+    // Use `stty` to disable canonical mode and echo
+    std::process::Command::new("stty")
+        .arg("-icanon")
+        .arg("-echo")
+        .arg("min")
+        .arg("1")
+        .arg("time")
+        .arg("0")
+        .status()?;
+    Ok(())
+}
+
+fn disable_raw_mode_cmd() -> Result<()> {
+    std::process::Command::new("stty").arg("sane").status()?;
+    Ok(())
+}
+
+fn read_key() -> Result<Key> {
+    let mut stdin = io::stdin();
+    let mut buf = [0u8; 1];
+    stdin.read_exact(&mut buf)?;
+    match buf[0] {
+        b'\n' | b'\r' => Ok(Key::Enter),
+        0x1B => {
+            // Escape sequence for arrows: ESC [ A/B
+            let mut seq = [0u8; 2];
+            if stdin.read_exact(&mut seq).is_ok() && seq[0] == b'[' {
+                return match seq[1] {
+                    b'A' => Ok(Key::Up),
+                    b'B' => Ok(Key::Down),
+                    _ => Ok(Key::Esc),
+                };
+            }
+            Ok(Key::Esc)
+        }
+        b => Ok(Key::Char(b as char)),
+    }
+}
 use std::io::{self, Write};
 
 /// Filter options for listing messages
@@ -102,8 +152,8 @@ pub fn list(config: &Config, filters: ListFilters) -> Result<()> {
         println!("   {}", preview);
     }
 
-    println!("\n─────────────────────────────────────");
-    println!("Use 'bv inbox -i' for interactive mode");
+    println!("\n-------------------------------------");
+    println!("Tip: use 'bv inbox --plain' for non-interactive output");
 
     Ok(())
 }
@@ -119,22 +169,28 @@ pub fn interactive(config: &Config, initial_view: Option<String>) -> Result<()> 
 
     let mut current_view = initial_view.unwrap_or_else(|| "inbox".to_string());
 
+    // Use raw mode and a simple key-driven UI (via stty)
+    enable_raw_mode_cmd()?;
+    let mut selected: usize = 0; // index into current messages; extra index for Quit
     loop {
-        // Clear and reset cursor position for each loop iteration
-        print!("\x1B[2J\x1B[1;1H");
-        io::stdout().flush()?;
-
-        // Get messages based on current view
+        // Load messages for current view
         let messages = match current_view.as_str() {
-            "inbox" => db.list_inbox_messages(Some(50))?,
-            "sent" => db.list_sent_messages(Some(50))?,
-            "all" => db.list_messages(Some(50))?,
+            "inbox" => db.list_inbox_messages(Some(200))?,
+            "sent" => db.list_sent_messages(Some(200))?,
+            "all" => db.list_messages(Some(200))?,
             "unread" => db.list_unread_messages()?,
-            "projects" => db.list_messages_by_type("project", Some(50))?,
-            _ => db.list_inbox_messages(Some(50))?,
+            "projects" => db.list_messages_by_type("project", Some(200))?,
+            _ => db.list_inbox_messages(Some(200))?,
         };
 
-        // Print header (ASCII only to avoid emoji width issues)
+        // Bound selection to range [0 .. messages.len()] where last is Quit
+        if selected > messages.len() {
+            selected = messages.len();
+        }
+
+        // Render screen
+        print!("\x1B[2J\x1B[1;1H");
+        io::stdout().flush()?;
         println!("======================================================");
         println!(
             "BioVault Inbox - {} ({} messages)",
@@ -142,17 +198,13 @@ pub fn interactive(config: &Config, initial_view: Option<String>) -> Result<()> 
             messages.len()
         );
         println!("======================================================");
-        println!();
+        println!("(Press '?' for shortcuts)");
+        println!("------------------------------------------------------");
 
-        // Build display options
-        let mut display_options = Vec::new();
-
-        // Add messages if any
         if messages.is_empty() {
-            display_options.push("(No messages in this view)".to_string());
+            println!("(No messages in this view)");
         } else {
-            for msg in &messages {
-                // Build concise ASCII-only line to prevent width mis-calculation and wrapping
+            for (i, msg) in messages.iter().enumerate() {
                 let status = match msg.status {
                     crate::messages::MessageStatus::Draft => "DRAFT",
                     crate::messages::MessageStatus::Sent => "SENT",
@@ -161,94 +213,114 @@ pub fn interactive(config: &Config, initial_view: Option<String>) -> Result<()> 
                     crate::messages::MessageStatus::Deleted => "DEL",
                     crate::messages::MessageStatus::Archived => "ARCH",
                 };
-
-                let from_or_to = if current_view == "sent" {
-                    format!("To:{}", msg.to)
+                let who = if current_view == "sent" {
+                    &msg.to
                 } else {
-                    format!("From:{}", msg.from)
+                    &msg.from
                 };
-
                 let subject = msg.subject.as_deref().unwrap_or("(No Subject)");
-                let mut option = format!("[{status}] {from_or_to} - {subject}");
-                // Truncate aggressively to avoid line wrapping that causes scroll glitches
-                const MAX_ITEM_LEN: usize = 80;
-                if option.len() > MAX_ITEM_LEN {
-                    option.truncate(MAX_ITEM_LEN);
+                let mut line = format!(
+                    "{} {status} {} - {}",
+                    if i == selected { ">" } else { " " },
+                    who,
+                    subject
+                );
+                if line.len() > 80 {
+                    line.truncate(80);
                 }
-                display_options.push(option);
+                println!("{}", line);
             }
         }
 
-        // Always add menu actions at the bottom
-        display_options.push("------------------------------------------------------".to_string());
-        display_options.push("Change View".to_string());
-        display_options.push("Sync Messages".to_string());
-        display_options.push("Quit".to_string());
+        // Quit item at the bottom
+        println!(
+            "{} Quit",
+            if selected == messages.len() { ">" } else { " " }
+        );
 
-        // Limit display height to prevent scrolling issues
-        // Keep it small to avoid the scrolling problem
-        let selection = Select::with_theme(&ColorfulTheme::default())
-            // Keep prompt ASCII and short to avoid wrapping
-            .with_prompt("Select (Arrows/Enter, Esc to quit)")
-            .default(0)
-            .items(&display_options)
-            .max_length(6) // Very conservative to prevent scrolling
-            .interact_opt()?;
-
-        match selection {
-            None => {
-                // User pressed Esc/Ctrl+C
+        // Wait for a key event
+        match read_key()? {
+            Key::Char('q') | Key::Esc => {
+                disable_raw_mode_cmd()?;
                 break;
             }
-            Some(idx) => {
-                // Calculate where we are in the menu
-                let separator_idx = if messages.is_empty() {
-                    1
-                } else {
-                    messages.len()
-                };
-                let change_view_idx = separator_idx + 1;
-                let sync_idx = separator_idx + 2;
-                let quit_idx = separator_idx + 3;
-
-                if messages.is_empty() && idx == 0 {
-                    // "(No messages in this view)" selected - do nothing
-                    continue;
-                } else if !messages.is_empty() && idx < messages.len() {
-                    // Message selected - show actions
-                    let msg = &messages[idx];
-                    message_actions(config, &db, msg)?;
-                } else if idx == separator_idx {
-                    // Separator line - do nothing
-                    continue;
-                } else if idx == change_view_idx {
-                    // Change view
-                    let views = ["inbox", "sent", "all", "unread", "projects"];
-                    // ASCII-only names to avoid width calc issues
-                    let view_names = ["Inbox", "Sent", "All Messages", "Unread", "Projects"];
-
-                    println!("\nSelect view:");
-                    let view_selection = Select::with_theme(&ColorfulTheme::default())
-                        .with_prompt("Choose a view")
-                        .default(0)
-                        .items(&view_names)
-                        .interact_opt()?;
-
-                    if let Some(selection) = view_selection {
-                        current_view = views[selection].to_string();
-                    }
-                } else if idx == sync_idx {
-                    // Sync
-                    println!("\nSyncing messages...");
-                    sync.sync()?;
-                    println!("Sync complete! Press Enter to continue...");
-                    let mut input = String::new();
-                    io::stdin().read_line(&mut input)?;
-                } else if idx == quit_idx {
-                    // Quit
-                    break;
+            Key::Char('?') | Key::Char('h') | Key::Char('H') => {
+                print!("\x1B[2J\x1B[1;1H");
+                println!("Shortcuts:\n  ? / h : Help\n  n     : New Message\n  s     : Sync Messages\n  v     : Change View (menu)\n  q / Esc: Quit\n  1..5  : Tabs (Inbox, Sent, All, Unread, Projects)\n\nArrows to move, Enter to open.");
+                println!("\nPress any key to return...");
+                let _ = read_key();
+            }
+            Key::Char('n') | Key::Char('N') => {
+                disable_raw_mode_cmd()?;
+                compose_new_message(config)?;
+                enable_raw_mode_cmd()?;
+            }
+            Key::Char('s') | Key::Char('S') => {
+                disable_raw_mode_cmd()?;
+                println!("\nSyncing messages...");
+                let _ = sync.sync();
+                println!("Sync complete. Press Enter...");
+                let mut t = String::new();
+                io::stdin().read_line(&mut t).ok();
+                enable_raw_mode_cmd()?;
+            }
+            Key::Char('v') | Key::Char('V') => {
+                disable_raw_mode_cmd()?;
+                let views = ["inbox", "sent", "all", "unread", "projects"];
+                let view_names = ["Inbox", "Sent", "All Messages", "Unread", "Projects"];
+                println!("\nSelect view:");
+                let view_selection = Select::with_theme(&ColorfulTheme::default())
+                    .with_prompt("Choose a view")
+                    .default(0)
+                    .items(&view_names)
+                    .interact_opt()?;
+                if let Some(sel) = view_selection {
+                    current_view = views[sel].to_string();
+                    selected = 0;
+                }
+                enable_raw_mode_cmd()?;
+            }
+            Key::Char('1') => {
+                current_view = "inbox".to_string();
+                selected = 0;
+            }
+            Key::Char('2') => {
+                current_view = "sent".to_string();
+                selected = 0;
+            }
+            Key::Char('3') => {
+                current_view = "all".to_string();
+                selected = 0;
+            }
+            Key::Char('4') => {
+                current_view = "unread".to_string();
+                selected = 0;
+            }
+            Key::Char('5') => {
+                current_view = "projects".to_string();
+                selected = 0;
+            }
+            Key::Up => {
+                selected = selected.saturating_sub(1);
+            }
+            Key::Down => {
+                if selected < messages.len() {
+                    selected += 1;
                 }
             }
+            Key::Enter => {
+                if selected == messages.len() {
+                    disable_raw_mode_cmd()?;
+                    break;
+                }
+                if !messages.is_empty() {
+                    let msg = &messages[selected];
+                    disable_raw_mode_cmd()?;
+                    let _ = message_actions(config, &db, msg)?;
+                    enable_raw_mode_cmd()?;
+                }
+            }
+            Key::Char(_) => {}
         }
     }
 
@@ -334,4 +406,58 @@ fn message_actions(
         }
         _ => Ok(false),
     }
+}
+
+/// Compose and send a new message interactively
+fn compose_new_message(config: &Config) -> Result<()> {
+    println!("\nCompose New Message");
+    println!("--------------------");
+
+    // Recipient
+    print!("Recipient email: ");
+    io::stdout().flush()?;
+    let mut recipient = String::new();
+    io::stdin().read_line(&mut recipient)?;
+    let recipient = recipient.trim().to_string();
+    if recipient.is_empty() {
+        println!("Cancelled (no recipient)");
+        println!("Press Enter to continue...");
+        let mut input = String::new();
+        io::stdin().read_line(&mut input)?;
+        return Ok(());
+    }
+
+    // Subject (optional)
+    print!("Subject (optional): ");
+    io::stdout().flush()?;
+    let mut subject = String::new();
+    io::stdin().read_line(&mut subject)?;
+    let subject = subject.trim().to_string();
+    let subject_opt = if subject.is_empty() {
+        None
+    } else {
+        Some(subject.as_str())
+    };
+
+    // Body (single line for simplicity)
+    println!("Body (single line, press Enter to finish):");
+    print!("> ");
+    io::stdout().flush()?;
+    let mut body = String::new();
+    io::stdin().read_line(&mut body)?;
+    let body = body.trim();
+    if body.is_empty() {
+        println!("Cancelled (empty body)");
+        println!("Press Enter to continue...");
+        let mut input = String::new();
+        io::stdin().read_line(&mut input)?;
+        return Ok(());
+    }
+
+    super::messages::send_message(config, &recipient, body, subject_opt)?;
+    println!("\nMessage sent. Press Enter to continue...");
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+
+    Ok(())
 }
