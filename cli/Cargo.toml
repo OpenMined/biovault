@@ -40,6 +40,9 @@ glob = "0.3"
 regex = "1.10"
 flate2 = "1.0"
 walkdir = "2.4"
+semver = "1.0"
+self_update = { version = "0.41", default-features = false, features = ["archive-tar", "compression-flate2", "rustls"] }
+rand = "0.8"
 base64 = "0.22"
 
 [dev-dependencies]
