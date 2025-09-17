@@ -10,7 +10,7 @@ def count_snps(input_stream):
     count = 0
     for line in input_stream:
         line = line.strip()
-        if line and not line.startswith('#'):  # Skip empty lines and comments
+        if line and not line.startswith("#"):  # Skip empty lines and comments
             count += 1
     return count
 
@@ -18,4 +18,4 @@ def count_snps(input_stream):
 if __name__ == "__main__":
     # Read from stdin
     count = count_snps(sys.stdin)
-    print(count)
+    print(count, end="")

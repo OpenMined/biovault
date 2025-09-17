@@ -3,6 +3,7 @@ name: haplo-y
 description: Haplotype assembly and phasing of Y chromosome from linked-read data
 author: madhava@openmined.org
 workflow: workflow.nf
+template: default
 assets:
   - interpret_y_haplogroup.py
   - y_haplogroup_panel.GRCh38.tsv

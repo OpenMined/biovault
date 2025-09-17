@@ -10,3 +10,10 @@ mock_data_grch38: &mock_data_grch38
   ref_index_b3sum: "002cf8e0066a2226616b5d9cc09994ac06831cd907e13e521bef6dc69403d147"
   aligned_b3sum: "4556b84f32e58e1a5c4d7238352e9fc0bcaabd2478250733252f2b76047ba3ca"
   aligned_index_b3sum: "6914d3c6842670bdde272b8cc4dfaf858a84f379e9e79d8b24c1a89d577262e2"
+
+mock_data_snp: &mock_data_snp
+  snp: https://github.com/OpenMined/biovault-data/raw/main/snp/23andme_genome_v4_Full.zip
+  snp_b3sum: "2f4aeca4ff424abcc187fcecc0f3776376a43ea674a9498c9b24b4ad4964ccea"
+  snp_post_process:
+    uncompress: true
+    file: genome_Zeeshan_Usamani_v4_Full.txt

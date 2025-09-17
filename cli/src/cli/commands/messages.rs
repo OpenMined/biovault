@@ -638,6 +638,7 @@ async fn run_project_test(config: &Config, msg: &Message) -> anyhow::Result<()> 
         with_docker: false,
         work_dir: None,
         resume: false,
+        template: None,
     })
     .await?;
     println!("{}", "Test run completed.".green());
@@ -667,6 +668,7 @@ async fn run_project_real(config: &Config, msg: &Message) -> anyhow::Result<()> 
         with_docker: false,
         work_dir: None,
         resume: false,
+        template: None,
     })
     .await?;
     println!("{}", "Real data run completed.".green());
@@ -696,6 +698,41 @@ async fn approve_project(config: &Config, msg: &Message) -> anyhow::Result<()> {
     let sender_results = sender_root.join("results");
     copy_dir_recursive(&results_dir, &sender_results)?;
 
+    // Get project details for the message
+    let project_location = meta
+        .get("project_location")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+
+    // Check if results exist and get basic info
+    let results_info = if sender_results.exists() {
+        let mut info = Vec::new();
+        if let Ok(entries) = fs::read_dir(&sender_results) {
+            for entry in entries.flatten() {
+                if entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+                    info.push(format!("{}/", entry.file_name().to_string_lossy()));
+                } else {
+                    info.push(entry.file_name().to_string_lossy().to_string());
+                }
+            }
+        }
+        if info.is_empty() {
+            "No results found".to_string()
+        } else {
+            format!("Results:\n  {}", info.join("\n  "))
+        }
+    } else {
+        "Results directory not found".to_string()
+    };
+
+    // Create the default approval message with results location
+    let default_message = format!(
+        "Your project has been approved.\n\nProject location: {}\nResults location: {}\n\n{}",
+        project_location,
+        sender_results.display(),
+        results_info
+    );
+
     // Optional approval message
     let add_note = Confirm::new()
         .with_prompt("Add a message to approval?")
@@ -706,11 +743,11 @@ async fn approve_project(config: &Config, msg: &Message) -> anyhow::Result<()> {
         Some(
             Input::new()
                 .with_prompt("Message")
-                .default("Your project has been approved.".to_string())
+                .default(default_message.clone())
                 .interact_text()?,
         )
     } else {
-        Some("Your project has been approved.".to_string())
+        Some(default_message)
     };
 
     // Include results_path in the status update so sender can see it directly
@@ -908,6 +945,7 @@ mod tests {
         Config {
             email: "test@example.com".to_string(),
             syftbox_config: None,
+            version: None,
         }
     }
 

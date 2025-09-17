@@ -195,6 +195,7 @@ dependencies = [
  "hex",
  "include_dir",
  "indicatif",
+ "lazy_static",
  "predicates",
  "rand 0.8.5",
  "regex",
