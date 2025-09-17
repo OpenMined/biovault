@@ -58,13 +58,29 @@ if ($env:CI -or $env:GITHUB_ACTIONS) {
     Cleanup-Existing
 }
 
+# Verify bv is installed
+if (-not (Test-Command "bv")) {
+    Write-Host "Error: bv command not found in PATH" -ForegroundColor Red
+    Write-Host "PATH: $env:PATH" -ForegroundColor Red
+    exit 1
+}
+
+Write-Host "Using bv binary at: $(Get-Command bv | Select-Object -ExpandProperty Source)" -ForegroundColor Green
+try {
+    $version = & bv --version 2>&1
+    Write-Host "bv version: $version" -ForegroundColor Green
+} catch {
+    Write-Host "bv version: unknown" -ForegroundColor Yellow
+}
+Write-Host ""
+
 Write-Host "=========================================" -ForegroundColor Cyan
 Write-Host "Testing bv check (before setup)" -ForegroundColor Cyan
 Write-Host "=========================================" -ForegroundColor Cyan
 
 # Note: Windows doesn't require bv setup as it doesn't have automated installation support
 # But we'll still run bv check to verify the environment
-& ".\cli\target\release\bv.exe" check
+& bv check
 if ($LASTEXITCODE -ne 0) {
     Write-Host "bv check reported missing dependencies (expected)" -ForegroundColor Yellow
 }
@@ -75,7 +91,7 @@ Write-Host "Testing bv setup" -ForegroundColor Cyan
 Write-Host "=========================================" -ForegroundColor Cyan
 
 # Run bv setup - it should detect Windows and provide manual instructions
-& ".\cli\target\release\bv.exe" setup
+& bv setup
 Write-Host ""
 
 Write-Host "=========================================" -ForegroundColor Cyan
@@ -166,7 +182,7 @@ Write-Host ""
 Write-Host "=========================================" -ForegroundColor Cyan
 Write-Host "Testing bv check (after setup)" -ForegroundColor Cyan
 Write-Host "=========================================" -ForegroundColor Cyan
-& ".\cli\target\release\bv.exe" check
+& bv check
 
 # Don't fail the test on Windows if dependencies are missing, as manual installation is expected
 if ($LASTEXITCODE -ne 0) {
