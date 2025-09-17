@@ -29,6 +29,10 @@ dependencies:
           - sudo pacman -Syu --noconfirm
           - sudo pacman -S --noconfirm jdk-openjdk
         verify_command: java -version
+      windows:
+        install_commands:
+          - winget install Microsoft.OpenJDK
+        verify_command: java -version
     
   - name: docker
     check_running: true
@@ -57,6 +61,9 @@ dependencies:
           - sudo pacman -Syu --noconfirm
           - sudo pacman -S --noconfirm docker
         verify_command: docker --version
+      windows:
+        skip: true
+        skip_reason: "Docker Desktop for Windows requires manual installation from docker.com"
     
   - name: nextflow
     check_running: false
@@ -88,6 +95,11 @@ dependencies:
           - sudo mv nextflow /usr/local/bin/
           - sudo chmod +x /usr/local/bin/nextflow
         verify_command: nextflow -version
+      windows:
+        install_commands:
+          - powershell -Command "Invoke-WebRequest -Uri 'https://github.com/nextflow-io/nextflow/releases/latest/download/nextflow' -OutFile '$env:USERPROFILE\nextflow.exe'"
+          - powershell -Command "$env:PATH = '$env:USERPROFILE;' + $env:PATH"
+        verify_command: nextflow -version
   
   - name: syftbox
     check_running: false
@@ -111,3 +123,6 @@ dependencies:
         install_commands:
           - curl -fsSL https://syftbox.net/install.sh | sh -s -- --setup-only
         verify_command: syftbox -v
+      windows:
+        skip: true
+        skip_reason: "SyftBox for Windows requires manual installation from GitHub releases"

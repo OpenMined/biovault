@@ -9,6 +9,7 @@ enum SystemType {
     MacOs,
     Ubuntu,
     ArchLinux,
+    Windows,
     Unknown,
 }
 
@@ -35,6 +36,10 @@ pub async fn execute() -> Result<()> {
             println!("✓ Detected Arch Linux environment");
             setup_arch().await?;
         }
+        SystemType::Windows => {
+            println!("✓ Detected Windows environment");
+            setup_windows().await?;
+        }
         SystemType::Unknown => {
             println!("ℹ️  System type not detected or not supported for automated setup");
             println!("   This command currently supports:");
@@ -42,6 +47,7 @@ pub async fn execute() -> Result<()> {
             println!("   - macOS (Homebrew)");
             println!("   - Ubuntu/Debian (apt)");
             println!("   - Arch Linux (pacman)");
+            println!("   - Windows (WinGet)");
             println!("\n   For manual setup, please run: bv check");
         }
     }
@@ -58,6 +64,11 @@ fn detect_system() -> SystemType {
     // Detect macOS
     if std::env::consts::OS == "macos" {
         return SystemType::MacOs;
+    }
+
+    // Detect Windows
+    if std::env::consts::OS == "windows" {
+        return SystemType::Windows;
     }
 
     // Detect Linux distributions
@@ -766,4 +777,172 @@ async fn setup_arch() -> Result<()> {
     }
 
     Ok(())
+}
+
+
+async fn setup_windows() -> Result<()> {
+    println!("\nSetting up Windows environment...\n");
+
+    // Check for WinGet availability
+    let winget_exists = Command::new("winget")
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+
+    if !winget_exists {
+        println!("❌ WinGet (Windows Package Manager) not found.");
+        println!("WinGet is required for automated Windows installation.");
+        println!("\nTo install WinGet:");
+        println!("1. Update Windows to the latest version (WinGet comes with modern Windows)");
+        println!("2. Or install from Microsoft Store: 'App Installer'");
+        println!("3. Or download from: https://github.com/microsoft/winget-cli/releases");
+        println!("\nAfter installing WinGet, re-run: bv setup");
+        print_windows_manual_instructions();
+        return Ok(());
+    }
+
+    println!("✓ WinGet found");
+
+    let deps_yaml = include_str!("../../deps.yaml");
+    let config: DependencyConfig = serde_yaml::from_str(deps_yaml)?;
+
+    let mut success_count = 0;
+    let mut skip_count = 0;
+    let mut fail_count = 0;
+
+    for dep in &config.dependencies {
+        if let Some(envs) = &dep.environments {
+            if let Some(env_cfg) = envs.get("windows") {
+                if env_cfg.skip {
+                    println!(
+                        "⏭️  Skipping {}: {}",
+                        dep.name,
+                        env_cfg
+                            .skip_reason
+                            .as_ref()
+                            .unwrap_or(&"Not needed on Windows".to_string())
+                    );
+                    skip_count += 1;
+                    continue;
+                }
+
+                if let Some(install_commands) = &env_cfg.install_commands {
+                    // Determine if installation is required
+                    let mut need_install = true;
+                    if let Some(verify_cmd) = &env_cfg.verify_command {
+                        let verified = Command::new("powershell")
+                            .arg("-Command")
+                            .arg(verify_cmd)
+                            .stdout(Stdio::null())
+                            .stderr(Stdio::null())
+                            .status()
+                            .map(|s| s.success())
+                            .unwrap_or(false);
+                        if verified {
+                            need_install = false;
+                        }
+                    }
+
+                    if dep.name == "java" {
+                        if let Some(min_v) = dep.min_version {
+                            if let Some(current) = java_major_version() {
+                                if current >= min_v {
+                                    println!("   Java version {} already meets minimum requirement of {}", current, min_v);
+                                    need_install = false;
+                                }
+                            }
+                        }
+                    }
+
+                    if !need_install {
+                        println!("✓ {} already meets requirements. Skipping.", dep.name);
+                        skip_count += 1;
+                        println!();
+                        continue;
+                    }
+
+                    println!("📦 Installing {}...", dep.name);
+                    println!("   {}", dep.description);
+
+                    let mut all_ok = true;
+                    for cmd in install_commands {
+                        println!("   Running: {}", cmd);
+                        let status = if cmd.starts_with("winget") {
+                            Command::new("winget").args(cmd.split_whitespace().skip(1)).status()
+                        } else {
+                            Command::new("powershell").arg("-Command").arg(cmd).status()
+                        };
+
+                        match status {
+                            Ok(s) if s.success() => println!("   ✓ Command succeeded"),
+                            Ok(_) | Err(_) => {
+                                println!("   ❌ Command failed");
+                                all_ok = false;
+                                break;
+                            }
+                        }
+                    }
+
+                    if all_ok {
+                        if let Some(verify_cmd) = &env_cfg.verify_command {
+                            print!("   Verifying installation... ");
+                            let ok = Command::new("powershell")
+                                .arg("-Command")
+                                .arg(verify_cmd)
+                                .stdout(Stdio::null())
+                                .stderr(Stdio::null())
+                                .status()
+                                .map(|s| s.success())
+                                .unwrap_or(false);
+                            if ok {
+                                println!("✓");
+                                success_count += 1;
+                            } else {
+                                println!("❌ Verification failed");
+                                fail_count += 1;
+                            }
+                        } else {
+                            success_count += 1;
+                        }
+                    } else {
+                        fail_count += 1;
+                    }
+
+                    println!();
+                }
+            }
+        }
+    }
+
+    println!("\nNotes:");
+    println!("- You may need to restart your terminal/PowerShell after installation to update PATH");
+    println!("- For Docker on Windows, Docker Desktop is required and may need manual setup");
+
+    print_windows_manual_instructions();
+
+    println!("\n==========================");
+    println!("Setup Summary:");
+    println!("  ✓ Installed: {}", success_count);
+    println!("  ⏭️  Skipped: {}", skip_count);
+    if fail_count > 0 {
+        println!("  ❌ Failed: {}", fail_count);
+        println!("\n⚠️  Some installations failed. Please check the errors above.");
+    } else {
+        println!(
+            "\n✅ Setup completed successfully!\n   Run 'bv check' to verify all dependencies."
+        );
+    }
+
+    Ok(())
+}
+
+fn print_windows_manual_instructions() {
+    println!("\nManual Installation Options:");
+    println!("Java 17+: Download from https://openjdk.org/ or use 'winget install Microsoft.OpenJDK'");
+    println!("Docker: Download Docker Desktop from https://www.docker.com/products/docker-desktop/");
+    println!("Nextflow: Download from https://www.nextflow.io/ or use PowerShell script");
+    println!("SyftBox: Download from https://github.com/OpenMined/syftbox/releases/latest");
 }
