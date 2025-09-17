@@ -127,37 +127,43 @@ Write-Host "=========================================" -ForegroundColor Cyan
 # Check Java installation and verify it meets minimum version
 if (Test-Command "java") {
     Write-Host "Java installed:" -ForegroundColor Green
-    $javaVersionOutput = & java -version 2>&1 | Select-Object -First 1 | Out-String
-    Write-Host $javaVersionOutput.Trim()
+    try {
+        $javaVersionOutput = & java -version 2>&1 | Select-Object -First 1 | Out-String
+        Write-Host $javaVersionOutput.Trim()
 
-    # Extract Java version number (handle both "1.8.0" and "17.0.0" formats)
-    if ($javaVersionOutput -match 'version "(\d+)\.(\d+)') {
-        $majorVersion = [int]$matches[1]
-        $minorVersion = [int]$matches[2]
+        # Extract Java version number (handle both "1.8.0" and "17.0.0" formats)
+        if ($javaVersionOutput -match 'version "(\d+)\.(\d+)') {
+            $majorVersion = [int]$matches[1]
+            $minorVersion = [int]$matches[2]
 
-        # Handle old Java versioning (1.8 = Java 8)
-        if ($majorVersion -eq 1) {
-            $actualVersion = $minorVersion
-        } else {
-            $actualVersion = $majorVersion
-        }
+            # Handle old Java versioning (1.8 = Java 8)
+            if ($majorVersion -eq 1) {
+                $actualVersion = $minorVersion
+            } else {
+                $actualVersion = $majorVersion
+            }
 
-        if ($actualVersion -ge 17) {
-            Write-Host "  Version $actualVersion meets minimum requirement (>=17)" -ForegroundColor Green
+            if ($actualVersion -ge 17) {
+                Write-Host "  Version $actualVersion meets minimum requirement (>=17)" -ForegroundColor Green
+            } else {
+                Write-Host "X Java version $actualVersion is below minimum requirement (17)" -ForegroundColor Red
+                Write-Host "ERROR: Java 8 detected. Java 17+ is required for BioVault." -ForegroundColor Red
+                exit 1
+            }
+        } elseif ($javaVersionOutput -match 'version "(\d+)') {
+            $actualVersion = [int]$matches[1]
+            if ($actualVersion -ge 17) {
+                Write-Host "  Version $actualVersion meets minimum requirement (>=17)" -ForegroundColor Green
+            } else {
+                Write-Host "X Java version $actualVersion is below minimum requirement (17)" -ForegroundColor Red
+                Write-Host "ERROR: Java $actualVersion detected. Java 17+ is required for BioVault." -ForegroundColor Red
+                exit 1
+            }
         } else {
-            Write-Host "X Java version $actualVersion is below minimum requirement (17)" -ForegroundColor Red
-            exit 1
+            Write-Host "Warning: Could not parse Java version from: $javaVersionOutput" -ForegroundColor Yellow
         }
-    } elseif ($javaVersionOutput -match 'version "(\d+)') {
-        $actualVersion = [int]$matches[1]
-        if ($actualVersion -ge 17) {
-            Write-Host "  Version $actualVersion meets minimum requirement (>=17)" -ForegroundColor Green
-        } else {
-            Write-Host "X Java version $actualVersion is below minimum requirement (17)" -ForegroundColor Red
-            exit 1
-        }
-    } else {
-        Write-Host "Warning: Could not parse Java version from: $javaVersionOutput" -ForegroundColor Yellow
+    } catch {
+        Write-Host "Warning: Error checking Java version: $_" -ForegroundColor Yellow
     }
 } else {
     Write-Host "X Java not found - Manual installation required on Windows" -ForegroundColor Red
@@ -216,22 +222,26 @@ Write-Host "=========================================" -ForegroundColor Cyan
 & bv check
 
 # Only exit with error if Java version is too old, otherwise pass the test
-if ($LASTEXITCODE -ne 0) {
-    Write-Host "Note: Some dependencies missing - manual installation may be required on Windows" -ForegroundColor Yellow
-    # Check if we failed due to Java version being too old
-    if (Test-Command "java") {
-        $javaVersionOutput = & java -version 2>&1 | Select-Object -First 1 | Out-String
-        if ($javaVersionOutput -match 'version "1\.8') {
-            Write-Host "ERROR: Java 8 detected. Java 17+ is required." -ForegroundColor Red
-            exit 1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "Note: Some dependencies missing - manual installation may be required on Windows" -ForegroundColor Yellow
+        # Check if we failed due to Java version being too old
+        if (Test-Command "java") {
+            try {
+                $javaVersionOutput = & java -version 2>&1 | Select-Object -First 1 | Out-String
+                if ($javaVersionOutput -match 'version "1\.8') {
+                    Write-Host "ERROR: Java 8 detected. Java 17+ is required." -ForegroundColor Red
+                    exit 1
+                }
+            } catch {
+                # Ignore errors in final check
+            }
         }
     }
-}
 
 Write-Host ""
 Write-Host "=========================================" -ForegroundColor Cyan
 Write-Host "Windows installation test completed" -ForegroundColor Green
 Write-Host "=========================================" -ForegroundColor Cyan
 
-# Exit successfully unless Java version was too old
+# Exit successfully unless Java version was too old (already handled above)
 exit 0
