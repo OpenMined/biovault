@@ -222,21 +222,21 @@ Write-Host "=========================================" -ForegroundColor Cyan
 & bv check
 
 # Only exit with error if Java version is too old, otherwise pass the test
-if ($LASTEXITCODE -ne 0) {
-    Write-Host "Note: Some dependencies missing - manual installation may be required on Windows" -ForegroundColor Yellow
-    # Check if we failed due to Java version being too old
-    if (Test-Command "java") {
-        try {
-            $javaVersionOutput = & java -version 2>&1 | Select-Object -First 1 | Out-String
-            if ($javaVersionOutput -match 'version "1\.8') {
-                Write-Host "ERROR: Java 8 detected. Java 17+ is required." -ForegroundColor Red
-                exit 1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "Note: Some dependencies missing - manual installation may be required on Windows" -ForegroundColor Yellow
+        # Check if we failed due to Java version being too old
+        if (Test-Command "java") {
+            try {
+                $javaVersionOutput = & java -version 2>&1 | Select-Object -First 1 | Out-String
+                if ($javaVersionOutput -match 'version "1\.8') {
+                    Write-Host "ERROR: Java 8 detected. Java 17+ is required." -ForegroundColor Red
+                    exit 1
+                }
+            } catch {
+                # Ignore errors in final check
             }
-        } catch {
-            # Ignore errors in final check
         }
     }
-}
 
 Write-Host ""
 Write-Host "=========================================" -ForegroundColor Cyan
