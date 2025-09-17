@@ -1,0 +1,5 @@
+name: count-snps
+author: dawnchen.xi96@gmail.com
+workflow: workflow.nf
+assets: 
+  - count_number_of_snps.py
