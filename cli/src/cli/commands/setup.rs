@@ -870,7 +870,9 @@ async fn setup_windows() -> Result<()> {
                     for cmd in install_commands {
                         println!("   Running: {}", cmd);
                         let status = if cmd.starts_with("winget") {
-                            Command::new("winget").args(cmd.split_whitespace().skip(1)).status()
+                            Command::new("winget")
+                                .args(cmd.split_whitespace().skip(1))
+                                .status()
                         } else {
                             Command::new("powershell").arg("-Command").arg(cmd).status()
                         };
@@ -917,7 +919,9 @@ async fn setup_windows() -> Result<()> {
     }
 
     println!("\nNotes:");
-    println!("- You may need to restart your terminal/PowerShell after installation to update PATH");
+    println!(
+        "- You may need to restart your terminal/PowerShell after installation to update PATH"
+    );
     println!("- For Docker on Windows, Docker Desktop is required and may need manual setup");
 
     print_windows_manual_instructions();
@@ -940,8 +944,12 @@ async fn setup_windows() -> Result<()> {
 
 fn print_windows_manual_instructions() {
     println!("\nManual Installation Options:");
-    println!("Java 17+: Download from https://openjdk.org/ or use 'winget install Microsoft.OpenJDK'");
-    println!("Docker: Download Docker Desktop from https://www.docker.com/products/docker-desktop/");
+    println!(
+        "Java 17+: Download from https://openjdk.org/ or use 'winget install Microsoft.OpenJDK'"
+    );
+    println!(
+        "Docker: Download Docker Desktop from https://www.docker.com/products/docker-desktop/"
+    );
     println!("Nextflow: Download from https://www.nextflow.io/ or use PowerShell script");
     println!("SyftBox: Download from https://github.com/OpenMined/syftbox/releases/latest");
 }
