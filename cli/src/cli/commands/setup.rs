@@ -7,6 +7,7 @@ use std::process::{Command, Stdio};
 enum SystemType {
     GoogleColab,
     MacOs,
+    Ubuntu,
     ArchLinux,
     Unknown,
 }
@@ -26,6 +27,10 @@ pub async fn execute() -> Result<()> {
             println!("✓ Detected macOS environment");
             setup_macos().await?;
         }
+        SystemType::Ubuntu => {
+            println!("✓ Detected Ubuntu/Debian environment");
+            setup_ubuntu().await?;
+        }
         SystemType::ArchLinux => {
             println!("✓ Detected Arch Linux environment");
             setup_arch().await?;
@@ -35,6 +40,7 @@ pub async fn execute() -> Result<()> {
             println!("   This command currently supports:");
             println!("   - Google Colab");
             println!("   - macOS (Homebrew)");
+            println!("   - Ubuntu/Debian (apt)");
             println!("   - Arch Linux (pacman)");
             println!("\n   For manual setup, please run: bv check");
         }
@@ -54,8 +60,20 @@ fn detect_system() -> SystemType {
         return SystemType::MacOs;
     }
 
-    // Detect Arch Linux by presence of pacman on Linux
+    // Detect Linux distributions
     if std::env::consts::OS == "linux" {
+        // Check for apt (Ubuntu/Debian)
+        let has_apt = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("command -v apt-get >/dev/null 2>&1")
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if has_apt {
+            return SystemType::Ubuntu;
+        }
+
+        // Check for pacman (Arch Linux)
         let has_pacman = std::process::Command::new("sh")
             .arg("-c")
             .arg("command -v pacman >/dev/null 2>&1")
@@ -292,6 +310,7 @@ async fn setup_macos() -> Result<()> {
                         if let Some(min_v) = dep.min_version {
                             if let Some(current) = java_major_version() {
                                 if current >= min_v {
+                                    println!("   Java version {} already meets minimum requirement of {}", current, min_v);
                                     need_install = false;
                                 }
                             }
@@ -441,6 +460,164 @@ fn parse_java_version(output: &str) -> Option<u32> {
     None
 }
 
+async fn setup_ubuntu() -> Result<()> {
+    use super::check::DependencyConfig;
+    use std::process::Command;
+
+    println!("\nSetting up Ubuntu/Debian environment...\n");
+
+    // Ensure apt-get exists
+    let apt_exists = Command::new("sh")
+        .arg("-c")
+        .arg("command -v apt-get >/dev/null 2>&1")
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !apt_exists {
+        println!("❌ apt-get not found. This setup targets Ubuntu/Debian-based systems.");
+        println!("Please ensure you're on an apt-based distribution.");
+        return Ok(());
+    }
+
+    let deps_yaml = include_str!("../../deps.yaml");
+    let config: DependencyConfig = serde_yaml::from_str(deps_yaml)?;
+
+    let mut success_count = 0;
+    let mut skip_count = 0;
+    let mut fail_count = 0;
+
+    for dep in &config.dependencies {
+        if let Some(envs) = &dep.environments {
+            if let Some(env_cfg) = envs.get("ubuntu") {
+                if env_cfg.skip {
+                    println!(
+                        "⏭️  Skipping {}: {}",
+                        dep.name,
+                        env_cfg
+                            .skip_reason
+                            .as_ref()
+                            .unwrap_or(&"Not needed on Ubuntu".to_string())
+                    );
+                    skip_count += 1;
+                    continue;
+                }
+
+                if let Some(install_commands) = &env_cfg.install_commands {
+                    // Determine if installation is required
+                    let mut need_install = true;
+                    if let Some(verify_cmd) = &env_cfg.verify_command {
+                        let verified = Command::new("sh")
+                            .arg("-c")
+                            .arg(verify_cmd)
+                            .stdout(Stdio::null())
+                            .stderr(Stdio::null())
+                            .status()
+                            .map(|s| s.success())
+                            .unwrap_or(false);
+                        if verified {
+                            need_install = false;
+                        }
+                    } else if which::which(&dep.name).is_ok() {
+                        need_install = false;
+                    }
+
+                    if dep.name == "java" {
+                        if let Some(min_v) = dep.min_version {
+                            if let Some(current) = java_major_version() {
+                                if current >= min_v {
+                                    println!("   Java version {} already meets minimum requirement of {}", current, min_v);
+                                    need_install = false;
+                                }
+                            }
+                        }
+                    }
+
+                    if !need_install {
+                        println!("✓ {} already meets requirements. Skipping.", dep.name);
+                        skip_count += 1;
+                        println!();
+                        continue;
+                    }
+
+                    println!("📦 Installing {}...", dep.name);
+                    println!("   {}", dep.description);
+
+                    let mut all_ok = true;
+                    for cmd in install_commands {
+                        println!("   Running: {}", cmd);
+                        // For apt commands on CI, we may need to run with sudo
+                        let cmd_to_run = if cmd.starts_with("apt-get") && !cmd.starts_with("sudo") {
+                            format!("sudo {}", cmd)
+                        } else {
+                            cmd.clone()
+                        };
+
+                        let status = Command::new("sh").arg("-c").arg(&cmd_to_run).status();
+                        match status {
+                            Ok(s) if s.success() => println!("   ✓ Command succeeded"),
+                            Ok(_) | Err(_) => {
+                                println!("   ❌ Command failed");
+                                all_ok = false;
+                                break;
+                            }
+                        }
+                    }
+
+                    if all_ok {
+                        if let Some(verify_cmd) = &env_cfg.verify_command {
+                            print!("   Verifying installation... ");
+                            let ok = Command::new("sh")
+                                .arg("-c")
+                                .arg(verify_cmd)
+                                .stdout(Stdio::null())
+                                .stderr(Stdio::null())
+                                .status()
+                                .map(|s| s.success())
+                                .unwrap_or(false);
+                            if ok {
+                                println!("✓");
+                                success_count += 1;
+                            } else {
+                                println!("❌ Verification failed");
+                                fail_count += 1;
+                            }
+                        } else {
+                            success_count += 1;
+                        }
+                    } else {
+                        fail_count += 1;
+                    }
+
+                    println!();
+                }
+            }
+        }
+    }
+
+    println!("\nNotes:");
+    println!("- For Docker on Ubuntu, you may need to add your user to the docker group: 'sudo usermod -aG docker $USER' and re-login.");
+    println!("- If Docker service is not running: 'sudo systemctl start docker'");
+
+    println!("\nSyftBox:");
+    println!("The installer has been invoked in setup-only mode if needed.");
+    println!("If you want to set up later: syftbox login; syftbox");
+
+    println!("\n==========================");
+    println!("Setup Summary:");
+    println!("  ✓ Installed: {}", success_count);
+    println!("  ⏭️  Skipped: {}", skip_count);
+    if fail_count > 0 {
+        println!("  ❌ Failed: {}", fail_count);
+        println!("\n⚠️  Some installations failed. Please check the errors above.");
+    } else {
+        println!(
+            "\n✅ Setup completed successfully!\n   Run 'bv check' to verify all dependencies."
+        );
+    }
+
+    Ok(())
+}
+
 async fn setup_arch() -> Result<()> {
     use super::check::DependencyConfig;
     use std::process::Command;
@@ -506,6 +683,7 @@ async fn setup_arch() -> Result<()> {
                         if let Some(min_v) = dep.min_version {
                             if let Some(current) = java_major_version() {
                                 if current >= min_v {
+                                    println!("   Java version {} already meets minimum requirement of {}", current, min_v);
                                     need_install = false;
                                 }
                             }
