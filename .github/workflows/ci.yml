@@ -29,6 +29,12 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      - name: Show Rust versions
+        run: |
+          rustc --version
+          cargo --version
+          rustfmt --version
+
       - name: Cache cargo registry
         uses: actions/cache@v4
         with:
