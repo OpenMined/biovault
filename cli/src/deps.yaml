@@ -15,6 +15,11 @@ dependencies:
           - apt-get update -y
           - apt-get install -y openjdk-21-jdk-headless
         verify_command: java -version
+      ubuntu:
+        install_commands:
+          - apt-get update -y
+          - apt-get install -y default-jdk-headless
+        verify_command: java -version
       macos:
         install_commands:
           - brew install openjdk@17
@@ -36,6 +41,13 @@ dependencies:
       google_colab:
         skip: true
         skip_reason: "Docker is not supported in Google Colab. Nextflow will use local executor instead."
+      ubuntu:
+        install_commands:
+          - apt-get update -y
+          - apt-get install -y --reinstall docker.io
+          - systemctl enable docker || true
+          - systemctl start docker || true
+        verify_command: docker --version
       macos:
         install_commands:
           - brew install --cask docker
@@ -60,6 +72,12 @@ dependencies:
           - mv nextflow /usr/local/bin/
           - chmod +x /usr/local/bin/nextflow
         verify_command: nextflow -version
+      ubuntu:
+        install_commands:
+          - curl -s https://get.nextflow.io | bash
+          - sudo mv nextflow /usr/local/bin/
+          - sudo chmod +x /usr/local/bin/nextflow
+        verify_command: nextflow -version
       macos:
         install_commands:
           - brew install nextflow
@@ -81,6 +99,10 @@ dependencies:
       google_colab:
         skip: true
         skip_reason: "TODO"
+      ubuntu:
+        install_commands:
+          - curl -fsSL https://syftbox.net/install.sh | sh -s -- --setup-only
+        verify_command: syftbox -v
       macos:
         install_commands:
           - curl -fsSL https://syftbox.net/install.sh | sh -s -- --setup-only

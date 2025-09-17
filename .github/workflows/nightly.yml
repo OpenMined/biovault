@@ -1,0 +1,88 @@
+name: Nightly Tests
+
+on:
+  schedule:
+    # Run at 2 AM UTC every day
+    - cron: '0 2 * * *'
+  # Allow manual trigger for testing
+  workflow_dispatch:
+    inputs:
+      run_colab_test:
+        description: 'Run Colab environment test'
+        required: false
+        default: true
+        type: boolean
+      run_os_tests:
+        description: 'Run OS-specific installation tests'
+        required: false
+        default: true
+        type: boolean
+
+jobs:
+  colab-test:
+    name: Google Colab Environment Test
+    if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.run_colab_test) }}
+    uses: ./.github/workflows/reusable-colab-test.yml
+    with:
+      event_name: ${{ github.event_name }}
+
+  os-installation-test:
+    name: OS Installation Test - ${{ matrix.os }}
+    if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.run_os_tests) }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: Ubuntu
+            test_script: test_ubuntu_install.sh
+          - os: macos-latest
+            name: macOS
+            test_script: test_macos_install.sh
+          - os: windows-latest
+            name: Windows
+            test_script: test_windows_install.ps1
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install BioVault CLI
+        run: |
+          cargo install --path cli --force
+          echo "Installed bv to: $(which bv)"
+          bv --version
+
+      - name: Run OS-specific installation test (Unix)
+        if: matrix.os != 'windows-latest'
+        run: |
+          cd tests/os
+          chmod +x ${{ matrix.test_script }}
+          ./${{ matrix.test_script }}
+        env:
+          CI: true
+          GITHUB_ACTIONS: true
+
+      - name: Run OS-specific installation test (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: powershell
+        run: |
+          cd tests/os
+          ./${{ matrix.test_script }}
+        env:
+          CI: true
+          GITHUB_ACTIONS: true
+
+      - name: Upload test logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}-test-logs-${{ github.run_id }}
+          path: |
+            tests/os/*.log
+            /tmp/bv-test-*.log
+          retention-days: 7
