@@ -49,16 +49,27 @@ if [ -n "$CI" ] || [ -n "$GITHUB_ACTIONS" ]; then
     cleanup_existing
 fi
 
+# Verify bv is installed
+if ! command_exists bv; then
+    echo "Error: bv command not found in PATH"
+    echo "PATH: $PATH"
+    exit 1
+fi
+
+echo "Using bv binary at: $(which bv)"
+echo "bv version: $(bv --version || echo 'unknown')"
+echo ""
+
 echo "========================================="
 echo "Testing bv check (before setup)"
 echo "========================================="
-./cli/target/release/bv check || true
+bv check || true
 echo ""
 
 echo "========================================="
 echo "Testing bv setup"
 echo "========================================="
-./cli/target/release/bv setup
+bv setup
 echo ""
 
 echo "========================================="
@@ -111,7 +122,7 @@ echo ""
 echo "========================================="
 echo "Testing bv check (after setup)"
 echo "========================================="
-./cli/target/release/bv check
+bv check
 echo ""
 
 echo "========================================="

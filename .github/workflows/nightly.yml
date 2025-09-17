@@ -51,10 +51,11 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Build BioVault CLI
+      - name: Install BioVault CLI
         run: |
-          cd cli
-          cargo build --release
+          cargo install --path cli --force
+          echo "Installed bv to: $(which bv)"
+          bv --version
 
       - name: Run OS-specific installation test (Unix)
         if: matrix.os != 'windows-latest'
