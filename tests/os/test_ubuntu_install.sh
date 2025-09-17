@@ -26,8 +26,13 @@ cleanup_existing() {
     if command_exists java; then
         JAVA_VERSION=$(java -version 2>&1 | head -1 | grep -oP '\d+' | head -1)
         echo "Found existing Java installation (version $JAVA_VERSION), removing to test fresh install..."
-        sudo apt-get remove -y --purge openjdk-* default-jdk* || true
+        # More aggressive Java removal
+        sudo apt-get remove -y --purge openjdk-* default-jdk* default-jre* || true
+        sudo apt-get remove -y --purge java-common || true
         sudo apt-get autoremove -y || true
+        # Clear alternatives
+        sudo update-alternatives --remove-all java 2>/dev/null || true
+        sudo update-alternatives --remove-all javac 2>/dev/null || true
     fi
 
     # Remove existing Nextflow if present
@@ -36,9 +41,10 @@ cleanup_existing() {
         sudo rm -f /usr/local/bin/nextflow
     fi
 
-    # Docker is usually not installed on GitHub runners for Ubuntu, but check anyway
+    # Docker is usually not installed on GitHub runners for Ubuntu, but we can reinstall
+    # The --reinstall flag in deps.yaml will handle existing installations
     if command_exists docker; then
-        echo "Docker already installed, skipping removal to preserve runner state"
+        echo "Docker already installed, will be reinstalled during setup"
     fi
 
     echo ""

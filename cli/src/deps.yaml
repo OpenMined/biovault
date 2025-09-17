@@ -44,7 +44,7 @@ dependencies:
       ubuntu:
         install_commands:
           - apt-get update -y
-          - apt-get install -y docker.io
+          - apt-get install -y --reinstall docker.io
           - systemctl enable docker || true
           - systemctl start docker || true
         verify_command: docker --version
