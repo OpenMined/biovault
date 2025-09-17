@@ -12,7 +12,6 @@ In this tutorial, you will:
 - Install BioVault and its dependencies
 - Set up a complete SNP counting project with 23andMe data
 - Run a simple analysis to count genetic variants
-- Process over 600,000 SNPs from a real genome file
 - Understand the basic structure of a BioVault project
 
 ## Prerequisites
@@ -119,12 +118,12 @@ For this tutorial, we'll work with a 23andMe genome file format. This is a simpl
 
 Let's copy the count-snps example which includes a sample 23andMe genome file:
 ```bash
-cp -r /Users/dawnxi/biovault/cli/examples/count-snps ./count-snps
+# TODO: ADD EXAMPLE DATA DOWNLOAD
 ```
 
 This copies:
 - A complete count-snps project template
-- A sample 23andMe genome file (`genome_23andMe_v4_Full.txt`) with over 600,000 genetic variants
+- A sample 23andMe genome file (`genome_23andMe_v4_Full.txt`)
 - All necessary workflow and configuration files
 
 **Note:** The 23andMe file format is a simple text file with genetic variants, making it perfect for learning SNP counting without requiring massive downloads or complex genomic data processing.
@@ -141,7 +140,6 @@ You should see:
 count-snps/
 ├── assets/
 │   └── count_number_of_snps.py
-├── genome_23andMe_v4_Full.txt
 ├── project.yaml
 ├── template.nf
 └── workflow.nf
