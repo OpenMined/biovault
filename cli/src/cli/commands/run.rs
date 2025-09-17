@@ -20,6 +20,8 @@ struct ProjectConfig {
     name: String,
     author: String,
     workflow: String,
+    #[serde(default)]
+    template: Option<String>,
     #[serde(default, deserialize_with = "deserialize_string_or_vec")]
     assets: Vec<String>,
     #[serde(default)]
@@ -68,20 +70,31 @@ where
 pub struct ParticipantData {
     #[serde(default)]
     pub id: String,
-    pub ref_version: String,
-    #[serde(rename = "ref")]
-    pub ref_path: String,
-    pub ref_index: String,
-    pub aligned: String,
-    pub aligned_index: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ref_version: Option<String>,
+    #[serde(rename = "ref", default, skip_serializing_if = "Option::is_none")]
+    pub ref_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ref_index: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aligned: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aligned_index: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ref_b3sum: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ref_index_b3sum: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub aligned_b3sum: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub aligned_index_b3sum: Option<String>,
+    // SNP data fields
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snp: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snp_b3sum: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uncompress: Option<bool>,
 }
 
 pub struct RunParams {
@@ -93,6 +106,7 @@ pub struct RunParams {
     pub with_docker: bool,
     pub work_dir: Option<String>,
     pub resume: bool,
+    pub template: Option<String>,
 }
 
 enum ParticipantSource {
@@ -175,13 +189,33 @@ async fn fetch_participant_file(
 
             // Load sample_data.yaml to get URLs and compute filenames
             #[derive(serde::Deserialize)]
+            struct PostProcess {
+                #[serde(default)]
+                #[allow(dead_code)]
+                uncompress: Option<bool>,
+                #[serde(default)]
+                file: Option<String>,
+            }
+            #[derive(serde::Deserialize)]
             struct SampleEntry {
-                ref_version: String,
-                #[serde(rename = "ref")]
-                ref_url: String,
-                ref_index: String,
-                aligned: serde_yaml::Value,
-                aligned_index: String,
+                #[serde(default)]
+                ref_version: Option<String>,
+                #[serde(rename = "ref", default)]
+                ref_url: Option<String>,
+                #[serde(default)]
+                ref_index: Option<String>,
+                #[serde(default)]
+                aligned: Option<serde_yaml::Value>,
+                #[serde(default)]
+                aligned_index: Option<String>,
+                // SNP fields
+                #[serde(default)]
+                snp: Option<String>,
+                #[serde(default)]
+                #[allow(dead_code)]
+                snp_b3sum: Option<String>,
+                #[serde(default)]
+                snp_post_process: Option<PostProcess>,
             }
             #[derive(serde::Deserialize)]
             struct SampleDataConfig {
@@ -216,13 +250,23 @@ async fn fetch_participant_file(
                     .to_string()
             }
 
-            let ref_filename = filename_from_url(&entry.ref_url);
-            let ref_index_filename = filename_from_url(&entry.ref_index);
+            let ref_filename = entry
+                .ref_url
+                .as_ref()
+                .map(|url| filename_from_url(url))
+                .unwrap_or_default();
+            let ref_index_filename = entry
+                .ref_index
+                .as_ref()
+                .map(|url| filename_from_url(url))
+                .unwrap_or_default();
 
             // Determine aligned file final name
-            let aligned_abs_path = match &entry.aligned {
-                serde_yaml::Value::String(url) => participant_dir.join(filename_from_url(url)),
-                serde_yaml::Value::Sequence(seq) if !seq.is_empty() => {
+            let aligned_abs_path = match entry.aligned.as_ref() {
+                Some(serde_yaml::Value::String(url)) => {
+                    participant_dir.join(filename_from_url(url))
+                }
+                Some(serde_yaml::Value::Sequence(seq)) if !seq.is_empty() => {
                     // multiple parts, derive base name from first
                     if let Some(serde_yaml::Value::String(first_url)) = seq.first() {
                         let first_name = filename_from_url(first_url);
@@ -237,11 +281,16 @@ async fn fetch_participant_file(
                         anyhow::bail!("Invalid aligned URL list in sample data");
                     }
                 }
+                None => PathBuf::new(), // No aligned field for SNP data
                 _ => anyhow::bail!("Invalid 'aligned' field in sample data"),
             };
 
-            let aligned_index_abs = if !entry.aligned_index.is_empty() {
-                participant_dir.join(filename_from_url(&entry.aligned_index))
+            let aligned_index_abs = if let Some(aligned_index) = entry.aligned_index.as_ref() {
+                if !aligned_index.is_empty() {
+                    participant_dir.join(filename_from_url(aligned_index))
+                } else {
+                    PathBuf::new()
+                }
             } else {
                 PathBuf::new()
             };
@@ -250,26 +299,51 @@ async fn fetch_participant_file(
             let mut yaml = String::new();
             yaml.push_str("participants:\n");
             yaml.push_str(&format!("  {}:\n", sample_id));
-            yaml.push_str(&format!("    ref_version: {}\n", entry.ref_version));
-            yaml.push_str(&format!(
-                "    ref: {}\n",
-                reference_dir.join(ref_filename).to_string_lossy()
-            ));
-            yaml.push_str(&format!(
-                "    ref_index: {}\n",
-                reference_dir.join(ref_index_filename).to_string_lossy()
-            ));
-            yaml.push_str(&format!(
-                "    aligned: {}\n",
-                aligned_abs_path.to_string_lossy()
-            ));
-            if !aligned_index_abs.as_os_str().is_empty() {
-                yaml.push_str(&format!(
-                    "    aligned_index: {}\n",
-                    aligned_index_abs.to_string_lossy()
-                ));
+            if let Some(ref_version) = &entry.ref_version {
+                yaml.push_str(&format!("    ref_version: {}\n", ref_version));
+            }
+
+            // Check if this is SNP data or CRAM data
+            if let Some(snp) = &entry.snp {
+                // SNP data - point to the specific file if specified in post_process
+                let snp_path = if let Some(ref post_process) = entry.snp_post_process {
+                    if let Some(ref file) = post_process.file {
+                        participant_dir.join(file)
+                    } else {
+                        // Strip .zip if present
+                        participant_dir.join(filename_from_url(snp).replace(".zip", ""))
+                    }
+                } else {
+                    // Strip .zip if present
+                    participant_dir.join(filename_from_url(snp).replace(".zip", ""))
+                };
+                yaml.push_str(&format!("    snp: {}\n", snp_path.to_string_lossy()));
             } else {
-                yaml.push_str("    aligned_index: \n");
+                // CRAM data - include reference and alignment files
+                if !ref_filename.is_empty() {
+                    yaml.push_str(&format!(
+                        "    ref: {}\n",
+                        reference_dir.join(ref_filename).to_string_lossy()
+                    ));
+                }
+                if !ref_index_filename.is_empty() {
+                    yaml.push_str(&format!(
+                        "    ref_index: {}\n",
+                        reference_dir.join(ref_index_filename).to_string_lossy()
+                    ));
+                }
+                if !aligned_abs_path.as_os_str().is_empty() {
+                    yaml.push_str(&format!(
+                        "    aligned: {}\n",
+                        aligned_abs_path.to_string_lossy()
+                    ));
+                }
+                if !aligned_index_abs.as_os_str().is_empty() {
+                    yaml.push_str(&format!(
+                        "    aligned_index: {}\n",
+                        aligned_index_abs.to_string_lossy()
+                    ));
+                }
             }
 
             Ok((yaml, Some(format!("participants.{}", sample_id))))
@@ -335,7 +409,14 @@ fn extract_participant_data(
             mock_data.id = participant_id;
 
             // Determine mock data key based on ref_version
-            let mock_key = format!("mock_data_{}", mock_data.ref_version.to_lowercase());
+            let mock_key = format!(
+                "mock_data_{}",
+                mock_data
+                    .ref_version
+                    .as_ref()
+                    .unwrap_or(&"unknown".to_string())
+                    .to_lowercase()
+            );
 
             return Ok((mock_data, Some(mock_key)));
         } else {
@@ -462,32 +543,35 @@ async fn ensure_files_exist(
     // First check what needs downloading
     for (name, url, b3sum) in &files_to_check {
         // Check if it's a URL
-        if url.starts_with("http://") || url.starts_with("https://") {
-            // Check cache first if we have a checksum
-            if let Some(checksum) = b3sum {
-                let cache_path = cache_base.join("by-hash").join(checksum);
-                if cache_path.exists() {
-                    debug!("Found {} in cache: {:?}", name, cache_path);
-                    let filename = extract_filename(url);
-                    cached_paths.insert(name.to_string(), (cache_path, filename));
-                    continue;
+        if let Some(url_str) = url {
+            if url_str.starts_with("http://") || url_str.starts_with("https://") {
+                // Check cache first if we have a checksum
+                if let Some(checksum) = b3sum {
+                    let cache_path = cache_base.join("by-hash").join(checksum);
+                    if cache_path.exists() {
+                        debug!("Found {} in cache: {:?}", name, cache_path);
+                        let filename = extract_filename(url_str);
+                        cached_paths.insert(name.to_string(), (cache_path, filename));
+                        continue;
+                    }
+                }
+                downloads_needed.push((name.to_string(), url.clone(), b3sum.clone()));
+            } else {
+                // Local file - check existence and keep path as-is
+                if !Path::new(url_str).exists() {
+                    return Err(anyhow!("Local file not found: {} at {}", name, url_str));
+                }
+                // Keep local paths unchanged
+                match *name {
+                    "reference" => local_participant.ref_path = Some(url_str.to_string()),
+                    "reference index" => local_participant.ref_index = Some(url_str.to_string()),
+                    "aligned" => local_participant.aligned = Some(url_str.to_string()),
+                    "aligned index" => local_participant.aligned_index = Some(url_str.to_string()),
+                    "snp" => local_participant.snp = Some(url_str.to_string()),
+                    _ => {}
                 }
             }
-            downloads_needed.push((name.to_string(), url.clone(), b3sum.clone()));
-        } else {
-            // Local file - check existence and keep path as-is
-            if !Path::new(url).exists() {
-                return Err(anyhow!("Local file not found: {} at {}", name, url));
-            }
-            // Keep local paths unchanged
-            match *name {
-                "reference" => local_participant.ref_path = url.clone(),
-                "reference index" => local_participant.ref_index = url.clone(),
-                "aligned" => local_participant.aligned = url.clone(),
-                "aligned index" => local_participant.aligned_index = url.clone(),
-                _ => {}
-            }
-        }
+        } // Close the if let Some(url_str) = url block
     }
 
     // Create symlinks for cached files with proper filenames
@@ -519,13 +603,17 @@ async fn ensure_files_exist(
 
         // Update participant paths with symlink paths
         match name.as_str() {
-            "reference" => local_participant.ref_path = symlink_path.to_string_lossy().to_string(),
-            "reference index" => {
-                local_participant.ref_index = symlink_path.to_string_lossy().to_string()
+            "reference" => {
+                local_participant.ref_path = Some(symlink_path.to_string_lossy().to_string())
             }
-            "aligned" => local_participant.aligned = symlink_path.to_string_lossy().to_string(),
+            "reference index" => {
+                local_participant.ref_index = Some(symlink_path.to_string_lossy().to_string())
+            }
+            "aligned" => {
+                local_participant.aligned = Some(symlink_path.to_string_lossy().to_string())
+            }
             "aligned index" => {
-                local_participant.aligned_index = symlink_path.to_string_lossy().to_string()
+                local_participant.aligned_index = Some(symlink_path.to_string_lossy().to_string())
             }
             _ => {}
         }
@@ -534,7 +622,11 @@ async fn ensure_files_exist(
     if !downloads_needed.is_empty() {
         println!("\nThe following files need to be downloaded:");
         for (name, url, _) in &downloads_needed {
-            println!("  - {} from {}", name.cyan(), url);
+            println!(
+                "  - {} from {}",
+                name.cyan(),
+                url.as_ref().unwrap_or(&"unknown".to_string())
+            );
         }
 
         let should_download = if auto_download {
@@ -554,8 +646,12 @@ async fn ensure_files_exist(
         for (name, url, b3sum) in &downloads_needed {
             println!("Downloading {}...", name.green());
 
+            let url_str = url
+                .as_ref()
+                .ok_or_else(|| anyhow!("Missing URL for {}", name))?;
+
             // Extract filename from URL
-            let filename = extract_filename(url);
+            let filename = extract_filename(url_str);
             let symlink_path = participant_downloads_dir.join(&filename);
 
             // Create a temporary path for download
@@ -582,7 +678,9 @@ async fn ensure_files_exist(
             };
 
             // Download (will be stored in cache)
-            let _downloaded_path = cache.download_with_cache(url, &temp_path, options).await?;
+            let _downloaded_path = cache
+                .download_with_cache(url_str, &temp_path, options)
+                .await?;
 
             // After download, the file is in cache. Create symlink with proper filename
             if let Some(hash) = b3sum {
@@ -615,14 +713,17 @@ async fn ensure_files_exist(
             // Update the participant data with symlink paths
             match name.as_str() {
                 "reference" => {
-                    local_participant.ref_path = symlink_path.to_string_lossy().to_string()
+                    local_participant.ref_path = Some(symlink_path.to_string_lossy().to_string())
                 }
                 "reference index" => {
-                    local_participant.ref_index = symlink_path.to_string_lossy().to_string()
+                    local_participant.ref_index = Some(symlink_path.to_string_lossy().to_string())
                 }
-                "aligned" => local_participant.aligned = symlink_path.to_string_lossy().to_string(),
+                "aligned" => {
+                    local_participant.aligned = Some(symlink_path.to_string_lossy().to_string())
+                }
                 "aligned index" => {
-                    local_participant.aligned_index = symlink_path.to_string_lossy().to_string()
+                    local_participant.aligned_index =
+                        Some(symlink_path.to_string_lossy().to_string())
                 }
                 _ => {}
             }
@@ -673,9 +774,16 @@ pub async fn execute(params: RunParams) -> anyhow::Result<()> {
     participant =
         ensure_files_exist(&participant, params.download, &source, mock_key.as_deref()).await?;
 
+    // Determine which template to use
+    // Priority: CLI flag > project.yaml > default
+    let template_name = params
+        .template
+        .or(config.template.clone())
+        .unwrap_or_else(|| "default".to_string());
+
     // Get BioVault environment directory
     let biovault_home = crate::config::get_biovault_home()?;
-    let env_dir = biovault_home.join("env").join("default");
+    let env_dir = biovault_home.join("env").join(&template_name);
 
     // Check if templates exist
     let template_nf = env_dir.join("template.nf");
@@ -684,6 +792,8 @@ pub async fn execute(params: RunParams) -> anyhow::Result<()> {
     if !template_nf.exists() || !nextflow_config.exists() {
         return Err(Error::TemplatesNotFound.into());
     }
+
+    println!("Using template: {}", template_name);
 
     // Use templates directly from env dir instead of copying to temp
     let temp_template = template_nf;
@@ -711,7 +821,9 @@ pub async fn execute(params: RunParams) -> anyhow::Result<()> {
         .context("Failed to resolve assets directory path")?;
 
     // Create results directory for this participant
-    let results_base = if params.test {
+    // Use results-test for sample data or if test flag is set
+    let is_sample_data = matches!(source, ParticipantSource::SampleDataId(_));
+    let results_base = if params.test || is_sample_data {
         "results-test"
     } else {
         "results-real"
@@ -731,7 +843,14 @@ pub async fn execute(params: RunParams) -> anyhow::Result<()> {
         config.workflow, config.name
     );
 
-    println!("Processing participant: {}", participant.id.cyan());
+    if is_sample_data {
+        println!(
+            "Processing sample data participant: {}",
+            participant.id.cyan()
+        );
+    } else {
+        println!("Processing participant: {}", participant.id.cyan());
+    }
 
     // Build Nextflow command
     let mut cmd = Command::new("nextflow");
@@ -742,18 +861,31 @@ pub async fn execute(params: RunParams) -> anyhow::Result<()> {
     cmd.arg("run")
         .arg(&temp_template)
         .arg("--participant_id")
-        .arg(&participant.id)
-        .arg("--ref_version")
-        .arg(&participant.ref_version)
-        .arg("--ref")
-        .arg(&participant.ref_path)
-        .arg("--ref_index")
-        .arg(&participant.ref_index)
-        .arg("--aligned")
-        .arg(&participant.aligned)
-        .arg("--aligned_index")
-        .arg(&participant.aligned_index)
-        .arg("--work_flow_file")
+        .arg(&participant.id);
+
+    // Add CRAM-specific parameters if present
+    if let Some(ref_version) = &participant.ref_version {
+        cmd.arg("--ref_version").arg(ref_version);
+    }
+    if let Some(ref_path) = &participant.ref_path {
+        cmd.arg("--ref").arg(ref_path);
+    }
+    if let Some(ref_index) = &participant.ref_index {
+        cmd.arg("--ref_index").arg(ref_index);
+    }
+    if let Some(aligned) = &participant.aligned {
+        cmd.arg("--aligned").arg(aligned);
+    }
+    if let Some(aligned_index) = &participant.aligned_index {
+        cmd.arg("--aligned_index").arg(aligned_index);
+    }
+
+    // Add SNP-specific parameters if present
+    if let Some(snp) = &participant.snp {
+        cmd.arg("--snp").arg(snp);
+    }
+
+    cmd.arg("--work_flow_file")
         .arg(workflow_file.to_string_lossy().as_ref())
         .arg("--assets_dir")
         .arg(assets_dir.to_string_lossy().as_ref())

@@ -18,6 +18,8 @@ pub struct Config {
     pub email: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub syftbox_config: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

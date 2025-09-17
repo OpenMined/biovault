@@ -93,6 +93,7 @@ mod tests {
         let initial_config = Config {
             email: "initial@example.com".to_string(),
             syftbox_config: None,
+            version: None,
         };
         initial_config.save(config_dir.join("config.yaml"))?;
 

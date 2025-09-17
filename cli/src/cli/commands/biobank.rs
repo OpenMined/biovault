@@ -19,12 +19,18 @@ const PUBLIC_TEMPLATE_PATH: &str = include_str!("../../participants.public.templ
 pub struct PublicParticipant {
     pub id: String,
     pub url: String,
-    pub ref_version: String,
-    #[serde(rename = "ref")]
-    pub reference: String,
-    pub ref_index: String,
-    pub aligned: String,
-    pub aligned_index: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ref_version: Option<String>,
+    #[serde(rename = "ref", skip_serializing_if = "Option::is_none")]
+    pub reference: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ref_index: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub aligned: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub aligned_index: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snp: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mock: Option<YamlValue>,
 }
@@ -201,21 +207,38 @@ fn save_public_participants(email: &str, file: &PublicParticipantsFile) -> Resul
         yaml_content.push_str(&format!("  {}:\n", id));
         yaml_content.push_str(&format!("    id: {}\n", participant.id));
         yaml_content.push_str(&format!("    url: \"{}\"\n", participant.url));
-        yaml_content.push_str(&format!("    ref_version: {}\n", participant.ref_version));
-        yaml_content.push_str(&format!("    ref: \"{}\"\n", participant.reference));
-        yaml_content.push_str(&format!("    ref_index: \"{}\"\n", participant.ref_index));
-        yaml_content.push_str(&format!("    aligned: \"{}\"\n", participant.aligned));
-        yaml_content.push_str(&format!(
-            "    aligned_index: \"{}\"\n",
-            participant.aligned_index
-        ));
 
-        // Add mock field as a proper YAML anchor reference (no quotes)
-        // Only add mock field if we have corresponding mock data in the template
-        if participant.ref_version.to_lowercase() == "grch38" {
-            yaml_content.push_str("    mock: *mock_data_grch38\n");
+        // Check if it's an SNP participant
+        if let Some(snp) = &participant.snp {
+            yaml_content.push_str(&format!("    snp: \"{}\"\n", snp));
+            // Add mock field for SNP
+            yaml_content.push_str("    mock: *mock_data_snp\n");
+        } else {
+            // Default CRAM/BAM participant
+            if let Some(ref_version) = &participant.ref_version {
+                yaml_content.push_str(&format!("    ref_version: {}\n", ref_version));
+            }
+            if let Some(reference) = &participant.reference {
+                yaml_content.push_str(&format!("    ref: \"{}\"\n", reference));
+            }
+            if let Some(ref_index) = &participant.ref_index {
+                yaml_content.push_str(&format!("    ref_index: \"{}\"\n", ref_index));
+            }
+            if let Some(aligned) = &participant.aligned {
+                yaml_content.push_str(&format!("    aligned: \"{}\"\n", aligned));
+            }
+            if let Some(aligned_index) = &participant.aligned_index {
+                yaml_content.push_str(&format!("    aligned_index: \"{}\"\n", aligned_index));
+            }
+            // Add mock field as a proper YAML anchor reference (no quotes)
+            // Only add mock field if we have corresponding mock data in the template
+            if let Some(ref_version) = &participant.ref_version {
+                if ref_version.to_lowercase() == "grch38" {
+                    yaml_content.push_str("    mock: *mock_data_grch38\n");
+                }
+            }
+            // Note: GRCh37 mock data not included yet
         }
-        // Note: GRCh37 mock data not included yet
     }
 
     fs::write(&path, yaml_content)
@@ -264,15 +287,32 @@ pub async fn publish(
     }
 
     for (id, participant) in participants_to_publish {
-        let public_participant = PublicParticipant {
-            id: id.clone(),
-            url: format!("{{root.private_url}}#participants.{}", id),
-            ref_version: participant.ref_version.clone(),
-            reference: "{url}.ref".to_string(),
-            ref_index: "{url}.ref_index".to_string(),
-            aligned: "{url}.aligned".to_string(),
-            aligned_index: "{url}.aligned_index".to_string(),
-            mock: None, // Handled manually in save_public_participants
+        let public_participant = if participant.snp.is_some() {
+            // SNP participant
+            PublicParticipant {
+                id: id.clone(),
+                url: format!("{{root.private_url}}#participants.{}", id),
+                ref_version: None,
+                reference: None,
+                ref_index: None,
+                aligned: None,
+                aligned_index: None,
+                snp: Some("{url}.snp".to_string()),
+                mock: None, // Handled manually in save_public_participants
+            }
+        } else {
+            // Default CRAM/BAM participant
+            PublicParticipant {
+                id: id.clone(),
+                url: format!("{{root.private_url}}#participants.{}", id),
+                ref_version: participant.ref_version.clone(),
+                reference: Some("{url}.ref".to_string()),
+                ref_index: Some("{url}.ref_index".to_string()),
+                aligned: Some("{url}.aligned".to_string()),
+                aligned_index: Some("{url}.aligned_index".to_string()),
+                snp: None,
+                mock: None, // Handled manually in save_public_participants
+            }
         };
 
         public_participants
@@ -453,12 +493,18 @@ pub struct BiobankFile {
 pub struct BiobankParticipant {
     pub id: String,
     pub url: String,
-    pub ref_version: String,
-    #[serde(rename = "ref")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ref_version: Option<String>,
+    #[serde(rename = "ref", skip_serializing_if = "Option::is_none")]
     pub reference: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub ref_index: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub aligned: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub aligned_index: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snp: Option<String>,
 }
 
 #[derive(Debug)]
@@ -513,7 +559,14 @@ pub async fn list(override_path: Option<PathBuf>) -> crate::error::Result<()> {
         println!("Participants:\n");
 
         for (participant_id, participant) in &biobank.participants {
-            println!("{} ({})", participant_id, participant.ref_version);
+            let participant_type = if participant.snp.is_some() {
+                "SNP".to_string()
+            } else if let Some(ref ref_version) = participant.ref_version {
+                ref_version.clone()
+            } else {
+                "Unknown".to_string()
+            };
+            println!("{} ({})", participant_id, participant_type);
 
             // Try to parse the participant URL
             if let Ok(syft_url) = SyftURL::parse(&participant.url) {
@@ -654,6 +707,7 @@ mod tests {
         let config = Config {
             email: email.to_string(),
             syftbox_config: Some(syftbox_config_path.to_str().unwrap().to_string()),
+            version: None,
         };
 
         let config_path = config_dir.join("config.yaml");
@@ -673,22 +727,24 @@ mod tests {
                     "TEST1".to_string(),
                     Participant {
                         id: "TEST1".to_string(),
-                        ref_version: "GRCh38".to_string(),
-                        r#ref: "/data/ref/grch38.fa".to_string(),
-                        ref_index: "/data/ref/grch38.fa.fai".to_string(),
-                        aligned: "/data/aligned/test1.cram".to_string(),
-                        aligned_index: "/data/aligned/test1.cram.crai".to_string(),
+                        ref_version: Some("GRCh38".to_string()),
+                        r#ref: Some("/data/ref/grch38.fa".to_string()),
+                        ref_index: Some("/data/ref/grch38.fa.fai".to_string()),
+                        aligned: Some("/data/aligned/test1.cram".to_string()),
+                        aligned_index: Some("/data/aligned/test1.cram.crai".to_string()),
+                        snp: None,
                     },
                 ),
                 (
                     "TEST2".to_string(),
                     Participant {
                         id: "TEST2".to_string(),
-                        ref_version: "GRCh38".to_string(),
-                        r#ref: "/data/ref/grch38_2.fa".to_string(),
-                        ref_index: "/data/ref/grch38_2.fa.fai".to_string(),
-                        aligned: "/data/aligned/test2.bam".to_string(),
-                        aligned_index: "/data/aligned/test2.bam.bai".to_string(),
+                        ref_version: Some("GRCh38".to_string()),
+                        r#ref: Some("/data/ref/grch38_2.fa".to_string()),
+                        ref_index: Some("/data/ref/grch38_2.fa.fai".to_string()),
+                        aligned: Some("/data/aligned/test2.bam".to_string()),
+                        aligned_index: Some("/data/aligned/test2.bam.bai".to_string()),
+                        snp: None,
                     },
                 ),
             ]
@@ -715,6 +771,7 @@ mod tests {
         crate::config::set_test_config(crate::config::Config {
             email: email.to_string(),
             syftbox_config: Some(syftbox_config_path.to_string_lossy().to_string()),
+            version: None,
         });
 
         // Setup test environment - create datasites for the email we're using
@@ -975,6 +1032,7 @@ participants:
                     .to_string_lossy()
                     .to_string(),
             ),
+            version: None,
         };
         config.save(config_dir.join("config.yaml"))?;
 
@@ -1019,11 +1077,12 @@ participants:
                         "syft://{}/public/biovault/participants.yaml#participants.{}",
                         email, id
                     ),
-                    ref_version: ref_version.to_string(),
+                    ref_version: Some(ref_version.to_string()),
                     reference: None,
                     ref_index: None,
                     aligned: None,
                     aligned_index: None,
+                    snp: None,
                 },
             );
         }

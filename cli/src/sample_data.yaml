@@ -27,3 +27,10 @@ sample_data_urls:
       - "fc07b607f8373f5bd832dc0d967deaa926b2eb2aee59968657f5c1e30457e3ad"
       - "1d23cd4a5c8c16805e5a4af602c5c209a83c618f4f133e274bcdbb74d3be5f65"
     aligned_index_b3sum: "f81bad3f1c7aeb1ed7b8cca3d911b57892f82c9b6a3e57786fcafe7ed64c74ae"
+
+  23andme:
+    snp: https://github.com/OpenMined/biovault-data/raw/main/snp/23andme_genome_v4_Full.zip
+    snp_b3sum: "2f4aeca4ff424abcc187fcecc0f3776376a43ea674a9498c9b24b4ad4964ccea"
+    snp_post_process:
+      uncompress: true
+      file: genome_Zeeshan_Usamani_v4_Full.txt

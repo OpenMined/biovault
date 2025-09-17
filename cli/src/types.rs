@@ -63,6 +63,8 @@ pub struct ProjectYaml {
     pub participants: Option<Vec<String>>,
     pub workflow: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub template: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub assets: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub b3_hashes: Option<HashMap<String, String>>,

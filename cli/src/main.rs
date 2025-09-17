@@ -6,6 +6,20 @@ use biovault::cli;
 
 use cli::commands;
 
+// Validator for example names that also shows available examples
+fn validate_example_name(s: &str) -> Result<String, String> {
+    let examples = cli::examples::list_examples();
+    if examples.contains(&s.to_string()) {
+        Ok(s.to_string())
+    } else {
+        Err(format!(
+            "Unknown example '{}'. Available examples: {}",
+            s,
+            examples.join(", ")
+        ))
+    }
+}
+
 #[derive(Parser)]
 #[command(
     name = "bv",
@@ -78,6 +92,9 @@ enum Commands {
 
         #[arg(long, help = "Resume from previous run")]
         resume: bool,
+
+        #[arg(long, help = "Template to use (default, snp, etc.)")]
+        template: Option<String>,
     },
 
     #[command(name = "sample-data", about = "Manage sample data")]
@@ -172,15 +189,12 @@ enum ProjectCommands {
         #[arg(long, help = "Folder path (defaults to ./{name})")]
         folder: Option<String>,
 
-        #[arg(long = "haplo-y", help = "Use embedded haplo-y example template")]
-        haplo_y: bool,
-
-        #[arg(long = "eye-color", help = "Use embedded eye-color example template")]
-        eye_color: bool,
-
-        #[arg(long = "red-hair", help = "Use embedded red-hair example template")]
-        red_hair: bool,
+        #[arg(long, value_parser = validate_example_name, help = "Use example template (use 'bv project examples' to list available)")]
+        example: Option<String>,
     },
+
+    #[command(about = "List available example templates")]
+    Examples,
 }
 
 #[derive(Subcommand)]
@@ -210,6 +224,16 @@ enum ParticipantCommands {
 
         #[arg(long, help = "Aligned file path (.cram, .bam, or .sam)")]
         aligned: Option<String>,
+
+        #[arg(
+            long,
+            help = "Template type (default or snp)",
+            default_value = "default"
+        )]
+        template: Option<String>,
+
+        #[arg(long, help = "SNP file path (for SNP template)")]
+        snp: Option<String>,
     },
 
     #[command(about = "List all participants")]
@@ -364,6 +388,9 @@ async fn main() -> Result<()> {
     // Random version check on startup (10% chance)
     let _ = commands::update::check_and_notify_random().await;
 
+    // Check for upgrades and perform them if needed
+    let _ = cli::upgrade::check_and_upgrade();
+
     match cli.command {
         Commands::Update => {
             commands::update::execute().await?;
@@ -384,11 +411,12 @@ async fn main() -> Result<()> {
             ProjectCommands::Create {
                 name,
                 folder,
-                haplo_y,
-                eye_color,
-                red_hair,
+                example,
             } => {
-                commands::project::create(name, folder, haplo_y, eye_color, red_hair).await?;
+                commands::project::create(name, folder, example).await?;
+            }
+            ProjectCommands::Examples => {
+                commands::project::list_examples()?;
             }
         },
         Commands::Run {
@@ -400,6 +428,7 @@ async fn main() -> Result<()> {
             with_docker,
             work_dir,
             resume,
+            template,
         } => {
             commands::run::execute(commands::run::RunParams {
                 project_folder,
@@ -410,6 +439,7 @@ async fn main() -> Result<()> {
                 with_docker,
                 work_dir,
                 resume,
+                template,
             })
             .await?;
         }
@@ -425,8 +455,13 @@ async fn main() -> Result<()> {
             }
         },
         Commands::Participant { command } => match command {
-            ParticipantCommands::Add { id, aligned } => {
-                commands::participant::add(id, aligned).await?;
+            ParticipantCommands::Add {
+                id,
+                aligned,
+                template,
+                snp,
+            } => {
+                commands::participant::add(id, aligned, template, snp).await?;
             }
             ParticipantCommands::List => {
                 commands::participant::list().await?;

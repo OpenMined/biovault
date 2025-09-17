@@ -95,6 +95,7 @@ pub async fn execute(email: Option<&str>) -> Result<()> {
         let config = Config {
             email: email.to_string(),
             syftbox_config: syftbox_config.clone(),
+            version: Some("0.1.16".to_string()),
         };
 
         config.save(&config_file)?;
@@ -106,26 +107,57 @@ pub async fn execute(email: Option<&str>) -> Result<()> {
             println!("  SyftBox config: {}", syftbox_cfg);
         }
 
-        // Create env/default directory and copy templates
-        let env_dir = biovault_dir.join("env").join("default");
+        // Create env directory
+        let env_dir = biovault_dir.join("env");
         if !env_dir.exists() {
             fs::create_dir_all(&env_dir)?;
             info!("Created environment directory: {:?}", env_dir);
         }
 
-        // Copy template.nf
-        let template_nf_content = include_str!("../../templates/template.nf");
-        let template_nf_path = env_dir.join("template.nf");
+        // Copy default templates
+        let default_dir = env_dir.join("default");
+        if !default_dir.exists() {
+            fs::create_dir_all(&default_dir)?;
+            info!("Created default template directory: {:?}", default_dir);
+        }
+
+        // Copy default template.nf
+        let template_nf_content = include_str!("../../templates/default/template.nf");
+        let template_nf_path = default_dir.join("template.nf");
         fs::write(&template_nf_path, template_nf_content)?;
         info!("Created template.nf at: {:?}", template_nf_path);
 
-        // Copy nextflow.config
-        let nextflow_config_content = include_str!("../../templates/nextflow.config");
-        let nextflow_config_path = env_dir.join("nextflow.config");
+        // Copy default nextflow.config
+        let nextflow_config_content = include_str!("../../templates/default/nextflow.config");
+        let nextflow_config_path = default_dir.join("nextflow.config");
         fs::write(&nextflow_config_path, nextflow_config_content)?;
         info!("Created nextflow.config at: {:?}", nextflow_config_path);
 
-        println!("✓ Nextflow templates installed to: {}", env_dir.display());
+        // Copy SNP templates
+        let snp_dir = env_dir.join("snp");
+        if !snp_dir.exists() {
+            fs::create_dir_all(&snp_dir)?;
+            info!("Created SNP template directory: {:?}", snp_dir);
+        }
+
+        // Copy SNP template.nf
+        let snp_template_nf_content = include_str!("../../templates/snp/template.nf");
+        let snp_template_nf_path = snp_dir.join("template.nf");
+        fs::write(&snp_template_nf_path, snp_template_nf_content)?;
+        info!("Created SNP template.nf at: {:?}", snp_template_nf_path);
+
+        // Copy SNP nextflow.config
+        let snp_nextflow_config_content = include_str!("../../templates/snp/nextflow.config");
+        let snp_nextflow_config_path = snp_dir.join("nextflow.config");
+        fs::write(&snp_nextflow_config_path, snp_nextflow_config_content)?;
+        info!(
+            "Created SNP nextflow.config at: {:?}",
+            snp_nextflow_config_path
+        );
+
+        println!("✓ Nextflow templates installed:");
+        println!("  - Default templates: {}", default_dir.display());
+        println!("  - SNP templates: {}", snp_dir.display());
 
         // Initialize SyftBox RPC folders for messaging if SyftBox is configured
         match config.get_syftbox_data_dir() {

@@ -55,21 +55,43 @@ struct SampleDataConfig {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+struct PostProcess {
+    #[serde(default)]
+    uncompress: Option<bool>,
+    #[serde(default)]
+    file: Option<String>,
+    #[serde(default)]
+    extract: Option<String>,
+    #[serde(default)]
+    rename: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 struct ParticipantData {
-    ref_version: String,
-    #[serde(rename = "ref")]
-    ref_url: String,
-    ref_index: String,
-    aligned: AlignedUrl,
-    aligned_index: String,
-    #[serde(default)]
-    ref_b3sum: String,
-    #[serde(default)]
-    ref_index_b3sum: String,
-    #[serde(default)]
-    aligned_b3sum: AlignedChecksum,
-    #[serde(default)]
-    aligned_index_b3sum: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ref_version: Option<String>,
+    #[serde(rename = "ref", default, skip_serializing_if = "Option::is_none")]
+    ref_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ref_index: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    aligned: Option<AlignedUrl>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    aligned_index: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ref_b3sum: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ref_index_b3sum: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    aligned_b3sum: Option<AlignedChecksum>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    aligned_index_b3sum: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    snp: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    snp_b3sum: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    snp_post_process: Option<PostProcess>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -79,12 +101,18 @@ struct ParticipantsFile {
 
 #[derive(Debug, Serialize, Deserialize)]
 struct ParticipantRecord {
-    ref_version: String,
-    #[serde(rename = "ref")]
-    ref_path: String,
-    ref_index: String,
-    aligned: String,
-    aligned_index: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ref_version: Option<String>,
+    #[serde(rename = "ref", skip_serializing_if = "Option::is_none")]
+    ref_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ref_index: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    aligned: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    aligned_index: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    snp: Option<String>,
 }
 
 pub async fn fetch(
@@ -142,15 +170,224 @@ pub async fn fetch(
         let participant_dir = sample_data_dir.join(&participant_id);
         fs::create_dir_all(&participant_dir).context("Failed to create participant directory")?;
 
-        // Extract filenames from URLs
-        let ref_filename = extract_filename_from_url(&participant_data.ref_url)?;
-        let ref_index_filename = extract_filename_from_url(&participant_data.ref_index)?;
+        // Check if this is SNP data or CRAM data
+        if let Some(snp_url) = &participant_data.snp {
+            // Handle SNP data
+            let snp_filename = extract_filename_from_url(snp_url)?;
+            let snp_checksum = participant_data
+                .snp_b3sum
+                .as_ref()
+                .unwrap_or(&String::new())
+                .clone();
+
+            let downloads = vec![(
+                snp_url.clone(),
+                participant_dir.join(&snp_filename),
+                "SNP data".to_string(),
+                snp_checksum,
+            )];
+
+            for (url, target_path, description, expected_b3sum) in &downloads {
+                if !quiet {
+                    println!(
+                        "\n  Processing {}: {}",
+                        description,
+                        target_path.file_name().unwrap().to_string_lossy()
+                    );
+                }
+
+                // Set up download options based on whether we have a checksum
+                let mut options = if !expected_b3sum.is_empty() {
+                    DownloadOptions {
+                        checksum_policy: ChecksumPolicy {
+                            policy_type: ChecksumPolicyType::Required,
+                            expected_hash: Some(expected_b3sum.to_string()),
+                        },
+                        ..Default::default()
+                    }
+                } else {
+                    DownloadOptions::default()
+                };
+                options.show_progress = !quiet;
+
+                // Download to a temporary location (will be cached)
+                let temp_filename = target_path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("download");
+                let temp_path =
+                    std::env::temp_dir().join(format!("bv_{}_{}", temp_filename, Uuid::new_v4()));
+
+                // Use the download cache
+                download_cache
+                    .download_with_cache(url, &temp_path, options)
+                    .await
+                    .with_context(|| format!("Failed to download {}", description))?;
+
+                // Handle archive extraction if post_process specifies it
+                let should_uncompress = participant_data
+                    .snp_post_process
+                    .as_ref()
+                    .and_then(|pp| pp.uncompress)
+                    .unwrap_or(false)
+                    || snp_filename.ends_with(".zip");
+
+                if should_uncompress {
+                    if !quiet {
+                        println!("  Extracting SNP archive...");
+                    }
+
+                    // Create temp extraction directory
+                    let temp_extract_dir =
+                        std::env::temp_dir().join(format!("bv_snp_extract_{}", Uuid::new_v4()));
+                    fs::create_dir_all(&temp_extract_dir)
+                        .context("Failed to create temp extraction dir")?;
+
+                    // Extract the zip file
+                    let output = std::process::Command::new("unzip")
+                        .args(["-q", "-o", temp_path.to_str().unwrap()])
+                        .current_dir(&temp_extract_dir)
+                        .output()
+                        .context("Failed to extract SNP zip archive")?;
+
+                    if !output.status.success() {
+                        anyhow::bail!(
+                            "Failed to extract SNP archive: {}",
+                            String::from_utf8_lossy(&output.stderr)
+                        );
+                    }
+
+                    // Move extracted files to participant directory
+                    let entries = fs::read_dir(&temp_extract_dir)
+                        .context("Failed to read extracted files")?;
+                    for entry in entries {
+                        let entry = entry?;
+                        let file_name = entry.file_name();
+                        let source_path = entry.path();
+                        let target_file_path = participant_dir.join(&file_name);
+
+                        // Move or copy file
+                        fs::rename(&source_path, &target_file_path)
+                            .or_else(|_| -> std::io::Result<()> {
+                                fs::copy(&source_path, &target_file_path)?;
+                                fs::remove_file(&source_path)?;
+                                Ok(())
+                            })
+                            .with_context(|| {
+                                format!("Failed to move extracted file: {:?}", file_name)
+                            })?;
+
+                        if !quiet {
+                            println!("    ✓ Extracted: {}", file_name.to_string_lossy());
+                        }
+                    }
+
+                    // Clean up
+                    fs::remove_dir_all(&temp_extract_dir).ok();
+                    fs::remove_file(&temp_path).ok();
+                } else if !expected_b3sum.is_empty() {
+                    // Non-zip file with checksum - create symlink to cache
+                    let cache_base = crate::config::get_cache_dir()?;
+                    let cache_path = cache_base.join("by-hash").join(expected_b3sum);
+
+                    // Remove any existing file or symlink at target
+                    if target_path.exists() || target_path.is_symlink() {
+                        fs::remove_file(target_path).ok();
+                    }
+
+                    // Create symlink to cache
+                    #[cfg(unix)]
+                    {
+                        std::os::unix::fs::symlink(&cache_path, target_path).with_context(
+                            || format!("Failed to create symlink for {}", description),
+                        )?;
+                    }
+                    #[cfg(windows)]
+                    {
+                        std::os::windows::fs::symlink_file(&cache_path, target_path).with_context(
+                            || format!("Failed to create symlink for {}", description),
+                        )?;
+                    }
+
+                    if !quiet {
+                        println!("    ✓ Linked to cache (saving disk space)");
+                    }
+
+                    // Clean up temp file
+                    fs::remove_file(&temp_path).ok();
+                } else {
+                    // No checksum, copy file to target
+                    fs::rename(&temp_path, target_path)
+                        .or_else(|_| fs::copy(&temp_path, target_path).map(|_| ()))
+                        .with_context(|| format!("Failed to move {} to target", description))?;
+                    fs::remove_file(&temp_path).ok();
+                }
+            }
+
+            // Update participants file for SNP data
+            // Include the specific file if specified in post_process
+            let snp_path = if let Some(ref post_process) = participant_data.snp_post_process {
+                if let Some(ref file) = post_process.file {
+                    format!("./{}/{}", participant_id, file)
+                } else {
+                    format!("./{}", participant_id)
+                }
+            } else {
+                format!("./{}", participant_id)
+            };
+
+            let participant_record = ParticipantRecord {
+                ref_version: None,
+                ref_path: None,
+                ref_index: None,
+                aligned: None,
+                aligned_index: None,
+                snp: Some(snp_path),
+            };
+
+            participants_file
+                .participant
+                .insert(participant_id.clone(), participant_record);
+
+            save_participants_file(&participants_file_path, &participants_file)?;
+            if !quiet {
+                println!("  ✓ Updated participants.yaml");
+            }
+
+            continue; // Skip the rest of the CRAM processing
+        }
+
+        // Extract filenames from URLs for CRAM data
+        let ref_filename = extract_filename_from_url(
+            participant_data
+                .ref_url
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("Missing ref URL for CRAM data"))?,
+        )?;
+        let ref_index_filename = extract_filename_from_url(
+            participant_data
+                .ref_index
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("Missing ref_index URL for CRAM data"))?,
+        )?;
 
         // Handle aligned URLs (can be single or multiple)
-        let aligned_urls = participant_data.aligned.to_vec();
-        let aligned_checksums = participant_data.aligned_b3sum.to_vec();
-        let aligned_index_filename = if !participant_data.aligned_index.is_empty() {
-            extract_filename_from_url(&participant_data.aligned_index)?
+        let aligned_urls = participant_data
+            .aligned
+            .as_ref()
+            .map(|a| a.to_vec())
+            .unwrap_or_default();
+        let aligned_checksums = participant_data
+            .aligned_b3sum
+            .as_ref()
+            .map(|a| a.to_vec())
+            .unwrap_or_default();
+        let aligned_index_filename = if let Some(aligned_index) = &participant_data.aligned_index {
+            if !aligned_index.is_empty() {
+                extract_filename_from_url(aligned_index)?
+            } else {
+                String::new()
+            }
         } else {
             String::new()
         };
@@ -158,16 +395,16 @@ pub async fn fetch(
         // Build downloads list - first add reference files
         let mut downloads = vec![
             (
-                participant_data.ref_url.clone(),
+                participant_data.ref_url.clone().unwrap_or_default(),
                 reference_dir.join(&ref_filename),
                 "Reference genome".to_string(),
-                participant_data.ref_b3sum.clone(),
+                participant_data.ref_b3sum.clone().unwrap_or_default(),
             ),
             (
-                participant_data.ref_index.clone(),
+                participant_data.ref_index.clone().unwrap_or_default(),
                 reference_dir.join(&ref_index_filename),
                 "Reference index".to_string(),
-                participant_data.ref_index_b3sum.clone(),
+                participant_data.ref_index_b3sum.clone().unwrap_or_default(),
             ),
         ];
 
@@ -208,13 +445,18 @@ pub async fn fetch(
         }
 
         // Add aligned index if present
-        if !participant_data.aligned_index.is_empty() {
-            downloads.push((
-                participant_data.aligned_index.clone(),
-                participant_dir.join(&aligned_index_filename),
-                "CRAM index".to_string(),
-                participant_data.aligned_index_b3sum.clone(),
-            ));
+        if let Some(aligned_index) = &participant_data.aligned_index {
+            if !aligned_index.is_empty() {
+                downloads.push((
+                    aligned_index.clone(),
+                    participant_dir.join(&aligned_index_filename),
+                    "CRAM index".to_string(),
+                    participant_data
+                        .aligned_index_b3sum
+                        .clone()
+                        .unwrap_or_default(),
+                ));
+            }
         };
 
         for (url, target_path, description, expected_b3sum) in &downloads {
@@ -423,18 +665,19 @@ pub async fn fetch(
 
         let participant_record = ParticipantRecord {
             ref_version: participant_data.ref_version.clone(),
-            ref_path: format!("./reference/{}", ref_filename),
-            ref_index: format!("./reference/{}", ref_index_filename),
+            ref_path: Some(format!("./reference/{}", ref_filename)),
+            ref_index: Some(format!("./reference/{}", ref_index_filename)),
             aligned: if !final_aligned_filename.is_empty() {
-                format!("./{}/{}", participant_id, final_aligned_filename)
+                Some(format!("./{}/{}", participant_id, final_aligned_filename))
             } else {
-                String::new()
+                None
             },
             aligned_index: if !aligned_index_filename.is_empty() {
-                format!("./{}/{}", participant_id, aligned_index_filename)
+                Some(format!("./{}/{}", participant_id, aligned_index_filename))
             } else {
-                String::new()
+                None
             },
+            snp: None,
         };
 
         participants_file
@@ -519,28 +762,49 @@ pub async fn list() -> anyhow::Result<()> {
 
     for (participant_id, data) in &config.sample_data_urls {
         println!("\nParticipant ID: {}", participant_id);
-        println!("  ref_version: {}", data.ref_version);
-        println!("  ref: {}", data.ref_url);
-        println!("  ref_index: {}", data.ref_index);
 
-        // Handle aligned URLs which can be single or multiple
-        match &data.aligned {
-            AlignedUrl::Single(url) => {
-                println!("  aligned: {}", url);
+        // Check if this is SNP data or CRAM data
+        if let Some(snp_url) = &data.snp {
+            println!("  Type: SNP");
+            println!("  snp: {}", snp_url);
+            if let Some(snp_b3sum) = &data.snp_b3sum {
+                println!("  snp_b3sum: {}", snp_b3sum);
             }
-            AlignedUrl::Multiple(urls) => {
-                if urls.len() == 1 {
-                    println!("  aligned: {}", urls[0]);
-                } else {
-                    println!("  aligned: {} parts", urls.len());
-                    for (i, url) in urls.iter().enumerate() {
-                        println!("    part {}: {}", i + 1, url);
+        } else {
+            // CRAM data
+            if let Some(ref_version) = &data.ref_version {
+                println!("  ref_version: {}", ref_version);
+            }
+            if let Some(ref_url) = &data.ref_url {
+                println!("  ref: {}", ref_url);
+            }
+            if let Some(ref_index) = &data.ref_index {
+                println!("  ref_index: {}", ref_index);
+            }
+
+            // Handle aligned URLs which can be single or multiple
+            if let Some(aligned) = &data.aligned {
+                match aligned {
+                    AlignedUrl::Single(url) => {
+                        println!("  aligned: {}", url);
+                    }
+                    AlignedUrl::Multiple(urls) => {
+                        if urls.len() == 1 {
+                            println!("  aligned: {}", urls[0]);
+                        } else {
+                            println!("  aligned: {} parts", urls.len());
+                            for (i, url) in urls.iter().enumerate() {
+                                println!("    part {}: {}", i + 1, url);
+                            }
+                        }
                     }
                 }
             }
-        }
 
-        println!("  aligned_index: {}", data.aligned_index);
+            if let Some(aligned_index) = &data.aligned_index {
+                println!("  aligned_index: {}", aligned_index);
+            }
+        }
     }
 
     println!("\n{}", "=".repeat(60));

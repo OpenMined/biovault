@@ -1,47 +1,59 @@
+use crate::cli::examples;
 use crate::error::Result;
 use crate::types::InboxSubmission;
 use colored::Colorize;
 use dialoguer::{theme::ColorfulTheme, Confirm, MultiSelect, Select};
-use include_dir::{include_dir, Dir};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use walkdir::WalkDir;
 
-static EXAMPLES_DIR: Dir = include_dir!("$CARGO_MANIFEST_DIR/examples");
+pub fn list_examples() -> Result<()> {
+    let available = examples::get_available_examples()?;
+
+    if available.is_empty() {
+        println!("No example templates available.");
+        return Ok(());
+    }
+
+    println!("Available example templates:\n");
+    for (key, info) in available.iter() {
+        println!("  {} - {}", key.green(), info.description);
+        println!("    Template: {}", info.template);
+        println!("    Files: {} files", info.files.len());
+        println!();
+    }
+
+    println!("To create a project from an example:");
+    println!("  bv project create --example <example-name>");
+
+    Ok(())
+}
 
 pub async fn create(
     name: Option<String>,
     folder: Option<String>,
-    haplo_y: bool,
-    eye_color: bool,
-    red_hair: bool,
+    example: Option<String>,
 ) -> Result<()> {
-    // Determine if a template flag was provided
-    let mut selected_template: Option<&str> = None;
-    if haplo_y {
-        selected_template = Some("haplo-y");
-    }
-    if eye_color {
-        if selected_template.is_some() {
+    // Determine which example to use
+    let selected_example = if let Some(ex) = example {
+        // Validate the example exists
+        let available = examples::list_examples();
+        if !available.contains(&ex) {
             return Err(crate::error::Error::Anyhow(anyhow::anyhow!(
-                "Multiple templates specified. Please choose only one of --haplo-y, --eye-color, or --red-hair"
+                "Unknown example '{}'. Available examples: {}",
+                ex,
+                available.join(", ")
             )));
         }
-        selected_template = Some("eye-color");
-    }
-    if red_hair {
-        if selected_template.is_some() {
-            return Err(crate::error::Error::Anyhow(anyhow::anyhow!(
-                "Multiple templates specified. Please choose only one of --haplo-y, --eye-color, or --red-hair"
-            )));
-        }
-        selected_template = Some("red-hair");
-    }
+        Some(ex)
+    } else {
+        None
+    };
 
     // Determine project name
-    let project_name = if let Some(template) = selected_template {
-        template.to_string()
+    let project_name = if let Some(ref ex) = selected_example {
+        ex.clone()
     } else if let Some(n) = name {
         n
     } else {
@@ -65,19 +77,14 @@ pub async fn create(
     // Create base folder
     fs::create_dir_all(project_path)?;
 
-    if let Some(template) = selected_template {
-        // Copy embedded example directory recursively
-        let example_dir = EXAMPLES_DIR.get_dir(template).ok_or_else(|| {
-            crate::error::Error::Anyhow(anyhow::anyhow!(
-                "Embedded example '{}' not found",
-                template
-            ))
-        })?;
+    if let Some(ref example_name) = selected_example {
+        // Use the new examples system to write files
+        examples::write_example_to_directory(example_name, project_path)
+            .map_err(crate::error::Error::Anyhow)?;
 
-        copy_embedded_dir(example_dir, example_dir.path(), project_path)?;
         println!(
-            "✅ Created project '{}' in {} from template '{}'",
-            project_name, project_folder, template
+            "✅ Created project '{}' in {} from example '{}'",
+            project_name, project_folder, example_name
         );
     } else {
         // Load user email from config (if available)
@@ -111,28 +118,6 @@ pub async fn create(
         println!("   1. cd {}", project_folder);
         println!("   2. Edit workflow.nf in your project");
         println!("   3. Run with: bv run . <participants>");
-    }
-
-    Ok(())
-}
-
-fn copy_embedded_dir(dir: &Dir, base: &Path, dest_root: &Path) -> std::io::Result<()> {
-    // Ensure root exists
-    fs::create_dir_all(dest_root)?;
-
-    // Write files directly under this dir
-    for file in dir.files() {
-        let rel = file.path().strip_prefix(base).unwrap_or(file.path());
-        let out_path = dest_root.join(rel);
-        if let Some(parent) = out_path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::write(out_path, file.contents())?;
-    }
-
-    // Recurse into subdirectories
-    for sub in dir.dirs() {
-        copy_embedded_dir(sub, base, dest_root)?;
     }
 
     Ok(())
