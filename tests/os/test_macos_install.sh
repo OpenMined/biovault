@@ -26,11 +26,12 @@ cleanup_existing() {
         echo "Homebrew is installed"
 
         # Remove existing Java installations if present via Homebrew
-        if brew list --formula | grep -q openjdk; then
-            echo "Found existing OpenJDK via Homebrew, removing..."
-            brew uninstall --ignore-dependencies openjdk@17 || true
-            brew uninstall --ignore-dependencies openjdk || true
-        fi
+        # Check for any openjdk installations
+        echo "Checking for existing OpenJDK installations..."
+        for pkg in $(brew list --formula | grep openjdk); do
+            echo "Found $pkg via Homebrew, removing..."
+            brew uninstall --ignore-dependencies "$pkg" 2>/dev/null || true
+        done
 
         # Remove existing Nextflow if installed via Homebrew
         if brew list --formula | grep -q nextflow; then

@@ -109,13 +109,13 @@ if ($env:CI -or $env:GITHUB_ACTIONS) {
 
     try {
         Invoke-WebRequest -Uri $nextflowUrl -OutFile $nextflowPath -UseBasicParsing
-        Write-Host "✓ Nextflow downloaded to $nextflowPath" -ForegroundColor Green
+        Write-Host "Nextflow downloaded to $nextflowPath" -ForegroundColor Green
 
         # Add to PATH for this session
         $env:PATH = "$env:USERPROFILE;$env:PATH"
     }
     catch {
-        Write-Host "⚠️ Could not download Nextflow: $_" -ForegroundColor Yellow
+        Write-Host "Warning: Could not download Nextflow: $_" -ForegroundColor Yellow
     }
 }
 
@@ -126,10 +126,10 @@ Write-Host "=========================================" -ForegroundColor Cyan
 
 # Check Java installation
 if (Test-Command "java") {
-    Write-Host "✓ Java installed:" -ForegroundColor Green
+    Write-Host "Java installed:" -ForegroundColor Green
     & java -version 2>&1 | Select-Object -First 1
 } else {
-    Write-Host "✗ Java not found - Manual installation required on Windows" -ForegroundColor Red
+    Write-Host "X Java not found - Manual installation required on Windows" -ForegroundColor Red
     Write-Host "  Please install OpenJDK 17+ from: https://openjdk.org/" -ForegroundColor Yellow
 }
 
@@ -144,7 +144,7 @@ if (Test-Command "nextflow") {
 }
 
 if ($nextflowFound) {
-    Write-Host "✓ Nextflow installed" -ForegroundColor Green
+    Write-Host "Nextflow installed" -ForegroundColor Green
     try {
         if (Test-Command "nextflow") {
             & nextflow -version
@@ -156,25 +156,25 @@ if ($nextflowFound) {
         Write-Host "  (Could not get version)" -ForegroundColor Yellow
     }
 } else {
-    Write-Host "⚠️ Nextflow not found - Manual installation required on Windows" -ForegroundColor Yellow
+    Write-Host "Warning: Nextflow not found - Manual installation required on Windows" -ForegroundColor Yellow
     Write-Host "  Please download from: https://www.nextflow.io/" -ForegroundColor Yellow
 }
 
 # Check Docker installation
 if (Test-Command "docker") {
-    Write-Host "✓ Docker installed:" -ForegroundColor Green
+    Write-Host "Docker installed:" -ForegroundColor Green
     & docker --version
 } else {
-    Write-Host "⚠️ Docker not installed - Docker Desktop required on Windows" -ForegroundColor Yellow
+    Write-Host "Warning: Docker not installed - Docker Desktop required on Windows" -ForegroundColor Yellow
     Write-Host "  Please install from: https://www.docker.com/products/docker-desktop/" -ForegroundColor Yellow
 }
 
 # Check SyftBox installation
 if (Test-Command "syftbox") {
-    Write-Host "✓ SyftBox installed:" -ForegroundColor Green
+    Write-Host "SyftBox installed:" -ForegroundColor Green
     & syftbox -v
 } else {
-    Write-Host "⚠️ SyftBox not installed - Manual installation required on Windows" -ForegroundColor Yellow
+    Write-Host "Warning: SyftBox not installed - Manual installation required on Windows" -ForegroundColor Yellow
     Write-Host "  Please download from: https://github.com/OpenMined/syftbox/releases/latest" -ForegroundColor Yellow
 }
 
@@ -191,7 +191,7 @@ if ($LASTEXITCODE -ne 0) {
 
 Write-Host ""
 Write-Host "=========================================" -ForegroundColor Cyan
-Write-Host "✓ Windows installation test completed" -ForegroundColor Green
+Write-Host "Windows installation test completed" -ForegroundColor Green
 Write-Host "=========================================" -ForegroundColor Cyan
 
 # Always exit successfully on Windows since manual installation is expected
