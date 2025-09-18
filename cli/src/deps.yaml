@@ -109,8 +109,9 @@ dependencies:
     website: https://syftbox.net
     environments:
       google_colab:
-        skip: true
-        skip_reason: "TODO"
+        install_commands:
+          - curl -fsSL https://syftbox.net/install.sh | sh -s -- --download-only
+        verify_command: syftbox -v
       ubuntu:
         install_commands:
           - curl -fsSL https://syftbox.net/install.sh | sh -s -- --download-only
