@@ -256,6 +256,8 @@ fn is_google_colab() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use tempfile::TempDir;
 
     #[test]
     fn java_version_parsing_various_formats() {
@@ -362,5 +364,93 @@ mod tests {
         if !was_set {
             env::remove_var("COLAB_TEST_VAR");
         }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn execute_reports_missing_in_clean_env() {
+        // Ensure PATH does not contain our fakes
+        // Run execute; in most CI/dev envs, at least one dependency is missing
+        // so this should return an error and cover the loop paths.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let res = rt.block_on(execute());
+        assert!(res.is_err());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn execute_with_all_tools_available_returns_ok() {
+        let dir = TempDir::new().unwrap();
+        // Create fake tools in a temp dir and prepend to PATH
+        let make_exec = |name: &str, body: &str| {
+            let p = dir.path().join(name);
+            fs::write(&p, format!("#!/bin/sh\n{}\n", body)).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut perm = fs::metadata(&p).unwrap().permissions();
+                perm.set_mode(0o755);
+                fs::set_permissions(&p, perm).unwrap();
+            }
+            p
+        };
+
+        // java prints version to stderr
+        make_exec("java", "echo 'openjdk version \"21\" 2024-01-01' 1>&2");
+        // docker returns success on 'info'
+        make_exec("docker", "[ \"$1\" = \"info\" ] && exit 0; exit 0");
+        // nextflow and syftbox stubs
+        make_exec("nextflow", "exit 0");
+        make_exec("syftbox", "exit 0");
+
+        // Prepend temp dir to PATH
+        let old_path = std::env::var("PATH").unwrap_or_default();
+        let new_path = format!("{}:{}", dir.path().display(), old_path);
+        std::env::set_var("PATH", &new_path);
+
+        // Run
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let res = rt.block_on(execute());
+        assert!(res.is_ok());
+
+        // Restore PATH
+        std::env::set_var("PATH", old_path);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn execute_with_docker_not_running_reports_warning() {
+        let dir = TempDir::new().unwrap();
+        let make_exec = |name: &str, body: &str| {
+            let p = dir.path().join(name);
+            fs::write(&p, format!("#!/bin/sh\n{}\n", body)).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut perm = fs::metadata(&p).unwrap().permissions();
+                perm.set_mode(0o755);
+                fs::set_permissions(&p, perm).unwrap();
+            }
+            p
+        };
+
+        // Provide java and nextflow and syftbox present
+        make_exec("java", "echo 'openjdk version \"21\"' 1>&2");
+        make_exec("nextflow", "exit 0");
+        make_exec("syftbox", "exit 0");
+        // docker exists but 'info' fails
+        make_exec("docker", "[ \"$1\" = \"info\" ] && exit 1; exit 0");
+
+        // Prepend
+        let old_path = std::env::var("PATH").unwrap_or_default();
+        let new_path = format!("{}:{}", dir.path().display(), old_path);
+        std::env::set_var("PATH", &new_path);
+
+        // Run: should return Err because a service is not running
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let res = rt.block_on(execute());
+        assert!(res.is_err());
+
+        std::env::set_var("PATH", old_path);
     }
 }

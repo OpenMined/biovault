@@ -1091,4 +1091,14 @@ mod tests {
     async fn setup_arch_returns_ok_when_pacman_missing() {
         super::setup_arch().await.unwrap();
     }
+
+    #[test]
+    fn winget_to_choco_mapping() {
+        assert_eq!(
+            super::map_winget_pkg_to_choco("Microsoft.OpenJDK"),
+            "openjdk"
+        );
+        // Unknown returns empty mapping
+        assert_eq!(super::map_winget_pkg_to_choco("Unknown.Package"), "");
+    }
 }
