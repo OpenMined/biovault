@@ -171,4 +171,23 @@ mod tests {
         let parsed_back = SyftURL::from_http_relay_url(&http_url, "syftbox.net").unwrap();
         assert_eq!(parsed_back, url);
     }
+
+    #[test]
+    fn syft_url_invalid_scheme_and_missing_slash() {
+        assert!(SyftURL::parse("http://example").is_err());
+        assert!(SyftURL::parse("syft://user@example.com").is_err());
+    }
+
+    #[test]
+    fn syft_url_relay_trim_and_fragment() {
+        let url = SyftURL::new("user@example.com", "p/q").with_fragment("frag");
+        assert_eq!(
+            url.to_http_relay_url("https://relay.example"),
+            "https://relay.example/datasites/user@example.com/p/q#frag"
+        );
+        assert_eq!(
+            url.to_http_relay_url("http://relay.example"),
+            "https://relay.example/datasites/user@example.com/p/q#frag"
+        );
+    }
 }
