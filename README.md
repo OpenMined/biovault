@@ -46,6 +46,10 @@ SyftBox requires setup and authentication.
 - [2) Submit Your Project](tutorials/2_submit_your_project.md)
 - [3) Create a Biobank](tutorials/3_create_biobank.md)
 
+## Development
+
+For development setup and commands, see [DEV.md](DEV.md).
+
 
 
 ## CLI Overview

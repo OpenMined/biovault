@@ -1,0 +1,3 @@
+[submodule "syftbox"]
+	path = syftbox
+	url = https://github.com/OpenMined/syftbox

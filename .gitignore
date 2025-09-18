@@ -218,3 +218,6 @@ submission/results/*
 **/work/*
 **/results/*
 **/.nextflow.log*
+
+# Test directories
+test-clients/
