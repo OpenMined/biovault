@@ -561,8 +561,7 @@ impl MessageDb {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::messages::models::{Message, MessageStatus, SyncStatus};
-    use std::path::PathBuf;
+    use crate::messages::models::{Message, MessageStatus};
     use tempfile::TempDir;
 
     fn new_db(tmp: &TempDir) -> MessageDb {

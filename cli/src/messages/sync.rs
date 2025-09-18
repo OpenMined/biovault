@@ -315,7 +315,7 @@ mod tests {
         let ms_recipient = MessageSync::new(&db_recipient, app_recipient.clone()).unwrap();
 
         // Insert a draft message in sender DB targeting bob
-        let mut m = Message::new(
+        let m = Message::new(
             "alice@example.com".into(),
             "bob@example.com".into(),
             "hello".into(),
@@ -351,7 +351,7 @@ mod tests {
         let ms_sender = MessageSync::new(&db_sender, app_sender.clone()).unwrap();
 
         // Insert a message and mark it as sent with an RPC request id
-        let mut m = Message::new(
+        let m = Message::new(
             "alice@example.com".into(),
             "bob@example.com".into(),
             "hello".into(),

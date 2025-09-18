@@ -646,3 +646,64 @@ pub async fn validate(id: Option<String>) -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn index_file_path_rules() {
+        assert_eq!(get_index_file_path("x.cram", true), "x.cram.crai");
+        assert_eq!(get_index_file_path("x.bam", true), "x.bam.bai");
+        assert_eq!(get_index_file_path("x.sam", true), "x.sam.sai");
+        assert_eq!(get_index_file_path("x.xyz", true), "x.xyz.idx");
+        assert_eq!(get_index_file_path("ref.fa", false), "ref.fa.fai");
+    }
+
+    #[test]
+    fn expand_and_normalize_path() {
+        // ~ expansion
+        let home = std::env::var("HOME").unwrap_or_else(|_| {
+            std::env::current_dir()
+                .unwrap()
+                .to_string_lossy()
+                .to_string()
+        });
+        let input = format!("{}/file.txt", home);
+        assert_eq!(expand_tilde("~/file.txt"), input);
+
+        // relative path normalization
+        let tmp = TempDir::new().unwrap();
+        let cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmp.path()).unwrap();
+        let abs = normalize_path("rel/path").unwrap();
+        let p = std::path::Path::new(&abs);
+        assert!(p.is_absolute());
+        assert!(p.ends_with("rel/path"));
+        std::env::set_current_dir(cwd).unwrap();
+    }
+
+    #[test]
+    fn participants_file_load_save_roundtrip() {
+        let tmp = TempDir::new().unwrap();
+        crate::config::set_test_biovault_home(tmp.path().join(".bv"));
+        let mut pf = ParticipantsFile::new();
+        pf.participants.insert(
+            "ID".into(),
+            Participant {
+                id: "ID".into(),
+                ref_version: Some("GRCh38".into()),
+                r#ref: None,
+                ref_index: None,
+                aligned: None,
+                aligned_index: None,
+                snp: None,
+            },
+        );
+        pf.save().unwrap();
+        let loaded = ParticipantsFile::load().unwrap();
+        assert!(loaded.participants.contains_key("ID"));
+        crate::config::clear_test_biovault_home();
+    }
+}
