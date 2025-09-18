@@ -1,0 +1,64 @@
+name: Coverage
+
+on:
+  schedule:
+    - cron: '0 2 * * *' # Nightly at 02:00 UTC
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  coverage:
+    name: Generate Coverage Report
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Show Rust versions
+        run: |
+          rustc --version
+          cargo --version
+
+      - name: Install llvm-tools component
+        run: rustup component add llvm-tools-preview
+
+      - name: Install cargo-llvm-cov
+        run: cargo install cargo-llvm-cov --locked
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-coverage-cargo-registry-${{ hashFiles('cli/Cargo.lock') }}
+
+      - name: Cache cargo index
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-coverage-cargo-index-${{ hashFiles('cli/Cargo.lock') }}
+
+      - name: Cache cargo build
+        uses: actions/cache@v4
+        with:
+          path: cli/target
+          key: ${{ runner.os }}-coverage-cargo-build-${{ hashFiles('cli/Cargo.lock') }}
+
+      - name: Run coverage script (full clean)
+        run: ./coverage.sh --full-clean
+
+      - name: Upload HTML report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-html
+          path: cli/target/llvm-cov/html
+
+      - name: Upload LCOV file
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-lcov
+          path: cli/target/coverage/lcov.info
