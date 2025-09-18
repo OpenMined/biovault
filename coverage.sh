@@ -77,6 +77,9 @@ fi
 echo "==> Cleaning previous coverage artifacts"
 cargo llvm-cov clean --workspace
 
+# Ensure coverage output directory exists after cleaning steps
+mkdir -p target/coverage
+
 LCOV_OUT=${LCOV_OUT:-target/coverage/lcov.info}
 HTML_FLAG="--html"
 OPEN_FLAG=""
