@@ -138,6 +138,48 @@ if ($env:CI -or $env:GITHUB_ACTIONS) {
             Write-Host "Warning: SyftBox installer failed: $_" -ForegroundColor Yellow
         }
     }
+
+    # Ensure Java 17+ is available (install if too old or missing)
+    $needJava = $true
+    if (Test-Command "java") {
+        try {
+            $javaVersionOutput = & java -version 2>&1 | Select-Object -First 1 | Out-String
+            if ($javaVersionOutput -match 'version "(\d+)\.(\d+)') {
+                $maj = [int]$matches[1]
+                $min = [int]$matches[2]
+                if ($maj -eq 1) { $v = $min } else { $v = $maj }
+                if ($v -ge 17) { $needJava = $false }
+            } elseif ($javaVersionOutput -match 'version "(\d+)') {
+                $v = [int]$matches[1]
+                if ($v -ge 17) { $needJava = $false }
+            }
+        } catch {}
+    }
+
+    if ($needJava) {
+        Write-Host "Installing OpenJDK 17+ for CI..." -ForegroundColor Yellow
+        if (Test-Command "winget") {
+            try {
+                winget install -e --id Microsoft.OpenJDK --silent || winget install Microsoft.OpenJDK -e -h || $false
+            } catch {}
+        } elseif (Test-Command "choco") {
+            try {
+                choco install openjdk -y
+            } catch {}
+        }
+
+        # Add common OpenJDK bin path to PATH for current process
+        $jdkBase = "C:\\Program Files\\OpenJDK"
+        if (Test-Path $jdkBase) {
+            $latest = Get-ChildItem -Path $jdkBase -Directory -ErrorAction SilentlyContinue | Sort-Object Name -Descending | Select-Object -First 1
+            if ($latest) {
+                $javaBin = Join-Path $latest.FullName 'bin'
+                if (Test-Path $javaBin) {
+                    $env:PATH = "$javaBin;$env:PATH"
+                }
+            }
+        }
+    }
 }
 
 Write-Host ""
