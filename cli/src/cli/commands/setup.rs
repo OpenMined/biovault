@@ -1033,4 +1033,62 @@ mod tests {
         assert!(is_google_colab());
         std::env::remove_var("COLAB_RELEASE_TAG");
     }
+
+    #[test]
+    #[serial_test::serial]
+    fn detect_system_prefers_colab_env() {
+        // Force Colab-like environment
+        std::env::set_var("COLAB_RELEASE_TAG", "1");
+        match detect_system() {
+            SystemType::GoogleColab => {}
+            other => panic!("expected GoogleColab, got {:?}", other),
+        }
+        std::env::remove_var("COLAB_RELEASE_TAG");
+    }
+
+    #[test]
+    fn print_syftbox_instructions_runs() {
+        // Just ensure it doesn't panic; covers simple printing logic
+        super::print_syftbox_instructions();
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn is_google_colab_detects_prefix_env() {
+        std::env::remove_var("COLAB_RELEASE_TAG");
+        std::env::set_var("COLAB_FOO", "1");
+        assert!(super::is_google_colab());
+        std::env::remove_var("COLAB_FOO");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    #[cfg(target_os = "macos")]
+    fn detect_system_reports_macos_on_macos() {
+        // Ensure no COLAB_* noise affects detection
+        std::env::remove_var("COLAB_RELEASE_TAG");
+        let keys: Vec<String> = std::env::vars()
+            .filter(|(k, _)| k.starts_with("COLAB_"))
+            .map(|(k, _)| k)
+            .collect();
+        for k in keys {
+            std::env::remove_var(k);
+        }
+        match super::detect_system() {
+            super::SystemType::MacOs => {}
+            other => panic!("expected MacOs, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    #[cfg(target_os = "macos")]
+    async fn setup_ubuntu_returns_ok_when_apt_missing() {
+        super::setup_ubuntu().await.unwrap();
+    }
+
+    #[tokio::test]
+    #[cfg(target_os = "macos")]
+    async fn setup_arch_returns_ok_when_pacman_missing() {
+        super::setup_arch().await.unwrap();
+    }
 }

@@ -254,4 +254,13 @@ mod tests {
             _ => panic!("expected Cargo install method for test binary"),
         }
     }
+
+    #[test]
+    fn current_version_parses_as_semver() {
+        let v = get_current_version();
+        // Reasonable expectations: non-empty and contains at least one dot
+        let s = v.to_string();
+        assert!(!s.is_empty());
+        assert!(s.contains('.'));
+    }
 }

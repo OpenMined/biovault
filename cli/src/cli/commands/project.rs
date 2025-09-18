@@ -731,6 +731,7 @@ fn show_submission_detail(submission_data: &(String, InboxSubmission, PathBuf, S
 fn show_submission_files(
     submission_data: &(String, InboxSubmission, PathBuf, String),
 ) -> Result<()> {
+    // no interactive input here to avoid blocking tests
     let (_sender, _submission, path, _date) = submission_data;
 
     let submission_dir = path
@@ -742,6 +743,7 @@ fn show_submission_files(
 
     for entry in WalkDir::new(submission_dir)
         .max_depth(3)
+        .follow_links(false)
         .into_iter()
         .filter_map(|e| e.ok())
     {
@@ -755,9 +757,6 @@ fn show_submission_files(
     }
 
     println!("{}", "─".repeat(40));
-    println!("Press Enter to continue...");
-    let mut _input = String::new();
-    std::io::stdin().read_line(&mut _input)?;
 
     Ok(())
 }
@@ -1128,6 +1127,32 @@ status: {}
         display_full_submission(1, "sender@example", &sub, Path::new("/tmp/id.yaml"));
     }
 
+    #[test]
+    fn show_submission_detail_prints() {
+        let sub = InboxSubmission {
+            name: "Proj".into(),
+            author: "A".into(),
+            datasites: Some(vec!["d@example".into()]),
+            participants: Some(vec![
+                "P1".into(),
+                "P2".into(),
+                "P3".into(),
+                "P4".into(),
+                "P5".into(),
+                "P6".into(),
+            ]),
+            syft_url: "syft://x/y".into(),
+            status: "approved".into(),
+        };
+        let data = (
+            "sender@example".into(),
+            sub,
+            PathBuf::from("/tmp/id.yaml"),
+            "2024-09-18".into(),
+        );
+        show_submission_detail(&data);
+    }
+
     #[tokio::test]
     async fn show_by_index_displays_detail() {
         let tmp = TempDir::new().unwrap();
@@ -1141,6 +1166,84 @@ status: {}
             "pending",
         );
         super::show("1", true).await.unwrap();
+        crate::config::clear_test_biovault_home();
+    }
+
+    #[test]
+    fn show_submission_files_lists_without_error() {
+        let tmp = TempDir::new().unwrap();
+        // Build a fake submission directory structure
+        let sub_dir = tmp
+            .path()
+            .join("sender@example.com")
+            .join("proj-2024-01-01-deadbeef");
+        std::fs::create_dir_all(sub_dir.join("assets/nested")).unwrap();
+        std::fs::write(sub_dir.join("workflow.nf"), b"wf").unwrap();
+        std::fs::write(sub_dir.join("assets/nested/file.txt"), b"x").unwrap();
+        // The path stored in tuple points to a yaml file inside the submission dir
+        let path = sub_dir.join("project.yaml");
+        std::fs::write(&path, b"name: P\nauthor: A\nstatus: pending\nsyft_url: x\n").unwrap();
+        let sub = InboxSubmission {
+            name: "P".into(),
+            author: "A".into(),
+            datasites: None,
+            participants: None,
+            syft_url: "x".into(),
+            status: "pending".into(),
+        };
+        let data = ("sender@example.com".into(), sub, path, "2024-01-01".into());
+        show_submission_files(&data).unwrap();
+    }
+
+    #[tokio::test]
+    async fn list_shows_concise_overview() {
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path().join(".bv");
+        crate::config::set_test_biovault_home(&home);
+        let inbox = home.join("inbox");
+        write_submission(
+            &inbox,
+            "alice@example.com",
+            "proj-2024-09-18-aaaa.yaml",
+            "pending",
+        );
+        write_submission(
+            &inbox,
+            "bob@example.com",
+            "proj-2023-01-02-bbbb.yaml",
+            "approved",
+        );
+        super::list(false, false).await.unwrap();
+        crate::config::clear_test_biovault_home();
+    }
+
+    #[tokio::test]
+    async fn show_handles_invalid_index_and_name_matches() {
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path().join(".bv");
+        crate::config::set_test_biovault_home(&home);
+        let inbox = home.join("inbox");
+        // Two submissions with same project name to trigger multi-match
+        write_submission(
+            &inbox,
+            "alice@example.com",
+            "proj-2024-09-18-aaaa.yaml",
+            "pending",
+        );
+        write_submission(
+            &inbox,
+            "bob@example.com",
+            "proj-2024-09-19-bbbb.yaml",
+            "approved",
+        );
+
+        // Invalid index prints error but returns Ok
+        super::show("5", true).await.unwrap();
+        // Name-based no match
+        super::show("does-not-exist", true).await.unwrap();
+        // Name-based multi-match ('proj' present in both filenames)
+        super::show("proj", true).await.unwrap();
+
         crate::config::clear_test_biovault_home();
     }
 }
