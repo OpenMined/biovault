@@ -796,8 +796,13 @@ pub async fn execute(params: RunParams) -> anyhow::Result<()> {
     println!("Using template: {}", template_name);
 
     // Use templates directly from env dir instead of copying to temp
-    let temp_template = template_nf;
-    let temp_config = nextflow_config;
+    // Convert to absolute paths for Nextflow
+    let temp_template = template_nf
+        .canonicalize()
+        .unwrap_or_else(|_| template_nf.clone());
+    let temp_config = nextflow_config
+        .canonicalize()
+        .unwrap_or_else(|_| nextflow_config.clone());
 
     // Determine assets directory
     // Prefer the conventional 'assets' folder. If the first assets entry is an existing directory,
@@ -882,7 +887,14 @@ pub async fn execute(params: RunParams) -> anyhow::Result<()> {
 
     // Add SNP-specific parameters if present
     if let Some(snp) = &participant.snp {
-        cmd.arg("--snp").arg(snp);
+        // Convert to absolute path if it's a file path
+        let snp_path = PathBuf::from(snp);
+        let snp_abs = if snp_path.exists() {
+            snp_path.canonicalize().unwrap_or(snp_path)
+        } else {
+            snp_path
+        };
+        cmd.arg("--snp").arg(snp_abs);
     }
 
     cmd.arg("--work_flow_file")

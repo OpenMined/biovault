@@ -6,7 +6,7 @@ use std::fs;
 use std::io::IsTerminal;
 use tracing::info;
 
-pub async fn execute(email: Option<&str>) -> Result<()> {
+pub async fn execute(email: Option<&str>, quiet: bool) -> Result<()> {
     // Get the BioVault home directory (respects env vars)
     let biovault_dir = get_biovault_home()?;
 
@@ -18,7 +18,10 @@ pub async fn execute(email: Option<&str>) -> Result<()> {
     let email = if let Some(email) = email {
         email.to_string()
     } else if let Ok(syftbox_email) = env::var("SYFTBOX_EMAIL") {
-        if std::io::stdin().is_terminal() {
+        if quiet {
+            // In quiet mode, auto-accept SYFTBOX_EMAIL
+            syftbox_email
+        } else if std::io::stdin().is_terminal() {
             println!("Detected SyftBox environment email: {}", syftbox_email);
             let use_syftbox = Confirm::with_theme(&ColorfulTheme::default())
                 .with_prompt("Use this email for BioVault?")
@@ -38,7 +41,7 @@ pub async fn execute(email: Option<&str>) -> Result<()> {
             // Non-interactive environment: auto-accept SYFTBOX_EMAIL
             syftbox_email
         }
-    } else if std::io::stdin().is_terminal() {
+    } else if std::io::stdin().is_terminal() && !quiet {
         Input::with_theme(&ColorfulTheme::default())
             .with_prompt("Enter email address")
             .interact_text()
@@ -95,7 +98,7 @@ pub async fn execute(email: Option<&str>) -> Result<()> {
         let config = Config {
             email: email.to_string(),
             syftbox_config: syftbox_config.clone(),
-            version: Some("0.1.16".to_string()),
+            version: Some("0.1.27".to_string()),
         };
 
         config.save(&config_file)?;
