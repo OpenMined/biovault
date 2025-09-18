@@ -13,11 +13,13 @@ fn test_syftbox_file_sync() {
     let client2_email =
         env::var("SYFTBOX_CLIENT2_EMAIL").unwrap_or_else(|_| "client2@syftbox.net".to_string());
     let test_clients_dir =
-        env::var("TEST_CLIENTS_DIR").unwrap_or_else(|_| "./test-clients".to_string());
+        env::var("TEST_CLIENTS_DIR").unwrap_or_else(|_| "./test-clients-docker".to_string());
     let server_url =
         env::var("SYFTBOX_SERVER_URL").unwrap_or_else(|_| "http://localhost:8080".to_string());
+    let test_mode = env::var("TEST_MODE").unwrap_or_else(|_| "docker".to_string());
 
     println!("Testing file sync between clients:");
+    println!("  Mode: {}", test_mode);
     println!("  Client1: {}", client1_email);
     println!("  Client2: {}", client2_email);
     println!("  Server: {}", server_url);
@@ -37,12 +39,22 @@ fn test_syftbox_file_sync() {
     thread::sleep(Duration::from_secs(10));
 
     // Step 3: Create test file in client1's public directory
-    let client1_public_dir = PathBuf::from(&test_clients_dir)
-        .join(&client1_email)
-        .join("SyftBox")
-        .join("datasites")
-        .join(&client1_email)
-        .join("public");
+    // Docker mode: test-clients-docker/email/SyftBox/datasites/email/public
+    // Local mode: test-clients-local/email/datasites/email/public
+    let client1_public_dir = if test_mode == "local" {
+        PathBuf::from(&test_clients_dir)
+            .join(&client1_email)
+            .join("datasites")
+            .join(&client1_email)
+            .join("public")
+    } else {
+        PathBuf::from(&test_clients_dir)
+            .join(&client1_email)
+            .join("SyftBox")
+            .join("datasites")
+            .join(&client1_email)
+            .join("public")
+    };
 
     // Create directory if it doesn't exist
     fs::create_dir_all(&client1_public_dir).expect("Failed to create client1 public directory");
@@ -63,13 +75,22 @@ fn test_syftbox_file_sync() {
     println!("✓ Test file written to: {:?}", test_file_path);
 
     // Step 4: Wait for file to sync to client2
-    let expected_sync_path = PathBuf::from(&test_clients_dir)
-        .join(&client2_email)
-        .join("SyftBox")
-        .join("datasites")
-        .join(&client1_email)
-        .join("public")
-        .join(&test_file_name);
+    let expected_sync_path = if test_mode == "local" {
+        PathBuf::from(&test_clients_dir)
+            .join(&client2_email)
+            .join("datasites")
+            .join(&client1_email)
+            .join("public")
+            .join(&test_file_name)
+    } else {
+        PathBuf::from(&test_clients_dir)
+            .join(&client2_email)
+            .join("SyftBox")
+            .join("datasites")
+            .join(&client1_email)
+            .join("public")
+            .join(&test_file_name)
+    };
 
     println!("⏳ Waiting for file to sync to: {:?}", expected_sync_path);
 
@@ -105,18 +126,27 @@ fn test_syftbox_multiple_files_sync() {
     let client2_email =
         env::var("SYFTBOX_CLIENT2_EMAIL").unwrap_or_else(|_| "client2@syftbox.net".to_string());
     let test_clients_dir =
-        env::var("TEST_CLIENTS_DIR").unwrap_or_else(|_| "./test-clients".to_string());
+        env::var("TEST_CLIENTS_DIR").unwrap_or_else(|_| "./test-clients-docker".to_string());
+    let test_mode = env::var("TEST_MODE").unwrap_or_else(|_| "docker".to_string());
 
     // Wait for initialization
     thread::sleep(Duration::from_secs(5));
 
     // Create multiple test files
-    let client1_public_dir = PathBuf::from(&test_clients_dir)
-        .join(&client1_email)
-        .join("SyftBox")
-        .join("datasites")
-        .join(&client1_email)
-        .join("public");
+    let client1_public_dir = if test_mode == "local" {
+        PathBuf::from(&test_clients_dir)
+            .join(&client1_email)
+            .join("datasites")
+            .join(&client1_email)
+            .join("public")
+    } else {
+        PathBuf::from(&test_clients_dir)
+            .join(&client1_email)
+            .join("SyftBox")
+            .join("datasites")
+            .join(&client1_email)
+            .join("public")
+    };
 
     fs::create_dir_all(&client1_public_dir).expect("Failed to create directory");
 
@@ -134,12 +164,20 @@ fn test_syftbox_multiple_files_sync() {
     }
 
     // Wait for all files to sync
-    let client2_sync_dir = PathBuf::from(&test_clients_dir)
-        .join(&client2_email)
-        .join("SyftBox")
-        .join("datasites")
-        .join(&client1_email)
-        .join("public");
+    let client2_sync_dir = if test_mode == "local" {
+        PathBuf::from(&test_clients_dir)
+            .join(&client2_email)
+            .join("datasites")
+            .join(&client1_email)
+            .join("public")
+    } else {
+        PathBuf::from(&test_clients_dir)
+            .join(&client2_email)
+            .join("SyftBox")
+            .join("datasites")
+            .join(&client1_email)
+            .join("public")
+    };
 
     let mut all_synced = true;
     for (filename, expected_content) in &test_files {

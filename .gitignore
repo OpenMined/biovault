@@ -221,3 +221,5 @@ submission/results/*
 
 # Test directories
 test-clients/
+test-clients-docker/
+test-clients-local/
