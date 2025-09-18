@@ -117,6 +117,69 @@ if ($env:CI -or $env:GITHUB_ACTIONS) {
     catch {
         Write-Host "Warning: Could not download Nextflow: $_" -ForegroundColor Yellow
     }
+
+    # Install SyftBox via official installer if not present
+    if (-not (Test-Command "syftbox")) {
+        Write-Host "Installing SyftBox via installer script..." -ForegroundColor Yellow
+        try {
+            powershell -ExecutionPolicy ByPass -c "irm https://syftbox.net/install.ps1 | iex"
+            # Ensure PATH includes the user local bin for this process
+            $userLocalBin = "$env:USERPROFILE\.local\bin"
+            if (Test-Path "$userLocalBin\syftbox.exe") {
+                $env:PATH = "$userLocalBin;$env:PATH"
+            }
+
+            if (Test-Command "syftbox") {
+                Write-Host "SyftBox installed successfully" -ForegroundColor Green
+            } else {
+                Write-Host "SyftBox installation did not add command to PATH" -ForegroundColor Yellow
+            }
+        } catch {
+            Write-Host "Warning: SyftBox installer failed: $_" -ForegroundColor Yellow
+        }
+    }
+
+    # Ensure Java 17+ is available (install if too old or missing)
+    $needJava = $true
+    if (Test-Command "java") {
+        try {
+            $javaVersionOutput = & java -version 2>&1 | Select-Object -First 1 | Out-String
+            if ($javaVersionOutput -match 'version "(\d+)\.(\d+)') {
+                $maj = [int]$matches[1]
+                $min = [int]$matches[2]
+                if ($maj -eq 1) { $v = $min } else { $v = $maj }
+                if ($v -ge 17) { $needJava = $false }
+            } elseif ($javaVersionOutput -match 'version "(\d+)') {
+                $v = [int]$matches[1]
+                if ($v -ge 17) { $needJava = $false }
+            }
+        } catch {}
+    }
+
+    if ($needJava) {
+        Write-Host "Installing OpenJDK 17+ for CI..." -ForegroundColor Yellow
+        if (Test-Command "winget") {
+            try {
+                winget install -e --id Microsoft.OpenJDK --silent || winget install Microsoft.OpenJDK -e -h || $false
+            } catch {}
+        } elseif (Test-Command "choco") {
+            try {
+                choco install openjdk -y
+            } catch {}
+        }
+
+        # Add common OpenJDK bin path to PATH for current process
+        $jdkBase = "C:\\Program Files\\OpenJDK"
+        if (Test-Path $jdkBase) {
+            $latest = Get-ChildItem -Path $jdkBase -Directory -ErrorAction SilentlyContinue | Sort-Object Name -Descending | Select-Object -First 1
+            if ($latest) {
+                $javaBin = Join-Path $latest.FullName 'bin'
+                if (Test-Path $javaBin) {
+                    $env:PATH = "$javaBin;$env:PATH"
+                }
+            }
+        }
+    }
 }
 
 Write-Host ""
@@ -207,6 +270,12 @@ if (Test-Command "docker") {
 }
 
 # Check SyftBox installation
+# Ensure user local bin is in PATH for this session
+$userLocalBin = "$env:USERPROFILE\.local\bin"
+if (Test-Path "$userLocalBin\syftbox.exe") {
+    $env:PATH = "$userLocalBin;$env:PATH"
+}
+
 if (Test-Command "syftbox") {
     Write-Host "SyftBox installed:" -ForegroundColor Green
     & syftbox -v
@@ -219,29 +288,24 @@ Write-Host ""
 Write-Host "=========================================" -ForegroundColor Cyan
 Write-Host "Testing bv check (after setup)" -ForegroundColor Cyan
 Write-Host "=========================================" -ForegroundColor Cyan
-& bv check
+$bvCheckOutput = & bv check 2>&1 | Out-String
+$bvCheckExit = $LASTEXITCODE
+Write-Host $bvCheckOutput
 
-# Only exit with error if Java version is too old, otherwise pass the test
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "Note: Some dependencies missing - manual installation may be required on Windows" -ForegroundColor Yellow
-        # Check if we failed due to Java version being too old
-        if (Test-Command "java") {
-            try {
-                $javaVersionOutput = & java -version 2>&1 | Select-Object -First 1 | Out-String
-                if ($javaVersionOutput -match 'version "1\.8') {
-                    Write-Host "ERROR: Java 8 detected. Java 17+ is required." -ForegroundColor Red
-                    exit 1
-                }
-            } catch {
-                # Ignore errors in final check
-            }
-        }
+if ($bvCheckExit -ne 0) {
+    # Treat services-not-running as a warning (e.g., Docker Desktop)
+    if ($bvCheckOutput -match 'Some services are not running') {
+        Write-Host "Note: Services not running (acceptable in CI)." -ForegroundColor Yellow
+    } else {
+        Write-Host "bv check failed due to missing/invalid dependencies." -ForegroundColor Red
+        exit $bvCheckExit
     }
+}
 
 Write-Host ""
 Write-Host "=========================================" -ForegroundColor Cyan
 Write-Host "Windows installation test completed" -ForegroundColor Green
 Write-Host "=========================================" -ForegroundColor Cyan
 
-# Exit successfully unless Java version was too old (already handled above)
+# Exit successfully
 exit 0

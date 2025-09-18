@@ -98,7 +98,7 @@ dependencies:
       windows:
         install_commands:
           - powershell -Command "Invoke-WebRequest -Uri 'https://github.com/nextflow-io/nextflow/releases/latest/download/nextflow' -OutFile '$env:USERPROFILE\nextflow.exe'"
-          - powershell -Command "$env:PATH = '$env:USERPROFILE;' + $env:PATH"
+          - powershell -Command "[Environment]::SetEnvironmentVariable('PATH', \"$env:USERPROFILE;$env:PATH\", 'Process')"
         verify_command: nextflow -version
   
   - name: syftbox
@@ -113,15 +113,15 @@ dependencies:
         skip_reason: "TODO"
       ubuntu:
         install_commands:
-          - curl -fsSL https://syftbox.net/install.sh | sh -s -- --setup-only
+          - curl -fsSL https://syftbox.net/install.sh | sh -s -- --download-only
         verify_command: syftbox -v
       macos:
         install_commands:
-          - curl -fsSL https://syftbox.net/install.sh | sh -s -- --setup-only
+          - curl -fsSL https://syftbox.net/install.sh | sh -s -- --download-only
         verify_command: syftbox -v
       arch:
         install_commands:
-          - curl -fsSL https://syftbox.net/install.sh | sh -s -- --setup-only
+          - curl -fsSL https://syftbox.net/install.sh | sh -s -- --download-only
         verify_command: syftbox -v
       windows:
         skip: true
