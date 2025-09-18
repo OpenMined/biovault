@@ -1,4 +1,5 @@
 use crate::Result;
+use anyhow::anyhow;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::process::Command;
@@ -105,15 +106,17 @@ pub async fn execute() -> Result<()> {
     println!("\n=========================");
     if all_found && all_running {
         println!("✓ All dependencies satisfied!");
+        Ok(())
     } else if !all_found {
         println!(
             "⚠️  Some dependencies are missing. Please install them using the instructions above."
         );
-    } else if !all_running {
+        Err(anyhow!("Dependencies missing").into())
+    } else {
+        // !all_running
         println!("⚠️  Some services are not running. Please start them using the commands above.");
+        Err(anyhow!("Services not running").into())
     }
-
-    Ok(())
 }
 
 fn check_if_running(service: &str) -> bool {
