@@ -64,10 +64,23 @@ just cleanup-integration-test-local
 Both test modes:
 - Check and configure `/etc/hosts` for MinIO
 - Start SyftBox server with MinIO storage
-- Start two SyftBox clients (either Docker containers or local sbenv instances)
+- Start three SyftBox clients including a "bad actor" client for permission testing
 - Run file synchronization tests between clients
+- Test permission system with various access control scenarios
 - Clean up automatically on success (unless disabled)
 - Leave everything running on failure for debugging
+
+The integrated permission tests verify:
+- User-only read/write permissions
+- Everyone read, user-only write permissions
+- Specific user access controls
+- Permission updates and propagation
+- Bad actor access prevention
+
+Test clients:
+- **client1@syftbox.net**: Primary test client
+- **client2@syftbox.net**: Secondary test client
+- **bad@syftbox.net**: Bad actor client for security testing
 
 #### Key Differences
 
@@ -149,24 +162,27 @@ This adds `127.0.0.1 minio` to your `/etc/hosts` file, allowing local clients to
 - **MinIO Storage**: Accessible via the `minio` hostname when properly configured
 - **Client 1**: http://localhost:7938 (client1@syftbox.net)
 - **Client 2**: http://localhost:7939 (client2@syftbox.net)
+- **Bad Client**: http://localhost:7940 (bad@syftbox.net) - Used for permission testing
 
 ## GitHub Workflows
 
-The project runs two nightly integration test workflows:
+The project runs nightly integration test workflows:
 
 1. **Docker Integration Tests** (`biovault-integration-test-docker.yml`)
    - Runs at 2:00 AM UTC nightly
    - Tests with containerized clients
+   - Includes permission system testing with bad actor client
    - Updates submodules to latest versions
    - Can be manually triggered with options
 
 2. **Local Integration Tests** (`biovault-integration-test-local.yml`)
    - Runs at 2:30 AM UTC nightly
    - Tests with local sbenv clients
+   - Includes permission system testing with bad actor client
    - Updates submodules to latest versions
    - Can be manually triggered with options
 
-Both workflows automatically update submodules to the latest versions during nightly runs to catch breaking changes in dependencies.
+All workflows automatically update submodules to the latest versions during nightly runs to catch breaking changes in dependencies.
 
 ## Debugging
 

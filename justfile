@@ -7,10 +7,13 @@ TEST_CLIENTS_LOCAL_DIR := "./test-clients-local"
 # Test client configurations
 TEST_CLIENT1_EMAIL := "client1@syftbox.net"
 TEST_CLIENT2_EMAIL := "client2@syftbox.net"
+TEST_BAD_CLIENT_EMAIL := "bad@syftbox.net"
 TEST_CLIENT1_NAME := "client1-syftbox-net"
 TEST_CLIENT2_NAME := "client2-syftbox-net"
+TEST_BAD_CLIENT_NAME := "bad-syftbox-net"
 TEST_CLIENT1_PORT := "7938"
 TEST_CLIENT2_PORT := "7939"
+TEST_BAD_CLIENT_PORT := "7940"
 
 start-syftbox-server:
     @echo "Starting SyftBox server with MinIO..."
@@ -63,7 +66,26 @@ start-syftbox-client1-docker:
 start-syftbox-client2-docker:
     just start-syftbox-client-docker "{{TEST_CLIENT2_EMAIL}}" "{{TEST_CLIENT2_NAME}}" "{{TEST_CLIENT2_PORT}}"
 
-# Start both docker clients
+# Start docker bad client
+start-syftbox-bad-client-docker:
+    just start-syftbox-client-docker "{{TEST_BAD_CLIENT_EMAIL}}" "{{TEST_BAD_CLIENT_NAME}}" "{{TEST_BAD_CLIENT_PORT}}"
+
+# Start all docker clients (including bad client)
+start-syftbox-all-clients-docker:
+    @echo "Cleaning up old test data..."
+    @if [ -n "${CI:-}" ] && [ -d {{TEST_CLIENTS_DOCKER_DIR}} ]; then \
+        echo "In CI environment, using sudo to remove root-owned files"; \
+        sudo rm -rf {{TEST_CLIENTS_DOCKER_DIR}}; \
+    else \
+        rm -rf {{TEST_CLIENTS_DOCKER_DIR}}; \
+    fi
+    @just start-syftbox-client1-docker
+    @sleep 2
+    @just start-syftbox-client2-docker
+    @sleep 2
+    @just start-syftbox-bad-client-docker
+
+# Start both docker clients (original, without bad client)
 start-syftbox-clients-docker:
     @echo "Cleaning up old test data..."
     @if [ -n "${CI:-}" ] && [ -d {{TEST_CLIENTS_DOCKER_DIR}} ]; then \
@@ -76,7 +98,16 @@ start-syftbox-clients-docker:
     @sleep 2
     @just start-syftbox-client2-docker
 
-# Stop docker clients
+# Stop all docker clients
+stop-syftbox-all-clients-docker:
+    -docker stop syftbox-client-{{TEST_CLIENT1_NAME}}
+    -docker stop syftbox-client-{{TEST_CLIENT2_NAME}}
+    -docker stop syftbox-client-{{TEST_BAD_CLIENT_NAME}}
+    -docker rm syftbox-client-{{TEST_CLIENT1_NAME}}
+    -docker rm syftbox-client-{{TEST_CLIENT2_NAME}}
+    -docker rm syftbox-client-{{TEST_BAD_CLIENT_NAME}}
+
+# Stop docker clients (original)
 stop-syftbox-clients-docker:
     -docker stop syftbox-client-{{TEST_CLIENT1_NAME}}
     -docker stop syftbox-client-{{TEST_CLIENT2_NAME}}
@@ -89,13 +120,14 @@ wait-for-server:
     @timeout 60 bash -c 'until curl -f http://localhost:8080 2>/dev/null; do echo "Waiting..."; sleep 2; done'
     @echo "Server is ready!"
 
-# Run integration tests with docker clients
+# Run all integration tests with docker clients
 run-integration-tests-docker:
     @echo "Running integration tests with docker clients..."
     cd cli && \
     SYFTBOX_SERVER_URL=http://localhost:8080 \
     SYFTBOX_CLIENT1_EMAIL={{TEST_CLIENT1_EMAIL}} \
     SYFTBOX_CLIENT2_EMAIL={{TEST_CLIENT2_EMAIL}} \
+    SYFTBOX_BAD_CLIENT_EMAIL={{TEST_BAD_CLIENT_EMAIL}} \
     TEST_CLIENTS_DIR=../{{TEST_CLIENTS_DOCKER_DIR}} \
     TEST_MODE=docker \
     cargo test --test '*' -- --ignored --nocapture
@@ -117,18 +149,18 @@ test-integration-docker cleanup="true":
     @echo "3. Waiting for server..."
     @just wait-for-server
     @echo ""
-    @echo "4. Starting SyftBox docker clients..."
-    @just start-syftbox-clients-docker
+    @echo "4. Starting SyftBox docker clients (including bad client)..."
+    @just start-syftbox-all-clients-docker
     @echo ""
     @echo "5. Waiting for clients to initialize..."
-    @sleep 5
+    @sleep 10
     @echo ""
     @echo "6. Running integration tests..."
     @if just run-integration-tests-docker; then \
         echo ""; \
         if [ "{{cleanup}}" = "true" ]; then \
             echo "✅ All tests passed! Cleaning up..."; \
-            just stop-syftbox-clients-docker; \
+            just stop-syftbox-all-clients-docker; \
             just stop-syftbox-server; \
             rm -rf {{TEST_CLIENTS_DOCKER_DIR}}; \
             echo "✅ Cleanup complete!"; \
@@ -139,6 +171,7 @@ test-integration-docker cleanup="true":
             echo "  - Check server logs: docker logs syftbox-server"; \
             echo "  - Check client1 logs: docker logs syftbox-client-{{TEST_CLIENT1_NAME}}"; \
             echo "  - Check client2 logs: docker logs syftbox-client-{{TEST_CLIENT2_NAME}}"; \
+            echo "  - Check bad client logs: docker logs syftbox-client-{{TEST_BAD_CLIENT_NAME}}"; \
             echo "  - Explore files: ls -la {{TEST_CLIENTS_DOCKER_DIR}}/"; \
             echo ""; \
             echo "When done, run:"; \
@@ -152,6 +185,7 @@ test-integration-docker cleanup="true":
         echo "  - Server logs: docker logs syftbox-server"; \
         echo "  - Client1 logs: docker logs syftbox-client-{{TEST_CLIENT1_NAME}}"; \
         echo "  - Client2 logs: docker logs syftbox-client-{{TEST_CLIENT2_NAME}}"; \
+        echo "  - Bad client logs: docker logs syftbox-client-{{TEST_BAD_CLIENT_NAME}}"; \
         echo "  - Check files: ls -la {{TEST_CLIENTS_DOCKER_DIR}}/"; \
         echo ""; \
         echo "When done debugging, run:"; \
@@ -163,10 +197,11 @@ test-integration-docker cleanup="true":
 test-integration-docker-inspect:
     just test-integration-docker false
 
+
 # Clean up docker integration test resources
 cleanup-integration-test-docker:
     @echo "Cleaning up docker integration test resources..."
-    -just stop-syftbox-clients-docker
+    -just stop-syftbox-all-clients-docker
     -just stop-syftbox-server
     @if [ -n "${CI:-}" ] && [ -d {{TEST_CLIENTS_DOCKER_DIR}} ]; then \
         echo "In CI environment, using sudo to remove root-owned files"; \
@@ -215,7 +250,26 @@ start-syftbox-client2-local: build-sbenv
     @just setup-sbenv-client "{{TEST_CLIENT2_EMAIL}}"
     @just start-sbenv-client "{{TEST_CLIENT2_EMAIL}}"
 
-# Start both local clients
+# Setup and start sbenv bad client
+start-syftbox-bad-client-local: build-sbenv
+    @just setup-sbenv-client "{{TEST_BAD_CLIENT_EMAIL}}"
+    @just start-sbenv-client "{{TEST_BAD_CLIENT_EMAIL}}"
+
+# Start all local clients (including bad client)
+start-syftbox-all-clients-local: build-sbenv
+    @echo "Cleaning up old test data..."
+    @rm -rf {{TEST_CLIENTS_LOCAL_DIR}}
+    @just start-syftbox-client1-local
+    @sleep 3
+    @just start-syftbox-client2-local
+    @sleep 3
+    @just start-syftbox-bad-client-local
+    @echo "Waiting for local clients to initialize..."
+    @sleep 10
+    @echo "Checking if clients are running..."
+    @ps aux | grep -E "syftbox|sbenv" | grep -v grep || echo "No syftbox processes found"
+
+# Start both local clients (original, without bad client)
 start-syftbox-clients-local: build-sbenv
     @echo "Cleaning up old test data..."
     @rm -rf {{TEST_CLIENTS_LOCAL_DIR}}
@@ -227,7 +281,17 @@ start-syftbox-clients-local: build-sbenv
     @echo "Checking if clients are running..."
     @ps aux | grep -E "syftbox|sbenv" | grep -v grep || echo "No syftbox processes found"
 
-# Stop local clients
+# Stop all local clients
+stop-syftbox-all-clients-local:
+    @echo "Stopping all local sbenv clients..."
+    -cd {{TEST_CLIENTS_LOCAL_DIR}}/{{TEST_CLIENT1_EMAIL}} && \
+        ../../{{SBENV_DIR}}/cli/target/release/sbenv stop 2>/dev/null || true
+    -cd {{TEST_CLIENTS_LOCAL_DIR}}/{{TEST_CLIENT2_EMAIL}} && \
+        ../../{{SBENV_DIR}}/cli/target/release/sbenv stop 2>/dev/null || true
+    -cd {{TEST_CLIENTS_LOCAL_DIR}}/{{TEST_BAD_CLIENT_EMAIL}} && \
+        ../../{{SBENV_DIR}}/cli/target/release/sbenv stop 2>/dev/null || true
+
+# Stop local clients (original)
 stop-syftbox-clients-local:
     @echo "Stopping local sbenv clients..."
     -cd {{TEST_CLIENTS_LOCAL_DIR}}/{{TEST_CLIENT1_EMAIL}} && \
@@ -235,13 +299,14 @@ stop-syftbox-clients-local:
     -cd {{TEST_CLIENTS_LOCAL_DIR}}/{{TEST_CLIENT2_EMAIL}} && \
         ../../{{SBENV_DIR}}/cli/target/release/sbenv stop 2>/dev/null || true
 
-# Run integration tests with local clients
+# Run all integration tests with local clients
 run-integration-tests-local:
     @echo "Running integration tests with local clients..."
     cd cli && \
     SYFTBOX_SERVER_URL=http://localhost:8080 \
     SYFTBOX_CLIENT1_EMAIL={{TEST_CLIENT1_EMAIL}} \
     SYFTBOX_CLIENT2_EMAIL={{TEST_CLIENT2_EMAIL}} \
+    SYFTBOX_BAD_CLIENT_EMAIL={{TEST_BAD_CLIENT_EMAIL}} \
     TEST_CLIENTS_DIR=../{{TEST_CLIENTS_LOCAL_DIR}} \
     TEST_MODE=local \
     cargo test --test '*' -- --ignored --nocapture
@@ -263,15 +328,15 @@ test-integration-local cleanup="true":
     @echo "3. Waiting for server..."
     @just wait-for-server
     @echo ""
-    @echo "4. Starting local SyftBox clients with sbenv..."
-    @just start-syftbox-clients-local
+    @echo "4. Starting local SyftBox clients with sbenv (including bad client)..."
+    @just start-syftbox-all-clients-local
     @echo ""
     @echo "5. Running integration tests..."
     @if just run-integration-tests-local; then \
         echo ""; \
         if [ "{{cleanup}}" = "true" ]; then \
             echo "✅ All tests passed! Cleaning up..."; \
-            just stop-syftbox-clients-local; \
+            just stop-syftbox-all-clients-local; \
             just stop-syftbox-server; \
             rm -rf {{TEST_CLIENTS_LOCAL_DIR}}; \
             echo "✅ Cleanup complete!"; \
@@ -282,6 +347,7 @@ test-integration-local cleanup="true":
             echo "  - Check server logs: docker logs syftbox-server"; \
             echo "  - Check client1 logs: cat {{TEST_CLIENTS_LOCAL_DIR}}/{{TEST_CLIENT1_EMAIL}}/.syftbox/logs/client.log"; \
             echo "  - Check client2 logs: cat {{TEST_CLIENTS_LOCAL_DIR}}/{{TEST_CLIENT2_EMAIL}}/.syftbox/logs/client.log"; \
+            echo "  - Check bad client logs: cat {{TEST_CLIENTS_LOCAL_DIR}}/{{TEST_BAD_CLIENT_EMAIL}}/.syftbox/logs/client.log"; \
             echo "  - Explore files: ls -la {{TEST_CLIENTS_LOCAL_DIR}}/"; \
             echo ""; \
             echo "When done, run:"; \
@@ -295,6 +361,7 @@ test-integration-local cleanup="true":
         echo "  - Server logs: docker logs syftbox-server"; \
         echo "  - Client1 logs: cat {{TEST_CLIENTS_LOCAL_DIR}}/{{TEST_CLIENT1_EMAIL}}/.syftbox/logs/client.log"; \
         echo "  - Client2 logs: cat {{TEST_CLIENTS_LOCAL_DIR}}/{{TEST_CLIENT2_EMAIL}}/.syftbox/logs/client.log"; \
+        echo "  - Bad client logs: cat {{TEST_CLIENTS_LOCAL_DIR}}/{{TEST_BAD_CLIENT_EMAIL}}/.syftbox/logs/client.log"; \
         echo "  - Check files: ls -la {{TEST_CLIENTS_LOCAL_DIR}}/"; \
         echo ""; \
         echo "When done debugging, run:"; \
@@ -309,7 +376,7 @@ test-integration-local-inspect:
 # Clean up local integration test resources
 cleanup-integration-test-local:
     @echo "Cleaning up local integration test resources..."
-    -just stop-syftbox-clients-local
+    -just stop-syftbox-all-clients-local
     -just stop-syftbox-server
     -rm -rf {{TEST_CLIENTS_LOCAL_DIR}}
     @echo "Cleanup complete!"
