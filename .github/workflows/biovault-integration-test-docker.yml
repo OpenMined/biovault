@@ -1,0 +1,75 @@
+name: BioVault Integration Test - Docker
+
+on:
+  schedule:
+    # Run nightly at 2 AM UTC
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      cleanup_after_success:
+        description: 'Clean up resources after successful tests'
+        type: boolean
+        required: false
+        default: true
+      update_submodules:
+        description: 'Update submodules to latest versions'
+        type: boolean
+        required: false
+        default: true
+
+jobs:
+  test-with-docker:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Update submodules to latest
+      if: github.event_name == 'schedule' || github.event.inputs.update_submodules == 'true'
+      run: |
+        echo "Updating submodules to latest versions..."
+        chmod +x submodules.sh
+        ./submodules.sh --latest
+
+    - name: Install just
+      uses: extractions/setup-just@v1
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Install Rust
+      uses: actions-rs/toolchain@v1
+      with:
+        toolchain: stable
+        profile: minimal
+        override: true
+
+    - name: Install cargo-nextest
+      uses: taiki-e/install-action@v2
+      with:
+        tool: nextest
+
+    - name: Add minio to /etc/hosts
+      run: |
+        echo "127.0.0.1 minio" | sudo tee -a /etc/hosts
+        cat /etc/hosts | grep minio
+
+    - name: Run integration tests with Docker
+      run: |
+        # Export CI environment variable so the justfile knows we're in CI
+        export CI=true
+        just test-integration-docker
+
+    - name: Show server logs on failure
+      if: failure()
+      run: |
+        echo "=== Server Logs ==="
+        docker logs syftbox-server || true
+        echo "=== Client 1 Logs ==="
+        docker logs syftbox-client-client1-syftbox-net || true
+        echo "=== Client 2 Logs ==="
+        docker logs syftbox-client-client2-syftbox-net || true
+
+    # Cleanup is handled by the just command based on test results

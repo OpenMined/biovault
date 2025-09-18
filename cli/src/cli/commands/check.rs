@@ -2,6 +2,7 @@ use crate::Result;
 use anyhow::anyhow;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::env;
 use std::process::Command;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -41,10 +42,36 @@ pub async fn execute() -> Result<()> {
     println!("BioVault Dependency Check");
     println!("=========================\n");
 
+    // Detect if we're in Google Colab
+    let is_colab = is_google_colab();
+    if is_colab {
+        println!("ℹ️  Google Colab environment detected\n");
+    }
+
     let mut all_found = true;
     let mut all_running = true;
 
     for dep in &config.dependencies {
+        // Check if this dependency should be skipped in Colab
+        if is_colab {
+            if let Some(environments) = &dep.environments {
+                if let Some(colab_config) = environments.get("google_colab") {
+                    if colab_config.skip {
+                        println!("Checking {}... ⏭️  SKIPPED", dep.name);
+                        println!(
+                            "  Reason: {}",
+                            colab_config
+                                .skip_reason
+                                .as_ref()
+                                .unwrap_or(&"Not available in Colab".to_string())
+                        );
+                        println!();
+                        continue;
+                    }
+                }
+            }
+        }
+
         print!("Checking {}... ", dep.name);
 
         // Check if the binary exists in PATH
@@ -208,6 +235,22 @@ fn parse_java_version(output: &str) -> Option<u32> {
     }
 
     None
+}
+
+fn is_google_colab() -> bool {
+    // Check for COLAB_RELEASE_TAG which is specific to Colab
+    if env::var("COLAB_RELEASE_TAG").is_ok() {
+        return true;
+    }
+
+    // Fallback: check for any COLAB_ prefixed environment variable
+    for (key, _) in env::vars() {
+        if key.starts_with("COLAB_") {
+            return true;
+        }
+    }
+
+    false
 }
 
 #[cfg(test)]
