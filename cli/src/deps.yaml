@@ -111,6 +111,8 @@ dependencies:
       google_colab:
         install_commands:
           - curl -fsSL https://syftbox.net/install.sh | sh -s -- --download-only
+          - mv /root/.local/bin/syftbox /usr/local/bin/ 2>/dev/null || mv ~/.local/bin/syftbox /usr/local/bin/
+          - chmod +x /usr/local/bin/syftbox
         verify_command: syftbox -v
       ubuntu:
         install_commands:
