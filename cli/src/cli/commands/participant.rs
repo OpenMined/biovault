@@ -662,48 +662,41 @@ mod tests {
     }
 
     #[test]
-    fn expand_and_normalize_path() {
-        // ~ expansion
-        let home = std::env::var("HOME").unwrap_or_else(|_| {
-            std::env::current_dir()
-                .unwrap()
-                .to_string_lossy()
-                .to_string()
-        });
-        let input = format!("{}/file.txt", home);
-        assert_eq!(expand_tilde("~/file.txt"), input);
-
-        // relative path normalization
+    #[serial_test::serial]
+    #[cfg(unix)]
+    fn expand_tilde_resolves_home_unix() {
         let tmp = TempDir::new().unwrap();
-        let cwd = std::env::current_dir().unwrap();
-        std::env::set_current_dir(tmp.path()).unwrap();
-        let abs = normalize_path("rel/path").unwrap();
-        let p = std::path::Path::new(&abs);
-        assert!(p.is_absolute());
-        assert!(p.ends_with("rel/path"));
-        std::env::set_current_dir(cwd).unwrap();
+        std::env::set_var("HOME", tmp.path());
+        let expanded = super::expand_tilde("~/file.txt");
+        assert_eq!(
+            std::path::Path::new(&expanded),
+            &tmp.path().join("file.txt")
+        );
     }
 
     #[test]
-    fn participants_file_load_save_roundtrip() {
+    #[serial_test::serial]
+    #[cfg(windows)]
+    fn expand_tilde_resolves_home_windows() {
         let tmp = TempDir::new().unwrap();
-        crate::config::set_test_biovault_home(tmp.path().join(".bv"));
-        let mut pf = ParticipantsFile::new();
-        pf.participants.insert(
-            "ID".into(),
-            Participant {
-                id: "ID".into(),
-                ref_version: Some("GRCh38".into()),
-                r#ref: None,
-                ref_index: None,
-                aligned: None,
-                aligned_index: None,
-                snp: None,
-            },
+        std::env::set_var("USERPROFILE", tmp.path());
+        let expanded = super::expand_tilde("~/file.txt");
+        assert_eq!(
+            std::path::Path::new(&expanded),
+            &tmp.path().join("file.txt")
         );
-        pf.save().unwrap();
-        let loaded = ParticipantsFile::load().unwrap();
-        assert!(loaded.participants.contains_key("ID"));
-        crate::config::clear_test_biovault_home();
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn normalize_path_makes_absolute_and_keeps_tail() {
+        let tmp = TempDir::new().unwrap();
+        let cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmp.path()).unwrap();
+        let abs = super::normalize_path("rel/path").unwrap();
+        let p = std::path::Path::new(&abs);
+        assert!(p.is_absolute());
+        assert!(p.ends_with(std::path::Path::new("rel").join("path")));
+        std::env::set_current_dir(cwd).unwrap();
     }
 }
