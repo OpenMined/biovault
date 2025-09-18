@@ -159,8 +159,7 @@ fn test_syftbox_multiple_files_sync() {
     // Write all test files
     for (filename, content) in &test_files {
         let file_path = client1_public_dir.join(filename);
-        fs::write(&file_path, content)
-            .unwrap_or_else(|_| panic!("Failed to write {}", filename));
+        fs::write(&file_path, content).unwrap_or_else(|_| panic!("Failed to write {}", filename));
         println!("✓ Created {}", filename);
     }
 
