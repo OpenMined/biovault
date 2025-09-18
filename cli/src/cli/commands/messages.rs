@@ -27,6 +27,28 @@ pub fn get_message_db_path(config: &Config) -> Result<PathBuf> {
     Ok(db_path)
 }
 
+#[cfg(test)]
+mod tests_fast_helpers {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn get_message_db_path_creates_parent_dir() {
+        let tmp = TempDir::new().unwrap();
+        crate::config::set_test_biovault_home(tmp.path().join(".bvtest"));
+        let cfg = Config {
+            email: "e@example".into(),
+            syftbox_config: None,
+            version: None,
+        };
+        let path = get_message_db_path(&cfg).unwrap();
+        // Parent dir should exist now
+        assert!(path.parent().unwrap().exists());
+        assert!(path.ends_with("messages.db"));
+        crate::config::clear_test_biovault_home();
+    }
+}
+
 /// Initialize the message system
 pub fn init_message_system(config: &Config) -> Result<(MessageDb, MessageSync)> {
     let db_path = get_message_db_path(config)?;

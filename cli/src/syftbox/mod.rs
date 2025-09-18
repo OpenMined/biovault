@@ -15,3 +15,17 @@ use std::path::Path;
 pub fn init_app(data_dir: &Path, email: &str, app_name: &str) -> Result<SyftBoxApp> {
     SyftBoxApp::new(data_dir, email, app_name)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn init_app_creates_structure() {
+        let td = TempDir::new().unwrap();
+        let app = init_app(td.path(), "u@example.com", "bv").unwrap();
+        assert!(app.app_data_dir.exists());
+        assert!(app.rpc_dir.exists());
+    }
+}
