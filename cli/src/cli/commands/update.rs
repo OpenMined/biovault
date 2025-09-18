@@ -328,7 +328,7 @@ mod tests {
     #[test]
     fn test_detect_install_method_cross_platform() {
         // Save original exe path
-        let original_exe = std::env::current_exe().ok();
+        let _original_exe = std::env::current_exe().ok();
 
         // Test various path patterns
         let test_cases = vec![
