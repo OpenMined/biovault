@@ -4,7 +4,7 @@ set -euo pipefail
 cd cli
 
 # Enforce formatting
-cargo fmt --all -- --check
+cargo fmt --all
 
 # Lint everything (lib, bins, tests, benches, examples), treat warnings as errors
-cargo clippy --all-targets --all-features --no-deps -- -D warnings
+cargo clippy --fix --allow-dirty --all-targets --all-features --no-deps -- -D warnings

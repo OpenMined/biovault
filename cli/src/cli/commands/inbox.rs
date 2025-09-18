@@ -733,4 +733,159 @@ mod tests {
         assert_eq!(filters.from, Some("admin@test.com".to_string()));
         assert_eq!(filters.search, Some("important".to_string()));
     }
+
+    fn test_config(tmp: &std::path::Path) -> Config {
+        crate::config::set_test_biovault_home(tmp.join(".bv"));
+        crate::config::set_test_syftbox_data_dir(tmp);
+        Config {
+            email: "me@example.com".into(),
+            syftbox_config: None,
+            version: None,
+        }
+    }
+
+    #[test]
+    fn list_handles_empty_db() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let cfg = test_config(tmp.path());
+        let filters = ListFilters {
+            sent: false,
+            all: false,
+            unread: false,
+            projects: false,
+            message_type: None,
+            from: None,
+            search: None,
+        };
+        list(&cfg, filters).unwrap();
+    }
+
+    #[test]
+    fn list_filters_sent_unread_projects_search_from() {
+        use crate::cli::commands::messages::get_message_db_path;
+        use crate::messages::{Message, MessageStatus, MessageType};
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let cfg = test_config(tmp.path());
+        let db_path = get_message_db_path(&cfg).unwrap();
+        let db = crate::messages::MessageDb::new(&db_path).unwrap();
+
+        // Sent/draft message from me
+        let mut m1 = Message::new(
+            "me@example.com".into(),
+            "you@example.com".into(),
+            "hello world".into(),
+        );
+        m1.status = MessageStatus::Sent;
+        db.insert_message(&m1).unwrap();
+
+        // Unread (received) message to me, from alice
+        let mut m2 = Message::new(
+            "alice@example.com".into(),
+            "me@example.com".into(),
+            "body 2".into(),
+        );
+        m2.status = MessageStatus::Received;
+        m2.subject = Some("greetings".into());
+        db.insert_message(&m2).unwrap();
+
+        // Project-type message (counted in projects filter)
+        let mut m3 = Message::new(
+            "bob@example.com".into(),
+            "me@example.com".into(),
+            "proj body".into(),
+        );
+        m3.message_type = MessageType::Project {
+            project_name: "P".into(),
+            submission_id: "S".into(),
+            files_hash: None,
+        };
+        m3.status = MessageStatus::Sent;
+        db.insert_message(&m3).unwrap();
+
+        // sent filter
+        list(
+            &cfg,
+            ListFilters {
+                sent: true,
+                all: false,
+                unread: false,
+                projects: false,
+                message_type: None,
+                from: None,
+                search: None,
+            },
+        )
+        .unwrap();
+        // unread filter
+        list(
+            &cfg,
+            ListFilters {
+                sent: false,
+                all: false,
+                unread: true,
+                projects: false,
+                message_type: None,
+                from: None,
+                search: None,
+            },
+        )
+        .unwrap();
+        // projects filter
+        list(
+            &cfg,
+            ListFilters {
+                sent: false,
+                all: false,
+                unread: false,
+                projects: true,
+                message_type: None,
+                from: None,
+                search: None,
+            },
+        )
+        .unwrap();
+        // message_type filter explicit
+        list(
+            &cfg,
+            ListFilters {
+                sent: false,
+                all: false,
+                unread: false,
+                projects: false,
+                message_type: Some("project".into()),
+                from: None,
+                search: None,
+            },
+        )
+        .unwrap();
+        // search filter by subject/body
+        list(
+            &cfg,
+            ListFilters {
+                sent: false,
+                all: false,
+                unread: false,
+                projects: false,
+                message_type: None,
+                from: None,
+                search: Some("greet".into()),
+            },
+        )
+        .unwrap();
+        // from filter narrows by sender
+        list(
+            &cfg,
+            ListFilters {
+                sent: false,
+                all: true,
+                unread: false,
+                projects: false,
+                message_type: None,
+                from: Some("alice".into()),
+                search: None,
+            },
+        )
+        .unwrap();
+    }
 }
