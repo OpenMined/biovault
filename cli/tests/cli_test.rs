@@ -180,17 +180,7 @@ fn test_info_command() {
         .stdout(predicate::str::contains("DISK FREE:"));
 }
 
-#[test]
-fn test_check_command() {
-    let mut cmd = Command::cargo_bin("bv").unwrap();
-    cmd.arg("check")
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("BioVault Dependency Check"))
-        .stdout(predicate::str::contains("docker"))
-        .stdout(predicate::str::contains("nextflow"));
-    // Note: not checking for 'git' since deps.yaml was updated
-}
+// Removed test_check_command: behavior is covered by OS/nightly installation tests.
 
 #[test]
 fn test_invalid_command() {

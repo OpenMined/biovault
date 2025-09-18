@@ -103,7 +103,24 @@ fi
 # Check Docker installation (Docker Desktop might not be running on CI)
 if command_exists docker; then
     echo "✓ Docker command available"
-    docker --version || echo "Docker command exists but daemon might not be running"
+    if docker info >/dev/null 2>&1; then
+        docker --version || true
+    else
+        echo "Attempting to start Docker Desktop..."
+        # Start Docker.app and wait up to ~2 minutes for it to be ready
+        (open -a Docker || open -a "/Applications/Docker.app" || true) >/dev/null 2>&1
+        for i in {1..60}; do
+            if docker info >/dev/null 2>&1; then
+                echo "Docker daemon is running"
+                docker --version || true
+                break
+            fi
+            sleep 2
+        done
+        if ! docker info >/dev/null 2>&1; then
+            echo "⚠️  Docker Desktop did not start within timeout"
+        fi
+    fi
 else
     echo "⚠️  Docker not installed (Docker Desktop installation requires GUI interaction)"
 fi
