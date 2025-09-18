@@ -998,3 +998,39 @@ fn map_winget_pkg_to_choco(pkg: &str) -> &'static str {
         _ => "",
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn java_parse_various_formats() {
+        let cases = [
+            ("openjdk version \"17.0.2\" 2022-01-18", Some(17)),
+            ("java version \"1.8.0_321\"", Some(8)),
+            ("openjdk version \"11.0.14\" 2022-01-18", Some(11)),
+            ("java version \"21\"", Some(21)),
+            ("garbage", None),
+        ];
+        for (s, want) in cases {
+            assert_eq!(parse_java_version(s), want);
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn google_colab_detection_via_env() {
+        // Ensure variable not set
+        std::env::remove_var("COLAB_RELEASE_TAG");
+        for (k, _) in std::env::vars() {
+            if k.starts_with("COLAB_") {
+                std::env::remove_var(k);
+            }
+        }
+        assert!(!is_google_colab());
+        // Set specific var and detect
+        std::env::set_var("COLAB_RELEASE_TAG", "test");
+        assert!(is_google_colab());
+        std::env::remove_var("COLAB_RELEASE_TAG");
+    }
+}

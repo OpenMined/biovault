@@ -939,6 +939,7 @@ fn verify_project_from_metadata(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use tempfile::TempDir;
 
     fn create_test_config() -> Config {
@@ -1012,6 +1013,199 @@ mod tests {
         let messages_after_delete = db.list_messages(None)?;
         assert_eq!(messages_after_delete.len(), 0);
 
+        Ok(())
+    }
+
+    #[test]
+    fn normalize_participant_source_for_real_behaviour() -> Result<()> {
+        let tmp = TempDir::new()?;
+        crate::config::set_test_biovault_home(tmp.path().join(".bv"));
+
+        // Existing URL/path strings are preserved
+        assert_eq!(
+            normalize_participant_source_for_real("syft://x/y#z")?,
+            "syft://x/y#z"
+        );
+        assert_eq!(
+            normalize_participant_source_for_real("/abs/path/participants.yaml#p.ID")?,
+            "/abs/path/participants.yaml#p.ID"
+        );
+
+        // Bare ID resolves to participants.yaml under BIOVAULT home
+        let got = normalize_participant_source_for_real("TESTID")?;
+        assert!(got.ends_with("participants.yaml#participants.TESTID"));
+        Ok(())
+    }
+
+    #[test]
+    fn resolve_and_paths_and_copy_dir() -> Result<()> {
+        let tmp = TempDir::new()?;
+        // SyftBox data dir and config email
+        crate::config::set_test_syftbox_data_dir(tmp.path());
+        let cfg = Config {
+            email: "u@example.com".into(),
+            syftbox_config: None,
+            version: None,
+        };
+
+        // Build a fake project tree under datasites/u@example.com/app_data/biovault/submissions/proj1
+        let root = tmp
+            .path()
+            .join("datasites/u@example.com/app_data/biovault/submissions/proj1");
+        std::fs::create_dir_all(root.join("a/b")).unwrap();
+        std::fs::write(root.join("a/b/file.txt"), b"hi").unwrap();
+        // This file should be skipped when copying
+        std::fs::write(root.join("a/syft.pub.yaml"), b"rules:").unwrap();
+
+        // sender_project_root from metadata
+        let loc = format!(
+            "syft://u@example.com/app_data/biovault/submissions/{}",
+            "proj1"
+        );
+        let meta = json!({
+            "project_location": loc
+        });
+        let (sender_root, folder) = sender_project_root(&cfg, &meta)?;
+        assert_eq!(folder, "proj1");
+        assert!(sender_root.ends_with("proj1"));
+
+        // receiver path
+        let recv = receiver_private_submissions_path(&cfg)?;
+        assert!(recv.ends_with("datasites/u@example.com/private/app_data/biovault/submissions"));
+
+        // Copy behaviour: skip syft.pub.yaml and recreate tree
+        let dest = recv.join(&folder);
+        copy_dir_recursive(&sender_root, &dest)?;
+        assert!(dest.join("a/b/file.txt").exists());
+        assert!(!dest.join("a/syft.pub.yaml").exists());
+
+        Ok(())
+    }
+
+    #[test]
+    fn build_run_project_copy_creates_dest_once() -> Result<()> {
+        let tmp = TempDir::new()?;
+        crate::config::set_test_syftbox_data_dir(tmp.path());
+        let cfg = Config {
+            email: "u@example.com".into(),
+            syftbox_config: None,
+            version: None,
+        };
+
+        // Make sender tree and one file
+        let proj = tmp
+            .path()
+            .join("datasites/u@example.com/app_data/biovault/submissions/projX");
+        std::fs::create_dir_all(proj.join("dir")).unwrap();
+        std::fs::write(proj.join("dir/f.txt"), b"x").unwrap();
+        let meta =
+            json!({"project_location": "syft://u@example.com/app_data/biovault/submissions/projX"});
+        let mut msg = Message::new("u@example.com".into(), "v@example.com".into(), "b".into());
+        msg.metadata = Some(meta);
+
+        let dest1 = build_run_project_copy(&cfg, &msg)?;
+        assert!(dest1.join("dir/f.txt").exists());
+        // Call again; should not error and keep same path
+        let dest2 = build_run_project_copy(&cfg, &msg)?;
+        assert_eq!(dest1, dest2);
+        Ok(())
+    }
+
+    #[test]
+    fn verify_project_from_metadata_ok_and_fail() -> Result<()> {
+        let tmp = TempDir::new()?;
+        crate::config::set_test_syftbox_data_dir(tmp.path());
+        let cfg = Config {
+            email: "u@example.com".into(),
+            syftbox_config: None,
+            version: None,
+        };
+
+        // Build project root with two files and compute blake3
+        let root = tmp
+            .path()
+            .join("datasites/u@example.com/app_data/biovault/submissions/projZ");
+        std::fs::create_dir_all(&root).unwrap();
+        let f1 = root.join("a.txt");
+        let f2 = root.join("b.txt");
+        std::fs::write(&f1, b"A").unwrap();
+        std::fs::write(&f2, b"B").unwrap();
+        let h1 = blake3::hash(&std::fs::read(&f1).unwrap())
+            .to_hex()
+            .to_string();
+        let h2 = blake3::hash(&std::fs::read(&f2).unwrap())
+            .to_hex()
+            .to_string();
+
+        // Construct embedded project.yaml equivalent in metadata
+        let project = json!({
+            "name": "n", "author":"a", "workflow":"w",
+            "b3_hashes": {"a.txt": h1, "b.txt": h2}
+        });
+        let meta_ok = json!({
+            "project": project,
+            "project_location": "syft://u@example.com/app_data/biovault/submissions/projZ"
+        });
+        let (ok, note) = verify_project_from_metadata(&cfg, &meta_ok)?;
+        assert!(ok, "expected OK, got note: {}", note);
+
+        // Now break one file and expect failure with note
+        std::fs::write(&f2, b"BROKEN").unwrap();
+        let (ok2, note2) = verify_project_from_metadata(&cfg, &meta_ok)?;
+        assert!(!ok2);
+        assert!(!note2.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn list_messages_displays_without_actions() -> Result<()> {
+        let tmp = TempDir::new()?;
+        crate::config::set_test_syftbox_data_dir(tmp.path());
+        crate::config::set_test_biovault_home(tmp.path().join(".bv"));
+        let cfg = Config {
+            email: "me@example.com".into(),
+            syftbox_config: None,
+            version: None,
+        };
+        // Init DB only
+        let db_path = get_message_db_path(&cfg)?;
+        let db = MessageDb::new(&db_path)?;
+        // Insert a simple draft message from me -> other (so no interactive recipient actions)
+        let m = Message::new(
+            "me@example.com".into(),
+            "you@example.com".into(),
+            "body".into(),
+        );
+        db.insert_message(&m)?;
+        // Should render list without interacting
+        list_messages(&cfg, false)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn read_message_marks_received_as_read() -> Result<()> {
+        let tmp = TempDir::new()?;
+        crate::config::set_test_syftbox_data_dir(tmp.path());
+        crate::config::set_test_biovault_home(tmp.path().join(".bv"));
+        let cfg = Config {
+            email: "me@example.com".into(),
+            syftbox_config: None,
+            version: None,
+        };
+        let db_path = get_message_db_path(&cfg)?;
+        let db = MessageDb::new(&db_path)?;
+
+        let mut m = Message::new(
+            "you@example.com".into(),
+            "me@example.com".into(),
+            "hi".into(),
+        );
+        m.status = crate::messages::MessageStatus::Received;
+        db.insert_message(&m)?;
+
+        read_message(&cfg, &m.id).await?;
+        let updated = db.get_message(&m.id)?.unwrap();
+        assert_eq!(updated.status, crate::messages::MessageStatus::Read);
         Ok(())
     }
 }

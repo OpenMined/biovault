@@ -159,7 +159,7 @@ fn test_syftbox_multiple_files_sync() {
     // Write all test files
     for (filename, content) in &test_files {
         let file_path = client1_public_dir.join(filename);
-        fs::write(&file_path, content).expect(&format!("Failed to write {}", filename));
+        fs::write(&file_path, content).unwrap_or_else(|_| panic!("Failed to write {}", filename));
         println!("✓ Created {}", filename);
     }
 
@@ -200,8 +200,8 @@ fn test_syftbox_multiple_files_sync() {
         }
 
         // Verify content
-        let actual_content =
-            fs::read_to_string(&sync_path).expect(&format!("Failed to read {}", filename));
+        let actual_content = fs::read_to_string(&sync_path)
+            .unwrap_or_else(|_| panic!("Failed to read {}", filename));
         if actual_content != *expected_content {
             println!("✗ {} content mismatch", filename);
             all_synced = false;

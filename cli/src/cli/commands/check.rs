@@ -252,3 +252,40 @@ fn is_google_colab() -> bool {
 
     false
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn java_version_parsing_various_formats() {
+        let samples = [
+            ("openjdk version \"17.0.2\" 2022-01-18", Some(17)),
+            ("java version \"1.8.0_321\"", Some(8)),
+            ("openjdk version \"11.0.14\" 2022-01-18", Some(11)),
+            ("java version \"21\" 2023-09-19", Some(21)),
+            ("no version here", None),
+        ];
+        for (out, expected) in samples {
+            assert_eq!(parse_java_version(out), expected);
+        }
+    }
+
+    #[test]
+    fn start_command_and_running_checks() {
+        assert_eq!(
+            get_start_command("docker"),
+            "Open Docker Desktop or run 'sudo dockerd' (Linux)"
+        );
+        // Unknown service -> generic
+        assert_eq!(get_start_command("xyz"), "Start xyz");
+
+        // Unknown service not considered running by default
+        assert!(!check_if_running("xyz"));
+    }
+
+    #[test]
+    fn check_version_non_java_defaults_true() {
+        assert!(check_version("not-java", 9999));
+    }
+}

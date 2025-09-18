@@ -769,17 +769,31 @@ fn combine_fastq_files_direct(
     _compression: CompressionType,
 ) -> Result<()> {
     // Calculate total bytes to process
+    #[cfg(not(test))]
     let total_bytes: u64 = files.iter().map(|f| f.size).sum();
+    #[cfg(test)]
+    let _total_bytes: u64 = files.iter().map(|f| f.size).sum();
 
     let mut output_file = File::create(output_path)?;
 
-    let pb = ProgressBar::new(total_bytes);
-    pb.set_style(
-        ProgressStyle::default_bar()
-            .template("{spinner:.green} [{bar:40.cyan/blue}] {bytes}/{total_bytes} {bytes_per_sec} | ETA: {eta} | {msg}")
-            .unwrap()
-            .progress_chars("#>-")
-    );
+    let pb = {
+        #[cfg(test)]
+        {
+            // Hide progress overhead during tests to keep slow suite leaner
+            ProgressBar::hidden()
+        }
+        #[cfg(not(test))]
+        {
+            let pb = ProgressBar::new(total_bytes);
+            pb.set_style(
+                ProgressStyle::default_bar()
+                    .template("{spinner:.green} [{bar:40.cyan/blue}] {bytes}/{total_bytes} {bytes_per_sec} | ETA: {eta} | {msg}")
+                    .unwrap()
+                    .progress_chars("#>-")
+            );
+            pb
+        }
+    };
 
     let start_time = Instant::now();
     let mut bytes_processed = 0u64;
@@ -948,34 +962,42 @@ fn generate_output_filename_with_metadata(
 
     let mut output_path = Path::new(output_dir).join(&suggested_name);
 
-    println!("\n📝 Suggested output filename: {}", output_path.display());
-    print!("Accept this filename? (y/n/e to edit): ");
-    io::stdout().flush()?;
+    // Non-interactive mode for tests or when BIOVAULT_NONINTERACTIVE=1
+    let noninteractive = cfg!(test)
+        || std::env::var("BIOVAULT_NONINTERACTIVE")
+            .map(|v| v == "1")
+            .unwrap_or(false);
 
-    let mut input = String::new();
-    io::stdin().read_line(&mut input)?;
-    let choice = input.trim().to_lowercase();
-
-    if choice == "n" {
-        return Err(anyhow!("Filename generation cancelled"));
-    } else if choice == "e" {
-        print!("Enter new filename (without path) [{}]: ", suggested_name);
+    if !noninteractive {
+        println!("\n📝 Suggested output filename: {}", output_path.display());
+        print!("Accept this filename? (y/n/e to edit): ");
         io::stdout().flush()?;
-        input.clear();
+
+        let mut input = String::new();
         io::stdin().read_line(&mut input)?;
-        let new_name = input.trim();
+        let choice = input.trim().to_lowercase();
 
-        // Use suggested name if user just presses enter
-        let final_name = if new_name.is_empty() {
-            &suggested_name
-        } else {
-            new_name
-        };
+        if choice == "n" {
+            return Err(anyhow!("Filename generation cancelled"));
+        } else if choice == "e" {
+            print!("Enter new filename (without path) [{}]: ", suggested_name);
+            io::stdout().flush()?;
+            input.clear();
+            io::stdin().read_line(&mut input)?;
+            let new_name = input.trim();
 
-        output_path = Path::new(output_dir).join(final_name);
-        println!("Using filename: {}", output_path.display());
-    } else if choice != "y" {
-        println!("Using suggested filename: {}", output_path.display());
+            // Use suggested name if user just presses enter
+            let final_name = if new_name.is_empty() {
+                &suggested_name
+            } else {
+                new_name
+            };
+
+            output_path = Path::new(output_dir).join(final_name);
+            println!("Using filename: {}", output_path.display());
+        } else if choice != "y" {
+            println!("Using suggested filename: {}", output_path.display());
+        }
     }
 
     Ok(output_path)
@@ -985,13 +1007,23 @@ fn generate_file_hashes(files: &[FastqFile]) -> Result<BTreeMap<PathBuf, String>
     let mut hashes = BTreeMap::new();
 
     println!("\n🔐 Generating Blake3 hashes for input files...");
-    let pb = ProgressBar::new(files.len() as u64);
-    pb.set_style(
-        ProgressStyle::default_bar()
-            .template("{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} {msg}")
-            .unwrap()
-            .progress_chars("#>-"),
-    );
+    let pb = {
+        #[cfg(test)]
+        {
+            ProgressBar::hidden()
+        }
+        #[cfg(not(test))]
+        {
+            let pb = ProgressBar::new(files.len() as u64);
+            pb.set_style(
+                ProgressStyle::default_bar()
+                    .template("{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} {msg}")
+                    .unwrap()
+                    .progress_chars("#>-"),
+            );
+            pb
+        }
+    };
 
     for (idx, file) in files.iter().enumerate() {
         pb.set_position(idx as u64);
@@ -1149,4 +1181,296 @@ fn display_nanopore_summary(
     println!("  Basecall models: {:?}", models);
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+    use tempfile::TempDir;
+
+    #[test]
+    fn compression_type_and_format_size() {
+        assert_eq!(
+            CompressionType::from_path(Path::new("a.fastq")),
+            CompressionType::None
+        );
+        assert_eq!(
+            CompressionType::from_path(Path::new("a.fq.gz")),
+            CompressionType::Gzip
+        );
+        assert_eq!(
+            CompressionType::from_path(Path::new("a.fastq.bz2")),
+            CompressionType::Bzip2
+        );
+        assert_eq!(
+            CompressionType::from_path(Path::new("a.fastq.xz")),
+            CompressionType::Xz
+        );
+        assert_eq!(
+            CompressionType::from_path(Path::new("a.fastq.zip")),
+            CompressionType::Zip
+        );
+        assert_eq!(
+            CompressionType::from_path(Path::new("a.fastq.zst")),
+            CompressionType::Zstd
+        );
+
+        // Keep a single small size check
+        assert_eq!(format_size(512), "512 B");
+    }
+
+    #[test]
+    fn size_and_content_duplicates_detection() {
+        let f1 = FastqFile {
+            path: PathBuf::from("a.fastq"),
+            size: 10,
+            compression: CompressionType::None,
+            sequence_number: Some(1),
+            base_name: "a".into(),
+        };
+        let f2 = FastqFile {
+            path: PathBuf::from("b.fastq"),
+            size: 10,
+            compression: CompressionType::None,
+            sequence_number: Some(2),
+            base_name: "a".into(),
+        };
+        let f3 = FastqFile {
+            path: PathBuf::from("c.fastq"),
+            size: 5,
+            compression: CompressionType::None,
+            sequence_number: None,
+            base_name: "c".into(),
+        };
+        let binding = [f1.clone(), f2.clone(), f3.clone()];
+        let dups = check_size_duplicates(&binding);
+        assert!(dups.contains_key(&10));
+        assert!(!dups.contains_key(&5));
+
+        let mut hashes = BTreeMap::new();
+        hashes.insert(f1.path.clone(), "h1".into());
+        hashes.insert(f2.path.clone(), "h1".into());
+        hashes.insert(f3.path.clone(), "h2".into());
+        let cdups = check_content_duplicates(&hashes);
+        assert!(cdups.contains_key("h1"));
+        assert!(!cdups.contains_key("h2"));
+    }
+
+    #[test]
+    fn group_and_sequence_extraction_and_find_files() {
+        let tmp = TempDir::new().unwrap();
+        // Create files that match patterns and with sequence numbers
+        let files = ["sample_001.fastq.gz", "sample_002.fastq.gz", "other.fastq"];
+        for name in &files {
+            fs::write(tmp.path().join(name), b"@h\nA\n+\n!\n").unwrap();
+        }
+        let found = find_fastq_files(tmp.path()).unwrap();
+        // Expect 3 files
+        assert_eq!(found.len(), 3);
+        // Grouping by base name should put first two together
+        let groups = group_files_by_base(&found);
+        assert!(groups.get("sample").unwrap().len() >= 2);
+    }
+
+    #[test]
+    fn stats_savers_and_blake3() {
+        let tmp = TempDir::new().unwrap();
+        // Prepare a fake file and hash it
+        let file = tmp.path().join("x.fastq");
+        fs::write(&file, b"@h\nAC\n+\n!!\n").unwrap();
+        let h = generate_blake3_hash(&file).unwrap();
+        assert_eq!(h.len(), 64);
+
+        let mut stats = BTreeMap::new();
+        stats.insert(
+            file.clone(),
+            FastqStats {
+                num_seqs: 1,
+                total_len: 2,
+                min_len: 2,
+                avg_len: 2.0,
+                max_len: 2,
+                gc_content: 50.0,
+            },
+        );
+        let mut hashes = BTreeMap::new();
+        hashes.insert(file.clone(), h);
+        let tsv = tmp.path().join("stats.tsv");
+        let yaml = tmp.path().join("stats.yaml");
+        let json = tmp.path().join("stats.json");
+        save_stats_to_file(&stats, &tsv, Some(&hashes), "tsv").unwrap();
+        save_stats_to_file(&stats, &yaml, Some(&hashes), "yaml").unwrap();
+        save_stats_to_file(&stats, &json, Some(&hashes), "json").unwrap();
+        assert!(tsv.exists() && yaml.exists() && json.exists());
+    }
+
+    #[test]
+    fn nanopore_header_parsing_and_single_file_metadata() {
+        // Valid header
+        let header = "@... runid=RID flow_cell_id=FC start_time=2024-01-02T03:04:05+00:00 protocol_group_id=PG sample_id=S basecall_model_version_id=M v=1";
+        let md = parse_nanopore_header(header).unwrap();
+        assert!(md.is_some());
+        // Invalid header
+        let md2 = parse_nanopore_header("@no fields").unwrap();
+        assert!(md2.is_none());
+
+        // Test parse_single_file_metadata with gz
+        let tmp = TempDir::new().unwrap();
+        let gz = tmp.path().join("s.fastq.gz");
+        {
+            let f = File::create(&gz).unwrap();
+            // Use fastest compression in tests to reduce overhead
+            let mut enc = flate2::write::GzEncoder::new(f, flate2::Compression::fast());
+            writeln!(enc, "{}", header).unwrap();
+            writeln!(enc, "+").unwrap();
+            enc.finish().unwrap();
+        }
+        let parsed = parse_single_file_metadata(&gz).unwrap();
+        assert!(parsed.is_some());
+    }
+
+    #[test]
+    fn output_filename_with_metadata_and_combine_direct() {
+        let tmp = TempDir::new().unwrap();
+        let f1 = tmp.path().join("a.fastq");
+        let f2 = tmp.path().join("b.fastq");
+        fs::write(&f1, b"@a\nA\n+\n!\n").unwrap();
+        fs::write(&f2, b"@b\nC\n+\n!\n").unwrap();
+        let files = vec![
+            FastqFile {
+                path: f1.clone(),
+                size: fs::metadata(&f1).unwrap().len(),
+                compression: CompressionType::None,
+                sequence_number: None,
+                base_name: "g".into(),
+            },
+            FastqFile {
+                path: f2.clone(),
+                size: fs::metadata(&f2).unwrap().len(),
+                compression: CompressionType::None,
+                sequence_number: None,
+                base_name: "g".into(),
+            },
+        ];
+
+        let mut meta = BTreeMap::new();
+        meta.insert(
+            f1.clone(),
+            Some(NanoporeMetadata {
+                runid: "r1".into(),
+                flow_cell_id: "FC1".into(),
+                start_time: FixedOffset::east_opt(0)
+                    .unwrap()
+                    .with_ymd_and_hms(2024, 1, 2, 3, 4, 5)
+                    .unwrap(),
+                protocol_group_id: "PG".into(),
+                sample_id: "S1".into(),
+                basecall_model: "M".into(),
+            }),
+        );
+        meta.insert(
+            f2.clone(),
+            Some(NanoporeMetadata {
+                runid: "r2".into(),
+                flow_cell_id: "FC2".into(),
+                start_time: FixedOffset::east_opt(0)
+                    .unwrap()
+                    .with_ymd_and_hms(2024, 1, 3, 0, 0, 0)
+                    .unwrap(),
+                protocol_group_id: "PG".into(),
+                sample_id: "S2".into(),
+                basecall_model: "M".into(),
+            }),
+        );
+
+        let outdir = tmp.path().join("out");
+        fs::create_dir_all(&outdir).unwrap();
+        let name = generate_output_filename_with_metadata(&files, outdir.to_str().unwrap(), &meta)
+            .unwrap();
+        assert!(name
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .contains("FC1-FC2"));
+
+        // Combine direct and verify concatenation length
+        let combined = tmp.path().join("combined.fastq");
+        combine_fastq_files_direct(&files, &combined, CompressionType::None).unwrap();
+        let content = fs::read(&combined).unwrap();
+        assert!(!content.is_empty());
+    }
+
+    #[test]
+    fn parse_seqkit_stats_output() {
+        let header = "file\tformat\ttype\tnum_seqs\tsum_len\tmin_len\tavg_len\tmax_len\tQ1\tQ2\tQ3\tsum_gap\tN50\tQ20(%)\tGC(%)";
+        let data = "a.fastq\tFASTQ\tDNA\t1\t2\t2\t2.0\t2\t0\t0\t0\t0\t0\t0\t50.0";
+        let out = format!("{}\n{}\n", header, data);
+        let s = parse_seqkit_stats(&out).unwrap();
+        assert_eq!(s.num_seqs, 1);
+        assert_eq!(s.total_len, 2);
+        assert_eq!(s.gc_content, 50.0);
+    }
+
+    #[test]
+    fn generate_file_hashes_and_output_name_fallback() {
+        let tmp = TempDir::new().unwrap();
+        let f1 = tmp.path().join("base_1.fastq");
+        let f2 = tmp.path().join("base_2.fastq");
+        fs::write(&f1, b"@h\nAA\n+\n!!\n").unwrap();
+        fs::write(&f2, b"@h\nCC\n+\n!!\n").unwrap();
+        let files = vec![
+            FastqFile {
+                path: f1.clone(),
+                size: fs::metadata(&f1).unwrap().len(),
+                compression: CompressionType::None,
+                sequence_number: Some(1),
+                base_name: "base".into(),
+            },
+            FastqFile {
+                path: f2.clone(),
+                size: fs::metadata(&f2).unwrap().len(),
+                compression: CompressionType::None,
+                sequence_number: Some(2),
+                base_name: "base".into(),
+            },
+        ];
+        let hashes = generate_file_hashes(&files).unwrap();
+        assert_eq!(hashes.len(), 2);
+
+        let meta = BTreeMap::new();
+        let outdir = tmp.path().join("out");
+        fs::create_dir_all(&outdir).unwrap();
+        let name = generate_output_filename_with_metadata(&files, outdir.to_str().unwrap(), &meta)
+            .unwrap();
+        let s = name.file_name().unwrap().to_string_lossy();
+        assert!(s.contains("base.all.fastq"));
+    }
+
+    #[test]
+    fn combine_fastq_files_mixed_compression_fails() {
+        let tmp = TempDir::new().unwrap();
+        let f1 = tmp.path().join("a.fastq");
+        let f2 = tmp.path().join("b.fastq.gz");
+        fs::write(&f1, b"@a\nA\n+\n!\n").unwrap();
+        fs::write(&f2, b"@b\nC\n+\n!\n").unwrap();
+        let files = vec![
+            FastqFile {
+                path: f1.clone(),
+                size: fs::metadata(&f1).unwrap().len(),
+                compression: CompressionType::None,
+                sequence_number: None,
+                base_name: "g".into(),
+            },
+            FastqFile {
+                path: f2.clone(),
+                size: fs::metadata(&f2).unwrap().len(),
+                compression: CompressionType::Gzip,
+                sequence_number: None,
+                base_name: "g".into(),
+            },
+        ];
+        let err = combine_fastq_files(&files, &tmp.path().join("out.fastq"));
+        assert!(err.is_err());
+    }
 }

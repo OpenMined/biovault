@@ -57,4 +57,7 @@ assert_cmd = "2.0"
 predicates = "3.1"
 tempfile = "3.12"
 serial_test = "3.1"
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+
+[features]
+# Enable to include slower, IO-heavy tests (e.g., FASTQ helpers)
+slow-tests = []

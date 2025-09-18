@@ -332,3 +332,42 @@ fn copy_project_files(src: &Path, dest: &Path) -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn hash_file_computes_blake3() {
+        let tmp = TempDir::new().unwrap();
+        let f = tmp.path().join("a.txt");
+        fs::write(&f, b"content").unwrap();
+        let h = hash_file(&f).unwrap();
+        assert_eq!(h.len(), 64);
+    }
+
+    #[test]
+    fn copy_project_files_copies_workflow_and_assets() {
+        let tmp = TempDir::new().unwrap();
+        let src = tmp.path().join("src");
+        let dest = tmp.path().join("dest");
+        fs::create_dir_all(&dest).unwrap();
+        fs::create_dir_all(src.join("assets/nested")).unwrap();
+        fs::write(src.join("workflow.nf"), b"wf").unwrap();
+        fs::write(src.join("assets/nested/file.bin"), b"x").unwrap();
+
+        copy_project_files(&src, &dest).unwrap();
+
+        assert!(dest.join("workflow.nf").exists());
+        assert!(dest.join("assets/nested/file.bin").exists());
+
+        // No assets dir case should still succeed
+        let src2 = tmp.path().join("src2");
+        fs::create_dir_all(&src2).unwrap();
+        fs::write(src2.join("workflow.nf"), b"wf").unwrap();
+        let dest2 = tmp.path().join("dest2");
+        fs::create_dir_all(&dest2).unwrap();
+        copy_project_files(&src2, &dest2).unwrap();
+    }
+}

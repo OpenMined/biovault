@@ -646,3 +646,57 @@ pub async fn validate(id: Option<String>) -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn index_file_path_rules() {
+        assert_eq!(get_index_file_path("x.cram", true), "x.cram.crai");
+        assert_eq!(get_index_file_path("x.bam", true), "x.bam.bai");
+        assert_eq!(get_index_file_path("x.sam", true), "x.sam.sai");
+        assert_eq!(get_index_file_path("x.xyz", true), "x.xyz.idx");
+        assert_eq!(get_index_file_path("ref.fa", false), "ref.fa.fai");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    #[cfg(unix)]
+    fn expand_tilde_resolves_home_unix() {
+        let tmp = TempDir::new().unwrap();
+        std::env::set_var("HOME", tmp.path());
+        let expanded = super::expand_tilde("~/file.txt");
+        assert_eq!(
+            std::path::Path::new(&expanded),
+            &tmp.path().join("file.txt")
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    #[cfg(windows)]
+    fn expand_tilde_resolves_home_windows() {
+        let tmp = TempDir::new().unwrap();
+        std::env::set_var("USERPROFILE", tmp.path());
+        let expanded = super::expand_tilde("~/file.txt");
+        assert_eq!(
+            std::path::Path::new(&expanded),
+            &tmp.path().join("file.txt")
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn normalize_path_makes_absolute_and_keeps_tail() {
+        let tmp = TempDir::new().unwrap();
+        let cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmp.path()).unwrap();
+        let abs = super::normalize_path("rel/path").unwrap();
+        let p = std::path::Path::new(&abs);
+        assert!(p.is_absolute());
+        assert!(p.ends_with(std::path::Path::new("rel").join("path")));
+        std::env::set_current_dir(cwd).unwrap();
+    }
+}
