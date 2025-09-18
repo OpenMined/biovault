@@ -223,4 +223,44 @@ mod tests {
         assert!(loaded.get_by_url("https://example.com/file.txt").is_some());
         assert!(loaded.get_by_hash("abc123").is_some());
     }
+
+    #[test]
+    fn manifest_load_default_and_save_parent_dirs() {
+        let temp_dir = TempDir::new().unwrap();
+        let nonexist = temp_dir.path().join("no/such/manifest.yaml");
+        let m = Manifest::load(&nonexist).unwrap();
+        assert_eq!(m.downloads.by_url.len(), 0);
+        m.save(&nonexist).unwrap();
+        assert!(nonexist.exists());
+    }
+
+    #[test]
+    fn manifest_add_download_history_and_updates() {
+        let mut m = Manifest::new();
+        m.add_download(
+            "https://example.com/f".into(),
+            "hash1".into(),
+            10,
+            Some("etag1".into()),
+            Some("2024-01-01".into()),
+        );
+        m.add_download(
+            "https://example.com/f".into(),
+            "hash2".into(),
+            10,
+            Some("etag2".into()),
+            Some("2024-01-02".into()),
+        );
+
+        let u = m.get_by_url("https://example.com/f").unwrap();
+        assert_eq!(u.current_hash, "hash2");
+        assert!(!u.history.is_empty());
+
+        let h2 = m.get_by_hash("hash2").unwrap();
+        assert!(h2.urls.contains(&"https://example.com/f".into()));
+
+        m.update_last_accessed("hash2");
+        m.increment_reference_count("hash2");
+        assert!(m.get_by_hash("hash2").unwrap().reference_count >= 1);
+    }
 }

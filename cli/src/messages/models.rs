@@ -152,3 +152,44 @@ impl std::fmt::Display for SyncStatus {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn messages_new_defaults_and_reply_to() {
+        let m = Message::new("a@x".into(), "b@y".into(), "hi".into());
+        assert_eq!(m.from, "a@x");
+        assert_eq!(m.to, "b@y");
+        assert_eq!(m.status, MessageStatus::Draft);
+        assert_eq!(m.sync_status, SyncStatus::Local);
+        assert_eq!(m.display_subject(), "(No Subject)");
+
+        let r = Message::reply_to(&m, "b@y".into(), "re".into());
+        assert_eq!(r.to, "a@x");
+        assert_eq!(r.thread_id, m.thread_id);
+        assert_eq!(r.parent_id.as_deref(), Some(m.id.as_str()));
+    }
+
+    #[test]
+    fn messages_display_impls() {
+        let t1 = MessageType::Text;
+        assert_eq!(t1.to_string(), "text");
+        let t2 = MessageType::Project {
+            project_name: "p".into(),
+            submission_id: "s".into(),
+            files_hash: None,
+        };
+        assert_eq!(t2.to_string(), "project");
+        let t3 = MessageType::Request {
+            request_type: "x".into(),
+            params: None,
+        };
+        assert_eq!(t3.to_string(), "request");
+
+        assert_eq!(MessageStatus::Draft.to_string(), "draft");
+        assert_eq!(MessageStatus::Sent.to_string(), "sent");
+        assert_eq!(SyncStatus::Synced.to_string(), "synced");
+    }
+}

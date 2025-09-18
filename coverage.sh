@@ -88,8 +88,13 @@ if [[ "$OPEN_HTML_FLAG" == "1" ]]; then
 fi
 
 echo "==> Running coverage (HTML via cargo alias)"
-# Use the alias defined in cli/.cargo/config.toml
-cargo coverage $OPEN_FLAG
+# Detect if cargo-llvm-cov supports --nextest
+NEXTEST_FLAG=""
+if cargo llvm-cov --help 2>/dev/null | grep -q -e "--nextest"; then
+  NEXTEST_FLAG="--nextest"
+fi
+# Use the alias defined in cli/.cargo/config.toml, append nextest if supported
+cargo coverage $NEXTEST_FLAG $OPEN_FLAG
 
 echo "==> Exporting LCOV (from existing coverage data)"
 cargo llvm-cov report --lcov --output-path "$LCOV_OUT"
