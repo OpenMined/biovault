@@ -2,7 +2,7 @@ use anyhow::Result;
 use reqwest::blocking::Client;
 use std::env;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
 
@@ -97,9 +97,9 @@ fn test_syftbox_permission_system() -> Result<()> {
 }
 
 fn test_user_only_permissions(
-    client1_base: &PathBuf,
-    client2_base: &PathBuf,
-    bad_client_base: &PathBuf,
+    client1_base: &Path,
+    client2_base: &Path,
+    bad_client_base: &Path,
     client1_email: &str,
 ) -> Result<()> {
     // Create a private folder in client1's datasite
@@ -164,9 +164,9 @@ fn test_user_only_permissions(
 }
 
 fn test_everyone_read_user_write(
-    client1_base: &PathBuf,
-    client2_base: &PathBuf,
-    bad_client_base: &PathBuf,
+    client1_base: &Path,
+    client2_base: &Path,
+    bad_client_base: &Path,
     client1_email: &str,
 ) -> Result<()> {
     // Create a public folder in client1's datasite
@@ -262,9 +262,9 @@ fn test_everyone_read_user_write(
 }
 
 fn test_specific_user_permissions(
-    client1_base: &PathBuf,
-    client2_base: &PathBuf,
-    bad_client_base: &PathBuf,
+    client1_base: &Path,
+    client2_base: &Path,
+    bad_client_base: &Path,
     client1_email: &str,
     client2_email: &str,
 ) -> Result<()> {
@@ -340,7 +340,7 @@ fn test_specific_user_permissions(
 fn test_permission_updates() -> Result<()> {
     println!("\n🔄 Testing permission updates:");
 
-    let server_url =
+    let _server_url =
         env::var("SYFTBOX_SERVER_URL").unwrap_or_else(|_| "http://localhost:8080".to_string());
     let client1_email =
         env::var("SYFTBOX_CLIENT1_EMAIL").unwrap_or_else(|_| "client1@syftbox.net".to_string());
