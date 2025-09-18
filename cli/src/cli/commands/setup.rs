@@ -1,5 +1,6 @@
 use super::check::DependencyConfig;
 use crate::Result;
+use anyhow::anyhow;
 use std::env;
 use std::process::{Command, Stdio};
 
@@ -416,6 +417,7 @@ async fn setup_macos() -> Result<()> {
     if fail_count > 0 {
         println!("  ❌ Failed: {}", fail_count);
         println!("\n⚠️  Some installations failed. Please check the errors above.");
+        return Err(anyhow!("Some installations failed").into());
     } else {
         println!(
             "\n✅ Setup completed successfully!\n   Run 'bv check' to verify all dependencies."
@@ -620,6 +622,7 @@ async fn setup_ubuntu() -> Result<()> {
     if fail_count > 0 {
         println!("  ❌ Failed: {}", fail_count);
         println!("\n⚠️  Some installations failed. Please check the errors above.");
+        return Err(anyhow!("Some installations failed").into());
     } else {
         println!(
             "\n✅ Setup completed successfully!\n   Run 'bv check' to verify all dependencies."
@@ -770,6 +773,7 @@ async fn setup_arch() -> Result<()> {
     if fail_count > 0 {
         println!("  ❌ Failed: {}", fail_count);
         println!("\n⚠️  Some installations failed. Please check the errors above.");
+        return Err(anyhow!("Some installations failed").into());
     } else {
         println!(
             "\n✅ Setup completed successfully!\n   Run 'bv check' to verify all dependencies."
@@ -791,19 +795,30 @@ async fn setup_windows() -> Result<()> {
         .map(|s| s.success())
         .unwrap_or(false);
 
-    if !winget_exists {
-        println!("❌ WinGet (Windows Package Manager) not found.");
-        println!("WinGet is required for automated Windows installation.");
+    // Check for Chocolatey availability (fallback)
+    let choco_exists = Command::new("choco")
+        .arg("-v")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+
+    if winget_exists {
+        println!("✓ WinGet found");
+    } else if choco_exists {
+        println!("❌ WinGet not found. Using Chocolatey fallback.");
+    } else {
+        println!("❌ Neither WinGet nor Chocolatey found.");
+        println!("Automated installation is unavailable on this system.");
         println!("\nTo install WinGet:");
         println!("1. Update Windows to the latest version (WinGet comes with modern Windows)");
         println!("2. Or install from Microsoft Store: 'App Installer'");
         println!("3. Or download from: https://github.com/microsoft/winget-cli/releases");
-        println!("\nAfter installing WinGet, re-run: bv setup");
+        println!("\nAlternatively, install Chocolatey from https://chocolatey.org/install");
         print_windows_manual_instructions();
         return Ok(());
     }
-
-    println!("✓ WinGet found");
 
     let deps_yaml = include_str!("../../deps.yaml");
     let config: DependencyConfig = serde_yaml::from_str(deps_yaml)?;
@@ -870,9 +885,27 @@ async fn setup_windows() -> Result<()> {
                     for cmd in install_commands {
                         println!("   Running: {}", cmd);
                         let status = if cmd.starts_with("winget") {
-                            Command::new("winget")
-                                .args(cmd.split_whitespace().skip(1))
-                                .status()
+                            if winget_exists {
+                                Command::new("winget")
+                                    .args(cmd.split_whitespace().skip(1))
+                                    .status()
+                            } else {
+                                // Chocolatey fallback for common packages
+                                let mut parts = cmd.split_whitespace();
+                                let _ = parts.next(); // winget
+                                let _ = parts.next(); // install
+                                let pkg = parts.next().unwrap_or("");
+                                let choco_pkg = map_winget_pkg_to_choco(pkg);
+                                if choco_pkg.is_empty() {
+                                    Err(std::io::Error::other("No Chocolatey mapping for package"))
+                                } else {
+                                    Command::new("choco")
+                                        .arg("install")
+                                        .arg(choco_pkg)
+                                        .arg("-y")
+                                        .status()
+                                }
+                            }
                         } else {
                             Command::new("powershell").arg("-Command").arg(cmd).status()
                         };
@@ -933,6 +966,7 @@ async fn setup_windows() -> Result<()> {
     if fail_count > 0 {
         println!("  ❌ Failed: {}", fail_count);
         println!("\n⚠️  Some installations failed. Please check the errors above.");
+        return Err(anyhow!("Some installations failed").into());
     } else {
         println!(
             "\n✅ Setup completed successfully!\n   Run 'bv check' to verify all dependencies."
@@ -952,4 +986,15 @@ fn print_windows_manual_instructions() {
     );
     println!("Nextflow: Download from https://www.nextflow.io/ or use PowerShell script");
     println!("SyftBox: Download from https://github.com/OpenMined/syftbox/releases/latest");
+}
+
+// Map common WinGet package IDs to Chocolatey package names for fallback
+fn map_winget_pkg_to_choco(pkg: &str) -> &'static str {
+    match pkg.to_ascii_lowercase().as_str() {
+        // Java/OpenJDK
+        // WinGet: Microsoft.OpenJDK => Chocolatey: openjdk (generic)
+        "microsoft.openjdk" => "openjdk",
+        // Add other mappings here as needed
+        _ => "",
+    }
 }

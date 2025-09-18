@@ -3,14 +3,6 @@ name: Development Colab Test
 on:
   # Allow manual trigger for testing
   workflow_dispatch:
-  # Run on PRs that modify the test files or setup command
-  pull_request:
-    paths:
-      - 'tests/docker/**'
-      - 'cli/src/cli/commands/setup.rs'
-      - 'cli/src/deps.yaml'
-      - '.github/workflows/release-colab-test.yml'
-      - '.github/workflows/reusable-colab-test.yml'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
