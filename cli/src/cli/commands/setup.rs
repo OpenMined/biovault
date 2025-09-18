@@ -1,5 +1,6 @@
 use super::check::DependencyConfig;
 use crate::Result;
+use anyhow::anyhow;
 use std::env;
 use std::process::{Command, Stdio};
 
@@ -416,6 +417,7 @@ async fn setup_macos() -> Result<()> {
     if fail_count > 0 {
         println!("  ❌ Failed: {}", fail_count);
         println!("\n⚠️  Some installations failed. Please check the errors above.");
+        return Err(anyhow!("Some installations failed").into());
     } else {
         println!(
             "\n✅ Setup completed successfully!\n   Run 'bv check' to verify all dependencies."
@@ -620,6 +622,7 @@ async fn setup_ubuntu() -> Result<()> {
     if fail_count > 0 {
         println!("  ❌ Failed: {}", fail_count);
         println!("\n⚠️  Some installations failed. Please check the errors above.");
+        return Err(anyhow!("Some installations failed").into());
     } else {
         println!(
             "\n✅ Setup completed successfully!\n   Run 'bv check' to verify all dependencies."
@@ -770,6 +773,7 @@ async fn setup_arch() -> Result<()> {
     if fail_count > 0 {
         println!("  ❌ Failed: {}", fail_count);
         println!("\n⚠️  Some installations failed. Please check the errors above.");
+        return Err(anyhow!("Some installations failed").into());
     } else {
         println!(
             "\n✅ Setup completed successfully!\n   Run 'bv check' to verify all dependencies."
@@ -933,6 +937,7 @@ async fn setup_windows() -> Result<()> {
     if fail_count > 0 {
         println!("  ❌ Failed: {}", fail_count);
         println!("\n⚠️  Some installations failed. Please check the errors above.");
+        return Err(anyhow!("Some installations failed").into());
     } else {
         println!(
             "\n✅ Setup completed successfully!\n   Run 'bv check' to verify all dependencies."
