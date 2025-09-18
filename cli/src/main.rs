@@ -48,6 +48,9 @@ enum Commands {
             help = "Email address for the vault configuration (optional, will detect from SYFTBOX_EMAIL)"
         )]
         email: Option<String>,
+
+        #[arg(short, long, help = "Automatically accept defaults (for testing)")]
+        quiet: bool,
     },
 
     #[command(about = "Show system information")]
@@ -395,8 +398,8 @@ async fn main() -> Result<()> {
         Commands::Update => {
             commands::update::execute().await?;
         }
-        Commands::Init { email } => {
-            commands::init::execute(email.as_deref()).await?;
+        Commands::Init { email, quiet } => {
+            commands::init::execute(email.as_deref(), quiet).await?;
         }
         Commands::Info => {
             commands::info::execute().await?;
