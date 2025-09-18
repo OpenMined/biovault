@@ -154,4 +154,66 @@ mod tests {
         assert!(target.exists());
         assert_eq!(fs::read(&target).unwrap(), b"test content");
     }
+
+    #[test]
+    fn test_cache_strategy_default_true() {
+        let s = CacheStrategy::default();
+        assert!(s.check_remote);
+    }
+
+    #[test]
+    fn test_calculate_blake3_open_error() {
+        let missing = Path::new("/definitely/not/here.bin");
+        let err = calculate_blake3(missing).err().unwrap();
+        let msg = format!("{}", err);
+        assert!(msg.contains("Failed to open file for checksum"));
+    }
+
+    #[test]
+    fn test_calculate_blake3_large_parallel() {
+        // Create a file > 100MB to hit the parallel hashing path
+        let temp_dir = TempDir::new().unwrap();
+        let big = temp_dir.path().join("big.bin");
+        let mut f = std::fs::File::create(&big).unwrap();
+        // Write 101 MiB in 8 MiB chunks
+        let chunk = vec![0u8; 8 * 1024 * 1024];
+        let mut written = 0usize;
+        while written < 101 * 1024 * 1024 {
+            let to_write = std::cmp::min(chunk.len(), 101 * 1024 * 1024 - written);
+            use std::io::Write;
+            f.write_all(&chunk[..to_write]).unwrap();
+            written += to_write;
+        }
+        drop(f);
+        let h = calculate_blake3(&big).unwrap();
+        assert_eq!(h.len(), 64);
+    }
+
+    #[test]
+    fn test_link_or_copy_parent_dir_create_error() {
+        let temp_dir = TempDir::new().unwrap();
+        let source = temp_dir.path().join("src.txt");
+        std::fs::write(&source, b"x").unwrap();
+        // Create a file where the parent dir should be
+        let parent_file = temp_dir.path().join("subdir");
+        std::fs::write(&parent_file, b"not a dir").unwrap();
+        let target = parent_file.join("target.txt");
+        let err = link_or_copy(&source, &target).err().unwrap();
+        let msg = format!("{}", err);
+        assert!(msg.contains("Failed to create parent directory"));
+    }
+
+    #[test]
+    fn test_link_or_copy_remove_existing_file_error() {
+        let temp_dir = TempDir::new().unwrap();
+        let source = temp_dir.path().join("src2.txt");
+        std::fs::write(&source, b"y").unwrap();
+        let target = temp_dir.path().join("exist/target.txt");
+        // Create parent dir and then create a directory at the target path
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::create_dir(&target).unwrap();
+        let err = link_or_copy(&source, &target).err().unwrap();
+        let msg = format!("{}", err);
+        assert!(msg.contains("Failed to remove existing file"));
+    }
 }

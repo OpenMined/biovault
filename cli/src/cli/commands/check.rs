@@ -369,12 +369,16 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn execute_reports_missing_in_clean_env() {
-        // Ensure PATH does not contain our fakes
-        // Run execute; in most CI/dev envs, at least one dependency is missing
-        // so this should return an error and cover the loop paths.
+        // Force an empty PATH so no dependencies are found
+        let old_path = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var("PATH", "");
+
         let rt = tokio::runtime::Runtime::new().unwrap();
         let res = rt.block_on(execute());
         assert!(res.is_err());
+
+        // Restore PATH
+        std::env::set_var("PATH", old_path);
     }
 
     #[test]
