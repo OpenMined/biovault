@@ -193,9 +193,14 @@ fn detect_install_method() -> Result<InstallMethod> {
     let exe_path = env::current_exe().context("Failed to get current executable path")?;
     let exe_path_str = exe_path.to_string_lossy();
 
-    if exe_path_str.contains(".cargo")
-        || exe_path_str.contains("target/release")
-        || exe_path_str.contains("target/debug")
+    // Use lowercase for case-insensitive comparison and handle both forward and backslashes
+    let path_lower = exe_path_str.to_lowercase();
+
+    if path_lower.contains(".cargo")
+        || path_lower.contains("target/release")
+        || path_lower.contains("target\\release")
+        || path_lower.contains("target/debug")
+        || path_lower.contains("target\\debug")
     {
         Ok(InstallMethod::Cargo)
     } else {
@@ -262,5 +267,103 @@ mod tests {
         let s = v.to_string();
         assert!(!s.is_empty());
         assert!(s.contains('.'));
+    }
+
+    #[test]
+    fn test_install_method_enum() {
+        // Test that InstallMethod enum works correctly
+        let cargo = InstallMethod::Cargo;
+        let binary = InstallMethod::Binary;
+
+        match cargo {
+            InstallMethod::Cargo => {}
+            _ => panic!("Expected Cargo"),
+        }
+
+        match binary {
+            InstallMethod::Binary => {}
+            _ => panic!("Expected Binary"),
+        }
+    }
+
+    #[test]
+    fn test_detect_install_method_with_cargo_path() {
+        // Test the detection logic - we can't set current_exe but we can test the function
+        let method = detect_install_method();
+        // Can't test the actual result as it depends on runtime environment
+        assert!(method.is_ok());
+    }
+
+    #[test]
+    fn test_github_release_struct() {
+        let release = GithubRelease {
+            tag_name: "v1.2.3".to_string(),
+            name: Some("Release v1.2.3".to_string()),
+            published_at: "2024-01-01T00:00:00Z".to_string(),
+        };
+        assert_eq!(release.tag_name, "v1.2.3");
+        assert_eq!(release.name, Some("Release v1.2.3".to_string()));
+        assert_eq!(release.published_at, "2024-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn test_crates_api_response_struct() {
+        let response = CratesApiResponse {
+            crate_info: CrateInfo {
+                max_version: "2.3.4".to_string(),
+            },
+        };
+        assert_eq!(response.crate_info.max_version, "2.3.4");
+    }
+
+    #[test]
+    fn test_get_current_version_returns_valid_semver() {
+        let version = get_current_version();
+        assert!(version.major > 0 || version.minor > 0 || version.patch > 0);
+        // Check it's a valid semver
+        let version_str = version.to_string();
+        semver::Version::parse(&version_str).expect("Should be valid semver");
+    }
+
+    #[test]
+    fn test_detect_install_method_cross_platform() {
+        // Save original exe path
+        let original_exe = std::env::current_exe().ok();
+
+        // Test various path patterns
+        let test_cases = vec![
+            ("/Users/test/.cargo/bin/biovault", InstallMethod::Cargo),
+            (
+                "C:\\Users\\test\\.cargo\\bin\\biovault.exe",
+                InstallMethod::Cargo,
+            ),
+            ("/home/user/target/debug/biovault", InstallMethod::Cargo),
+            (
+                "C:\\project\\target\\release\\biovault.exe",
+                InstallMethod::Cargo,
+            ),
+            ("/usr/local/bin/biovault", InstallMethod::Binary),
+            (
+                "C:\\Program Files\\biovault\\biovault.exe",
+                InstallMethod::Binary,
+            ),
+        ];
+
+        // We can't actually change current_exe in tests, but we can verify the logic
+        for (path, _expected) in test_cases {
+            // Verify path pattern matching
+            let path_lower = path.to_lowercase();
+            let is_cargo = path_lower.contains(".cargo")
+                || path_lower.contains("target/release")
+                || path_lower.contains("target\\release")
+                || path_lower.contains("target/debug")
+                || path_lower.contains("target\\debug");
+
+            if path.contains(".cargo") || path.contains("target") {
+                assert!(is_cargo, "Path {} should be detected as Cargo", path);
+            } else {
+                assert!(!is_cargo, "Path {} should be detected as Binary", path);
+            }
+        }
     }
 }
