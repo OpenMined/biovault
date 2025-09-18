@@ -288,4 +288,79 @@ mod tests {
     fn check_version_non_java_defaults_true() {
         assert!(check_version("not-java", 9999));
     }
+
+    #[test]
+    fn test_parse_java_version_edge_cases() {
+        // Test various edge cases
+        assert_eq!(parse_java_version(""), None);
+        assert_eq!(parse_java_version("version"), None);
+        assert_eq!(parse_java_version("version \"\""), None);
+        assert_eq!(parse_java_version("version \"not a number\""), None);
+
+        // Test versions without quotes
+        assert_eq!(parse_java_version("java 17"), None);
+
+        // Test malformed versions
+        assert_eq!(parse_java_version("version \"1.\""), None);
+        assert_eq!(parse_java_version("version \"1.x.0\""), None);
+    }
+
+    #[test]
+    fn test_parse_java_version_modern_formats() {
+        // Test various modern Java version formats
+        assert_eq!(
+            parse_java_version("openjdk version \"17\" 2021-09-14"),
+            Some(17)
+        );
+        assert_eq!(
+            parse_java_version("openjdk version \"21.0.1\" 2023-10-17 LTS"),
+            Some(21)
+        );
+        assert_eq!(
+            parse_java_version("java version \"19.0.2\" 2023-01-17"),
+            Some(19)
+        );
+    }
+
+    #[test]
+    fn test_parse_java_version_legacy_formats() {
+        // Test legacy Java version formats (1.x style)
+        assert_eq!(parse_java_version("java version \"1.7.0_80\""), Some(7));
+        assert_eq!(parse_java_version("java version \"1.6.0_45\""), Some(6));
+        assert_eq!(parse_java_version("java version \"1.8.0_351\""), Some(8));
+    }
+
+    #[test]
+    fn test_google_colab_detection() {
+        // Save current env state
+        let was_set = env::var("COLAB_RELEASE_TAG").is_ok();
+        let old_value = env::var("COLAB_RELEASE_TAG").ok();
+
+        // Test detection when COLAB_RELEASE_TAG is set
+        env::set_var("COLAB_RELEASE_TAG", "release-123");
+        assert!(is_google_colab());
+
+        // Clean up
+        if was_set {
+            if let Some(val) = old_value {
+                env::set_var("COLAB_RELEASE_TAG", val);
+            }
+        } else {
+            env::remove_var("COLAB_RELEASE_TAG");
+        }
+    }
+
+    #[test]
+    fn test_google_colab_detection_prefix() {
+        // Test detection with other COLAB_ prefixed vars
+        let was_set = env::var("COLAB_TEST_VAR").is_ok();
+
+        env::set_var("COLAB_TEST_VAR", "test");
+        assert!(is_google_colab());
+
+        // Clean up
+        if !was_set {
+            env::remove_var("COLAB_TEST_VAR");
+        }
+    }
 }
