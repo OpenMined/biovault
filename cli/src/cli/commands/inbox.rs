@@ -597,4 +597,140 @@ mod tests {
         assert_eq!(filters.from, Some("test@example.com".to_string()));
         assert_eq!(filters.search, Some("search term".to_string()));
     }
+
+    #[test]
+    fn test_key_char_creation() {
+        let key = Key::Char('a');
+        match key {
+            Key::Char(c) => assert_eq!(c, 'a'),
+            _ => panic!("Expected Char variant"),
+        }
+    }
+
+    #[test]
+    fn test_key_copy_trait() {
+        let key1 = Key::Up;
+        let key2 = key1; // This works because Key implements Copy
+        assert_eq!(key1, key2);
+    }
+
+    #[test]
+    fn test_list_filters_sent_filter() {
+        let filters = ListFilters {
+            sent: true,
+            all: false,
+            unread: false,
+            projects: false,
+            message_type: None,
+            from: None,
+            search: None,
+        };
+        assert!(filters.sent);
+        assert!(!filters.all);
+    }
+
+    #[test]
+    fn test_list_filters_search_filter() {
+        let filters = ListFilters {
+            sent: false,
+            all: false,
+            unread: false,
+            projects: false,
+            message_type: None,
+            from: None,
+            search: Some("test query".to_string()),
+        };
+        assert_eq!(filters.search, Some("test query".to_string()));
+    }
+
+    #[test]
+    fn test_list_filters_message_type_filter() {
+        let filters = ListFilters {
+            sent: false,
+            all: false,
+            unread: false,
+            projects: false,
+            message_type: Some("request".to_string()),
+            from: None,
+            search: None,
+        };
+        assert_eq!(filters.message_type, Some("request".to_string()));
+    }
+
+    #[test]
+    fn test_list_filters_from_filter() {
+        let filters = ListFilters {
+            sent: false,
+            all: false,
+            unread: false,
+            projects: false,
+            message_type: None,
+            from: Some("user@example.com".to_string()),
+            search: None,
+        };
+        assert_eq!(filters.from, Some("user@example.com".to_string()));
+    }
+
+    #[test]
+    fn test_list_filters_projects_filter() {
+        let filters = ListFilters {
+            sent: false,
+            all: false,
+            unread: false,
+            projects: true,
+            message_type: None,
+            from: None,
+            search: None,
+        };
+        assert!(filters.projects);
+        assert!(!filters.sent);
+    }
+
+    #[test]
+    fn test_list_filters_unread_filter() {
+        let filters = ListFilters {
+            sent: false,
+            all: false,
+            unread: true,
+            projects: false,
+            message_type: None,
+            from: None,
+            search: None,
+        };
+        assert!(filters.unread);
+        assert!(!filters.all);
+    }
+
+    #[test]
+    fn test_list_filters_all_filter() {
+        let filters = ListFilters {
+            sent: false,
+            all: true,
+            unread: false,
+            projects: false,
+            message_type: None,
+            from: None,
+            search: None,
+        };
+        assert!(filters.all);
+        assert!(!filters.sent);
+    }
+
+    #[test]
+    fn test_list_filters_combined() {
+        let filters = ListFilters {
+            sent: true,
+            all: false,
+            unread: true,
+            projects: false,
+            message_type: Some("system".to_string()),
+            from: Some("admin@test.com".to_string()),
+            search: Some("important".to_string()),
+        };
+        assert!(filters.sent);
+        assert!(filters.unread);
+        assert_eq!(filters.message_type, Some("system".to_string()));
+        assert_eq!(filters.from, Some("admin@test.com".to_string()));
+        assert_eq!(filters.search, Some("important".to_string()));
+    }
 }
