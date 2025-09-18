@@ -183,13 +183,15 @@ setup-sbenv-client email:
     @echo "Setting up sbenv for {{email}}..."
     @mkdir -p {{TEST_CLIENTS_LOCAL_DIR}}/{{email}}
     cd {{TEST_CLIENTS_LOCAL_DIR}}/{{email}} && \
-    ../../../{{SBENV_DIR}}/cli/target/release/sbenv init --dev --server_url http://localhost:8080
+    ../../{{SBENV_DIR}}/cli/target/release/sbenv init --dev --server-url http://localhost:8080 --email {{email}}
 
-# Start local client with sbenv
+# Start local client with sbenv (uses environment from sbenv init)
 start-sbenv-client email:
     @echo "Starting sbenv client {{email}}..."
     cd {{TEST_CLIENTS_LOCAL_DIR}}/{{email}} && \
-    ../../../{{SBENV_DIR}}/cli/target/release/sbenv start --skip-login-check &
+    set +u && \
+    eval "$(../../{{SBENV_DIR}}/cli/target/release/sbenv activate --quiet)" && \
+    ../../{{SBENV_DIR}}/cli/target/release/sbenv start &
 
 # Setup and start sbenv client 1
 start-syftbox-client1-local: build-sbenv
@@ -214,8 +216,10 @@ start-syftbox-clients-local: build-sbenv
 # Stop local clients
 stop-syftbox-clients-local:
     @echo "Stopping local sbenv clients..."
-    -cd {{TEST_CLIENTS_LOCAL_DIR}}/{{TEST_CLIENT1_EMAIL}} && ../../../{{SBENV_DIR}}/cli/target/release/sbenv stop
-    -cd {{TEST_CLIENTS_LOCAL_DIR}}/{{TEST_CLIENT2_EMAIL}} && ../../../{{SBENV_DIR}}/cli/target/release/sbenv stop
+    -cd {{TEST_CLIENTS_LOCAL_DIR}}/{{TEST_CLIENT1_EMAIL}} && \
+        ../../{{SBENV_DIR}}/cli/target/release/sbenv stop 2>/dev/null || true
+    -cd {{TEST_CLIENTS_LOCAL_DIR}}/{{TEST_CLIENT2_EMAIL}} && \
+        ../../{{SBENV_DIR}}/cli/target/release/sbenv stop 2>/dev/null || true
 
 # Run integration tests with local clients
 run-integration-tests-local:
