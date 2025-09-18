@@ -954,3 +954,495 @@ pub async fn execute(params: RunParams) -> anyhow::Result<()> {
     println!("{}", "Workflow completed successfully!".green().bold());
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[allow(unused_imports)]
+    use crate::cli::download_cache::manifest::Manifest;
+    use crate::config::{clear_test_biovault_home, set_test_biovault_home};
+    use std::fs;
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_deserialize_string_as_vec() {
+        #[derive(Deserialize)]
+        struct TestStruct {
+            #[serde(deserialize_with = "deserialize_string_or_vec")]
+            assets: Vec<String>,
+        }
+
+        let yaml_str = "assets: single_asset";
+        let result: TestStruct = serde_yaml::from_str(yaml_str).unwrap();
+        assert_eq!(result.assets, vec!["single_asset"]);
+
+        let yaml_list = "assets:\n  - asset1\n  - asset2";
+        let result: TestStruct = serde_yaml::from_str(yaml_list).unwrap();
+        assert_eq!(result.assets, vec!["asset1", "asset2"]);
+    }
+
+    #[test]
+    fn test_project_config_deserialize() {
+        let yaml = r#"
+name: test_project
+author: test@example.com
+workflow: test.nf
+template: test_template
+assets: test_asset
+participants:
+  - p1
+  - p2
+"#;
+        let config: ProjectConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.name, "test_project");
+        assert_eq!(config.author, "test@example.com");
+        assert_eq!(config.workflow, "test.nf");
+        assert_eq!(config.template, Some("test_template".to_string()));
+        assert_eq!(config.assets, vec!["test_asset"]);
+        assert_eq!(config.participants, vec!["p1", "p2"]);
+    }
+
+    #[test]
+    fn test_participant_data_serialize() {
+        let participant = ParticipantData {
+            id: "test_id".to_string(),
+            ref_version: Some("GRCh38".to_string()),
+            ref_path: Some("/path/to/ref.fa".to_string()),
+            ref_index: Some("/path/to/ref.fa.fai".to_string()),
+            aligned: Some("/path/to/aligned.cram".to_string()),
+            aligned_index: Some("/path/to/aligned.cram.crai".to_string()),
+            ref_b3sum: None,
+            ref_index_b3sum: None,
+            aligned_b3sum: None,
+            aligned_index_b3sum: None,
+            snp: None,
+            snp_b3sum: None,
+            uncompress: None,
+        };
+
+        let yaml = serde_yaml::to_string(&participant).unwrap();
+        assert!(yaml.contains("id: test_id"));
+        assert!(yaml.contains("ref_version: GRCh38"));
+        assert!(yaml.contains("ref: /path/to/ref.fa"));
+    }
+
+    #[test]
+    fn test_participant_data_snp_variant() {
+        let participant = ParticipantData {
+            id: "snp_test".to_string(),
+            ref_version: None,
+            ref_path: None,
+            ref_index: None,
+            aligned: None,
+            aligned_index: None,
+            ref_b3sum: None,
+            ref_index_b3sum: None,
+            aligned_b3sum: None,
+            aligned_index_b3sum: None,
+            snp: Some("/path/to/snp.vcf".to_string()),
+            snp_b3sum: Some("abc123".to_string()),
+            uncompress: Some(true),
+        };
+
+        assert_eq!(participant.id, "snp_test");
+        assert_eq!(participant.snp, Some("/path/to/snp.vcf".to_string()));
+        assert_eq!(participant.snp_b3sum, Some("abc123".to_string()));
+        assert_eq!(participant.uncompress, Some(true));
+    }
+
+    #[test]
+    fn test_run_params_default() {
+        let params = RunParams {
+            project_folder: "/test".to_string(),
+            participant_source: "participants.yaml#TEST".to_string(),
+            test: false,
+            download: false,
+            dry_run: false,
+            with_docker: false,
+            work_dir: None,
+            resume: false,
+            template: None,
+        };
+
+        assert_eq!(params.project_folder, "/test");
+        assert_eq!(params.participant_source, "participants.yaml#TEST");
+        assert!(!params.test);
+        assert!(!params.download);
+        assert!(!params.with_docker);
+        assert!(!params.dry_run);
+        assert!(params.work_dir.is_none());
+        assert!(!params.resume);
+        assert!(params.template.is_none());
+    }
+
+    #[test]
+    fn test_participant_data_clone() {
+        let original = ParticipantData {
+            id: "clone_test".to_string(),
+            ref_version: Some("GRCh37".to_string()),
+            ref_path: None,
+            ref_index: None,
+            aligned: None,
+            aligned_index: None,
+            ref_b3sum: None,
+            ref_index_b3sum: None,
+            aligned_b3sum: None,
+            aligned_index_b3sum: None,
+            snp: None,
+            snp_b3sum: None,
+            uncompress: None,
+        };
+
+        let cloned = original.clone();
+        assert_eq!(cloned.id, original.id);
+        assert_eq!(cloned.ref_version, original.ref_version);
+    }
+
+    #[test]
+    fn test_project_config_minimal() {
+        let yaml = r#"
+name: minimal
+author: user@example.com
+workflow: main.nf
+"#;
+        let config: ProjectConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.name, "minimal");
+        assert_eq!(config.author, "user@example.com");
+        assert_eq!(config.workflow, "main.nf");
+        assert!(config.template.is_none());
+        assert!(config.assets.is_empty());
+        assert!(config.participants.is_empty());
+    }
+
+    #[test]
+    fn participant_source_parse_variants() {
+        // Local file with fragment
+        let ps = ParticipantSource::parse("/tmp/p.yml#participants.A").unwrap();
+        match ps {
+            ParticipantSource::LocalFile(path, frag) => {
+                assert!(path.ends_with("p.yml"));
+                assert_eq!(frag.as_deref(), Some("participants.A"));
+            }
+            _ => panic!("expected LocalFile"),
+        }
+
+        // HTTP url
+        let ps = ParticipantSource::parse("https://example.com/p.yml#participants.A").unwrap();
+        match ps {
+            ParticipantSource::HttpUrl(u) => assert!(u.starts_with("https://example.com")),
+            _ => panic!("expected HttpUrl"),
+        }
+
+        // Syft URL
+        let ps = ParticipantSource::parse("syft://user@example.com/path#participants.A").unwrap();
+        match ps {
+            ParticipantSource::SyftUrl(u) => {
+                assert_eq!(u.email, "user@example.com");
+            }
+            _ => panic!("expected SyftUrl"),
+        }
+
+        // Sample data id present in embedded config (uses include_str)
+        let ps = ParticipantSource::parse("NA06985").unwrap();
+        match ps {
+            ParticipantSource::SampleDataId(id) => assert_eq!(id, "NA06985"),
+            _ => panic!("expected SampleDataId"),
+        }
+    }
+
+    #[test]
+    fn extract_participant_data_happy_and_error_paths() {
+        // Happy path
+        let yaml = r#"
+participants:
+  TEST:
+    ref_version: GRCh38
+"#;
+        let (p, mock) = extract_participant_data(yaml, Some("participants.TEST".into()), false)
+            .expect("parse ok");
+        assert_eq!(p.id, "TEST");
+        assert_eq!(p.ref_version.as_deref(), Some("GRCh38"));
+        assert!(mock.is_none());
+
+        // Missing fragment
+        let err = extract_participant_data(yaml, None, false).unwrap_err();
+        assert!(format!("{}", err).contains("No participant specified"));
+
+        // Wrong fragment prefix
+        let err = extract_participant_data(yaml, Some("foo.TEST".into()), false).unwrap_err();
+        assert!(format!("{}", err).contains("Invalid fragment"));
+
+        // Participant not found
+        let err = extract_participant_data(yaml, Some("participants.X".into()), false).unwrap_err();
+        assert!(format!("{}", err).contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn ensure_files_exist_with_local_paths() {
+        // Prepare local files
+        let td = TempDir::new().unwrap();
+        let refp = td.path().join("ref.fa");
+        let refi = td.path().join("ref.fa.fai");
+        let cram = td.path().join("aln.cram");
+        let crai = td.path().join("aln.cram.crai");
+        fs::write(&refp, b"ref").unwrap();
+        fs::write(&refi, b"idx").unwrap();
+        fs::write(&cram, b"cram").unwrap();
+        fs::write(&crai, b"crai").unwrap();
+
+        // Participant with local paths
+        let p = ParticipantData {
+            id: "P1".into(),
+            ref_version: Some("GRCh38".into()),
+            ref_path: Some(refp.to_string_lossy().to_string()),
+            ref_index: Some(refi.to_string_lossy().to_string()),
+            aligned: Some(cram.to_string_lossy().to_string()),
+            aligned_index: Some(crai.to_string_lossy().to_string()),
+            ref_b3sum: None,
+            ref_index_b3sum: None,
+            aligned_b3sum: None,
+            aligned_index_b3sum: None,
+            snp: None,
+            snp_b3sum: None,
+            uncompress: None,
+        };
+
+        // Ensure BIOVAULT home is isolated
+        let home = TempDir::new().unwrap();
+        set_test_biovault_home(home.path());
+
+        let src = ParticipantSource::LocalFile(PathBuf::from("participants.yaml"), None);
+        // Point cache dir to a writable temp to avoid platform HOME surprises
+        let cache_td = TempDir::new().unwrap();
+        std::env::set_var("BIOVAULT_CACHE_DIR", cache_td.path());
+        let out = ensure_files_exist(&p, false, &src, None).await.unwrap();
+        std::env::remove_var("BIOVAULT_CACHE_DIR");
+        assert_eq!(out.ref_path.as_deref(), p.ref_path.as_deref());
+        assert_eq!(out.ref_index.as_deref(), p.ref_index.as_deref());
+        assert_eq!(out.aligned.as_deref(), p.aligned.as_deref());
+        assert_eq!(out.aligned_index.as_deref(), p.aligned_index.as_deref());
+
+        clear_test_biovault_home();
+    }
+
+    #[tokio::test]
+    async fn execute_dry_run_minimal_project() {
+        // Isolate BIOVAULT home and create template files
+        let bv_home = TempDir::new().unwrap();
+        let env_dir = bv_home.path().join("env").join("test_tpl");
+        fs::create_dir_all(&env_dir).unwrap();
+        fs::write(env_dir.join("template.nf"), "// template").unwrap();
+        fs::write(env_dir.join("nextflow.config"), "// config").unwrap();
+        set_test_biovault_home(bv_home.path());
+
+        // Create minimal project
+        let proj = TempDir::new().unwrap();
+        fs::write(
+            proj.path().join("project.yaml"),
+            "name: p\nauthor: a\nworkflow: main.nf\ntemplate: test_tpl\n",
+        )
+        .unwrap();
+        fs::write(proj.path().join("workflow.nf"), "// wf").unwrap();
+        fs::write(
+            proj.path().join("participants.yaml"),
+            "participants:\n  X:\n    ref_version: GRCh38\n",
+        )
+        .unwrap();
+
+        let params = RunParams {
+            project_folder: proj.path().to_string_lossy().to_string(),
+            participant_source: proj
+                .path()
+                .join("participants.yaml#participants.X")
+                .to_string_lossy()
+                .to_string(),
+            test: false,
+            download: false,
+            dry_run: true,
+            with_docker: false,
+            work_dir: None,
+            resume: false,
+            template: Some("test_tpl".into()),
+        };
+
+        // Use a writable cache dir during test
+        let cache_td = TempDir::new().unwrap();
+        std::env::set_var("BIOVAULT_CACHE_DIR", cache_td.path());
+        // Should return Ok before trying to execute nextflow
+        execute(params).await.expect("dry-run ok");
+        std::env::remove_var("BIOVAULT_CACHE_DIR");
+
+        clear_test_biovault_home();
+    }
+
+    #[tokio::test]
+    async fn execute_dry_run_with_all_params_and_fields() {
+        // Isolate BIOVAULT home and create template files
+        let bv_home = TempDir::new().unwrap();
+        let env_dir = bv_home.path().join("env").join("full_tpl");
+        fs::create_dir_all(&env_dir).unwrap();
+        fs::write(env_dir.join("template.nf"), "// template").unwrap();
+        fs::write(env_dir.join("nextflow.config"), "// config").unwrap();
+        set_test_biovault_home(bv_home.path());
+
+        // Create minimal project with assets dir
+        let proj = TempDir::new().unwrap();
+        fs::create_dir_all(proj.path().join("assets")).unwrap();
+        fs::write(
+            proj.path().join("project.yaml"),
+            "name: p\nauthor: a\nworkflow: main.nf\ntemplate: full_tpl\nassets: assets\n",
+        )
+        .unwrap();
+        fs::write(proj.path().join("workflow.nf"), "// wf").unwrap();
+
+        // Participant with many optional fields set and corresponding local files
+        fs::write(proj.path().join("ref.fa"), b"ref").unwrap();
+        fs::write(proj.path().join("ref.fa.fai"), b"idx").unwrap();
+        fs::write(proj.path().join("aln.cram"), b"cram").unwrap();
+        fs::write(proj.path().join("aln.cram.crai"), b"crai").unwrap();
+        fs::write(proj.path().join("snp.vcf"), b"##vcf\n").unwrap();
+        // Participant with many optional fields set
+        let participants_yaml = format!(
+            "participants:\n  Y:\n    ref_version: GRCh38\n    ref: {}\n    ref_index: {}\n    aligned: {}\n    aligned_index: {}\n    snp: {}\n",
+            proj.path().join("ref.fa").display(),
+            proj.path().join("ref.fa.fai").display(),
+            proj.path().join("aln.cram").display(),
+            proj.path().join("aln.cram.crai").display(),
+            proj.path().join("snp.vcf").display(),
+        );
+        fs::write(proj.path().join("participants.yaml"), participants_yaml).unwrap();
+
+        let params = RunParams {
+            project_folder: proj.path().to_string_lossy().to_string(),
+            participant_source: proj
+                .path()
+                .join("participants.yaml#participants.Y")
+                .to_string_lossy()
+                .to_string(),
+            test: false,
+            download: false,
+            dry_run: true,
+            with_docker: true,
+            work_dir: Some("workdir".into()),
+            resume: true,
+            template: Some("full_tpl".into()),
+        };
+
+        let cache_td = TempDir::new().unwrap();
+        std::env::set_var("BIOVAULT_CACHE_DIR", cache_td.path());
+        execute(params).await.expect("dry-run ok");
+        std::env::remove_var("BIOVAULT_CACHE_DIR");
+
+        clear_test_biovault_home();
+    }
+
+    // Removed HTTP cache test to avoid network in restricted environments
+
+    #[tokio::test]
+    async fn execute_errors_when_paths_missing() {
+        // Missing project directory
+        let params = RunParams {
+            project_folder: "/definitely/not/here".into(),
+            participant_source: "participants.yaml#participants.X".into(),
+            test: false,
+            download: false,
+            dry_run: true,
+            with_docker: false,
+            work_dir: None,
+            resume: false,
+            template: None,
+        };
+        assert!(execute(params).await.is_err());
+
+        // Project exists but missing project.yaml
+        let proj = TempDir::new().unwrap();
+        let params = RunParams {
+            project_folder: proj.path().to_string_lossy().to_string(),
+            participant_source: "participants.yaml#participants.X".into(),
+            test: false,
+            download: false,
+            dry_run: true,
+            with_docker: false,
+            work_dir: None,
+            resume: false,
+            template: None,
+        };
+        assert!(execute(params).await.is_err());
+
+        // project.yaml present, workflow.nf missing
+        fs::write(
+            proj.path().join("project.yaml"),
+            "name: p\nauthor: a\nworkflow: main.nf\n",
+        )
+        .unwrap();
+        let params = RunParams {
+            project_folder: proj.path().to_string_lossy().to_string(),
+            participant_source: "participants.yaml#participants.X".into(),
+            test: false,
+            download: false,
+            dry_run: true,
+            with_docker: false,
+            work_dir: None,
+            resume: false,
+            template: None,
+        };
+        assert!(execute(params).await.is_err());
+
+        // workflow present but template missing in env dir -> TemplatesNotFound
+        fs::write(proj.path().join("workflow.nf"), "// wf").unwrap();
+        // Participants file with minimal entry
+        fs::write(
+            proj.path().join("participants.yaml"),
+            "participants:\n  X:\n    ref_version: GRCh38\n",
+        )
+        .unwrap();
+        // point test home to an empty env dir
+        let bv_home = TempDir::new().unwrap();
+        set_test_biovault_home(bv_home.path());
+        let params = RunParams {
+            project_folder: proj.path().to_string_lossy().to_string(),
+            participant_source: proj
+                .path()
+                .join("participants.yaml#participants.X")
+                .to_string_lossy()
+                .to_string(),
+            test: false,
+            download: false,
+            dry_run: true,
+            with_docker: false,
+            work_dir: None,
+            resume: false,
+            template: Some("missing_tpl".into()),
+        };
+        assert!(execute(params).await.is_err());
+
+        clear_test_biovault_home();
+    }
+
+    #[tokio::test]
+    async fn fetch_participant_file_local_missing_errors() {
+        let res = fetch_participant_file(&ParticipantSource::LocalFile(
+            PathBuf::from("/nope/participants.yaml"),
+            Some("participants.X".into()),
+        ))
+        .await;
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn extract_participant_data_mock_branch() {
+        let yaml = r#"
+participants:
+  P:
+    mock:
+      ref_version: GRCh38
+      aligned: /tmp/test.cram
+      aligned_index: /tmp/test.cram.crai
+"#;
+        let (p, mock) =
+            extract_participant_data(yaml, Some("participants.P".into()), true).unwrap();
+        assert_eq!(p.id, "P");
+        assert_eq!(p.ref_version.as_deref(), Some("GRCh38"));
+        assert_eq!(mock.as_deref(), Some("mock_data_grch38"));
+    }
+}

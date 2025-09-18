@@ -533,3 +533,68 @@ fn compose_new_message(config: &Config) -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_list_filters_default() {
+        let filters = ListFilters {
+            sent: false,
+            all: false,
+            unread: false,
+            projects: false,
+            message_type: None,
+            from: None,
+            search: None,
+        };
+        assert!(!filters.sent);
+        assert!(!filters.all);
+        assert!(!filters.unread);
+        assert!(!filters.projects);
+        assert!(filters.message_type.is_none());
+        assert!(filters.from.is_none());
+        assert!(filters.search.is_none());
+    }
+
+    #[test]
+    fn test_key_enum_equality() {
+        assert_eq!(Key::Up, Key::Up);
+        assert_eq!(Key::Down, Key::Down);
+        assert_eq!(Key::Enter, Key::Enter);
+        assert_eq!(Key::Esc, Key::Esc);
+        assert_eq!(Key::Char('a'), Key::Char('a'));
+        assert_ne!(Key::Char('a'), Key::Char('b'));
+        assert_ne!(Key::Up, Key::Down);
+    }
+
+    #[test]
+    fn test_key_enum_debug() {
+        assert_eq!(format!("{:?}", Key::Up), "Up");
+        assert_eq!(format!("{:?}", Key::Down), "Down");
+        assert_eq!(format!("{:?}", Key::Enter), "Enter");
+        assert_eq!(format!("{:?}", Key::Esc), "Esc");
+        assert_eq!(format!("{:?}", Key::Char('x')), "Char('x')");
+    }
+
+    #[test]
+    fn test_list_filters_with_values() {
+        let filters = ListFilters {
+            sent: true,
+            all: false,
+            unread: true,
+            projects: false,
+            message_type: Some("project".to_string()),
+            from: Some("test@example.com".to_string()),
+            search: Some("search term".to_string()),
+        };
+        assert!(filters.sent);
+        assert!(!filters.all);
+        assert!(filters.unread);
+        assert!(!filters.projects);
+        assert_eq!(filters.message_type, Some("project".to_string()));
+        assert_eq!(filters.from, Some("test@example.com".to_string()));
+        assert_eq!(filters.search, Some("search term".to_string()));
+    }
+}

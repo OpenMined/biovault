@@ -240,3 +240,27 @@ async fn update_via_self_update(new_version: &Version) -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detect_install_method_on_test_binary_is_cargo() {
+        // Test binaries run from target/debug/deps, so detect_install_method should detect Cargo
+        let method = detect_install_method().expect("detect");
+        match method {
+            InstallMethod::Cargo => {}
+            _ => panic!("expected Cargo install method for test binary"),
+        }
+    }
+
+    #[test]
+    fn current_version_parses_as_semver() {
+        let v = get_current_version();
+        // Reasonable expectations: non-empty and contains at least one dot
+        let s = v.to_string();
+        assert!(!s.is_empty());
+        assert!(s.contains('.'));
+    }
+}
