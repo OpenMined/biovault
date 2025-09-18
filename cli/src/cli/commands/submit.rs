@@ -418,8 +418,6 @@ mod tests {
 
     #[test]
     fn test_copy_project_files_with_symlinks() {
-        use std::os::unix::fs::symlink;
-
         let tmp = TempDir::new().unwrap();
         let src = tmp.path().join("src");
         let dest = tmp.path().join("dest");
@@ -434,6 +432,7 @@ mod tests {
         // Create a symlink (this test will only work on Unix-like systems)
         #[cfg(unix)]
         {
+            use std::os::unix::fs::symlink;
             let _ = symlink(
                 src.join("assets/real_file.txt"),
                 src.join("assets/link_file.txt"),
