@@ -339,6 +339,8 @@ fn format_status(status: &str) -> String {
     }
 }
 
+// tests moved to bottom of file
+
 pub async fn show(reference: &str, show_all: bool) -> Result<()> {
     let submissions = load_submissions(show_all)?;
 
@@ -1025,4 +1027,120 @@ async fn test_submission(
     }
 
     Ok(())
+}
+
+// NOTE: Keep tests at the very end of file to satisfy clippy (items-after-test-module)
+#[cfg(test)]
+mod tests_final {
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    fn write_submission(dir: &Path, sender: &str, filename: &str, status: &str) {
+        let sender_dir = dir.join(sender);
+        fs::create_dir_all(&sender_dir).unwrap();
+        let path = sender_dir.join(filename);
+        let yaml = format!(
+            r#"name: Proj
+author: A
+datasites: ["d@example"]
+participants: ["P1"]
+syft_url: syft://x/y
+status: {}
+"#,
+            status
+        );
+        fs::write(path, yaml).unwrap();
+    }
+
+    #[test]
+    fn extract_date_from_filename_parses_and_falls_back() {
+        assert_eq!(
+            extract_date_from_filename("proj-2024-09-18-abc"),
+            "2024-09-18"
+        );
+        assert_eq!(extract_date_from_filename("bad"), "unknown");
+        assert_eq!(extract_date_from_filename("x-y-z"), "unknown");
+    }
+
+    #[test]
+    fn get_inbox_path_uses_biovault_home() {
+        let tmp = TempDir::new().unwrap();
+        crate::config::set_test_biovault_home(tmp.path().join(".bv"));
+        let p = get_inbox_path().unwrap();
+        assert!(p.ends_with("inbox"));
+        assert!(p.starts_with(tmp.path().join(".bv")));
+        crate::config::clear_test_biovault_home();
+    }
+
+    #[test]
+    fn format_status_colors_known_statuses() {
+        for s in ["pending", "approved", "rejected", "reviewing", "other"] {
+            let out = format_status(s);
+            assert!(!out.is_empty());
+        }
+    }
+
+    #[test]
+    fn load_submissions_filters_and_sorts() {
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path().join(".bv");
+        crate::config::set_test_biovault_home(&home);
+        let inbox = home.join("inbox");
+        write_submission(
+            &inbox,
+            "alice@example.com",
+            "proj-2024-09-18-aaaa.yaml",
+            "pending",
+        );
+        write_submission(
+            &inbox,
+            "bob@example.com",
+            "proj-2023-01-02-bbbb.yaml",
+            "rejected",
+        );
+        let subs = load_submissions(false).unwrap();
+        assert_eq!(subs.len(), 1);
+        assert_eq!(subs[0].0, "alice@example.com");
+        let subs_all = load_submissions(true).unwrap();
+        assert_eq!(subs_all.len(), 2);
+        assert_eq!(subs_all[0].0, "alice@example.com");
+        crate::config::clear_test_biovault_home();
+    }
+
+    #[test]
+    fn display_helpers_run_without_panic() {
+        let sub = InboxSubmission {
+            name: "Proj".into(),
+            author: "A".into(),
+            datasites: Some(vec!["d@example".into()]),
+            participants: Some(vec!["P".into()]),
+            syft_url: "syft://x/y".into(),
+            status: "pending".into(),
+        };
+        let items = vec![(
+            "sender@example".into(),
+            sub.clone(),
+            PathBuf::from("/tmp/id.yaml"),
+            "2024-09-18".into(),
+        )];
+        display_concise_list(&items);
+        display_full_submission(1, "sender@example", &sub, Path::new("/tmp/id.yaml"));
+    }
+
+    #[tokio::test]
+    async fn show_by_index_displays_detail() {
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path().join(".bv");
+        crate::config::set_test_biovault_home(&home);
+        let inbox = home.join("inbox");
+        write_submission(
+            &inbox,
+            "alice@example.com",
+            "proj-2024-09-18-aaaa.yaml",
+            "pending",
+        );
+        super::show("1", true).await.unwrap();
+        crate::config::clear_test_biovault_home();
+    }
 }
