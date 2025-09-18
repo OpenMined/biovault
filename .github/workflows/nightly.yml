@@ -127,7 +127,7 @@ jobs:
           bv --version
 
       - name: Run Windows installation test
-        shell: powershell
+        shell: pwsh
         run: |
           cd tests/os
           ./test_windows_install.ps1

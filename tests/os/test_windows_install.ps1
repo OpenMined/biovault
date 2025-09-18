@@ -160,12 +160,19 @@ if ($env:CI -or $env:GITHUB_ACTIONS) {
         Write-Host "Installing OpenJDK 17+ for CI..." -ForegroundColor Yellow
         if (Test-Command "winget") {
             try {
-                winget install -e --id Microsoft.OpenJDK --silent || winget install Microsoft.OpenJDK -e -h || $false
-            } catch {}
+                winget install --id Microsoft.OpenJDK -e --accept-source-agreements --accept-package-agreements -h
+                if ($LASTEXITCODE -ne 0) {
+                    Write-Host "winget install returned non-zero exit code ($LASTEXITCODE)" -ForegroundColor Yellow
+                }
+            } catch {
+                Write-Host "Warning: winget install failed: $_" -ForegroundColor Yellow
+            }
         } elseif (Test-Command "choco") {
             try {
                 choco install openjdk -y
-            } catch {}
+            } catch {
+                Write-Host "Warning: choco install failed: $_" -ForegroundColor Yellow
+            }
         }
 
         # Add common OpenJDK bin path to PATH for current process
