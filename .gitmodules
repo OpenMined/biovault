@@ -1,3 +1,6 @@
 [submodule "syftbox"]
 	path = syftbox
 	url = https://github.com/OpenMined/syftbox
+[submodule "sbenv"]
+	path = sbenv
+	url = https://github.com/openmined/sbenv

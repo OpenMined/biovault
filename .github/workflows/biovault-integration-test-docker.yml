@@ -1,4 +1,4 @@
-name: BioVault Integration Test
+name: BioVault Integration Test - Docker
 
 on:
   schedule:
@@ -6,27 +6,32 @@ on:
     - cron: '0 2 * * *'
   workflow_dispatch:
     inputs:
-      run_with_containers:
-        description: 'Run tests with containerized clients'
+      cleanup_after_success:
+        description: 'Clean up resources after successful tests'
         type: boolean
         required: false
         default: true
-      run_with_local:
-        description: 'Run tests with local clients (not implemented yet)'
+      update_submodules:
+        description: 'Update submodules to latest versions'
         type: boolean
         required: false
-        default: false
+        default: true
 
 jobs:
-  test-with-containers:
+  test-with-docker:
     runs-on: ubuntu-latest
-    # Only run if containers checkbox is selected (or scheduled/default)
-    if: github.event_name == 'schedule' || github.event.inputs.run_with_containers == 'true'
 
     steps:
     - uses: actions/checkout@v4
       with:
         submodules: recursive
+
+    - name: Update submodules to latest
+      if: github.event_name == 'schedule' || github.event.inputs.update_submodules == 'true'
+      run: |
+        echo "Updating submodules to latest versions..."
+        chmod +x submodules.sh
+        ./submodules.sh --latest
 
     - name: Install just
       uses: extractions/setup-just@v1
