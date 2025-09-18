@@ -180,6 +180,66 @@ fn test_info_command() {
         .stdout(predicate::str::contains("DISK FREE:"));
 }
 
+#[test]
+fn test_project_examples_cli() {
+    let mut cmd = Command::cargo_bin("bv").unwrap();
+    cmd.arg("project")
+        .arg("examples")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Available example templates"));
+}
+
+#[test]
+fn test_sample_data_list_cli() {
+    let mut cmd = Command::cargo_bin("bv").unwrap();
+    cmd.arg("sample-data")
+        .arg("list")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Available sample data"));
+}
+
+#[test]
+fn test_run_dry_run_cli() {
+    let tmp = TempDir::new().unwrap();
+    // Set explicit BIOVAULT_HOME for templates
+    let bv_home = tmp.path().join(".bvhome");
+    fs::create_dir_all(bv_home.join("env/test_tpl")).unwrap();
+    fs::write(bv_home.join("env/test_tpl/template.nf"), "// template").unwrap();
+    fs::write(bv_home.join("env/test_tpl/nextflow.config"), "// config").unwrap();
+
+    // Prepare minimal project
+    let proj = tmp.path().join("proj");
+    fs::create_dir_all(&proj).unwrap();
+    fs::write(
+        proj.join("project.yaml"),
+        "name: p\nauthor: a\nworkflow: main.nf\ntemplate: test_tpl\n",
+    )
+    .unwrap();
+    fs::write(proj.join("workflow.nf"), "// wf").unwrap();
+    fs::write(
+        proj.join("participants.yaml"),
+        "participants:\n  X:\n    ref_version: GRCh38\n",
+    )
+    .unwrap();
+
+    let mut cmd = Command::cargo_bin("bv").unwrap();
+    cmd.env("BIOVAULT_HOME", &bv_home)
+        .arg("run")
+        .arg(proj.to_string_lossy().to_string())
+        .arg(
+            proj.join("participants.yaml#participants.X")
+                .to_string_lossy()
+                .to_string(),
+        )
+        .arg("--dry-run")
+        .arg("--template=test_tpl")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Nextflow command:"));
+}
+
 // Removed test_check_command: behavior is covered by OS/nightly installation tests.
 
 #[test]
