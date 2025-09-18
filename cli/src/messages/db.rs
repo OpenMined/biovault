@@ -557,3 +557,132 @@ impl MessageDb {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::messages::models::{Message, MessageStatus, SyncStatus};
+    use std::path::PathBuf;
+    use tempfile::TempDir;
+
+    fn new_db(tmp: &TempDir) -> MessageDb {
+        let db_path = tmp.path().join("msgs.sqlite");
+        MessageDb::new(&db_path).expect("create db")
+    }
+
+    #[test]
+    fn insert_get_and_list() {
+        let tmp = TempDir::new().unwrap();
+        let db = new_db(&tmp);
+
+        let m = Message::new("a@x".into(), "b@y".into(), "hello world".into());
+        db.insert_message(&m).unwrap();
+
+        // Exact get
+        let got = db.get_message(&m.id).unwrap().expect("found");
+        assert_eq!(got.body, "hello world");
+
+        // Prefix get
+        let prefix = &m.id[..8];
+        let got2 = db.get_message(prefix).unwrap().expect("prefix found");
+        assert_eq!(got2.id, m.id);
+
+        // list_messages (non-deleted)
+        let all = db.list_messages(None).unwrap();
+        assert_eq!(all.len(), 1);
+
+        // list_sent_messages includes drafts and sent
+        let sent = db.list_sent_messages(None).unwrap();
+        assert_eq!(sent.len(), 1);
+    }
+
+    #[test]
+    fn thread_and_status_updates() {
+        let tmp = TempDir::new().unwrap();
+        let db = new_db(&tmp);
+
+        let m1 = Message::new("a@x".into(), "b@y".into(), "m1".into());
+        db.insert_message(&m1).unwrap();
+
+        // Reply creates same thread_id
+        let m2 = Message::reply_to(&m1, "b@y".into(), "m2".into());
+        db.insert_message(&m2).unwrap();
+
+        let thread = db
+            .get_thread_messages(m1.thread_id.as_ref().unwrap())
+            .unwrap();
+        assert_eq!(thread.len(), 2);
+        assert_eq!(thread[0].id, m1.id);
+        assert_eq!(thread[1].id, m2.id);
+
+        // Mark as sent and read, and query inbox
+        db.mark_as_sent(&m1.id).unwrap();
+
+        // To make it show in inbox, set to received and update, then mark as read
+        let mut m2_upd = m2.clone();
+        m2_upd.status = MessageStatus::Received;
+        db.update_message(&m2_upd).unwrap();
+        let unread = db.list_unread_messages().unwrap();
+        assert_eq!(unread.len(), 1);
+        assert_eq!(unread[0].id, m2.id);
+
+        db.mark_as_read(&m2.id).unwrap();
+        let inbox = db.list_inbox_messages(None).unwrap();
+        assert_eq!(inbox.len(), 1);
+        assert_eq!(inbox[0].status, MessageStatus::Read);
+    }
+
+    #[test]
+    fn delete_and_search_and_permanent_delete() {
+        let tmp = TempDir::new().unwrap();
+        let db = new_db(&tmp);
+
+        let mut m = Message::new("a@x".into(), "b@y".into(), "find me body".into());
+        m.subject = Some("about rust".into());
+        db.insert_message(&m).unwrap();
+
+        // Search by body
+        assert_eq!(db.search_messages("find me", None).unwrap().len(), 1);
+        // Search by subject
+        assert_eq!(db.search_messages("rust", None).unwrap().len(), 1);
+        assert_eq!(db.search_messages("nomatch", None).unwrap().len(), 0);
+
+        // Soft delete
+        db.delete_message(&m.id).unwrap();
+        assert_eq!(db.list_deleted_messages(None).unwrap().len(), 1);
+        assert_eq!(db.list_messages(None).unwrap().len(), 0);
+
+        // Permanent delete
+        db.permanently_delete(&m.id).unwrap();
+        assert!(db.get_message(&m.id).unwrap().is_none());
+    }
+
+    #[test]
+    fn list_messages_by_type_filters_correctly() {
+        let tmp = TempDir::new().unwrap();
+        let db = new_db(&tmp);
+
+        let mut p = Message::new("a@x".into(), "b@y".into(), "p".into());
+        p.message_type = crate::messages::MessageType::Project {
+            project_name: "n".into(),
+            submission_id: "s".into(),
+            files_hash: None,
+        };
+        db.insert_message(&p).unwrap();
+
+        let mut r = Message::new("a@x".into(), "b@y".into(), "r".into());
+        r.message_type = crate::messages::MessageType::Request {
+            request_type: "t".into(),
+            params: None,
+        };
+        db.insert_message(&r).unwrap();
+
+        let projects = db.list_messages_by_type("project", None).unwrap();
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].id, p.id);
+
+        let requests = db.list_messages_by_type("request", None).unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].id, r.id);
+    }
+}

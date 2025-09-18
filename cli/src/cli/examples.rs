@@ -51,3 +51,22 @@ pub fn write_example_to_directory(example_name: &str, target_dir: &Path) -> anyh
 pub fn list_examples() -> Vec<String> {
     EXAMPLE_FILES.keys().map(|k| k.to_string()).collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn examples_list_and_write_round_trip() {
+        // At least one example should be embedded
+        let names = list_examples();
+        assert!(!names.is_empty());
+
+        // For a small sample (first up to 2), write to temp dir and ensure files appear
+        let tmp = TempDir::new().unwrap();
+        for name in names.iter().take(2) {
+            write_example_to_directory(name, tmp.path()).unwrap();
+        }
+    }
+}

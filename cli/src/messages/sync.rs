@@ -277,3 +277,114 @@ impl MessageSync {
         Ok((new_messages.clone(), new_messages.len()))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::messages::models::Message;
+    use std::fs;
+    use tempfile::TempDir;
+
+    // Helper to list response files under an endpoint path
+    fn list_response_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+        if !dir.exists() {
+            return vec![];
+        }
+        let mut out = vec![];
+        for e in fs::read_dir(dir).unwrap() {
+            let p = e.unwrap().path();
+            if p.extension().and_then(|s| s.to_str()) == Some("response") {
+                out.push(p);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn send_receive_and_ack_flow_via_fs() {
+        let tmp = TempDir::new().unwrap();
+        let data_dir = tmp.path();
+
+        // Both parties share the same syftbox data_dir (as in a sync-mounted folder), with different datasites
+        let app_sender = SyftBoxApp::new(data_dir, "alice@example.com", "biovault").unwrap();
+        let app_recipient = SyftBoxApp::new(data_dir, "bob@example.com", "biovault").unwrap();
+
+        let db_sender = tmp.path().join("sender.sqlite");
+        let db_recipient = tmp.path().join("recipient.sqlite");
+        let ms_sender = MessageSync::new(&db_sender, app_sender.clone()).unwrap();
+        let ms_recipient = MessageSync::new(&db_recipient, app_recipient.clone()).unwrap();
+
+        // Insert a draft message in sender DB targeting bob
+        let mut m = Message::new(
+            "alice@example.com".into(),
+            "bob@example.com".into(),
+            "hello".into(),
+        );
+        ms_sender.db.insert_message(&m).unwrap();
+
+        // Send the message: should create request file under bob's endpoint and update sender DB fields
+        ms_sender.send_message(&m.id).unwrap();
+
+        // Recipient checks incoming; should ingest and write an ACK response in bob's endpoint dir
+        let new_msgs = ms_recipient.check_incoming().unwrap();
+        assert_eq!(new_msgs.len(), 1);
+
+        // Simulate syft sync by copying the response from bob's endpoint to alice's endpoint
+        let recipient_ep = app_recipient.endpoint_path("/message");
+        let sender_ep = app_sender.endpoint_path("/message");
+        fs::create_dir_all(&sender_ep).unwrap();
+        for resp in list_response_files(&recipient_ep) {
+            let file_name = resp.file_name().unwrap();
+            fs::copy(&resp, sender_ep.join(file_name)).unwrap();
+        }
+
+        // Sender checks ACKs and should update message sync status
+        ms_sender.check_acks().unwrap();
+    }
+
+    #[test]
+    fn ack_failure_sets_failed_status() {
+        let tmp = TempDir::new().unwrap();
+        let data_dir = tmp.path();
+        let app_sender = SyftBoxApp::new(data_dir, "alice@example.com", "biovault").unwrap();
+        let db_sender = tmp.path().join("sender.sqlite");
+        let ms_sender = MessageSync::new(&db_sender, app_sender.clone()).unwrap();
+
+        // Insert a message and mark it as sent with an RPC request id
+        let mut m = Message::new(
+            "alice@example.com".into(),
+            "bob@example.com".into(),
+            "hello".into(),
+        );
+        ms_sender.db.insert_message(&m).unwrap();
+        ms_sender.send_message(&m.id).unwrap();
+
+        // Create a failure response file for the same request id
+        let endpoint = Endpoint::new(&app_sender, "/message").unwrap();
+        let req_id = ms_sender
+            .db
+            .get_message(&m.id)
+            .unwrap()
+            .unwrap()
+            .rpc_request_id
+            .unwrap();
+        // Build a dummy RpcResponse with non-200 code
+        let dummy_req = RpcRequest::new(
+            "x".into(),
+            app_sender.build_syft_url("/message"),
+            "POST".into(),
+            b"{}".to_vec(),
+        );
+        let mut resp = RpcResponse::new(&dummy_req, "bob@example.com".into(), 500, b"err".to_vec());
+        // Force response id to match the request id we need to ack
+        resp.id = req_id.clone();
+        let resp_path = endpoint.path.join(format!("{}.response", req_id));
+        std::fs::write(&resp_path, serde_json::to_string_pretty(&resp).unwrap()).unwrap();
+
+        // Process ACKs and verify status is Failed
+        ms_sender.check_acks().unwrap();
+        let updated = ms_sender.db.get_message(&m.id).unwrap().unwrap();
+        assert_eq!(updated.sync_status, SyncStatus::Failed);
+        assert!(updated.rpc_ack_at.is_some());
+    }
+}

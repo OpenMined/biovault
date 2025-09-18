@@ -93,3 +93,14 @@ pub async fn execute() -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn info_execute_runs() {
+        // Just ensure the function executes without error; it queries local sysinfo only
+        execute().await.unwrap();
+    }
+}
