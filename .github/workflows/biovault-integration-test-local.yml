@@ -48,12 +48,6 @@ jobs:
       with:
         tool: nextest
 
-    - name: Build SyftBox from source
-      run: |
-        echo "Building SyftBox from source..."
-        cd syftbox
-        pip install -e .
-
     - name: Add minio to /etc/hosts
       run: |
         echo "127.0.0.1 minio" | sudo tee -a /etc/hosts
