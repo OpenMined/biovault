@@ -38,7 +38,6 @@ add-minio-host:
 start-syftbox-client-docker email name port:
     @echo "Starting docker client {{email}}..."
     @mkdir -p {{TEST_CLIENTS_DOCKER_DIR}}
-    @chmod -R 777 {{TEST_CLIENTS_DOCKER_DIR}}
     @echo "Building client image..."
     @if [ -n "${DOCKER_BUILDX:-}" ]; then \
         cd {{SYFTBOX_DIR}} && docker buildx build --cache-from=type=gha --cache-to=type=gha,mode=max -f docker/Dockerfile.client -t syftbox-client --load .; \
@@ -67,7 +66,12 @@ start-syftbox-client2-docker:
 # Start both docker clients
 start-syftbox-clients-docker:
     @echo "Cleaning up old test data..."
-    @rm -rf {{TEST_CLIENTS_DOCKER_DIR}}
+    @if [ -n "${CI:-}" ] && [ -d {{TEST_CLIENTS_DOCKER_DIR}} ]; then \
+        echo "In CI environment, using sudo to remove root-owned files"; \
+        sudo rm -rf {{TEST_CLIENTS_DOCKER_DIR}}; \
+    else \
+        rm -rf {{TEST_CLIENTS_DOCKER_DIR}}; \
+    fi
     @just start-syftbox-client1-docker
     @sleep 2
     @just start-syftbox-client2-docker
@@ -164,7 +168,12 @@ cleanup-integration-test-docker:
     @echo "Cleaning up docker integration test resources..."
     -just stop-syftbox-clients-docker
     -just stop-syftbox-server
-    -rm -rf {{TEST_CLIENTS_DOCKER_DIR}}
+    @if [ -n "${CI:-}" ] && [ -d {{TEST_CLIENTS_DOCKER_DIR}} ]; then \
+        echo "In CI environment, using sudo to remove root-owned files"; \
+        sudo rm -rf {{TEST_CLIENTS_DOCKER_DIR}}; \
+    else \
+        rm -rf {{TEST_CLIENTS_DOCKER_DIR}}; \
+    fi
     @echo "Cleanup complete!"
 
 # ============= SBENV LOCAL CLIENT COMMANDS =============
@@ -188,10 +197,13 @@ setup-sbenv-client email:
 # Start local client with sbenv (uses environment from sbenv init)
 start-sbenv-client email:
     @echo "Starting sbenv client {{email}}..."
-    cd {{TEST_CLIENTS_LOCAL_DIR}}/{{email}} && \
-    set +u && \
-    eval "$(../../{{SBENV_DIR}}/cli/target/release/sbenv activate --quiet)" && \
-    ../../{{SBENV_DIR}}/cli/target/release/sbenv start &
+    @cd {{TEST_CLIENTS_LOCAL_DIR}}/{{email}} && \
+    bash -c 'set +u; \
+    echo "Activating sbenv environment..."; \
+    eval "$(../../{{SBENV_DIR}}/cli/target/release/sbenv activate --quiet)"; \
+    echo "Checking syftbox is available: $(which syftbox || echo not found)"; \
+    echo "Starting sbenv client..."; \
+    ../../{{SBENV_DIR}}/cli/target/release/sbenv start --skip-login-check || echo "sbenv start failed with code: $?"' &
 
 # Setup and start sbenv client 1
 start-syftbox-client1-local: build-sbenv
@@ -208,10 +220,12 @@ start-syftbox-clients-local: build-sbenv
     @echo "Cleaning up old test data..."
     @rm -rf {{TEST_CLIENTS_LOCAL_DIR}}
     @just start-syftbox-client1-local
-    @sleep 2
+    @sleep 3
     @just start-syftbox-client2-local
     @echo "Waiting for local clients to initialize..."
-    @sleep 5
+    @sleep 10
+    @echo "Checking if clients are running..."
+    @ps aux | grep -E "syftbox|sbenv" | grep -v grep || echo "No syftbox processes found"
 
 # Stop local clients
 stop-syftbox-clients-local:

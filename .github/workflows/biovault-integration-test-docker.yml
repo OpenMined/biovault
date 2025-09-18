@@ -57,7 +57,10 @@ jobs:
         cat /etc/hosts | grep minio
 
     - name: Run integration tests with Docker
-      run: just test-integration-docker
+      run: |
+        # Export CI environment variable so the justfile knows we're in CI
+        export CI=true
+        just test-integration-docker
 
     - name: Show server logs on failure
       if: failure()
