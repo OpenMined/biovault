@@ -48,10 +48,11 @@ jobs:
       with:
         tool: nextest
 
-    - name: Install SyftBox
+    - name: Build SyftBox from source
       run: |
-        echo "Installing SyftBox..."
-        pip install syftbox
+        echo "Building SyftBox from source..."
+        cd syftbox
+        pip install -e .
 
     - name: Add minio to /etc/hosts
       run: |
@@ -60,6 +61,8 @@ jobs:
 
     - name: Run integration tests with local clients
       run: |
+        # Export CI environment variable so the justfile knows we're in CI
+        export CI=true
         if [ "${{ github.event.inputs.cleanup_after_success }}" = "false" ]; then
           just test-integration-local false
         else
@@ -71,11 +74,21 @@ jobs:
       run: |
         echo "=== Server Logs ==="
         docker logs syftbox-server || true
+        echo "=== Client 1 Directory ==="
+        ls -la test-clients-local/client1@syftbox.net/ || true
+        ls -la test-clients-local/client1@syftbox.net/.syftbox/ || true
         echo "=== Client 1 Logs ==="
-        cat test-clients-local/client1@syftbox.net/.syftbox/logs/client.log || true
+        cat test-clients-local/client1@syftbox.net/.syftbox/logs/client.log || echo "No client1 log file found"
+        echo "=== Client 2 Directory ==="
+        ls -la test-clients-local/client2@syftbox.net/ || true
+        ls -la test-clients-local/client2@syftbox.net/.syftbox/ || true
         echo "=== Client 2 Logs ==="
-        cat test-clients-local/client2@syftbox.net/.syftbox/logs/client.log || true
+        cat test-clients-local/client2@syftbox.net/.syftbox/logs/client.log || echo "No client2 log file found"
         echo "=== Test files ==="
         ls -la test-clients-local/ || true
+        echo "=== Check syftbox installation ==="
+        which syftbox || echo "syftbox not in PATH"
+        echo "=== Python packages ==="
+        pip list | grep -i syft || true
 
     # Cleanup is handled by the just command based on test results
