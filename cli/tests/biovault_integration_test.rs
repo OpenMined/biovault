@@ -156,10 +156,8 @@ fn test_biovault_init(client_base: &Path, email: &str, test_mode: &str) -> Resul
         if client_base.exists() {
             println!("Contents of client_base:");
             if let Ok(entries) = fs::read_dir(client_base) {
-                for entry in entries {
-                    if let Ok(entry) = entry {
-                        println!("  - {}", entry.path().display());
-                    }
+                for entry in entries.flatten() {
+                    println!("  - {}", entry.path().display());
                 }
             }
         }
@@ -390,11 +388,17 @@ echo "Debug: Running bv with args: {}" >&2
         cmd.arg("-c").arg(&script);
         cmd
     } else {
-        // For Docker mode, run locally with env vars set
-        // Let bv determine BIOVAULT_HOME from SYFTBOX_DATA_DIR
+        // For Docker mode, the SyftBox directory structure is:
+        // test-clients-docker/client1@syftbox.net/SyftBox/
+        // We want .biovault to be created at test-clients-docker/client1@syftbox.net/SyftBox/.biovault
+        // So we set SYFTBOX_DATA_DIR to the SyftBox directory itself
         let mut cmd = Command::new(&bv_temp);
         cmd.current_dir(client_base);
-        cmd.env("SYFTBOX_DATA_DIR", client_base);
+        // Use absolute path to avoid any relative path confusion
+        let abs_client_base = client_base
+            .canonicalize()
+            .unwrap_or_else(|_| client_base.to_path_buf());
+        cmd.env("SYFTBOX_DATA_DIR", &abs_client_base);
         cmd.args(args);
         cmd
     };
