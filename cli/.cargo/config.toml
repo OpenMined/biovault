@@ -1,0 +1,4 @@
+[alias]
+# Run coverage with HTML output (requires cargo-llvm-cov installed)
+coverage = "llvm-cov --workspace --all-features --html"
+
