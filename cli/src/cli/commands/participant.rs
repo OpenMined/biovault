@@ -699,4 +699,232 @@ mod tests {
         assert!(p.ends_with(std::path::Path::new("rel").join("path")));
         std::env::set_current_dir(cwd).unwrap();
     }
+
+    #[test]
+    fn test_participant_serialize_deserialize() {
+        let participant = Participant {
+            id: "test123".to_string(),
+            ref_version: Some("GRCh38".to_string()),
+            r#ref: Some("/path/to/ref.fa".to_string()),
+            ref_index: Some("/path/to/ref.fa.fai".to_string()),
+            aligned: Some("/path/to/aligned.cram".to_string()),
+            aligned_index: Some("/path/to/aligned.cram.crai".to_string()),
+            snp: None,
+        };
+
+        let serialized = serde_yaml::to_string(&participant).unwrap();
+        assert!(serialized.contains("id: test123"));
+        assert!(serialized.contains("ref_version: GRCh38"));
+        assert!(serialized.contains("ref: /path/to/ref.fa"));
+
+        let deserialized: Participant = serde_yaml::from_str(&serialized).unwrap();
+        assert_eq!(deserialized.id, "test123");
+        assert_eq!(deserialized.ref_version, Some("GRCh38".to_string()));
+    }
+
+    #[test]
+    fn test_participant_snp_variant() {
+        let participant = Participant {
+            id: "snp_test".to_string(),
+            ref_version: None,
+            r#ref: None,
+            ref_index: None,
+            aligned: None,
+            aligned_index: None,
+            snp: Some("/path/to/snp.vcf".to_string()),
+        };
+
+        assert_eq!(participant.id, "snp_test");
+        assert_eq!(participant.snp, Some("/path/to/snp.vcf".to_string()));
+        assert!(participant.aligned.is_none());
+        assert!(participant.ref_version.is_none());
+    }
+
+    #[test]
+    fn test_participants_file_default() {
+        let pf = ParticipantsFile::default();
+        assert!(pf.participants.is_empty());
+    }
+
+    #[test]
+    fn test_participants_file_with_multiple_entries() {
+        let mut pf = ParticipantsFile::new();
+
+        let p1 = Participant {
+            id: "p1".to_string(),
+            ref_version: Some("GRCh37".to_string()),
+            r#ref: None,
+            ref_index: None,
+            aligned: None,
+            aligned_index: None,
+            snp: None,
+        };
+
+        let p2 = Participant {
+            id: "p2".to_string(),
+            ref_version: Some("GRCh38".to_string()),
+            r#ref: None,
+            ref_index: None,
+            aligned: None,
+            aligned_index: None,
+            snp: None,
+        };
+
+        pf.participants.insert("p1".to_string(), p1.clone());
+        pf.participants.insert("p2".to_string(), p2.clone());
+
+        assert_eq!(pf.participants.len(), 2);
+        assert!(pf.participants.contains_key("p1"));
+        assert!(pf.participants.contains_key("p2"));
+        assert_eq!(
+            pf.participants["p1"].ref_version,
+            Some("GRCh37".to_string())
+        );
+        assert_eq!(
+            pf.participants["p2"].ref_version,
+            Some("GRCh38".to_string())
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_participants_file_load_nonexistent() {
+        let temp = TempDir::new().unwrap();
+        std::env::set_var("BIOVAULT_HOME", temp.path());
+
+        let pf = ParticipantsFile::load().unwrap();
+        assert!(pf.participants.is_empty());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_participants_file_save_and_reload() {
+        let temp = TempDir::new().unwrap();
+        std::env::set_var("BIOVAULT_HOME", temp.path());
+
+        let mut pf = ParticipantsFile::new();
+        let participant = Participant {
+            id: "save_test".to_string(),
+            ref_version: Some("GRCh38".to_string()),
+            r#ref: Some("/ref.fa".to_string()),
+            ref_index: Some("/ref.fa.fai".to_string()),
+            aligned: Some("/aligned.cram".to_string()),
+            aligned_index: Some("/aligned.cram.crai".to_string()),
+            snp: None,
+        };
+
+        pf.participants.insert("save_test".to_string(), participant);
+        pf.save().unwrap();
+
+        // Verify file was created
+        let file_path = temp.path().join("participants.yaml");
+        assert!(file_path.exists());
+
+        // Load and verify
+        let loaded = ParticipantsFile::load().unwrap();
+        assert_eq!(loaded.participants.len(), 1);
+        assert!(loaded.participants.contains_key("save_test"));
+        assert_eq!(loaded.participants["save_test"].id, "save_test");
+        assert_eq!(
+            loaded.participants["save_test"].ref_version,
+            Some("GRCh38".to_string())
+        );
+    }
+
+    #[test]
+    fn test_get_index_file_path_edge_cases() {
+        // Test various file extensions for aligned files (function is case-sensitive)
+        assert_eq!(get_index_file_path("test.CRAM", true), "test.CRAM.idx"); // Uppercase not recognized
+        assert_eq!(get_index_file_path("test.BAM", true), "test.BAM.idx"); // Uppercase not recognized
+        assert_eq!(get_index_file_path("test.SAM", true), "test.SAM.idx"); // Uppercase not recognized
+        assert_eq!(get_index_file_path("test", true), "test.idx");
+        assert_eq!(get_index_file_path("test.txt", true), "test.txt.idx");
+
+        // Test lowercase extensions work correctly
+        assert_eq!(get_index_file_path("test.cram", true), "test.cram.crai");
+        assert_eq!(get_index_file_path("test.bam", true), "test.bam.bai");
+        assert_eq!(get_index_file_path("test.sam", true), "test.sam.sai");
+
+        // Test reference files (always get .fai regardless of extension)
+        assert_eq!(
+            get_index_file_path("genome.fasta", false),
+            "genome.fasta.fai"
+        );
+        assert_eq!(get_index_file_path("genome.FA", false), "genome.FA.fai");
+        assert_eq!(get_index_file_path("genome", false), "genome.fai");
+    }
+
+    #[test]
+    fn test_expand_tilde_edge_cases() {
+        // Test non-tilde paths
+        assert_eq!(expand_tilde(""), "");
+        assert_eq!(expand_tilde("~"), "~");
+        assert_eq!(expand_tilde("~user/file"), "~user/file"); // Not expanded
+        assert_eq!(expand_tilde("/~/file"), "/~/file"); // Not at start
+        assert_eq!(expand_tilde("./~/file"), "./~/file"); // Not at start
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_normalize_path_with_tilde() {
+        let temp = TempDir::new().unwrap();
+        let temp_path = temp.path().to_string_lossy().to_string();
+
+        if cfg!(unix) {
+            std::env::set_var("HOME", &temp_path);
+        } else {
+            std::env::set_var("USERPROFILE", &temp_path);
+        }
+
+        let result = normalize_path("~/test.txt").unwrap();
+        assert!(result.contains("test.txt"));
+        assert!(std::path::Path::new(&result).is_absolute());
+    }
+
+    #[test]
+    fn test_participant_clone() {
+        let original = Participant {
+            id: "clone_test".to_string(),
+            ref_version: Some("GRCh38".to_string()),
+            r#ref: Some("/ref.fa".to_string()),
+            ref_index: None,
+            aligned: None,
+            aligned_index: None,
+            snp: None,
+        };
+
+        let cloned = original.clone();
+        assert_eq!(cloned.id, original.id);
+        assert_eq!(cloned.ref_version, original.ref_version);
+        assert_eq!(cloned.r#ref, original.r#ref);
+    }
+
+    #[test]
+    fn test_participant_debug_format() {
+        let participant = Participant {
+            id: "debug_test".to_string(),
+            ref_version: None,
+            r#ref: None,
+            ref_index: None,
+            aligned: None,
+            aligned_index: None,
+            snp: Some("/snp.vcf".to_string()),
+        };
+
+        let debug_str = format!("{:?}", participant);
+        assert!(debug_str.contains("debug_test"));
+        assert!(debug_str.contains("snp"));
+        assert!(debug_str.contains("/snp.vcf"));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_get_participants_file_path() {
+        let temp = TempDir::new().unwrap();
+        std::env::set_var("BIOVAULT_HOME", temp.path());
+
+        let path = get_participants_file_path().unwrap();
+        assert!(path.ends_with("participants.yaml"));
+        assert!(path.starts_with(temp.path()));
+    }
 }

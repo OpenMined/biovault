@@ -942,3 +942,158 @@ pub async fn execute(params: RunParams) -> anyhow::Result<()> {
     println!("{}", "Workflow completed successfully!".green().bold());
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_deserialize_string_as_vec() {
+        #[derive(Deserialize)]
+        struct TestStruct {
+            #[serde(deserialize_with = "deserialize_string_or_vec")]
+            assets: Vec<String>,
+        }
+
+        let yaml_str = "assets: single_asset";
+        let result: TestStruct = serde_yaml::from_str(yaml_str).unwrap();
+        assert_eq!(result.assets, vec!["single_asset"]);
+
+        let yaml_list = "assets:\n  - asset1\n  - asset2";
+        let result: TestStruct = serde_yaml::from_str(yaml_list).unwrap();
+        assert_eq!(result.assets, vec!["asset1", "asset2"]);
+    }
+
+    #[test]
+    fn test_project_config_deserialize() {
+        let yaml = r#"
+name: test_project
+author: test@example.com
+workflow: test.nf
+template: test_template
+assets: test_asset
+participants:
+  - p1
+  - p2
+"#;
+        let config: ProjectConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.name, "test_project");
+        assert_eq!(config.author, "test@example.com");
+        assert_eq!(config.workflow, "test.nf");
+        assert_eq!(config.template, Some("test_template".to_string()));
+        assert_eq!(config.assets, vec!["test_asset"]);
+        assert_eq!(config.participants, vec!["p1", "p2"]);
+    }
+
+    #[test]
+    fn test_participant_data_serialize() {
+        let participant = ParticipantData {
+            id: "test_id".to_string(),
+            ref_version: Some("GRCh38".to_string()),
+            ref_path: Some("/path/to/ref.fa".to_string()),
+            ref_index: Some("/path/to/ref.fa.fai".to_string()),
+            aligned: Some("/path/to/aligned.cram".to_string()),
+            aligned_index: Some("/path/to/aligned.cram.crai".to_string()),
+            ref_b3sum: None,
+            ref_index_b3sum: None,
+            aligned_b3sum: None,
+            aligned_index_b3sum: None,
+            snp: None,
+            snp_b3sum: None,
+            uncompress: None,
+        };
+
+        let yaml = serde_yaml::to_string(&participant).unwrap();
+        assert!(yaml.contains("id: test_id"));
+        assert!(yaml.contains("ref_version: GRCh38"));
+        assert!(yaml.contains("ref: /path/to/ref.fa"));
+    }
+
+    #[test]
+    fn test_participant_data_snp_variant() {
+        let participant = ParticipantData {
+            id: "snp_test".to_string(),
+            ref_version: None,
+            ref_path: None,
+            ref_index: None,
+            aligned: None,
+            aligned_index: None,
+            ref_b3sum: None,
+            ref_index_b3sum: None,
+            aligned_b3sum: None,
+            aligned_index_b3sum: None,
+            snp: Some("/path/to/snp.vcf".to_string()),
+            snp_b3sum: Some("abc123".to_string()),
+            uncompress: Some(true),
+        };
+
+        assert_eq!(participant.id, "snp_test");
+        assert_eq!(participant.snp, Some("/path/to/snp.vcf".to_string()));
+        assert_eq!(participant.snp_b3sum, Some("abc123".to_string()));
+        assert_eq!(participant.uncompress, Some(true));
+    }
+
+    #[test]
+    fn test_run_params_default() {
+        let params = RunParams {
+            project_folder: "/test".to_string(),
+            participant_source: "participants.yaml#TEST".to_string(),
+            test: false,
+            download: false,
+            dry_run: false,
+            with_docker: false,
+            work_dir: None,
+            resume: false,
+            template: None,
+        };
+
+        assert_eq!(params.project_folder, "/test");
+        assert_eq!(params.participant_source, "participants.yaml#TEST");
+        assert!(!params.test);
+        assert!(!params.download);
+        assert!(!params.with_docker);
+        assert!(!params.dry_run);
+        assert!(params.work_dir.is_none());
+        assert!(!params.resume);
+        assert!(params.template.is_none());
+    }
+
+    #[test]
+    fn test_participant_data_clone() {
+        let original = ParticipantData {
+            id: "clone_test".to_string(),
+            ref_version: Some("GRCh37".to_string()),
+            ref_path: None,
+            ref_index: None,
+            aligned: None,
+            aligned_index: None,
+            ref_b3sum: None,
+            ref_index_b3sum: None,
+            aligned_b3sum: None,
+            aligned_index_b3sum: None,
+            snp: None,
+            snp_b3sum: None,
+            uncompress: None,
+        };
+
+        let cloned = original.clone();
+        assert_eq!(cloned.id, original.id);
+        assert_eq!(cloned.ref_version, original.ref_version);
+    }
+
+    #[test]
+    fn test_project_config_minimal() {
+        let yaml = r#"
+name: minimal
+author: user@example.com
+workflow: main.nf
+"#;
+        let config: ProjectConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.name, "minimal");
+        assert_eq!(config.author, "user@example.com");
+        assert_eq!(config.workflow, "main.nf");
+        assert!(config.template.is_none());
+        assert!(config.assets.is_empty());
+        assert!(config.participants.is_empty());
+    }
+}
