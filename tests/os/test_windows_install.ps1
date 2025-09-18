@@ -123,6 +123,12 @@ if ($env:CI -or $env:GITHUB_ACTIONS) {
         Write-Host "Installing SyftBox via installer script..." -ForegroundColor Yellow
         try {
             powershell -ExecutionPolicy ByPass -c "irm https://syftbox.net/install.ps1 | iex"
+            # Ensure PATH includes the user local bin for this process
+            $userLocalBin = "$env:USERPROFILE\.local\bin"
+            if (Test-Path "$userLocalBin\syftbox.exe") {
+                $env:PATH = "$userLocalBin;$env:PATH"
+            }
+
             if (Test-Command "syftbox") {
                 Write-Host "SyftBox installed successfully" -ForegroundColor Green
             } else {
@@ -222,6 +228,12 @@ if (Test-Command "docker") {
 }
 
 # Check SyftBox installation
+# Ensure user local bin is in PATH for this session
+$userLocalBin = "$env:USERPROFILE\.local\bin"
+if (Test-Path "$userLocalBin\syftbox.exe") {
+    $env:PATH = "$userLocalBin;$env:PATH"
+}
+
 if (Test-Command "syftbox") {
     Write-Host "SyftBox installed:" -ForegroundColor Green
     & syftbox -v
