@@ -437,6 +437,88 @@ pub async fn perform_project_action(
     Ok(())
 }
 
+/// Process a project message non-interactively (for automated testing)
+pub async fn process_project_message(
+    config: &Config,
+    message_id: &str,
+    test: bool,
+    _real: bool,
+    participant: Option<String>,
+    approve: bool,
+) -> anyhow::Result<()> {
+    let (db, _sync) = init_message_system(config)?;
+    let msg = db
+        .get_message(message_id)?
+        .ok_or_else(|| anyhow::anyhow!("Message not found: {}", message_id))?;
+
+    // Verify it's a project message
+    if !matches!(
+        msg.message_type,
+        crate::messages::MessageType::Project { .. }
+    ) {
+        return Err(anyhow::anyhow!(
+            "Message {} is not a project message",
+            message_id
+        ));
+    }
+
+    // Build the project copy in private directory
+    let dest = build_run_project_copy(config, &msg)?;
+
+    // Determine participant source
+    let participant_source = if let Some(ref p) = participant {
+        p.clone()
+    } else {
+        return Err(anyhow::anyhow!(
+            "No participant specified. Please provide a participant source with --participant"
+        ));
+    };
+
+    // Run the project
+    use crate::cli::commands::run::{execute as run_execute, RunParams};
+
+    let result = run_execute(RunParams {
+        project_folder: dest.to_string_lossy().to_string(),
+        participant_source: participant_source.clone(),
+        test,
+        download: true,
+        dry_run: false,
+        with_docker: false,
+        work_dir: None,
+        resume: false,
+        template: Some("snp".to_string()),
+    })
+    .await;
+
+    match result {
+        Ok(_) => {
+            println!(
+                "✓ Project processed successfully with participant: {}",
+                participant_source
+            );
+
+            // Show results location
+            let results_base = if test { "results-test" } else { "results-real" };
+            let results_dir = dest.join(results_base).join(&participant_source);
+            if results_dir.exists() {
+                println!("Results saved to: {}", results_dir.display());
+            }
+
+            // Approve if requested
+            if approve {
+                approve_project(config, &msg).await?;
+                println!("✓ Project approved and results sent to sender");
+            }
+        }
+        Err(e) => {
+            eprintln!("✗ Failed to process project: {}", e);
+            return Err(e);
+        }
+    }
+
+    Ok(())
+}
+
 fn archive_project(config: &Config, msg: &Message) -> anyhow::Result<()> {
     // Update syft.pub.yaml by removing the results write rule
     let meta = msg

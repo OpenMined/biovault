@@ -160,6 +160,9 @@ pub async fn add(
     aligned: Option<String>,
     template: Option<String>,
     snp: Option<String>,
+    reference: Option<String>,
+    ref_version: Option<String>,
+    non_interactive: bool,
 ) -> Result<()> {
     println!("{}", "Adding new participant...".green().bold());
 
@@ -178,22 +181,34 @@ pub async fn add(
 
     let participant_id = match id {
         Some(id) => id,
-        None => Input::<String>::new()
-            .with_prompt("Enter participant ID")
-            .interact_text()?,
+        None => {
+            if non_interactive {
+                return Err(anyhow!(
+                    "Participant ID is required in non-interactive mode"
+                ));
+            }
+            Input::<String>::new()
+                .with_prompt("Enter participant ID")
+                .interact_text()?
+        }
     };
 
     if participants_file.participants.contains_key(&participant_id) {
-        let overwrite = Confirm::new()
-            .with_prompt(format!(
-                "Participant '{}' already exists. Overwrite?",
-                participant_id
-            ))
-            .interact()?;
+        if non_interactive {
+            // In non-interactive mode, just overwrite
+            println!("⚠ Overwriting existing participant '{}'", participant_id);
+        } else {
+            let overwrite = Confirm::new()
+                .with_prompt(format!(
+                    "Participant '{}' already exists. Overwrite?",
+                    participant_id
+                ))
+                .interact()?;
 
-        if !overwrite {
-            println!("Cancelled.");
-            return Ok(());
+            if !overwrite {
+                println!("Cancelled.");
+                return Ok(());
+            }
         }
     }
 
@@ -201,17 +216,24 @@ pub async fn add(
     if template_type == "snp" {
         let snp_file = match snp {
             Some(file) => file,
-            None => Input::<String>::new()
-                .with_prompt("Enter SNP file path")
-                .validate_with(|input: &String| -> Result<(), &str> {
-                    let expanded = expand_tilde(input);
-                    if Path::new(&expanded).exists() {
-                        Ok(())
-                    } else {
-                        Err("File does not exist")
-                    }
-                })
-                .interact_text()?,
+            None => {
+                if non_interactive {
+                    return Err(anyhow!(
+                        "SNP file path is required for SNP template in non-interactive mode"
+                    ));
+                }
+                Input::<String>::new()
+                    .with_prompt("Enter SNP file path")
+                    .validate_with(|input: &String| -> Result<(), &str> {
+                        let expanded = expand_tilde(input);
+                        if Path::new(&expanded).exists() {
+                            Ok(())
+                        } else {
+                            Err("File does not exist")
+                        }
+                    })
+                    .interact_text()?
+            }
         };
 
         let snp_file_normalized = normalize_path(&snp_file)?;
@@ -252,17 +274,24 @@ pub async fn add(
 
     let aligned_file = match aligned {
         Some(file) => file,
-        None => Input::<String>::new()
-            .with_prompt("Enter aligned file path (.cram, .bam, or .sam)")
-            .validate_with(|input: &String| -> Result<(), &str> {
-                let expanded = expand_tilde(input);
-                if Path::new(&expanded).exists() {
-                    Ok(())
-                } else {
-                    Err("File does not exist")
-                }
-            })
-            .interact_text()?,
+        None => {
+            if non_interactive {
+                return Err(anyhow!(
+                    "Aligned file path is required for default template in non-interactive mode"
+                ));
+            }
+            Input::<String>::new()
+                .with_prompt("Enter aligned file path (.cram, .bam, or .sam)")
+                .validate_with(|input: &String| -> Result<(), &str> {
+                    let expanded = expand_tilde(input);
+                    if Path::new(&expanded).exists() {
+                        Ok(())
+                    } else {
+                        Err("File does not exist")
+                    }
+                })
+                .interact_text()?
+        }
     };
 
     let aligned_file = normalize_path(&aligned_file)?;
@@ -280,16 +309,26 @@ pub async fn add(
     }
 
     let use_aligned_index = if aligned_index_exists {
-        Confirm::new()
-            .with_prompt(format!("Use this index file: {}?", aligned_index))
-            .default(true)
-            .interact()?
+        if non_interactive {
+            true // Use the auto-detected index in non-interactive mode
+        } else {
+            Confirm::new()
+                .with_prompt(format!("Use this index file: {}?", aligned_index))
+                .default(true)
+                .interact()?
+        }
     } else {
         false
     };
 
     let final_aligned_index = if use_aligned_index {
         aligned_index.clone()
+    } else if non_interactive {
+        // In non-interactive mode, use the default index path
+        if !Path::new(&aligned_index).exists() && check_samtools_installed() {
+            index_jobs.push((aligned_file.clone(), true));
+        }
+        aligned_index
     } else {
         let custom_index = Input::<String>::new()
             .with_prompt("Enter aligned index file path")
@@ -314,32 +353,47 @@ pub async fn add(
         .map(|v| format!(" (Possibly {} detected)", v))
         .unwrap_or_default();
 
-    let ref_version_choices = vec!["GRCh38", "GRCh37"];
-    let default_selection = match detected_version.as_deref() {
-        Some("GRCh38") => 0,
-        Some("GRCh37") => 1,
-        _ => 0,
+    let ref_version_str = if let Some(version) = ref_version {
+        version
+    } else if non_interactive {
+        // Use detected version or default to GRCh38
+        detected_version.unwrap_or_else(|| "GRCh38".to_string())
+    } else {
+        let ref_version_choices = vec!["GRCh38", "GRCh37"];
+        let default_selection = match detected_version.as_deref() {
+            Some("GRCh38") => 0,
+            Some("GRCh37") => 1,
+            _ => 0,
+        };
+
+        let ref_version_idx = Select::new()
+            .with_prompt(format!("Select reference version{}", version_hint))
+            .items(&ref_version_choices)
+            .default(default_selection)
+            .interact()?;
+
+        ref_version_choices[ref_version_idx].to_string()
     };
 
-    let ref_version_idx = Select::new()
-        .with_prompt(format!("Select reference version{}", version_hint))
-        .items(&ref_version_choices)
-        .default(default_selection)
-        .interact()?;
-
-    let ref_version = ref_version_choices[ref_version_idx].to_string();
-
-    let ref_file = Input::<String>::new()
-        .with_prompt("Enter reference genome file path (.fa or .fasta)")
-        .validate_with(|input: &String| -> Result<(), &str> {
-            let expanded = expand_tilde(input);
-            if Path::new(&expanded).exists() {
-                Ok(())
-            } else {
-                Err("File does not exist")
-            }
-        })
-        .interact_text()?;
+    let ref_file = if let Some(ref_path) = reference {
+        ref_path
+    } else if non_interactive {
+        return Err(anyhow!(
+            "Reference genome file path is required in non-interactive mode"
+        ));
+    } else {
+        Input::<String>::new()
+            .with_prompt("Enter reference genome file path (.fa or .fasta)")
+            .validate_with(|input: &String| -> Result<(), &str> {
+                let expanded = expand_tilde(input);
+                if Path::new(&expanded).exists() {
+                    Ok(())
+                } else {
+                    Err("File does not exist")
+                }
+            })
+            .interact_text()?
+    };
 
     let ref_file = normalize_path(&ref_file)?;
 
@@ -353,16 +407,26 @@ pub async fn add(
     }
 
     let use_ref_index = if ref_index_exists {
-        Confirm::new()
-            .with_prompt(format!("Use this reference index file: {}?", ref_index))
-            .default(true)
-            .interact()?
+        if non_interactive {
+            true // Use the auto-detected reference index in non-interactive mode
+        } else {
+            Confirm::new()
+                .with_prompt(format!("Use this reference index file: {}?", ref_index))
+                .default(true)
+                .interact()?
+        }
     } else {
         false
     };
 
     let final_ref_index = if use_ref_index {
         ref_index.clone()
+    } else if non_interactive {
+        // In non-interactive mode, use the default reference index path
+        if !Path::new(&ref_index).exists() && check_samtools_installed() {
+            index_jobs.push((ref_file.clone(), false));
+        }
+        ref_index
     } else {
         let custom_index = Input::<String>::new()
             .with_prompt("Enter reference index file path")
@@ -383,7 +447,7 @@ pub async fn add(
 
     let participant = Participant {
         id: participant_id.clone(),
-        ref_version: Some(ref_version),
+        ref_version: Some(ref_version_str),
         r#ref: Some(ref_file.clone()),
         ref_index: Some(normalize_path(&final_ref_index)?),
         aligned: Some(aligned_file.clone()),

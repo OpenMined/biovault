@@ -13,7 +13,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
-pub async fn submit(project_path: String, destination: String) -> Result<()> {
+pub async fn submit(
+    project_path: String,
+    destination: String,
+    non_interactive: bool,
+) -> Result<()> {
     let config = Config::load()?;
 
     // Parse destination - could be email or full syft URL
@@ -223,19 +227,24 @@ pub async fn submit(project_path: String, destination: String) -> Result<()> {
 
     // Prepare default message body and allow user to override
     let default_body = "I would like to run the following project.".to_string();
-    let use_custom = Confirm::new()
-        .with_prompt("Write a custom message body?")
-        .default(false)
-        .interact()
-        .unwrap_or(false);
-
-    let mut body = if use_custom {
-        match Editor::new().edit(&default_body) {
-            Ok(Some(content)) if !content.trim().is_empty() => content,
-            _ => default_body.clone(),
-        }
-    } else {
+    let mut body = if non_interactive {
+        // In non-interactive mode, use default message
         default_body.clone()
+    } else {
+        let use_custom = Confirm::new()
+            .with_prompt("Write a custom message body?")
+            .default(false)
+            .interact()
+            .unwrap_or(false);
+
+        if use_custom {
+            match Editor::new().edit(&default_body) {
+                Ok(Some(content)) if !content.trim().is_empty() => content,
+                _ => default_body.clone(),
+            }
+        } else {
+            default_body.clone()
+        }
     };
 
     // Add handy paths for the recipient to copy/paste
