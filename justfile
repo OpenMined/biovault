@@ -1,3 +1,5 @@
+set shell := ["bash", "-c"]
+
 DOCKER_DIR := "./syftbox/docker"
 SYFTBOX_DIR := "./syftbox"
 SBENV_DIR := "./sbenv"
