@@ -54,6 +54,7 @@ jobs:
         cat /etc/hosts | grep minio
 
     - name: Run integration tests with local clients
+      shell: bash
       run: |
         # Export CI environment variable so the justfile knows we're in CI
         export CI=true
