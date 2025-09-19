@@ -156,6 +156,15 @@ enum Commands {
             help = "Destination: either a datasite email (e.g., user@domain.com) or full Syft URL (e.g., syft://user@domain.com/public/biovault/participants.yaml#participants.ID)"
         )]
         destination: String,
+
+        #[arg(long, help = "Skip interactive prompts, use defaults")]
+        non_interactive: bool,
+
+        #[arg(
+            long,
+            help = "Force resubmission even if project was already submitted"
+        )]
+        force: bool,
     },
 
     #[command(about = "View and manage inbox messages")]
@@ -254,6 +263,15 @@ enum ParticipantCommands {
 
         #[arg(long, help = "SNP file path (for SNP template)")]
         snp: Option<String>,
+
+        #[arg(long, help = "Reference genome file path (.fa or .fasta)")]
+        reference: Option<String>,
+
+        #[arg(long, help = "Reference version (GRCh38 or GRCh37)")]
+        ref_version: Option<String>,
+
+        #[arg(long, help = "Skip interactive prompts, use defaults")]
+        non_interactive: bool,
     },
 
     #[command(about = "List all participants")]
@@ -382,6 +400,12 @@ enum MessageCommands {
     List {
         #[arg(short = 'u', long = "unread", help = "Show only unread messages")]
         unread: bool,
+
+        #[arg(short = 's', long = "sent", help = "Show sent messages")]
+        sent: bool,
+
+        #[arg(short = 'p', long = "projects", help = "Show only project messages")]
+        projects: bool,
     },
 
     #[command(about = "View a message thread")]
@@ -392,6 +416,33 @@ enum MessageCommands {
 
     #[command(about = "Sync messages (check for new and update ACKs)")]
     Sync,
+
+    #[command(about = "Process a project message (run test/real)")]
+    Process {
+        #[arg(help = "Message ID of the project to process")]
+        message_id: String,
+
+        #[arg(long, help = "Run with test data", conflicts_with = "real")]
+        test: bool,
+
+        #[arg(long, help = "Run with real data", conflicts_with = "test")]
+        real: bool,
+
+        #[arg(long, help = "Participant to use (defaults to first available)")]
+        participant: Option<String>,
+
+        #[arg(long, help = "Approve after successful run")]
+        approve: bool,
+
+        #[arg(long, help = "Non-interactive mode (skip prompts)")]
+        non_interactive: bool,
+    },
+
+    #[command(about = "Archive a project message (revoke write permissions)")]
+    Archive {
+        #[arg(help = "Message ID to archive")]
+        message_id: String,
+    },
 }
 
 #[tokio::main]
@@ -480,8 +531,20 @@ async fn main() -> Result<()> {
                 aligned,
                 template,
                 snp,
+                reference,
+                ref_version,
+                non_interactive,
             } => {
-                commands::participant::add(id, aligned, template, snp).await?;
+                commands::participant::add(
+                    id,
+                    aligned,
+                    template,
+                    snp,
+                    reference,
+                    ref_version,
+                    non_interactive,
+                )
+                .await?;
             }
             ParticipantCommands::List => {
                 commands::participant::list().await?;
@@ -546,8 +609,10 @@ async fn main() -> Result<()> {
         Commands::Submit {
             project_path,
             destination,
+            non_interactive,
+            force,
         } => {
-            commands::submit::submit(project_path, destination).await?;
+            commands::submit::submit(project_path, destination, non_interactive, force).await?;
         }
         Commands::Inbox {
             interactive,
@@ -604,9 +669,13 @@ async fn main() -> Result<()> {
                 let config = biovault::config::Config::load()?;
                 commands::messages::delete_message(&config, &message_id)?;
             }
-            MessageCommands::List { unread } => {
+            MessageCommands::List {
+                unread,
+                sent,
+                projects,
+            } => {
                 let config = biovault::config::Config::load()?;
-                commands::messages::list_messages(&config, unread)?;
+                commands::messages::list_messages(&config, unread, sent, projects)?;
             }
             MessageCommands::Thread { thread_id } => {
                 let config = biovault::config::Config::load()?;
@@ -615,6 +684,30 @@ async fn main() -> Result<()> {
             MessageCommands::Sync => {
                 let config = biovault::config::Config::load()?;
                 commands::messages::sync_messages(&config)?;
+            }
+            MessageCommands::Process {
+                message_id,
+                test,
+                real,
+                participant,
+                approve,
+                non_interactive,
+            } => {
+                let config = biovault::config::Config::load()?;
+                commands::messages::process_project_message(
+                    &config,
+                    &message_id,
+                    test,
+                    real,
+                    participant,
+                    approve,
+                    non_interactive,
+                )
+                .await?;
+            }
+            MessageCommands::Archive { message_id } => {
+                let config = biovault::config::Config::load()?;
+                commands::messages::archive_message(&config, &message_id)?;
             }
         },
     }

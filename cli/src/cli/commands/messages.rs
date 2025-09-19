@@ -14,6 +14,18 @@ use std::path::PathBuf;
 
 const MESSAGE_ENDPOINT: &str = "/message";
 
+/// Expand environment variables in text (specifically $SYFTBOX_DATA_DIR)
+fn expand_env_vars_in_text(text: &str) -> Result<String> {
+    let mut result = text.to_string();
+
+    // Expand $SYFTBOX_DATA_DIR
+    if let Ok(data_dir) = std::env::var("SYFTBOX_DATA_DIR") {
+        result = result.replace("$SYFTBOX_DATA_DIR", &data_dir);
+    }
+
+    Ok(result)
+}
+
 /// Get the path to the message database
 pub fn get_message_db_path(config: &Config) -> Result<PathBuf> {
     let biovault_dir = config.get_biovault_dir()?;
@@ -150,7 +162,12 @@ pub fn delete_message(config: &Config, message_id: &str) -> Result<()> {
 }
 
 /// List messages
-pub fn list_messages(config: &Config, unread_only: bool) -> Result<()> {
+pub fn list_messages(
+    config: &Config,
+    unread_only: bool,
+    sent_only: bool,
+    projects_only: bool,
+) -> Result<()> {
     let (db, sync) = init_message_system(config)?;
 
     // Quietly sync to get latest messages and show notification if new
@@ -159,11 +176,23 @@ pub fn list_messages(config: &Config, unread_only: bool) -> Result<()> {
         println!("🆕 {} new message(s) received", count);
     }
 
-    let messages = if unread_only {
+    let mut messages = if unread_only {
         db.list_unread_messages()?
+    } else if sent_only {
+        db.list_sent_messages(Some(50))?
     } else {
         db.list_messages(Some(50))?
     };
+
+    // Filter for projects if requested
+    if projects_only {
+        messages.retain(|msg| {
+            matches!(
+                msg.message_type,
+                crate::messages::MessageType::Project { .. }
+            )
+        });
+    }
 
     if messages.is_empty() {
         if unread_only {
@@ -257,7 +286,10 @@ pub async fn read_message(config: &Config, message_id: &str) -> Result<()> {
 
     println!("\nBody:");
     println!("─────");
-    println!("{}", msg.body);
+
+    // Expand environment variables in message body
+    let expanded_body = expand_env_vars_in_text(&msg.body)?;
+    println!("{}", expanded_body);
 
     // If this is a project message with metadata, attempt verification and show details
     if let Some(meta) = &msg.metadata {
@@ -434,6 +466,107 @@ pub async fn perform_project_action(
         ProjectAction::RunTest => run_project_test(config, &msg).await?,
         ProjectAction::RunReal => run_project_real(config, &msg).await?,
     }
+    Ok(())
+}
+
+/// Process a project message non-interactively (for automated testing)
+pub async fn process_project_message(
+    config: &Config,
+    message_id: &str,
+    test: bool,
+    _real: bool,
+    participant: Option<String>,
+    approve: bool,
+    _non_interactive: bool, // Currently always non-interactive
+) -> anyhow::Result<()> {
+    let (db, _sync) = init_message_system(config)?;
+    let msg = db
+        .get_message(message_id)?
+        .ok_or_else(|| anyhow::anyhow!("Message not found: {}", message_id))?;
+
+    // Verify it's a project message
+    if !matches!(
+        msg.message_type,
+        crate::messages::MessageType::Project { .. }
+    ) {
+        return Err(anyhow::anyhow!(
+            "Message {} is not a project message",
+            message_id
+        ));
+    }
+
+    // Build the project copy in private directory
+    let dest = build_run_project_copy(config, &msg)?;
+
+    // Determine participant source
+    let participant_source = if let Some(ref p) = participant {
+        // Normalize the participant source if it's just an ID
+        if !test {
+            // For real data, normalize the participant ID to full path
+            normalize_participant_source_for_real(p)?
+        } else {
+            // For test data, just use the ID as-is (sample data)
+            p.clone()
+        }
+    } else {
+        return Err(anyhow::anyhow!(
+            "No participant specified. Please provide a participant source with --participant"
+        ));
+    };
+
+    // Run the project
+    use crate::cli::commands::run::{execute as run_execute, RunParams};
+
+    let result = run_execute(RunParams {
+        project_folder: dest.to_string_lossy().to_string(),
+        participant_source: participant_source.clone(),
+        test,
+        download: true,
+        dry_run: false,
+        with_docker: false,
+        work_dir: None,
+        resume: false,
+        template: Some("snp".to_string()),
+    })
+    .await;
+
+    match result {
+        Ok(_) => {
+            println!(
+                "✓ Project processed successfully with participant: {}",
+                participant_source
+            );
+
+            // Show results location
+            let results_base = if test { "results-test" } else { "results-real" };
+            let results_dir = dest.join(results_base).join(&participant_source);
+            if results_dir.exists() {
+                println!("Results saved to: {}", results_dir.display());
+            }
+
+            // Approve if requested
+            if approve {
+                approve_project_non_interactive(config, &msg).await?;
+                println!("✓ Project approved and results sent to sender");
+            }
+        }
+        Err(e) => {
+            eprintln!("✗ Failed to process project: {}", e);
+            return Err(e);
+        }
+    }
+
+    Ok(())
+}
+
+/// Archive a message (for non-interactive use)
+pub fn archive_message(config: &Config, message_id: &str) -> anyhow::Result<()> {
+    let (db, _sync) = init_message_system(config)?;
+    let msg = db
+        .get_message(message_id)?
+        .ok_or_else(|| anyhow::anyhow!("Message not found: {}", message_id))?;
+
+    archive_project(config, &msg)?;
     Ok(())
 }
 
@@ -699,6 +832,82 @@ async fn run_project_real(config: &Config, msg: &Message) -> anyhow::Result<()> 
     Ok(())
 }
 
+/// Non-interactive version of approve_project for automated testing
+async fn approve_project_non_interactive(config: &Config, msg: &Message) -> anyhow::Result<()> {
+    let dest = build_run_project_copy(config, msg)?;
+    let results_dir = dest.join("results-real");
+    let needs_run = !results_dir.exists()
+        || fs::read_dir(&results_dir)
+            .map(|mut i| i.next().is_none())
+            .unwrap_or(true);
+    if needs_run {
+        println!("No results found. Running on real data before approval...");
+        run_project_real(config, msg).await?;
+    }
+
+    // Release results to sender shared location
+    let meta = msg
+        .metadata
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("missing metadata"))?;
+    let (sender_root, _folder) = sender_project_root(config, meta)?;
+    let sender_results = sender_root.join("results");
+    copy_dir_recursive(&results_dir, &sender_results)?;
+
+    // Get project details for the message
+    let project_location = meta
+        .get("project_location")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+
+    // Check if results exist and get basic info
+    let results_info = if sender_results.exists() {
+        let mut info = Vec::new();
+        if let Ok(entries) = fs::read_dir(&sender_results) {
+            for entry in entries.flatten() {
+                if entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+                    info.push(format!("{}/", entry.file_name().to_string_lossy()));
+                } else {
+                    info.push(entry.file_name().to_string_lossy().to_string());
+                }
+            }
+        }
+        if info.is_empty() {
+            "No results found".to_string()
+        } else {
+            format!("Results:\n  {}", info.join("\n  "))
+        }
+    } else {
+        "Results directory not found".to_string()
+    };
+
+    // Create relative path for results location
+    let data_dir = config.get_syftbox_data_dir()?;
+    let relative_results = if sender_results.starts_with(&data_dir) {
+        format!(
+            "$SYFTBOX_DATA_DIR/{}",
+            sender_results.strip_prefix(&data_dir)?.to_string_lossy()
+        )
+    } else {
+        sender_results.to_string_lossy().to_string()
+    };
+
+    // Create the default approval message with results location
+    let body = format!(
+        "Your project has been approved.\n\nProject location: {}\nResults location: {}\n\n{}",
+        project_location, relative_results, results_info
+    );
+
+    // Include results_path in the status update so sender can see it directly
+    let extra = json!({ "results_path": relative_results });
+    send_status_ack_with_meta(config, msg, "approved", Some(body), Some(extra))?;
+    println!(
+        "{}",
+        "Approved, results released, and sender notified.".green()
+    );
+    Ok(())
+}
+
 async fn approve_project(config: &Config, msg: &Message) -> anyhow::Result<()> {
     let dest = build_run_project_copy(config, msg)?;
     let results_dir = dest.join("results-real");
@@ -747,12 +956,21 @@ async fn approve_project(config: &Config, msg: &Message) -> anyhow::Result<()> {
         "Results directory not found".to_string()
     };
 
+    // Create relative path for results location
+    let data_dir = config.get_syftbox_data_dir()?;
+    let relative_results = if sender_results.starts_with(&data_dir) {
+        format!(
+            "$SYFTBOX_DATA_DIR/{}",
+            sender_results.strip_prefix(&data_dir)?.to_string_lossy()
+        )
+    } else {
+        sender_results.to_string_lossy().to_string()
+    };
+
     // Create the default approval message with results location
     let default_message = format!(
         "Your project has been approved.\n\nProject location: {}\nResults location: {}\n\n{}",
-        project_location,
-        sender_results.display(),
-        results_info
+        project_location, relative_results, results_info
     );
 
     // Optional approval message
@@ -773,7 +991,7 @@ async fn approve_project(config: &Config, msg: &Message) -> anyhow::Result<()> {
     };
 
     // Include results_path in the status update so sender can see it directly
-    let extra = json!({ "results_path": sender_results.to_string_lossy().to_string() });
+    let extra = json!({ "results_path": relative_results });
     send_status_ack_with_meta(config, msg, "approved", body, Some(extra))?;
     println!(
         "{}",
@@ -873,7 +1091,9 @@ pub fn view_thread(config: &Config, thread_id: &str) -> Result<()> {
             println!("Subject: {}", subj);
         }
 
-        println!("{}", msg.body);
+        // Expand environment variables in message body
+        let expanded_body = expand_env_vars_in_text(&msg.body)?;
+        println!("{}", expanded_body);
         println!("─────────────────────");
     }
 
@@ -1200,7 +1420,7 @@ mod tests {
         );
         db.insert_message(&m)?;
         // Should render list without interacting
-        list_messages(&cfg, false)?;
+        list_messages(&cfg, false, false, false)?;
         Ok(())
     }
 
@@ -1287,8 +1507,8 @@ mod tests {
         let cfg = create_test_config();
 
         // With empty DB
-        super::list_messages(&cfg, false)?;
-        super::list_messages(&cfg, true)?;
+        super::list_messages(&cfg, false, false, false)?;
+        super::list_messages(&cfg, true, false, false)?;
         Ok(())
     }
 }
