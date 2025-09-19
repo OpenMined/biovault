@@ -167,7 +167,10 @@ fn fix_yaml_file(path: &Path) -> anyhow::Result<()> {
     // This is safer than trying to fix various indentation issues
 
     // Determine which template to use based on the path
-    let new_content = if path.to_string_lossy().contains("/rpc/") {
+    let s = path.to_string_lossy();
+    let is_rpc =
+        s.contains("/rpc/") || s.contains("\\rpc\\") || s.ends_with("/rpc") || s.ends_with("\\rpc");
+    let new_content = if is_rpc {
         // RPC permission file - allow read/write for requests
         r#"rules:
   - pattern: '**/*.request'
@@ -194,4 +197,85 @@ fn fix_yaml_file(path: &Path) -> anyhow::Result<()> {
     fs::write(path, new_content)?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config;
+    use tempfile::TempDir;
+
+    #[test]
+    fn version_compare_works() {
+        assert!(version_less_than("0.1.0", "0.1.27"));
+        assert!(!version_less_than("0.2.0", "0.1.27"));
+        assert!(!version_less_than("0.1.27", "0.1.27"));
+        assert!(version_less_than("0.1", "0.1.1"));
+    }
+
+    #[test]
+    fn upgrade_writes_templates_and_fixes_permissions() {
+        let tmp = TempDir::new().unwrap();
+        // Point BIOVAULT home to temp
+        config::set_test_biovault_home(tmp.path().join(".bv"));
+        std::fs::create_dir_all(tmp.path().join(".bv")).unwrap();
+
+        // Seed config with old version and syftbox config path
+        let email = "user@example.com";
+        let cfg_path = tmp.path().join(".bv/config.yaml");
+        let syft_dir = tmp.path().join("syft");
+        std::fs::create_dir_all(&syft_dir).unwrap();
+        let syft_cfg = syft_dir.join("config.json");
+        let data_root = tmp.path().join("data");
+        std::fs::create_dir_all(&data_root).unwrap();
+        std::fs::write(
+            &syft_cfg,
+            serde_json::json!({"data_dir": data_root.to_string_lossy()}).to_string(),
+        )
+        .unwrap();
+
+        let cfg = Config {
+            email: email.into(),
+            syftbox_config: Some(syft_cfg.to_string_lossy().to_string()),
+            version: Some("0.1.0".into()),
+        };
+        cfg.save(&cfg_path).unwrap();
+
+        // Seed permission files with dummy content to be fixed
+        let rpc_perm = data_root
+            .join("datasites")
+            .join(email)
+            .join("app_data/biovault/rpc/syft.pub.yaml");
+        let app_perm = data_root
+            .join("datasites")
+            .join(email)
+            .join("app_data/biovault/syft.pub.yaml");
+        std::fs::create_dir_all(rpc_perm.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(app_perm.parent().unwrap()).unwrap();
+        std::fs::write(&rpc_perm, "bad").unwrap();
+        std::fs::write(&app_perm, "bad").unwrap();
+
+        // Run upgrade
+        check_and_upgrade().unwrap();
+
+        // Config version updated
+        let updated = Config::from_file(&cfg_path).unwrap();
+        assert_eq!(updated.version.as_deref(), Some(CURRENT_VERSION));
+
+        // Templates written
+        let env_dir = tmp.path().join(".bv/env");
+        assert!(env_dir.join("default/template.nf").exists());
+        assert!(env_dir.join("default/nextflow.config").exists());
+        assert!(env_dir.join("snp/template.nf").exists());
+        assert!(env_dir.join("snp/nextflow.config").exists());
+
+        // Permission files fixed with expected content prefixes
+        let rpc_fixed = std::fs::read_to_string(&rpc_perm).unwrap();
+        assert!(rpc_fixed.contains("**/*.request"));
+        let app_fixed = std::fs::read_to_string(&app_perm).unwrap();
+        assert!(app_fixed.contains("rules:"));
+
+        // Cleanup thread-local override
+        config::clear_test_biovault_home();
+    }
 }

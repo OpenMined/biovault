@@ -379,4 +379,127 @@ mod tests {
         fs::create_dir_all(&dest2).unwrap();
         copy_project_files(&src2, &dest2).unwrap();
     }
+
+    #[test]
+    fn test_hash_file_with_different_content() {
+        let tmp = TempDir::new().unwrap();
+
+        let file1 = tmp.path().join("file1.txt");
+        fs::write(&file1, b"content1").unwrap();
+        let hash1 = hash_file(&file1).unwrap();
+
+        let file2 = tmp.path().join("file2.txt");
+        fs::write(&file2, b"content2").unwrap();
+        let hash2 = hash_file(&file2).unwrap();
+
+        // Different content should produce different hashes
+        assert_ne!(hash1, hash2);
+
+        // Same content should produce same hash
+        let file3 = tmp.path().join("file3.txt");
+        fs::write(&file3, b"content1").unwrap();
+        let hash3 = hash_file(&file3).unwrap();
+        assert_eq!(hash1, hash3);
+    }
+
+    #[test]
+    fn test_hash_file_empty_file() {
+        let tmp = TempDir::new().unwrap();
+        let empty_file = tmp.path().join("empty.txt");
+        fs::write(&empty_file, b"").unwrap();
+        let hash = hash_file(&empty_file).unwrap();
+        // Blake3 hash of empty string is a known value
+        assert_eq!(hash.len(), 64);
+    }
+
+    #[test]
+    fn test_copy_project_files_missing_workflow() {
+        let tmp = TempDir::new().unwrap();
+        let src = tmp.path().join("src");
+        let dest = tmp.path().join("dest");
+        fs::create_dir_all(&src).unwrap();
+        fs::create_dir_all(&dest).unwrap();
+        // No workflow.nf file
+
+        let result = copy_project_files(&src, &dest);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_copy_project_files_with_symlinks() {
+        let tmp = TempDir::new().unwrap();
+        let src = tmp.path().join("src");
+        let dest = tmp.path().join("dest");
+
+        fs::create_dir_all(&src).unwrap();
+        fs::create_dir_all(&dest).unwrap();
+        fs::create_dir_all(src.join("assets")).unwrap();
+
+        fs::write(src.join("workflow.nf"), b"workflow").unwrap();
+        fs::write(src.join("assets/real_file.txt"), b"real").unwrap();
+
+        // Create a symlink (this test will only work on Unix-like systems)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            let _ = symlink(
+                src.join("assets/real_file.txt"),
+                src.join("assets/link_file.txt"),
+            );
+        }
+
+        let result = copy_project_files(&src, &dest);
+        assert!(result.is_ok());
+        assert!(dest.join("workflow.nf").exists());
+    }
+
+    #[test]
+    fn test_copy_project_files_deeply_nested() {
+        let tmp = TempDir::new().unwrap();
+        let src = tmp.path().join("src");
+        let dest = tmp.path().join("dest");
+
+        fs::create_dir_all(&dest).unwrap();
+        fs::create_dir_all(src.join("assets/a/b/c/d")).unwrap();
+        fs::write(src.join("workflow.nf"), b"wf").unwrap();
+        fs::write(src.join("assets/a/b/c/d/deep.txt"), b"deep").unwrap();
+
+        copy_project_files(&src, &dest).unwrap();
+
+        assert!(dest.join("workflow.nf").exists());
+        assert!(dest.join("assets/a/b/c/d/deep.txt").exists());
+
+        let content = fs::read(dest.join("assets/a/b/c/d/deep.txt")).unwrap();
+        assert_eq!(content, b"deep");
+    }
+
+    #[test]
+    fn test_copy_project_files_preserves_content() {
+        let tmp = TempDir::new().unwrap();
+        let src = tmp.path().join("src");
+        let dest = tmp.path().join("dest");
+
+        fs::create_dir_all(&dest).unwrap();
+        fs::create_dir_all(src.join("assets")).unwrap();
+
+        let workflow_content = b"nextflow.enable.dsl=2\nworkflow { }";
+        let asset_content = b"important data";
+
+        fs::write(src.join("workflow.nf"), workflow_content).unwrap();
+        fs::write(src.join("assets/data.csv"), asset_content).unwrap();
+
+        copy_project_files(&src, &dest).unwrap();
+
+        let copied_workflow = fs::read(dest.join("workflow.nf")).unwrap();
+        let copied_asset = fs::read(dest.join("assets/data.csv")).unwrap();
+
+        assert_eq!(copied_workflow, workflow_content);
+        assert_eq!(copied_asset, asset_content);
+    }
+
+    #[test]
+    fn test_hash_file_nonexistent() {
+        let result = hash_file(Path::new("/nonexistent/file.txt"));
+        assert!(result.is_err());
+    }
 }

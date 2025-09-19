@@ -1,3 +1,5 @@
+#![cfg(feature = "e2e-tests")]
+
 use std::env;
 use std::fs;
 use std::path::PathBuf;

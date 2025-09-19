@@ -1246,4 +1246,29 @@ status: {}
 
         crate::config::clear_test_biovault_home();
     }
+
+    #[tokio::test]
+    async fn create_scaffold_project_without_example() {
+        let tmp = TempDir::new().unwrap();
+        let proj_dir = tmp.path().join("myproj");
+        // Provide email via env var to avoid requiring a real config
+        std::env::set_var("SYFTBOX_EMAIL", "scaffold@example.com");
+        super::create(
+            Some("myproj".into()),
+            Some(proj_dir.to_string_lossy().to_string()),
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(proj_dir.join("project.yaml").exists());
+        assert!(proj_dir.join("workflow.nf").exists());
+        assert!(proj_dir.join("assets").is_dir());
+        std::env::remove_var("SYFTBOX_EMAIL");
+    }
+
+    #[test]
+    fn list_examples_runs() {
+        // Should list embedded examples without error
+        super::list_examples().unwrap();
+    }
 }

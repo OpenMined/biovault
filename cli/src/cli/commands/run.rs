@@ -1214,7 +1214,10 @@ participants:
         let src = ParticipantSource::LocalFile(PathBuf::from("participants.yaml"), None);
         // Point cache dir to a writable temp to avoid platform HOME surprises
         let cache_td = TempDir::new().unwrap();
-        std::env::set_var("BIOVAULT_CACHE_DIR", cache_td.path());
+        std::env::set_var(
+            "BIOVAULT_CACHE_DIR",
+            cache_td.path().to_string_lossy().to_string(),
+        );
         let out = ensure_files_exist(&p, false, &src, None).await.unwrap();
         std::env::remove_var("BIOVAULT_CACHE_DIR");
         assert_eq!(out.ref_path.as_deref(), p.ref_path.as_deref());
@@ -1267,7 +1270,10 @@ participants:
 
         // Use a writable cache dir during test
         let cache_td = TempDir::new().unwrap();
-        std::env::set_var("BIOVAULT_CACHE_DIR", cache_td.path());
+        std::env::set_var(
+            "BIOVAULT_CACHE_DIR",
+            cache_td.path().to_string_lossy().to_string(),
+        );
         // Should return Ok before trying to execute nextflow
         execute(params).await.expect("dry-run ok");
         std::env::remove_var("BIOVAULT_CACHE_DIR");

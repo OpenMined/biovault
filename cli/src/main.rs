@@ -20,6 +20,23 @@ fn validate_example_name(s: &str) -> Result<String, String> {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_example_name_accepts_known_and_rejects_unknown() {
+        let list = cli::examples::list_examples();
+        // When at least one example exists, it validates
+        if let Some(first) = list.first() {
+            assert!(validate_example_name(first).is_ok());
+        }
+        // Unknown example returns Err with helpful message
+        let err = validate_example_name("__definitely_not_real__").unwrap_err();
+        assert!(err.contains("Unknown example"));
+    }
+}
+
 #[derive(Parser)]
 #[command(
     name = "bv",

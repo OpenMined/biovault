@@ -256,6 +256,8 @@ fn is_google_colab() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use tempfile::TempDir;
 
     #[test]
     fn java_version_parsing_various_formats() {
@@ -287,5 +289,177 @@ mod tests {
     #[test]
     fn check_version_non_java_defaults_true() {
         assert!(check_version("not-java", 9999));
+    }
+
+    #[test]
+    fn test_parse_java_version_edge_cases() {
+        // Test various edge cases
+        assert_eq!(parse_java_version(""), None);
+        assert_eq!(parse_java_version("version"), None);
+        assert_eq!(parse_java_version("version \"\""), None);
+        assert_eq!(parse_java_version("version \"not a number\""), None);
+
+        // Test versions without quotes
+        assert_eq!(parse_java_version("java 17"), None);
+
+        // Test malformed versions
+        assert_eq!(parse_java_version("version \"1.\""), None);
+        assert_eq!(parse_java_version("version \"1.x.0\""), None);
+    }
+
+    #[test]
+    fn test_parse_java_version_modern_formats() {
+        // Test various modern Java version formats
+        assert_eq!(
+            parse_java_version("openjdk version \"17\" 2021-09-14"),
+            Some(17)
+        );
+        assert_eq!(
+            parse_java_version("openjdk version \"21.0.1\" 2023-10-17 LTS"),
+            Some(21)
+        );
+        assert_eq!(
+            parse_java_version("java version \"19.0.2\" 2023-01-17"),
+            Some(19)
+        );
+    }
+
+    #[test]
+    fn test_parse_java_version_legacy_formats() {
+        // Test legacy Java version formats (1.x style)
+        assert_eq!(parse_java_version("java version \"1.7.0_80\""), Some(7));
+        assert_eq!(parse_java_version("java version \"1.6.0_45\""), Some(6));
+        assert_eq!(parse_java_version("java version \"1.8.0_351\""), Some(8));
+    }
+
+    #[test]
+    fn test_google_colab_detection() {
+        // Save current env state
+        let was_set = env::var("COLAB_RELEASE_TAG").is_ok();
+        let old_value = env::var("COLAB_RELEASE_TAG").ok();
+
+        // Test detection when COLAB_RELEASE_TAG is set
+        env::set_var("COLAB_RELEASE_TAG", "release-123");
+        assert!(is_google_colab());
+
+        // Clean up
+        if was_set {
+            if let Some(val) = old_value {
+                env::set_var("COLAB_RELEASE_TAG", val);
+            }
+        } else {
+            env::remove_var("COLAB_RELEASE_TAG");
+        }
+    }
+
+    #[test]
+    fn test_google_colab_detection_prefix() {
+        // Test detection with other COLAB_ prefixed vars
+        let was_set = env::var("COLAB_TEST_VAR").is_ok();
+
+        env::set_var("COLAB_TEST_VAR", "test");
+        assert!(is_google_colab());
+
+        // Clean up
+        if !was_set {
+            env::remove_var("COLAB_TEST_VAR");
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn execute_reports_missing_in_clean_env() {
+        // Force an empty PATH so no dependencies are found
+        let old_path = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var("PATH", "");
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let res = rt.block_on(execute());
+        assert!(res.is_err());
+
+        // Restore PATH
+        std::env::set_var("PATH", old_path);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    #[cfg_attr(
+        not(feature = "slow-tests"),
+        ignore = "env-dependent; covered in slow/integration"
+    )]
+    #[cfg_attr(windows, ignore = "Windows shell semantics; covered in integration CI")]
+    fn execute_with_all_tools_available_returns_ok() {
+        let dir = TempDir::new().unwrap();
+        // Create fake tools in a temp dir and prepend to PATH
+        let make_exec = |name: &str, body: &str| {
+            let p = dir.path().join(name);
+            fs::write(&p, format!("#!/bin/sh\n{}\n", body)).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut perm = fs::metadata(&p).unwrap().permissions();
+                perm.set_mode(0o755);
+                fs::set_permissions(&p, perm).unwrap();
+            }
+            p
+        };
+
+        // java prints version to stderr
+        make_exec("java", "echo 'openjdk version \"21\" 2024-01-01' 1>&2");
+        // docker returns success on 'info'
+        make_exec("docker", "[ \"$1\" = \"info\" ] && exit 0; exit 0");
+        // nextflow and syftbox stubs
+        make_exec("nextflow", "exit 0");
+        make_exec("syftbox", "exit 0");
+
+        // Prepend temp dir to PATH
+        let old_path = std::env::var("PATH").unwrap_or_default();
+        let new_path = format!("{}:{}", dir.path().display(), old_path);
+        std::env::set_var("PATH", &new_path);
+
+        // Run
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let res = rt.block_on(execute());
+        assert!(res.is_ok());
+
+        // Restore PATH
+        std::env::set_var("PATH", old_path);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn execute_with_docker_not_running_reports_warning() {
+        let dir = TempDir::new().unwrap();
+        let make_exec = |name: &str, body: &str| {
+            let p = dir.path().join(name);
+            fs::write(&p, format!("#!/bin/sh\n{}\n", body)).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut perm = fs::metadata(&p).unwrap().permissions();
+                perm.set_mode(0o755);
+                fs::set_permissions(&p, perm).unwrap();
+            }
+            p
+        };
+
+        // Provide java and nextflow and syftbox present
+        make_exec("java", "echo 'openjdk version \"21\"' 1>&2");
+        make_exec("nextflow", "exit 0");
+        make_exec("syftbox", "exit 0");
+        // docker exists but 'info' fails
+        make_exec("docker", "[ \"$1\" = \"info\" ] && exit 1; exit 0");
+
+        // Prepend
+        let old_path = std::env::var("PATH").unwrap_or_default();
+        let new_path = format!("{}:{}", dir.path().display(), old_path);
+        std::env::set_var("PATH", &new_path);
+
+        // Run: should return Err because a service is not running
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let res = rt.block_on(execute());
+        assert!(res.is_err());
+
+        std::env::set_var("PATH", old_path);
     }
 }

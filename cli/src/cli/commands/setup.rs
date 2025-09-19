@@ -1091,4 +1091,58 @@ mod tests {
     async fn setup_arch_returns_ok_when_pacman_missing() {
         super::setup_arch().await.unwrap();
     }
+
+    #[test]
+    fn winget_to_choco_mapping() {
+        assert_eq!(
+            super::map_winget_pkg_to_choco("Microsoft.OpenJDK"),
+            "openjdk"
+        );
+        // Unknown returns empty mapping
+        assert_eq!(super::map_winget_pkg_to_choco("Unknown.Package"), "");
+    }
+
+    #[tokio::test]
+    #[cfg_attr(not(feature = "slow-tests"), ignore = "slow env-setup path")]
+    async fn setup_google_colab_runs_without_panic() {
+        super::setup_google_colab().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn setup_macos_returns_ok_without_brew() {
+        // Only run when brew is not available; otherwise skip to avoid invoking installs
+        let brew_exists = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("command -v brew >/dev/null 2>&1")
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !brew_exists {
+            super::setup_macos().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    #[cfg(target_os = "windows")]
+    #[cfg_attr(
+        not(feature = "e2e-tests"),
+        ignore = "runs installer commands; e2e-only"
+    )]
+    async fn setup_windows_returns_ok_when_tools_missing() {
+        super::setup_windows().await.unwrap();
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    #[cfg_attr(not(feature = "slow-tests"), ignore = "slow env-setup path")]
+    async fn setup_execute_colab_branch() {
+        std::env::set_var("COLAB_RELEASE_TAG", "1");
+        super::execute().await.unwrap();
+        std::env::remove_var("COLAB_RELEASE_TAG");
+    }
+
+    #[test]
+    fn print_windows_manual_instructions_runs() {
+        super::print_windows_manual_instructions();
+    }
 }

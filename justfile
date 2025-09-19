@@ -159,7 +159,7 @@ run-integration-tests-docker:
     SYFTBOX_BAD_CLIENT_EMAIL={{TEST_BAD_CLIENT_EMAIL}} \
     TEST_CLIENTS_DIR=../{{TEST_CLIENTS_DOCKER_DIR}} \
     TEST_MODE=docker \
-    cargo test --test '*' -- --ignored --nocapture
+    cargo test --features e2e-tests --test '*' -- --ignored --nocapture
 
 # Full integration test with Docker - starts everything, runs tests, cleans up on success
 test-integration-docker cleanup="true" reset="false":
@@ -581,7 +581,7 @@ run-integration-tests-local:
     SYFTBOX_BAD_CLIENT_EMAIL={{TEST_BAD_CLIENT_EMAIL}} \
     TEST_CLIENTS_DIR=../{{TEST_CLIENTS_LOCAL_DIR}} \
     TEST_MODE=local \
-    cargo test --test '*' -- --ignored --nocapture
+    cargo test --features e2e-tests --test '*' -- --ignored --nocapture
 
 # Full integration test with local clients
 test-integration-local cleanup="true" reset="false":
