@@ -383,6 +383,11 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
+    #[cfg_attr(
+        not(feature = "slow-tests"),
+        ignore = "env-dependent; covered in slow/integration"
+    )]
+    #[cfg_attr(windows, ignore = "Windows shell semantics; covered in integration CI")]
     fn execute_with_all_tools_available_returns_ok() {
         let dir = TempDir::new().unwrap();
         // Create fake tools in a temp dir and prepend to PATH
