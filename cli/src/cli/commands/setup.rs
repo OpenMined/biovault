@@ -1124,6 +1124,10 @@ mod tests {
 
     #[tokio::test]
     #[cfg(target_os = "windows")]
+    #[cfg_attr(
+        not(feature = "e2e-tests"),
+        ignore = "runs installer commands; e2e-only"
+    )]
     async fn setup_windows_returns_ok_when_tools_missing() {
         super::setup_windows().await.unwrap();
     }

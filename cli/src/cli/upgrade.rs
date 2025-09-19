@@ -167,7 +167,10 @@ fn fix_yaml_file(path: &Path) -> anyhow::Result<()> {
     // This is safer than trying to fix various indentation issues
 
     // Determine which template to use based on the path
-    let new_content = if path.to_string_lossy().contains("/rpc/") {
+    let s = path.to_string_lossy();
+    let is_rpc =
+        s.contains("/rpc/") || s.contains("\\rpc\\") || s.ends_with("/rpc") || s.ends_with("\\rpc");
+    let new_content = if is_rpc {
         // RPC permission file - allow read/write for requests
         r#"rules:
   - pattern: '**/*.request'
