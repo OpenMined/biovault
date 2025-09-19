@@ -416,6 +416,7 @@ fn test_submit_project(client_base: &Path, recipient_email: &str, test_mode: &st
             "./count-snps", // Use relative path
             recipient_email,
             "--non-interactive",
+            "--force", // Add force flag to ensure message is sent even if already submitted
         ],
     )?;
 
@@ -436,12 +437,26 @@ fn test_submit_project(client_base: &Path, recipient_email: &str, test_mode: &st
     }
 
     // Check for expected output
-    if stdout.contains("Project submitted successfully") {
+    if stdout.contains("Project submitted successfully")
+        || stdout.contains("Project message prepared")
+    {
         println!("✓ Project submitted to {}", recipient_email);
 
         // Extract submission location if present
         if let Some(location_line) = stdout.lines().find(|l| l.contains("Location:")) {
             println!("  {}", location_line.trim());
+        }
+
+        // Verify message was sent by checking the sent messages
+        println!("\n  Verifying message was sent...");
+        let msg_output = run_bv_command(client_base, test_mode, &["message", "list", "--sent"])?;
+
+        let msg_stdout = String::from_utf8_lossy(&msg_output.stdout);
+        if msg_stdout.contains(recipient_email) && msg_stdout.contains("Project Request") {
+            println!("  ✓ Message successfully sent to {}", recipient_email);
+        } else {
+            println!("  ⚠ Could not verify message was sent");
+            println!("  Messages output: {}", msg_stdout);
         }
     } else {
         println!("⚠ Submission may have succeeded but output unclear");
@@ -504,7 +519,7 @@ fn test_check_submission(client_base: &Path, sender_email: &str, _test_mode: &st
     Ok(())
 }
 
-fn test_process_request(client_base: &Path, email: &str, test_mode: &str) -> Result<()> {
+fn test_process_request(client_base: &Path, _email: &str, test_mode: &str) -> Result<()> {
     // First check if participant exists
     println!("Checking for participants...");
     let list_output = run_bv_command(client_base, test_mode, &["participant", "list"]);
@@ -541,155 +556,170 @@ fn test_process_request(client_base: &Path, email: &str, test_mode: &str) -> Res
                             "⚠ Failed to add participant: {}",
                             String::from_utf8_lossy(&output.stderr)
                         );
-                        println!("  Falling back to using '23andme' participant for testing");
                     }
                 }
             } else {
                 println!("⚠ SNP file not found, cannot add participant");
-                println!("  Will try to use '23andme' participant if available");
             }
         } else {
             println!("✓ Participant 'client2_participant' already exists");
         }
     }
 
-    // Find the submission folder
-    let sender_email = if email == "client2@syftbox.net" {
-        "client1@syftbox.net"
-    } else {
-        "client2@syftbox.net"
-    };
+    // Check inbox for project messages
+    println!("\nChecking inbox for project messages...");
+    let inbox_output = run_bv_command(client_base, test_mode, &["message", "list", "--projects"]);
 
-    let submissions_path = client_base
-        .join("datasites")
-        .join(sender_email)
-        .join("shared")
-        .join("biovault")
-        .join("submissions");
+    if let Ok(output) = inbox_output {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        println!("Inbox messages:\n{}", stdout);
 
-    if !submissions_path.exists() {
-        println!("⚠ Submissions folder not found - messages may not have synced");
-        return Ok(());
-    }
+        // Find the project message from client1
+        if stdout.contains("client1@syftbox.net") && stdout.contains("Project Request") {
+            // Extract message ID (usually shown in square brackets like [abc123])
+            let msg_id =
+                if let Some(line) = stdout.lines().find(|l| l.contains("[") && l.contains("]")) {
+                    if let Some(start) = line.find('[') {
+                        line.find(']').map(|end| line[start + 1..end].to_string())
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
 
-    // Find the count-snps submission
-    let mut submission_dir = None;
-    for entry in fs::read_dir(&submissions_path)? {
-        let entry = entry?;
-        if entry.file_type()?.is_dir() {
-            let name = entry.file_name().to_string_lossy().to_string();
-            if name.starts_with("count-snps") {
-                submission_dir = Some(entry.path());
-                break;
-            }
-        }
-    }
+            if let Some(id) = msg_id {
+                println!("Found project message with ID: {}", id);
 
-    if let Some(dir) = submission_dir {
-        println!("Processing submission: {}", dir.display());
+                // Process the message using the message process command
+                // This handles path resolution correctly
+                let process_output = run_bv_command(
+                    client_base,
+                    test_mode,
+                    &[
+                        "message",
+                        "process",
+                        &id,
+                        "--real", // Run on real participant data
+                        "--participant",
+                        "client2_participant", // Just the participant ID
+                        "--non-interactive",
+                    ],
+                );
 
-        // Convert absolute path to relative path from client_base
-        let relative_path = if let Ok(rel) = dir.strip_prefix(client_base) {
-            format!("./{}", rel.to_string_lossy())
-        } else {
-            // If we can't make it relative, use the absolute path
-            dir.to_string_lossy().to_string()
-        };
+                match process_output {
+                    Ok(output) => {
+                        let stdout = String::from_utf8_lossy(&output.stdout);
+                        let stderr = String::from_utf8_lossy(&output.stderr);
 
-        println!("Using project path: {}", relative_path);
+                        if !output.status.success() {
+                            eprintln!(
+                                "Process failed with exit code: {}",
+                                output.status.code().unwrap_or(-1)
+                            );
+                            eprintln!("stderr: {}", stderr);
+                            eprintln!("stdout: {}", stdout);
 
-        // Run the submitted project with client2's participant
-        // The participant source should reference the participants.yaml file
-        // Since bv runs from within client_base directory, use relative path
-        let participants_file = client_base.join(".biovault/participants.yaml");
-        if !participants_file.exists() {
-            eprintln!(
-                "⚠ Warning: participants.yaml not found at {}",
-                participants_file.display()
-            );
-            eprintln!("  Cannot process submission without participant data");
-            return Ok(());
-        }
-
-        let participant_source =
-            ".biovault/participants.yaml#participants.client2_participant".to_string();
-
-        let output = run_bv_command(
-            client_base,
-            test_mode,
-            &[
-                "run",
-                &relative_path,
-                &participant_source,
-                "--template",
-                "snp",
-                "--test",
-            ],
-        );
-
-        match output {
-            Ok(output) => {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                let stderr = String::from_utf8_lossy(&output.stderr);
-
-                if !output.status.success() {
-                    eprintln!(
-                        "Run failed with exit code: {}",
-                        output.status.code().unwrap_or(-1)
-                    );
-                    eprintln!("stderr: {}", stderr);
-                    eprintln!("stdout: {}", stdout);
-                    // Check if it's just Docker not available
-                    if stderr.contains("docker") || stderr.contains("Docker") {
-                        println!("⚠ Skipping processing - Docker not available");
-                        return Ok(());
-                    } else if stderr.contains("Project folder does not exist") {
-                        println!("⚠ Project folder issue - checking paths...");
-                        println!("  Working directory: {}", client_base.display());
-                        println!("  Submission path: {}", dir.display());
-                        println!("  Relative path used: {}", relative_path);
-                        // List contents to debug
-                        if client_base.exists() {
-                            println!("  Contents of client base:");
-                            for e in fs::read_dir(client_base)?.take(5).flatten() {
-                                println!("    - {}", e.path().display());
+                            // Check for specific error conditions
+                            if stderr.contains("docker") || stderr.contains("Docker") {
+                                println!("⚠ Skipping processing - Docker not available");
+                                return Ok(());
                             }
+                        } else if stdout.contains("Project processed successfully")
+                            || stdout.contains("Number of SNPs")
+                            || stdout.contains("601802")
+                        {
+                            println!("✓ Project processed successfully via inbox");
+                            println!("  SNP count: 601802");
+
+                            // Now approve the project to release results
+                            println!("\n  Approving project to release results...");
+                            let approve_output = run_bv_command(
+                                client_base,
+                                test_mode,
+                                &[
+                                    "message",
+                                    "process",
+                                    &id,
+                                    "--real",
+                                    "--participant",
+                                    "client2_participant",
+                                    "--approve",
+                                    "--non-interactive",
+                                ],
+                            );
+
+                            if let Ok(output) = approve_output {
+                                let stdout = String::from_utf8_lossy(&output.stdout);
+                                if output.status.success() && stdout.contains("approved") {
+                                    println!("  ✓ Project approved and results released");
+                                } else {
+                                    println!("  ⚠ Approval may have failed");
+                                }
+                            }
+                        } else {
+                            println!("✓ Project processed but output unclear");
                         }
                     }
-                } else if stdout.contains("Number of SNPs") || stdout.contains("601802") {
-                    println!("✓ Project processed successfully");
-                    println!("  SNP count: 601802");
-                } else {
-                    println!("✓ Project ran but output unclear");
-                    println!(
-                        "  Output snippet: {}",
-                        stdout.lines().take(3).collect::<Vec<_>>().join(" | ")
-                    );
+                    Err(e) => {
+                        println!("⚠ Error processing project: {}", e);
+                    }
                 }
+            } else {
+                println!("⚠ Could not extract message ID from inbox");
             }
-            Err(e) => {
-                println!("⚠ Error processing project: {}", e);
-            }
+        } else {
+            println!("⚠ No project message from client1 found in inbox");
         }
-    } else {
-        println!("⚠ No count-snps submission found to process");
     }
 
     Ok(())
 }
 
-fn test_check_results(client_base: &Path, processor_email: &str, test_mode: &str) -> Result<()> {
+fn test_check_results(client_base: &Path, _processor_email: &str, test_mode: &str) -> Result<()> {
+    // First check for approval message
+    println!("Checking for approval message...");
+    let inbox_output = run_bv_command(client_base, test_mode, &["message", "list"]);
+
+    let mut _approval_msg_id = None;
+    if let Ok(output) = inbox_output {
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            if stdout.contains("approved") || stdout.contains("Project approved") {
+                println!("✓ Found approval notification in messages");
+
+                // Extract message ID if possible
+                for line in stdout.lines() {
+                    if line.contains("approved") && line.contains("[") && line.contains("]") {
+                        if let Some(start) = line.find('[') {
+                            if let Some(end) = line.find(']') {
+                                _approval_msg_id = Some(line[start + 1..end].to_string());
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Check if results were generated in the submission folder
-    // When client2 processes a submission, results go into the submission folder
     let submissions_path = client_base
         .join("datasites")
-        .join("client1@syftbox.net") // Original sender
+        .join(
+            client_base
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .to_string(),
+        ) // Self submissions
         .join("shared")
         .join("biovault")
         .join("submissions");
 
     // Find the count-snps submission directory
     let mut found_results = false;
+    let mut _submission_dir_path = None;
     if submissions_path.exists() {
         for entry in fs::read_dir(&submissions_path)? {
             let entry = entry?;
@@ -697,26 +727,29 @@ fn test_check_results(client_base: &Path, processor_email: &str, test_mode: &str
                 let name = entry.file_name().to_string_lossy().to_string();
                 if name.starts_with("count-snps") {
                     let submission_dir = entry.path();
-                    let results_test = submission_dir.join("results-test");
-                    let results_real = submission_dir.join("results-real");
+                    _submission_dir_path = Some(submission_dir.clone());
+                    let results_dir = submission_dir.join("results");
 
-                    if results_test.exists() || results_real.exists() {
+                    if results_dir.exists() {
                         println!("✓ Results found in submission: {}", name);
                         found_results = true;
 
-                        // List results
-                        if results_test.exists() {
-                            println!("  Test results:");
-                            for e in fs::read_dir(&results_test)?.take(5).flatten() {
-                                println!("    - {}", e.file_name().to_string_lossy());
+                        // List results - should have client2_participant folder
+                        println!("  Results content:");
+                        for e in fs::read_dir(&results_dir)?.flatten() {
+                            let filename = e.file_name().to_string_lossy().to_string();
+                            if e.file_type()?.is_dir() {
+                                println!("    - {}/", filename);
+                                // Check participant name
+                                if filename == "client2_participant" {
+                                    println!("      ✓ Correct participant folder name");
+                                }
+                            } else {
+                                println!("    - {}", filename);
                             }
                         }
-                        if results_real.exists() {
-                            println!("  Real results:");
-                            for e in fs::read_dir(&results_real)?.take(5).flatten() {
-                                println!("    - {}", e.file_name().to_string_lossy());
-                            }
-                        }
+                    } else {
+                        println!("⚠ No results directory in submission: {}", name);
                     }
                     break;
                 }
@@ -725,73 +758,98 @@ fn test_check_results(client_base: &Path, processor_email: &str, test_mode: &str
     }
 
     if !found_results {
-        println!("⚠ No results found yet in submission folders");
-        println!("  Results may still be processing or need approval");
-    }
-
-    // Check message inbox for result notifications
-    let inbox_output = run_bv_command(client_base, test_mode, &["message", "list"]);
-    if let Ok(output) = inbox_output {
-        if output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            if stdout.contains("approved") || stdout.contains("completed") {
-                println!("✓ Found result notification in messages");
-            }
-        }
+        println!("⚠ No results found in submission folders");
+        println!("  Results may still be syncing or need approval");
     }
 
     Ok(())
 }
 
 fn test_archive_project(client_base: &Path, _other_email: &str, test_mode: &str) -> Result<()> {
-    // Archive functionality:
-    // 1. Find completed projects
-    // 2. Archive them (which removes write permissions)
+    // Archive the project message to revoke write permissions
 
-    // Find the count-snps submission
-    let submissions_path = client_base
-        .join("datasites")
-        .join(client_base.file_name().unwrap()) // Self submissions
-        .join("shared")
-        .join("biovault")
-        .join("submissions");
+    // Find the project message to archive
+    println!("Looking for project message to archive...");
+    let list_output = run_bv_command(
+        client_base,
+        test_mode,
+        &["message", "list", "--sent", "--projects"],
+    );
 
-    if submissions_path.exists() {
-        for entry in fs::read_dir(&submissions_path)? {
-            let entry = entry?;
-            if entry.file_type()?.is_dir() {
-                let name = entry.file_name().to_string_lossy().to_string();
-                if name.starts_with("count-snps") {
-                    // Check if it has results (meaning it's completed)
-                    let submission_dir = entry.path();
-                    let has_results = submission_dir.join("results-test").exists()
-                        || submission_dir.join("results-real").exists();
+    if let Ok(output) = list_output {
+        let stdout = String::from_utf8_lossy(&output.stdout);
 
-                    if has_results {
-                        // Archive the project
-                        println!("Archiving completed project: {}", name);
+        // Find the count-snps project message
+        if stdout.contains("count-snps") {
+            // Extract message ID
+            let msg_id =
+                if let Some(line) = stdout.lines().find(|l| l.contains("[") && l.contains("]")) {
+                    if let Some(start) = line.find('[') {
+                        line.find(']').map(|end| line[start + 1..end].to_string())
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
 
-                        // Create archive directory
-                        let archive_dir = client_base.join(".biovault").join("archive").join(&name);
+            if let Some(id) = msg_id {
+                println!("Found project message to archive: {}", id);
 
-                        if !archive_dir.exists() {
-                            fs::create_dir_all(&archive_dir)?;
+                // Archive the message
+                let archive_output =
+                    run_bv_command(client_base, test_mode, &["message", "archive", &id]);
+
+                if let Ok(output) = archive_output {
+                    if output.status.success() {
+                        println!("✓ Project archived - write permissions revoked");
+
+                        // Verify permissions were updated
+                        let submissions_path = client_base
+                            .join("datasites")
+                            .join(
+                                client_base
+                                    .file_name()
+                                    .unwrap()
+                                    .to_string_lossy()
+                                    .to_string(),
+                            )
+                            .join("shared")
+                            .join("biovault")
+                            .join("submissions");
+
+                        if submissions_path.exists() {
+                            for entry in fs::read_dir(&submissions_path)?.flatten() {
+                                if entry.file_type()?.is_dir() {
+                                    let name = entry.file_name().to_string_lossy().to_string();
+                                    if name.starts_with("count-snps") {
+                                        let perm_file = entry.path().join("syft.pub.yaml");
+                                        if perm_file.exists() {
+                                            let content = fs::read_to_string(&perm_file)?;
+                                            if !content.contains("results/**/*") {
+                                                println!("  ✓ Verified: results write rule removed from permissions");
+                                            } else {
+                                                println!(
+                                                    "  ⚠ Warning: results write rule still present"
+                                                );
+                                            }
+                                        }
+                                        break;
+                                    }
+                                }
+                            }
                         }
-
-                        // Copy project to archive (in real implementation, would move)
-                        println!("  ✓ Project archived to: {}", archive_dir.display());
-
-                        // Update permissions (would normally modify syft.pub.yaml)
-                        let perm_file = submission_dir.join("syft.pub.yaml");
-                        if perm_file.exists() {
-                            println!("  ✓ Permissions updated (read-only)");
-                        }
+                    } else {
+                        let stderr = String::from_utf8_lossy(&output.stderr);
+                        println!("⚠ Archive failed: {}", stderr);
                     }
                 }
+            } else {
+                println!("⚠ Could not find message ID to archive");
             }
+        } else {
+            println!("⚠ No project message found to archive");
         }
-    } else {
-        println!("⚠ No submissions to archive");
     }
 
     Ok(())

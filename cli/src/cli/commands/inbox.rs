@@ -4,6 +4,18 @@ use anyhow::Result;
 use dialoguer::{theme::ColorfulTheme, Select};
 use std::io::Read;
 
+/// Expand environment variables in text (specifically $SYFTBOX_DATA_DIR)
+fn expand_env_vars_in_text(text: &str) -> Result<String> {
+    let mut result = text.to_string();
+
+    // Expand $SYFTBOX_DATA_DIR
+    if let Ok(data_dir) = std::env::var("SYFTBOX_DATA_DIR") {
+        result = result.replace("$SYFTBOX_DATA_DIR", &data_dir);
+    }
+
+    Ok(result)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Key {
     Up,
@@ -144,10 +156,11 @@ pub fn list(config: &Config, filters: ListFilters) -> Result<()> {
 
         // Show preview of body
         let preview_len = 80;
-        let preview = if msg.body.len() > preview_len {
-            format!("{}...", &msg.body[..preview_len])
+        let expanded_body = expand_env_vars_in_text(&msg.body)?;
+        let preview = if expanded_body.len() > preview_len {
+            format!("{}...", &expanded_body[..preview_len])
         } else {
-            msg.body.clone()
+            expanded_body
         };
         println!("   {}", preview);
     }

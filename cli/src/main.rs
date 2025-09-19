@@ -159,6 +159,12 @@ enum Commands {
 
         #[arg(long, help = "Skip interactive prompts, use defaults")]
         non_interactive: bool,
+
+        #[arg(
+            long,
+            help = "Force resubmission even if project was already submitted"
+        )]
+        force: bool,
     },
 
     #[command(about = "View and manage inbox messages")]
@@ -394,6 +400,12 @@ enum MessageCommands {
     List {
         #[arg(short = 'u', long = "unread", help = "Show only unread messages")]
         unread: bool,
+
+        #[arg(short = 's', long = "sent", help = "Show sent messages")]
+        sent: bool,
+
+        #[arg(short = 'p', long = "projects", help = "Show only project messages")]
+        projects: bool,
     },
 
     #[command(about = "View a message thread")]
@@ -421,6 +433,15 @@ enum MessageCommands {
 
         #[arg(long, help = "Approve after successful run")]
         approve: bool,
+
+        #[arg(long, help = "Non-interactive mode (skip prompts)")]
+        non_interactive: bool,
+    },
+
+    #[command(about = "Archive a project message (revoke write permissions)")]
+    Archive {
+        #[arg(help = "Message ID to archive")]
+        message_id: String,
     },
 }
 
@@ -589,8 +610,9 @@ async fn main() -> Result<()> {
             project_path,
             destination,
             non_interactive,
+            force,
         } => {
-            commands::submit::submit(project_path, destination, non_interactive).await?;
+            commands::submit::submit(project_path, destination, non_interactive, force).await?;
         }
         Commands::Inbox {
             interactive,
@@ -647,9 +669,13 @@ async fn main() -> Result<()> {
                 let config = biovault::config::Config::load()?;
                 commands::messages::delete_message(&config, &message_id)?;
             }
-            MessageCommands::List { unread } => {
+            MessageCommands::List {
+                unread,
+                sent,
+                projects,
+            } => {
                 let config = biovault::config::Config::load()?;
-                commands::messages::list_messages(&config, unread)?;
+                commands::messages::list_messages(&config, unread, sent, projects)?;
             }
             MessageCommands::Thread { thread_id } => {
                 let config = biovault::config::Config::load()?;
@@ -665,6 +691,7 @@ async fn main() -> Result<()> {
                 real,
                 participant,
                 approve,
+                non_interactive,
             } => {
                 let config = biovault::config::Config::load()?;
                 commands::messages::process_project_message(
@@ -674,8 +701,13 @@ async fn main() -> Result<()> {
                     real,
                     participant,
                     approve,
+                    non_interactive,
                 )
                 .await?;
+            }
+            MessageCommands::Archive { message_id } => {
+                let config = biovault::config::Config::load()?;
+                commands::messages::archive_message(&config, &message_id)?;
             }
         },
     }

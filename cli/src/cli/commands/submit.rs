@@ -17,6 +17,7 @@ pub async fn submit(
     project_path: String,
     destination: String,
     non_interactive: bool,
+    force: bool,
 ) -> Result<()> {
     let config = Config::load()?;
 
@@ -180,10 +181,93 @@ pub async fn submit(
                 .to_string();
 
             if existing_hash == project_hash {
-                println!("⚠️  This exact project version has already been submitted.");
-                println!("   Location: {}", submission_path.display());
-                println!("   Hash: {}", short_hash);
-                return Ok(());
+                if !force {
+                    println!("⚠️  This exact project version has already been submitted.");
+                    println!("   Location: {}", submission_path.display());
+                    println!("   Hash: {}", short_hash);
+                    println!("   Use --force to resend the message.");
+                    return Ok(());
+                } else {
+                    println!(
+                        "ℹ️  Project already submitted, but --force flag used. Sending message..."
+                    );
+                    println!("   Location: {}", submission_path.display());
+                    println!("   Hash: {}", short_hash);
+
+                    // Skip to message sending part since files already exist
+                    // Build the syft URL and send the message
+                    let datasite_root = config.get_datasite_path()?;
+                    let rel_from_datasite = submission_path
+                        .strip_prefix(&datasite_root)
+                        .unwrap_or(&submission_path)
+                        .to_string_lossy()
+                        .to_string();
+                    let submission_syft_url =
+                        format!("syft://{}/{}", config.email, rel_from_datasite);
+
+                    // Use project data from existing submission
+                    let default_body = "I would like to run the following project.".to_string();
+                    let mut body = if non_interactive {
+                        default_body.clone()
+                    } else {
+                        let use_custom = Confirm::new()
+                            .with_prompt("Write a custom message body?")
+                            .default(false)
+                            .interact()
+                            .unwrap_or(false);
+
+                        if use_custom {
+                            match Editor::new().edit(&default_body) {
+                                Ok(Some(content)) if !content.trim().is_empty() => content,
+                                _ => default_body.clone(),
+                            }
+                        } else {
+                            default_body.clone()
+                        }
+                    };
+
+                    let sender_local_path = submission_path.to_string_lossy().to_string();
+                    let receiver_local_path_template = format!(
+                        "$SYFTBOX_DATA_DIR/datasites/{}/shared/biovault/submissions/{}",
+                        config.email, submission_folder_name
+                    );
+                    body.push_str(&format!(
+                        "\n\nSubmission location references:\n- syft URL: {}\n- Sender local path: {}\n- Receiver local path (template): {}\n",
+                        submission_syft_url, sender_local_path, receiver_local_path_template
+                    ));
+
+                    let metadata = json!({
+                        "project": existing_project,
+                        "project_location": submission_syft_url,
+                        "participants": "With your participants: ALL",
+                        "date": date_str,
+                        "assets": existing_project.assets.clone().unwrap_or_default(),
+                        "sender_local_path": sender_local_path,
+                        "receiver_local_path_template": receiver_local_path_template,
+                    });
+
+                    let (db, sync) = init_message_system(&config)?;
+
+                    let mut msg = Message::new(config.email.clone(), datasite_email.clone(), body);
+                    msg.subject = Some(format!("Project Request - {}", existing_project.name));
+                    msg.message_type = MessageType::Project {
+                        project_name: existing_project.name.clone(),
+                        submission_id: submission_folder_name.clone(),
+                        files_hash: Some(existing_hash.clone()),
+                    };
+                    msg.metadata = Some(metadata);
+
+                    db.insert_message(&msg)?;
+                    let _ = sync.send_message(&msg.id);
+
+                    println!("✉️  Project message prepared for {}", datasite_email);
+                    if let Some(subj) = &msg.subject {
+                        println!("  Subject: {}", subj);
+                    }
+                    println!("  Submission URL: {}", submission_syft_url);
+
+                    return Ok(());
+                }
             }
         }
 
