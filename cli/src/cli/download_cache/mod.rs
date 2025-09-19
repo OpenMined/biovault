@@ -37,6 +37,11 @@ impl Default for CacheStrategy {
     }
 }
 
+#[cfg(test)]
+const PARALLEL_THRESHOLD: u64 = 1024 * 1024; // 1MB in tests to keep them fast
+#[cfg(not(test))]
+const PARALLEL_THRESHOLD: u64 = 100 * 1024 * 1024; // 100MB in production
+
 pub fn calculate_blake3(path: &Path) -> Result<String> {
     let mut file = fs::File::open(path)
         .with_context(|| format!("Failed to open file for checksum: {}", path.display()))?;
@@ -44,10 +49,10 @@ pub fn calculate_blake3(path: &Path) -> Result<String> {
     let metadata = file.metadata()?;
     let file_size = metadata.len();
 
-    if file_size > 100 * 1024 * 1024 {
+    if file_size > PARALLEL_THRESHOLD {
         // For files > 100MB, use parallel hashing
         let mut hasher = blake3::Hasher::new();
-        let mut buffer = vec![0; 64 * 1024 * 1024]; // 64MB buffer
+        let mut buffer = vec![0; 8 * 1024 * 1024]; // keep memory modest in tests too
 
         loop {
             let bytes_read = file.read(&mut buffer)?;
@@ -61,7 +66,7 @@ pub fn calculate_blake3(path: &Path) -> Result<String> {
     } else {
         // For smaller files, use regular update
         let mut hasher = blake3::Hasher::new();
-        let mut buffer = vec![0; 8 * 1024 * 1024]; // 8MB buffer
+        let mut buffer = vec![0; 1024 * 1024]; // 1MB buffer
 
         loop {
             let bytes_read = file.read(&mut buffer)?;
@@ -174,17 +179,11 @@ mod tests {
         // Create a file > 100MB to hit the parallel hashing path
         let temp_dir = TempDir::new().unwrap();
         let big = temp_dir.path().join("big.bin");
+        // In tests the threshold is 1MB, so write ~2MB quickly
         let mut f = std::fs::File::create(&big).unwrap();
-        // Write 101 MiB in 8 MiB chunks
-        let chunk = vec![0u8; 8 * 1024 * 1024];
-        let mut written = 0usize;
-        while written < 101 * 1024 * 1024 {
-            let to_write = std::cmp::min(chunk.len(), 101 * 1024 * 1024 - written);
-            use std::io::Write;
-            f.write_all(&chunk[..to_write]).unwrap();
-            written += to_write;
-        }
-        drop(f);
+        let buf = vec![0u8; 2 * 1024 * 1024];
+        use std::io::Write;
+        f.write_all(&buf).unwrap();
         let h = calculate_blake3(&big).unwrap();
         assert_eq!(h.len(), 64);
     }
