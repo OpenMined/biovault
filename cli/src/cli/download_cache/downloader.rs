@@ -460,4 +460,40 @@ mod tests {
         assert_eq!(res, target);
         assert_eq!(std::fs::read(&target).unwrap(), b"via-url");
     }
+
+    #[tokio::test]
+    #[cfg_attr(not(feature = "slow-tests"), ignore = "slow (network error path)")]
+    async fn cache_miss_attempts_download_and_errors() {
+        let tmp = TempDir::new().unwrap();
+        let cache_dir = tmp.path().join("cache");
+        std::fs::create_dir_all(&cache_dir).unwrap();
+
+        // Manifest with a URL entry but missing cache file to force revalidation/download
+        let mut m = Manifest::new();
+        m.add_download(
+            "http://127.0.0.1:9/nonexistent".into(),
+            "missinghash".into(),
+            0,
+            Some("etag".into()),
+            Some("lm".into()),
+        );
+        write_manifest(tmp.path(), &m);
+
+        let mut dc = DownloadCache::new(Some(cache_dir.clone())).unwrap();
+        let target = tmp.path().join("out/target.txt");
+        let opts = DownloadOptions {
+            checksum_policy: ChecksumPolicy {
+                policy_type: ChecksumPolicyType::Optional,
+                expected_hash: None,
+            },
+            cache_strategy: CacheStrategy { check_remote: true },
+            show_progress: false,
+        };
+
+        // With network restricted and URL unreachable, this should error
+        let res = dc
+            .download_with_cache("http://127.0.0.1:9/nonexistent", &target, opts)
+            .await;
+        assert!(res.is_err());
+    }
 }

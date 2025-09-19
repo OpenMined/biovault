@@ -1230,4 +1230,65 @@ mod tests {
         assert_eq!(updated.status, crate::messages::MessageStatus::Read);
         Ok(())
     }
+
+    #[test]
+    fn send_and_delete_message_flow() -> Result<()> {
+        let tmp = TempDir::new()?;
+        // Point syftbox data dir and biovault home to temp
+        crate::config::set_test_syftbox_data_dir(tmp.path());
+        crate::config::set_test_biovault_home(tmp.path().join(".bv"));
+        let cfg = create_test_config();
+
+        // Send a message to another recipient
+        super::send_message(&cfg, "you@example.com", "hello", Some("subj"))?;
+
+        // Validate DB has a sent message
+        let db_path = get_message_db_path(&cfg)?;
+        let db = MessageDb::new(&db_path)?;
+        let msgs = db.list_sent_messages(None)?;
+        assert!(!msgs.is_empty());
+        let first = &msgs[0];
+        assert_eq!(first.status, crate::messages::MessageStatus::Sent);
+        assert_eq!(first.to, "you@example.com");
+
+        // Delete the message (soft delete)
+        super::delete_message(&cfg, &first.id)?;
+        let after = db.get_message(&first.id)?.unwrap();
+        assert_eq!(after.status, crate::messages::MessageStatus::Deleted);
+        Ok(())
+    }
+
+    #[test]
+    fn reply_message_creates_response() -> Result<()> {
+        let tmp = TempDir::new()?;
+        crate::config::set_test_syftbox_data_dir(tmp.path());
+        crate::config::set_test_biovault_home(tmp.path().join(".bv"));
+        let cfg = create_test_config();
+        // Initialize DB and insert an incoming message to reply to
+        let db_path = get_message_db_path(&cfg)?;
+        let db = MessageDb::new(&db_path)?;
+        let mut original = Message::new("alice@example.com".into(), cfg.email.clone(), "hi".into());
+        original.status = crate::messages::MessageStatus::Received;
+        db.insert_message(&original)?;
+
+        super::reply_message(&cfg, &original.id, "re: hi")?;
+
+        // Should have at least one sent message now
+        let sent = db.list_sent_messages(None)?;
+        assert!(!sent.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn list_messages_smoke() -> Result<()> {
+        let tmp = TempDir::new()?;
+        crate::config::set_test_syftbox_data_dir(tmp.path());
+        crate::config::set_test_biovault_home(tmp.path().join(".bv"));
+        let cfg = create_test_config();
+
+        // With empty DB
+        super::list_messages(&cfg, false)?;
+        super::list_messages(&cfg, true)?;
+        Ok(())
+    }
 }

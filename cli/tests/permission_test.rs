@@ -1,3 +1,4 @@
+#![cfg(feature = "e2e-tests")]
 use anyhow::Result;
 use reqwest::blocking::Client;
 use std::env;
