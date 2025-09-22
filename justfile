@@ -575,6 +575,13 @@ stop-syftbox-clients-local:
 run-integration-tests-local:
     @echo "Building BioVault binary..."
     cd cli && cargo build --release
+    @echo "Setting up BioVault dependencies..."
+    @if [ "${CI}" = "true" ]; then \
+        echo "CI environment detected, running bv setup..."; \
+        cd cli && ./target/release/bv setup || true; \
+    else \
+        echo "Local environment, skipping bv setup (assumes dependencies are installed)"; \
+    fi
     @echo "Running integration tests with local clients..."
     cd cli && \
     SYFTBOX_SERVER_URL=http://localhost:8080 \
