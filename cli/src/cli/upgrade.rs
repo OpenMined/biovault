@@ -3,7 +3,7 @@ use std::fs;
 use std::path::Path;
 use tracing::info;
 
-const CURRENT_VERSION: &str = "0.1.27";
+const CURRENT_VERSION: &str = "0.1.28";
 
 pub fn check_and_upgrade() -> anyhow::Result<()> {
     let biovault_home = get_biovault_home()?;
@@ -88,9 +88,28 @@ fn upgrade_templates(biovault_home: &std::path::Path) -> anyhow::Result<()> {
     fs::write(&snp_nextflow_config_path, snp_nextflow_config_content)?;
     info!("Updated SNP nextflow.config");
 
+    // Copy/update sheet templates
+    let sheet_dir = env_dir.join("sheet");
+    if !sheet_dir.exists() {
+        fs::create_dir_all(&sheet_dir)?;
+    }
+
+    // Update sheet template.nf
+    let sheet_template_nf_content = include_str!("../templates/sheet/template.nf");
+    let sheet_template_nf_path = sheet_dir.join("template.nf");
+    fs::write(&sheet_template_nf_path, sheet_template_nf_content)?;
+    info!("Updated sheet template.nf");
+
+    // Update sheet nextflow.config
+    let sheet_nextflow_config_content = include_str!("../templates/sheet/nextflow.config");
+    let sheet_nextflow_config_path = sheet_dir.join("nextflow.config");
+    fs::write(&sheet_nextflow_config_path, sheet_nextflow_config_content)?;
+    info!("Updated sheet nextflow.config");
+
     println!("✓ Templates updated:");
     println!("  - Default templates: {}", default_dir.display());
     println!("  - SNP templates: {}", snp_dir.display());
+    println!("  - Sheet templates: {}", sheet_dir.display());
 
     Ok(())
 }
