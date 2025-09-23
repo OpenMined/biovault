@@ -114,6 +114,7 @@ enum ParticipantSource {
     SyftUrl(SyftURL),
     HttpUrl(String),
     SampleDataId(String),
+    RegisteredParticipant(String), // participant ID from ~/.biovault/participants.yaml
 }
 
 impl ParticipantSource {
@@ -123,6 +124,30 @@ impl ParticipantSource {
         } else if source.starts_with("http://") || source.starts_with("https://") {
             Ok(ParticipantSource::HttpUrl(source.to_string()))
         } else {
+            // First check if this is a registered participant (no path separators, no fragment)
+            if !source.contains('/') && !source.contains('#') {
+                // Try to load registered participants
+                if let Ok(participants_path) = crate::config::get_biovault_home() {
+                    let participants_file = participants_path.join("participants.yaml");
+                    if participants_file.exists() {
+                        if let Ok(contents) = fs::read_to_string(&participants_file) {
+                            #[derive(serde::Deserialize)]
+                            struct ParticipantsFile {
+                                participants: std::collections::HashMap<String, serde_yaml::Value>,
+                            }
+                            if let Ok(parsed) = serde_yaml::from_str::<ParticipantsFile>(&contents)
+                            {
+                                if parsed.participants.contains_key(source) {
+                                    return Ok(ParticipantSource::RegisteredParticipant(
+                                        source.to_string(),
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             // Check if this matches a known sample data ID
             #[derive(serde::Deserialize)]
             struct SampleDataConfig {
@@ -151,8 +176,21 @@ impl ParticipantSource {
 
 async fn fetch_participant_file(
     source: &ParticipantSource,
+    auto_download: bool,
 ) -> anyhow::Result<(String, Option<String>)> {
     match source {
+        ParticipantSource::RegisteredParticipant(participant_id) => {
+            // Load the participants file
+            let participants_path = crate::config::get_biovault_home()?.join("participants.yaml");
+            if !participants_path.exists() {
+                return Err(anyhow!("No registered participants found"));
+            }
+            let content = fs::read_to_string(&participants_path).with_context(|| {
+                format!("Failed to read participants file: {:?}", participants_path)
+            })?;
+            // Return the full file content with the participant ID as fragment
+            Ok((content, Some(format!("participants.{}", participant_id))))
+        }
         ParticipantSource::LocalFile(path, fragment) => {
             if !path.exists() {
                 return Err(anyhow!("Local file not found: {:?}", path));
@@ -183,8 +221,30 @@ async fn fetch_participant_file(
                 .map(|content| (content, fragment))
         }
         ParticipantSource::SampleDataId(sample_id) => {
-            // Ensure sample data is fetched
-            crate::cli::commands::sample_data::fetch(Some(vec![sample_id.clone()]), false, true)
+            // Check if sample data exists locally first
+            let biovault_home = crate::config::get_biovault_home()?;
+            let participants_file = biovault_home
+                .join("data")
+                .join("sample")
+                .join("participants.yaml");
+
+            // If participants file doesn't exist or auto_download is false, we need to prompt
+            if !participants_file.exists() && !auto_download {
+                println!("Sample data for '{}' needs to be downloaded.", sample_id);
+                println!("This may take some time depending on the file size.");
+
+                let proceed = dialoguer::Confirm::new()
+                    .with_prompt("Do you want to download the sample data now?")
+                    .default(true)
+                    .interact()?;
+
+                if !proceed {
+                    return Err(anyhow!("Sample data download cancelled by user"));
+                }
+            }
+
+            // Fetch sample data (with quiet=false so user sees progress)
+            crate::cli::commands::sample_data::fetch(Some(vec![sample_id.clone()]), false, false)
                 .await?;
 
             // Load sample_data.yaml to get URLs and compute filenames
@@ -503,6 +563,10 @@ async fn ensure_files_exist(
         ParticipantSource::SampleDataId(_) => {
             // Use a dedicated directory for sample data
             downloads_base.join("sample").join(&participant.id)
+        }
+        ParticipantSource::RegisteredParticipant(_) => {
+            // For registered participants, use "registered" subdirectory
+            downloads_base.join("registered").join(&participant.id)
         }
     };
 
@@ -963,7 +1027,7 @@ pub async fn execute(params: RunParams) -> anyhow::Result<()> {
     let source = ParticipantSource::parse(&params.participant_source)?;
 
     // Fetch participant file
-    let (yaml_content, fragment) = fetch_participant_file(&source).await?;
+    let (yaml_content, fragment) = fetch_participant_file(&source, params.download).await?;
 
     // Extract participant data
     let (mut participant, mock_key) =
@@ -1626,10 +1690,13 @@ participants:
 
     #[tokio::test]
     async fn fetch_participant_file_local_missing_errors() {
-        let res = fetch_participant_file(&ParticipantSource::LocalFile(
-            PathBuf::from("/nope/participants.yaml"),
-            Some("participants.X".into()),
-        ))
+        let res = fetch_participant_file(
+            &ParticipantSource::LocalFile(
+                PathBuf::from("/nope/participants.yaml"),
+                Some("participants.X".into()),
+            ),
+            false,
+        )
         .await;
         assert!(res.is_err());
     }
