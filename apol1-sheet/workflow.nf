@@ -1,10 +1,11 @@
 /*
- * Module: USER (DSL2-safe, debug-friendly; Python writer)
+ * Module: USER (DSL2-safe; Python writer; report from augmented sheet)
  * - Buffers rows once, fans out cleanly (no `into`)
  * - APOL1 classification per PID
  * - Left-join computed_genotype
  * - Adds BMI, age_group
  * - Writes augmented CSV/TSV via Python (robust header mapping)
+ * - Report computes counts & average age per genotype from augmented CSV/TSV
  */
 
 nextflow.enable.dsl=2
@@ -37,7 +38,7 @@ workflow USER {
     def header_v   = mapping_ch.map { m -> (m.orig_headers + new_cols) as List }   // VALUE
     header_v.view { "Header (raw): $it" }
 
-    // We’ll also pass rename map if provided
+    // Pass rename map if provided
     def rename_v   = mapping_ch.map { m -> (m.containsKey('rename') && m.rename instanceof Map) ? m.rename : [:] }
 
     //------------------------------------------------------------------
@@ -64,7 +65,7 @@ workflow USER {
     def apol1 = apol1_classifier(assets_dir_ch, to_classify_ch)
 
     //------------------------------------------------------------------
-    // 4) Extract (pid, computed_genotype)
+    // 4) Extract (pid, computed_genotype) from apol1_<PID>.genotype.txt
     //------------------------------------------------------------------
     def apol1_calls = apol1.genotype_line.map { f ->
       def text = f.text?.trim() ?: ''
@@ -77,9 +78,9 @@ workflow USER {
     apol1_calls.view { "APOL1 call: $it" }
 
     //------------------------------------------------------------------
-    // 5) Left-join computed genotype
+    // 5) Left-join: keep all input rows, attach computed_genotype
     //------------------------------------------------------------------
-    def all_pids_ch = rows_for_join.map { r -> tuple(r.participant_id as String, r) }
+    def all_pids_ch = rows_for_join.map { r -> tuple(r.participant_id as String, r) }  // QUEUE
 
     def joined_rows_ch =
       all_pids_ch
@@ -141,11 +142,10 @@ workflow USER {
     } // VALUE
 
     //------------------------------------------------------------------
-    // 9) Write augmented sheet (Python) & simple report (Alpine)
+    // 9) Write augmented sheet (Python) & report from that sheet (Python)
     //------------------------------------------------------------------
     def csv_out    = write_sheet_py(header_v, rows_maps_v, rename_v, sample_sheet_filename_v, extension_v)
-    def calls_tsv  = apol1.genotype_line.collectFile(name: 'calls.tsv')
-    def report_out = write_report(calls_tsv)
+    def report_out = write_report(csv_out.augmented_csv)  // <-- now uses the augmented CSV/TSV
 
   emit:
     augmented_csv = csv_out.augmented_csv
@@ -180,7 +180,7 @@ process apol1_classifier {
 }
 
 /*
- * New: Python-based sheet writer. No bash string gymnastics.
+ * Python-based sheet writer. No bash string gymnastics.
  * Inputs are VALUEs: header_list (List), rows_maps (List<Map>), rename (Map),
  *                    sample_sheet_filename (String), extension (String).
  */
@@ -205,7 +205,6 @@ process write_sheet_py {
   def rename_clean = (rename_map instanceof Map) ? rename_map.collectEntries { k,v ->
     [(k == null ? "" : k.toString().trim()) : (v == null ? "" : v.toString().trim())]
   } : [:]
-  // rows_maps is List<Map>; convert keys/values to strings (values may be null)
   def rows_clean = (rows_maps instanceof List) ? rows_maps.collect { r ->
     (r instanceof Map) ? r.collectEntries { k,v ->
       [(k == null ? "" : k.toString().trim()) : (v == null ? "" : v.toString())]
@@ -292,32 +291,63 @@ PY
   """
 }
 
-
+/*
+ * New: Report from augmented CSV/TSV (counts + average age by computed_genotype)
+ */
 process write_report {
-  container 'alpine:latest'
-  shell 'ash'
+  container 'python:3.11-slim'
   publishDir params.results_dir, mode: 'copy'
   debug true
 
   input:
-    path calls_tsv
+    path augmented_csv
 
   output:
     path "report.txt", emit: report_file
 
   script:
   """
-  set -euo pipefail
-  {
-    echo "APOL1 genotype counts:"
-    grep -h "^APOL1 genotype:" calls.tsv \\
-      | awk '{print \$3}' \\
-      | sort \\
-      | uniq -c \\
-      | awk '{printf "- %s: %d\\n", \$2, \$1}'
-    echo
-    echo "Average age by genotype:"
-    echo "(Not available — age not included in genotype_line inputs.)"
-  } > report.txt
+  python3 - <<'PY'
+import csv, sys, os
+from collections import defaultdict
+
+infile = os.path.basename("${augmented_csv}")
+# Detect delimiter by header line
+with open(infile, 'r', newline='') as fh:
+    sample = fh.readline()
+    delim = '\\t' if ('\\t' in sample and ',' not in sample) else ','
+# Now read fully
+with open(infile, 'r', newline='') as fh:
+    reader = csv.DictReader(fh, delimiter=delim)
+    counts = defaultdict(int)
+    age_sums = defaultdict(float)
+    age_counts = defaultdict(int)
+
+    # Try both "computed_genotype" and "APOL1 genotype" if someone renamed
+    for row in reader:
+        geno = row.get("computed_genotype") or row.get("APOL1 genotype") or "UNKNOWN"
+        counts[geno] += 1
+        age_raw = row.get("age", "")
+        try:
+            age = float(age_raw)
+        except Exception:
+            age = None
+        if age is not None:
+            age_sums[geno] += age
+            age_counts[geno] += 1
+
+with open("report.txt","w") as out:
+    out.write("APOL1 genotype counts:\\n")
+    for geno in sorted(counts.keys()):
+        out.write(f"- {geno}: {counts[geno]}\\n")
+
+    out.write("\\nAverage age by genotype:\\n")
+    for geno in sorted(counts.keys()):
+        if age_counts[geno] > 0:
+            avg = age_sums[geno] / age_counts[geno]
+            out.write(f"- {geno}: {avg:.1f}\\n")
+        else:
+            out.write(f"- {geno}: (no ages)\\n")
+PY
   """
 }

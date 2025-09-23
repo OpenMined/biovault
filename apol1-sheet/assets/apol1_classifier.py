@@ -3,33 +3,37 @@ import csv
 import os
 import re
 import sys
+from typing import Dict, List, Optional, Set, Tuple
 
 # ---------- Config ----------
 TARGET_RSIDS = [
-    "rs73885319",  # G1 part A (A>G)
-    "rs60910145",  # G1 part B (T>G)
-    "rs71785313",  # G2 (TTATAA > -)
-    "rs1317778148",  # merged into rs71785313
-    "rs143830837",  # merged into rs71785313
+    "rs73885319",  # G1 part A (A>G, sometimes A>C)
+    "rs60910145",  # G1 part B (T>G, sometimes T>C)
+    "rs71785313",  # G2 (TTATAA > -) canonical
+    "rs1317778148",  # merged into rs71785313 (alias)
+    "rs143830837",  # merged into rs71785313 (alias)
 ]
 
 DEFAULT_FIELDS = ["rsid", "chromosome", "position", "genotype", "gs", "baf", "lrr"]
 
 RS_G1_A = "rs73885319"
 RS_G1_B = "rs60910145"
-RS_G2 = "rs71785313"
-RS_MERGED = {"rs1317778148", "rs143830837"}
+RS_G2_CANON = "rs71785313"
+RS_G2_ALIASES = {"rs1317778148", "rs143830837"}
+RS_G2_ALL = {RS_G2_CANON} | RS_G2_ALIASES
 
-# Heuristic thresholds for inferring 0/0 vs 0/1 vs 1/1 from BAF/AD
+# Authoritative REF and allowed ALT sets for G1 SNPs
+KNOWN_REF_ALLOWED_ALTS: Dict[str, Tuple[str, Set[str]]] = {
+    RS_G1_A: ("A", {"G", "C"}),  # A>G normally; some assays show A>C
+    RS_G1_B: ("T", {"G", "C"}),  # T>G normally; some assays show T>C
+}
+
+# Heuristic thresholds (used only for SNP fallback from counts/BAF; NEVER for G2)
 HET_MIN, HET_MAX, HOM_ALT_MIN = 0.20, 0.80, 0.80
 
 
-# ---------- Helpers ----------
+# ---------- Robust TSV ingestion ----------
 def detect_header_and_stream(lines):
-    """
-    Accepts a TSV-ish stream that may contain comment lines starting with '#'
-    and may or may not contain a header line. Returns (header_fields, data_lines).
-    """
     header_fields, data_lines = None, []
     for raw in lines:
         line = raw.lstrip("\ufeff").rstrip("\r\n")
@@ -77,7 +81,7 @@ def extract_snps(input_stream):
         ]
     }
 
-    results = {rsid: None for rsid in TARGET_RSIDS}
+    results: Dict[str, Optional[Dict[str, str]]] = {rsid: None for rsid in TARGET_RSIDS}
     for row in reader:
         rsid_key = key_map["rsid"]
         if not rsid_key:
@@ -88,6 +92,7 @@ def extract_snps(input_stream):
     return header_fields, results, key_map
 
 
+# ---------- Parsing helpers ----------
 def parse_int(x, default=0):
     try:
         return int(x)
@@ -121,156 +126,224 @@ def normalize_gt_like(genostr):
     return f"{m.group(1)}/{m.group(2)}" if m else None
 
 
-def two_letter_zygosity(genostr, ref=None, alt=None):
+def two_letter_with_allowed(
+    genostr: Optional[str], ref: str, allowed_alts: Set[str]
+) -> Optional[str]:
     """
-    Try to infer 0/0, 0/1, 1/1 from two-letter genotypes (e.g., 'AG', 'TT').
-    If REF/ALT are provided, use them; otherwise, fallback to equality check.
+    Map two-letter genotype using authoritative ref and a SET of allowed alts.
+    - If both letters == ref -> '0/0'
+    - If one is ref and the other in allowed_alts -> '0/1'
+    - If both in allowed_alts (even if different from each other) -> '1/1'
+      (treat mixed-alt like 'GC' as non-ref/non-ref; still show exact 'bases=' in evidence)
+    - If any letter not in {ref} ∪ allowed_alts -> unknown (None)
     """
     if not genostr or len(genostr) < 2:
         return None
     g = genostr.strip().upper().replace(" ", "")
-    if len(g) == 2 and g.isalpha():
-        a, b = g[0], g[1]
-        if ref and alt:
-            ref = ref.upper()
-            alt_first = alt.split(",")[0].upper()
-            if a == ref and b == ref:
-                return "0/0"
-            if {a, b} == {ref, alt_first}:
-                return "0/1"
-            if a == alt_first and b == alt_first:
-                return "1/1"
-        # no REF/ALT → assume hom letters => 0/0; het letters => 0/1
-        return "0/0" if a == b else "0/1"
-    return None
+    if len(g) != 2 or not g.isalpha():
+        return None
+    a, b = g[0], g[1]
+    valid = {ref} | allowed_alts
+    if a not in valid or b not in valid:
+        return None  # unexpected letter (e.g., N, or wrong locus)
+    if a == ref and b == ref:
+        return "0/0"
+    if a in allowed_alts and b in allowed_alts:
+        return "1/1"
+    # one ref, one allowed alt
+    return "0/1"
 
 
-def call_from_row(row, key_map):
+# ---------- Calling core ----------
+def g2_call_from_text_indel(genostr: Optional[str]) -> Tuple[str, bool]:
     """
-    Return site-level genotype in index form: '0/0', '0/1', '1/1', or './.' if unknown.
-    Uses, in order of preference: TYPE/EVENT_GT → AD/DP → GT (index) → two-letter → BAF.
+    Map 'II'/'ID'/'DD' → ('0/0'|'0/1'|'1/1', True).
+    Anything else or missing → ('./.', False).
+    """
+    if not genostr:
+        return "./.", False
+    g = genostr.strip().upper()
+    if g == "II":
+        return "0/0", True
+    if g == "ID":
+        return "0/1", True
+    if g == "DD":
+        return "1/1", True
+    return "./.", False
+
+
+def call_from_row_snp(rsid: str, row, key_map) -> Tuple[str, bool]:
+    """
+    Return ('0/0'|'0/1'|'1/1'|'./.', known_bool) for SNP rows (G1 sites).
+    Preference: AD/DP → GT index → two-letter with (ref + allowed_alts) → BAF.
+    (We ignore file REF/ALT if missing/wrong; we rely on authoritative sets.)
     """
     if row is None:
-        return "./."
+        return "./.", False
 
     def get(k, d=""):
         kk = key_map.get(k)
         return (row.get(kk) if kk else d) if row else d
 
-    typ, event_gt, dp = (
-        (get("type") or "").upper(),
-        get("event_gt"),
-        parse_int(get("dp")),
-    )
-    baf, ad, ref, alt, geno = (
-        parse_float(get("baf")),
-        get("ad"),
-        get("ref"),
-        get("alt"),
-        get("genotype"),
-    )
+    dp = parse_int(get("dp"))
+    baf = parse_float(get("baf"))
+    ad = get("ad")
+    geno = get("genotype")
 
-    # 1) Structural-style typed events (DEL/INS) with explicit EVENT_GT
-    if typ in ("DEL", "INS") and event_gt in (
-        "REF/REF",
-        "REF/DEL",
-        "DEL/DEL",
-        "REF/INS",
-        "INS/INS",
-    ):
-        return {
-            "REF/REF": "0/0",
-            "REF/DEL": "0/1",
-            "DEL/DEL": "1/1",
-            "REF/INS": "0/1",
-            "INS/INS": "1/1",
-        }[event_gt]
+    # Authoritative ref + allowed alts for this rsid (if known)
+    ref, allowed = KNOWN_REF_ALLOWED_ALTS.get(rsid, (None, None))
 
-    # 2) AD/DP counts
+    # 1) AD/DP counts (if present)
     refc, altc = parse_ad(ad)
     if dp <= 0 and (refc + altc) > 0:
         dp = refc + altc
     if dp > 0:
         baf_est = altc / float(dp)
         if baf_est >= HOM_ALT_MIN:
-            return "1/1"
+            return "1/1", True
         if HET_MIN <= baf_est < HET_MAX:
-            return "0/1"
-        return "0/0"
+            return "0/1", True
+        return "0/0", True
 
-    # 3) Index-style GT like '0/1' or '1|1'
+    # 2) Index-style GT like '0/1' or '1|1'
     gt_idx = normalize_gt_like(geno)
     if gt_idx:
-        return gt_idx
+        return gt_idx, True
 
-    # 4) Two-letter genotype (e.g., 'AG'), ideally with REF/ALT
-    letter_gt = two_letter_zygosity(geno, ref, alt)
-    if letter_gt:
-        return letter_gt
+    # 3) Two-letter genotype using authoritative ref + allowed_alts
+    if ref and allowed:
+        letter_gt = two_letter_with_allowed(geno, ref, allowed)
+        if letter_gt:
+            return letter_gt, True
 
-    # 5) Bare BAF
+    # 4) Bare BAF (last resort)
     if baf is not None:
         if baf >= HOM_ALT_MIN:
-            return "1/1"
+            return "1/1", True
         if HET_MIN <= baf < HET_MAX:
-            return "0/1"
-        return "0/0"
+            return "0/1", True
+        return "0/0", True
 
-    return "./."
+    return "./.", False
 
 
-def g1_count_from_two_calls(ca, cb):
+def call_from_row_g2(row, key_map) -> Tuple[str, bool]:
+    """
+    STRICT G2: trust ONLY the textual 'genotype' field as II/ID/DD.
+    """
+    if row is None:
+        return "./.", False
+    geno = row.get(key_map.get("genotype")) if key_map.get("genotype") else None
+    return g2_call_from_text_indel(geno)
+
+
+def g1_count_from_two_calls(ca: str, cb: str) -> Tuple[Optional[int], bool]:
+    known = ca in {"0/0", "0/1", "1/1"} and cb in {"0/0", "0/1", "1/1"}
+    if not known:
+        return None, False
     if ca == "1/1" and cb == "1/1":
-        return 2
-    if (ca in ("0/1", "1/1")) and (cb in ("0/1", "1/1")):
-        return 1
-    return 0
+        return 2, True
+    if (ca in {"0/1", "1/1"}) and (cb in {"0/1", "1/1"}):
+        return 1, True
+    return 0, True
 
 
-def g2_count_from_call(c):
-    return 2 if c == "1/1" else 1 if c == "0/1" else 0
+def g2_count_from_call(c: str) -> Tuple[Optional[int], bool]:
+    if c not in {"0/0", "0/1", "1/1"}:
+        return None, False
+    return (2 if c == "1/1" else 1 if c == "0/1" else 0), True
+
+
+def final_label(
+    g1_count: Optional[int], g1_known: bool, g2_count: Optional[int], g2_known: bool
+) -> str:
+    if g1_known and g2_known:
+        gc1, gc2 = g1_count or 0, g2_count or 0
+        if gc2 == 2:
+            return "G2/G2"
+        if gc1 == 2:
+            return "G1/G1"
+        if gc1 >= 1 and gc2 >= 1:
+            return "G1/G2"
+        if gc1 == 1:
+            return "G1/G0"
+        if gc2 == 1:
+            return "G2/G0"
+        return "G0/G0"
+    if g1_known and not g2_known:
+        return "G1/G-" if (g1_count or 0) >= 1 else "G0/G-"
+    if g2_known and not g1_known:
+        return "G2/G-" if (g2_count or 0) >= 1 else "G0/G-"
+    return "G-/G-"
+
+
+def pick_best_g2(
+    results: Dict[str, Optional[Dict[str, str]]],
+) -> Tuple[Optional[str], Optional[Dict[str, str]]]:
+    if results.get(RS_G2_CANON):
+        return RS_G2_CANON, results[RS_G2_CANON]
+    for rid in sorted(RS_G2_ALIASES):
+        if results.get(rid):
+            return rid, results[rid]
+    return None, None
 
 
 # ---------- Main ----------
 if __name__ == "__main__":
     header_fields, results, key_map = extract_snps(sys.stdin)
 
-    # Pick best records for each signal
-    best_g1a, best_g1b = results.get(RS_G1_A), results.get(RS_G1_B)
-    G2_CANDIDATES = [RS_G2] + sorted(RS_MERGED)
-    g2_id_used = next((rid for rid in G2_CANDIDATES if results.get(rid)), None)
-    best_g2 = results.get(g2_id_used) if g2_id_used else None
+    # --- G1 site calls (SNP path) ---
+    best_g1a = results.get(RS_G1_A)
+    best_g1b = results.get(RS_G1_B)
+    call_g1a, known_g1a = call_from_row_snp(RS_G1_A, best_g1a, key_map)
+    call_g1b, known_g1b = call_from_row_snp(RS_G1_B, best_g1b, key_map)
 
-    # Site-level calls
-    call_g1a = call_from_row(best_g1a, key_map)
-    call_g1b = call_from_row(best_g1b, key_map)
-    call_g2 = call_from_row(best_g2, key_map)
+    # --- G2 call (STRICT indel-from-text path, alias-aware) ---
+    g2_id_used, best_g2 = pick_best_g2(results)
 
-    # Counts → final APOL1 genotype
-    g1_count = g1_count_from_two_calls(call_g1a, call_g1b)
-    g2_count = g2_count_from_call(call_g2)
+    # If multiple G2 IDs are present, require agreement among their text genotypes; else unknown.
+    g2_texts: List[str] = []
+    for rid in RS_G2_ALL:
+        row = results.get(rid)
+        if not row:
+            continue
+        geno = row.get(key_map.get("genotype")) if key_map.get("genotype") else None
+        if geno:
+            g2_texts.append(geno.strip().upper())
+    g2_texts = [t for t in g2_texts if t]
 
-    if g2_count == 2:
-        apol1 = "G2/G2"
-    elif g1_count == 2:
-        apol1 = "G1/G1"
-    elif g1_count >= 1 and g2_count >= 1:
-        apol1 = "G1/G2"
-    elif g1_count == 1:
-        apol1 = "G1/G0"
-    elif g2_count == 1:
-        apol1 = "G2/G0"
+    if len(g2_texts) == 0:
+        call_g2, known_g2 = "./.", False
     else:
-        apol1 = "G0/G0"
+        agree = all(t == g2_texts[0] for t in g2_texts)
+        if not agree:
+            call_g2, known_g2 = "./.", False
+        else:
+            call_g2, known_g2 = g2_call_from_text_indel(g2_texts[0])
+            if best_g2 is None:
+                best_g2 = next(
+                    (results[rid] for rid in RS_G2_ALL if results.get(rid)), None
+                )
+            if g2_id_used is None:
+                g2_id_used = (
+                    RS_G2_CANON
+                    if results.get(RS_G2_CANON)
+                    else next(iter(RS_G2_ALIASES), RS_G2_CANON)
+                )
+
+    # --- Aggregate → final genotype with unknown propagation ---
+    g1_count, g1_known = g1_count_from_two_calls(call_g1a, call_g1b)
+    g2_count, g2_known = g2_count_from_call(call_g2)
+    apol1 = final_label(g1_count, g1_known, g2_count, g2_known)
 
     # --- Write outputs with prefix ---
     base = os.environ.get("APOL1_OUT_PREFIX", "apol1_result")
 
-    # 1) rsid/genotype table (now includes ref/alt columns, if present)
+    # 1) rsid/genotype table (include ref/alt columns if present)
     with open(f"{base}.rsid.tsv", "w") as fh:
         fh.write("rsid\tchromosome\tposition\tgenotype\tref\talt\n")
         for rsid in TARGET_RSIDS:
-            row = results[rsid]
+            row = results.get(rsid)
             geno = row.get(key_map.get("genotype"), "--") if row else "--"
             chrom = row.get(key_map.get("chromosome"), "--") if row else "--"
             pos = row.get(key_map.get("position"), "--") if row else "--"
@@ -282,40 +355,69 @@ if __name__ == "__main__":
     with open(f"{base}.genotype.txt", "w") as fh:
         fh.write(f"APOL1 genotype: {apol1}\n")
 
-    # 3) evidence + heuristic (now includes bases=<raw genotype> in each line)
-    def brief_row(rsid, row, call, key_map):
+    # 3) evidence + heuristic (now includes allowed_alts for G1 clarity)
+    def brief_row_g1(rsid, row, call):
         if row is None:
-            return f"{rsid}: no row"
+            return f"{rsid}\tno row"
         chrom = row.get(key_map.get("chromosome"), "--")
         pos = row.get(key_map.get("position"), "--")
         typ = (row.get(key_map.get("type"), "") or "").upper()
-        ref = row.get(key_map.get("ref"), "--")
-        alt = row.get(key_map.get("alt"), "--")
+        ref_file = row.get(key_map.get("ref"), "--")
+        alt_file = row.get(key_map.get("alt"), "--")
+        ad = row.get(key_map.get("ad"), "--")
+        dp = row.get(key_map.get("dp"), "--")
+        baf = row.get(key_map.get("baf"), "--")
+        geno = row.get(key_map.get("genotype"), "--")
+        ref_auth, alts_auth = KNOWN_REF_ALLOWED_ALTS.get(rsid, ("?", set()))
+        alts_auth_str = (
+            ",".join(sorted(alts_auth))
+            if isinstance(alts_auth, set)
+            else str(alts_auth)
+        )
+        return (
+            f"{rsid}\tpos={chrom}:{pos}\ttype={typ}\t"
+            f"GT≈{call}\tbases={geno}\tref={ref_file} alt={alt_file}\t"
+            f"AD={ad}\tDP={dp}\tBAF={baf}\tallowed_alts={ref_auth}->{alts_auth_str}"
+        )
+
+    def brief_row_g2(rsid, row, call):
+        if row is None:
+            return f"{rsid}\tno row"
+        chrom = row.get(key_map.get("chromosome"), "--")
+        pos = row.get(key_map.get("position"), "--")
+        typ = (row.get(key_map.get("type"), "") or "").upper()
+        ref_file = row.get(key_map.get("ref"), "--")
+        alt_file = row.get(key_map.get("alt"), "--")
         ad = row.get(key_map.get("ad"), "--")
         dp = row.get(key_map.get("dp"), "--")
         baf = row.get(key_map.get("baf"), "--")
         geno = row.get(key_map.get("genotype"), "--")
         return (
             f"{rsid}\tpos={chrom}:{pos}\ttype={typ}\t"
-            f"GT≈{call}\tbases={geno}\tref={ref} alt={alt}\tAD={ad}\tDP={dp}\tBAF={baf}"
+            f"GT≈{call}\tbases={geno}\tref={ref_file} alt={alt_file}\t"
+            f"AD={ad}\tDP={dp}\tBAF={baf}"
         )
 
-    explain = [
-        brief_row(RS_G1_A, best_g1a, call_g1a, key_map),
-        brief_row(RS_G1_B, best_g1b, call_g1b, key_map),
-        brief_row(g2_id_used or RS_G2, best_g2, call_g2, key_map),
-        "(Note: rs1317778148 and rs143830837 are merged into rs71785313)",
+    evidence_lines = [
+        brief_row_g1(RS_G1_A, best_g1a, call_g1a),
+        brief_row_g1(RS_G1_B, best_g1b, call_g1b),
+        brief_row_g2(g2_id_used or RS_G2_CANON, best_g2, call_g2),
+        "(Note: rs1317778148 and rs143830837 are merged into rs71785313; all must agree or G2=unknown.)",
     ]
 
     with open(f"{base}.evidence.txt", "w") as fh:
         fh.write("Calls (evidence):\n")
-        for line in explain:
+        for line in evidence_lines:
             fh.write(f"- {line}\n")
         fh.write("\nHeuristic (unphased):\n")
-        fh.write("- G1 requires ALT at BOTH rs73885319 (A>G) AND rs60910145 (T>G).\n")
+        fh.write(
+            "- G1 requires ALT at BOTH rs73885319 (A>G/C) AND rs60910145 (T>G/C).\n"
+        )
         fh.write(
             "  * both sites hom-alt -> 2×G1; both non-ref (het/alt) -> 1×G1; else 0×G1.\n"
         )
         fh.write("- G2 is the 6bp deletion at rs71785313 (TTATAA>-).\n")
-        fh.write("  * 1/1 -> 2×G2; 0/1 -> 1×G2; 0/0 -> 0×G2.\n")
-        fh.write("- Final genotype is derived from (G1 count, G2 count).\n")
+        fh.write("  * DD -> 2×G2; ID -> 1×G2; II -> 0×G2. (Aliases must agree.)\n")
+        fh.write(
+            "- Unknown stays unknown (printed as '-'). Final genotype derives from (G1 count, G2 count).\n"
+        )
