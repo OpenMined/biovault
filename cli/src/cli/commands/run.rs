@@ -135,9 +135,12 @@ impl ParticipantSource {
                             struct ParticipantsFile {
                                 participants: std::collections::HashMap<String, serde_yaml::Value>,
                             }
-                            if let Ok(parsed) = serde_yaml::from_str::<ParticipantsFile>(&contents) {
+                            if let Ok(parsed) = serde_yaml::from_str::<ParticipantsFile>(&contents)
+                            {
                                 if parsed.participants.contains_key(source) {
-                                    return Ok(ParticipantSource::RegisteredParticipant(source.to_string()));
+                                    return Ok(ParticipantSource::RegisteredParticipant(
+                                        source.to_string(),
+                                    ));
                                 }
                             }
                         }
@@ -182,8 +185,9 @@ async fn fetch_participant_file(
             if !participants_path.exists() {
                 return Err(anyhow!("No registered participants found"));
             }
-            let content = fs::read_to_string(&participants_path)
-                .with_context(|| format!("Failed to read participants file: {:?}", participants_path))?;
+            let content = fs::read_to_string(&participants_path).with_context(|| {
+                format!("Failed to read participants file: {:?}", participants_path)
+            })?;
             // Return the full file content with the participant ID as fragment
             Ok((content, Some(format!("participants.{}", participant_id))))
         }
@@ -219,7 +223,10 @@ async fn fetch_participant_file(
         ParticipantSource::SampleDataId(sample_id) => {
             // Check if sample data exists locally first
             let biovault_home = crate::config::get_biovault_home()?;
-            let participants_file = biovault_home.join("data").join("sample").join("participants.yaml");
+            let participants_file = biovault_home
+                .join("data")
+                .join("sample")
+                .join("participants.yaml");
 
             // If participants file doesn't exist or auto_download is false, we need to prompt
             if !participants_file.exists() && !auto_download {
@@ -1683,10 +1690,13 @@ participants:
 
     #[tokio::test]
     async fn fetch_participant_file_local_missing_errors() {
-        let res = fetch_participant_file(&ParticipantSource::LocalFile(
-            PathBuf::from("/nope/participants.yaml"),
-            Some("participants.X".into()),
-        ))
+        let res = fetch_participant_file(
+            &ParticipantSource::LocalFile(
+                PathBuf::from("/nope/participants.yaml"),
+                Some("participants.X".into()),
+            ),
+            false,
+        )
         .await;
         assert!(res.is_err());
     }
