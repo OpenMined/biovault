@@ -36,3 +36,13 @@ examples:
       - project.yaml
       - workflow.nf
       - assets/count_number_of_snps.py
+
+  sheet-add:
+    name: "Sheet Add"
+    description: "Add derived columns to participant data"
+    template: sheet
+    files:
+      - project.yaml
+      - workflow.nf
+      - assets/schema.yaml
+      - participants.csv
