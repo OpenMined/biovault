@@ -1,51 +1,158 @@
 /*
- * Module: USER
- * Run the APOL1 classifier once per samplesheet row.
- * - Make assets_dir a value input so it’s available to every task.
- * - Map rows -> (pid, snp_file, age)
- * - No combine needed; process takes two inputs: value path + tuple.
+ * Module: USER (DSL2-safe, debug-friendly; Python writer)
+ * - Buffers rows once, fans out cleanly (no `into`)
+ * - APOL1 classification per PID
+ * - Left-join computed_genotype
+ * - Adds BMI, age_group
+ * - Writes augmented CSV/TSV via Python (robust header mapping)
  */
+
+nextflow.enable.dsl=2
+params.results_dir = params.results_dir ?: 'results'
 
 workflow USER {
   take:
-    sample_sheet_ch   // kept for signature parity (unused)
-    rows_ch           // emits maps: { participant_id, genotype_file_path, (optional) age }
-    mapping_ch        // kept for signature parity (unused)
-    assets_dir_ch     // MUST be a value channel (Channel.value(file(params.assets_dir)))
-    results_dir       // pass-through value from the template
+    sample_sheet_ch   // value path to original sheet
+    rows_ch           // queue of row maps (schema already applied)
+    mapping_ch        // value { orig_headers, types, required, rename, defaults }
+    assets_dir_ch     // value path to assets dir (has apol1_classifier.py)
+    results_dir       // string path
 
   main:
-    /*
-     * 1) Map rows -> (pid, snp_file, age)
-     */
-    def to_classify_ch = rows_ch.map { row ->
-      def pid = row.participant_id as String
+    file(params.results_dir).mkdirs()
+
+    //------------------------------------------------------------------
+    // 0) Buffer rows ONCE, then replay
+    //------------------------------------------------------------------
+    def rows_all_v = rows_ch.collect()                   // VALUE: List<Map>
+    rows_all_v.view { lst -> "Buffered rows: ${lst.size()}" }
+
+    def rows_for_classify = rows_all_v.flatten()         // QUEUE: Map rows
+    def rows_for_join     = rows_all_v.flatten()
+
+    //------------------------------------------------------------------
+    // 1) Build output header once
+    //------------------------------------------------------------------
+    def new_cols   = ['bmi', 'age_group', 'computed_genotype']
+    def header_v   = mapping_ch.map { m -> (m.orig_headers + new_cols) as List }   // VALUE
+    header_v.view { "Header (raw): $it" }
+
+    // We’ll also pass rename map if provided
+    def rename_v   = mapping_ch.map { m -> (m.containsKey('rename') && m.rename instanceof Map) ? m.rename : [:] }
+
+    //------------------------------------------------------------------
+    // 2) Prepare tuples to classify: (pid, snp_file, age)
+    //------------------------------------------------------------------
+    def to_classify_ch = rows_for_classify.map { row ->
       def snp_file = file(row.genotype_file_path)
+      if (!snp_file.exists())
+        error "Genotype file not found for PID ${row.participant_id}: ${row.genotype_file_path}"
 
-      if (!pid)               error "Row missing participant_id: ${row}"
-      if (!snp_file.exists()) error "Genotype file not found for PID ${pid}: ${row.genotype_file_path}"
-
-      def age =
-        (row.age instanceof Number) ? (row.age as Number).intValue() :
-        (row.age instanceof String && row.age.isInteger()) ? row.age.toInteger() :
-        null
-
-      tuple(pid, snp_file, age)
+      tuple(
+        row.participant_id as String,
+        snp_file,
+        (row.age instanceof Number) ? row.age.intValue()
+          : (row.age instanceof String && row.age.isInteger()) ? row.age.toInteger()
+          : null
+      )
     }
+    to_classify_ch.view { "To classify: $it" }
 
-    // DEBUG
-    to_classify_ch.view { t -> "To classify: [${t[0]}, ${t[1]}, ${t[2]}]" }
-
-    /*
-     * 2) Run one task per row
-     *    Pass assets_dir as a reusable value input + the per-row tuple
-     */
+    //------------------------------------------------------------------
+    // 3) Run classifier
+    //------------------------------------------------------------------
     def apol1 = apol1_classifier(assets_dir_ch, to_classify_ch)
 
+    //------------------------------------------------------------------
+    // 4) Extract (pid, computed_genotype)
+    //------------------------------------------------------------------
+    def apol1_calls = apol1.genotype_line.map { f ->
+      def text = f.text?.trim() ?: ''
+      def m = text =~ /^APOL1 genotype:\s*(\S+)/
+      def computed = m ? m[0][1] : 'UNKNOWN'
+      def pidm = f.name =~ /^apol1_(.+)\.genotype\.txt$/
+      def pid = pidm ? pidm[0][1] : 'UNKNOWN_PID'
+      tuple(pid, computed)
+    }
+    apol1_calls.view { "APOL1 call: $it" }
+
+    //------------------------------------------------------------------
+    // 5) Left-join computed genotype
+    //------------------------------------------------------------------
+    def all_pids_ch = rows_for_join.map { r -> tuple(r.participant_id as String, r) }
+
+    def joined_rows_ch =
+      all_pids_ch
+        .map { pid, row -> tuple(pid, row, null) }
+        .mix( apol1_calls.map { pid, computed -> tuple(pid, null, computed) } )
+        .groupTuple(by: 0)
+        .map { pid, rows, computed_list ->
+          def row = rows.find { it != null }
+          def computed = computed_list.find { it != null } ?: 'UNKNOWN'
+          def out = new LinkedHashMap(row)
+          out.computed_genotype = computed
+          out
+        }
+    joined_rows_ch.view { "Joined row (pre-metrics): $it" }
+
+    //------------------------------------------------------------------
+    // 6) Add BMI and age_group
+    //------------------------------------------------------------------
+    def enriched_rows_ch = joined_rows_ch.map { row ->
+      BigDecimal weight   = row.weight != null ? new BigDecimal(row.weight.toString()) : null
+      BigDecimal height_m = row.height != null ? new BigDecimal(row.height.toString()).divide(new BigDecimal("100")) : null
+      BigDecimal bmi      = (weight != null && height_m != null && height_m > 0)
+                            ? weight.divide(height_m.multiply(height_m), 6, java.math.RoundingMode.HALF_UP)
+                            : null
+
+      Integer age = (row.age instanceof Number) ? (row.age as Integer)
+                    : (row.age instanceof String && row.age.isInteger()) ? row.age.toInteger()
+                    : null
+
+      def age_group = (age == null) ? null :
+        (age < 18 ? 'child' :
+         age < 30 ? '18-29' :
+         age < 45 ? '30-44' :
+         age < 60 ? '45-59' : '60+')
+
+      def out = new LinkedHashMap(row)
+      out.bmi = bmi
+      out.age_group = age_group
+      out
+    }
+    enriched_rows_ch.view { "Row with metrics: $it" }
+
+    //------------------------------------------------------------------
+    // 7) Collect maps for Python writer
+    //------------------------------------------------------------------
+    def rows_maps_v = enriched_rows_ch.collect()     // VALUE: List<Map>
+    rows_maps_v.view { rows -> "Rows collected for writer: ${rows?.size() ?: 0}" }
+
+    //------------------------------------------------------------------
+    // 8) Detect base filename & delimiter from original sheet
+    //------------------------------------------------------------------
+    def sample_sheet_filename_v = sample_sheet_ch.map { f ->
+      def n = f.name; def i = n.lastIndexOf('.'); i != -1 ? n[0..<i] : n
+    } // VALUE
+
+    def extension_v = sample_sheet_ch.map { f ->
+      def firstLine = f.readLines().head()
+      firstLine.contains('\t') ? 'tsv' : 'csv'
+    } // VALUE
+
+    //------------------------------------------------------------------
+    // 9) Write augmented sheet (Python) & simple report (Alpine)
+    //------------------------------------------------------------------
+    def csv_out    = write_sheet_py(header_v, rows_maps_v, rename_v, sample_sheet_filename_v, extension_v)
+    def calls_tsv  = apol1.genotype_line.collectFile(name: 'calls.tsv')
+    def report_out = write_report(calls_tsv)
+
   emit:
-    apol1_rsids = apol1.rsid_table
-    apol1_genos = apol1.genotype_line
-    apol1_evid  = apol1.evidence
+    augmented_csv = csv_out.augmented_csv
+    report        = report_out.report_file
+    apol1_rsids   = apol1.rsid_table
+    apol1_genos   = apol1.genotype_line
+    apol1_evid    = apol1.evidence
 }
 
 process apol1_classifier {
@@ -55,7 +162,6 @@ process apol1_classifier {
   debug true
 
   input:
-    // assets_dir must be a value channel so it’s reused for every task
     path assets_dir
     tuple val(pid), path(snp_file), val(age)
 
@@ -66,14 +172,152 @@ process apol1_classifier {
 
   script:
   """
-  echo ">>> PROCESS START pid=${pid}"
-  echo "assets_dir contents:"
-  ls -la "${assets_dir}" || true
-  echo "snp_file path: ${snp_file}"
-  echo "age: ${age}"
+  echo "Processing PID: ${pid}, SNP file: \$(basename "${snp_file}"), Age: ${age}"
   set -euo pipefail
   APOL1_OUT_PREFIX="apol1_${pid}" \\
     python3 "${assets_dir}/apol1_classifier.py" < "${snp_file}"
-  echo ">>> PROCESS END pid=${pid}"
+  """
+}
+
+/*
+ * New: Python-based sheet writer. No bash string gymnastics.
+ * Inputs are VALUEs: header_list (List), rows_maps (List<Map>), rename (Map),
+ *                    sample_sheet_filename (String), extension (String).
+ */
+process write_sheet_py {
+  container 'python:3.11-slim'
+  publishDir params.results_dir, mode: 'copy'
+  debug true
+
+  input:
+    val header_list
+    val rows_maps
+    val rename_map
+    val sample_sheet_filename
+    val extension
+
+  output:
+    path "${sample_sheet_filename}-updated.${extension}", emit: augmented_csv
+
+  script:
+  // ---- SANITIZE to plain strings to avoid Groovy JSON recursion/stack overflows ----
+  def header_clean = (header_list instanceof List) ? header_list.collect { it == null ? "" : it.toString().trim() } : []
+  def rename_clean = (rename_map instanceof Map) ? rename_map.collectEntries { k,v ->
+    [(k == null ? "" : k.toString().trim()) : (v == null ? "" : v.toString().trim())]
+  } : [:]
+  // rows_maps is List<Map>; convert keys/values to strings (values may be null)
+  def rows_clean = (rows_maps instanceof List) ? rows_maps.collect { r ->
+    (r instanceof Map) ? r.collectEntries { k,v ->
+      [(k == null ? "" : k.toString().trim()) : (v == null ? "" : v.toString())]
+    } : [:]
+  } : []
+
+  def header_json = groovy.json.JsonOutput.toJson(header_clean)
+  def rows_json   = groovy.json.JsonOutput.toJson(rows_clean)
+  def rename_json = groovy.json.JsonOutput.toJson(rename_clean)
+
+  """
+  set -euo pipefail
+
+  # Write JSON payloads (plain strings only)
+  cat > header.json <<EOF
+  ${header_json}
+EOF
+  cat > rows.json <<EOF
+  ${rows_json}
+EOF
+  cat > rename.json <<EOF
+  ${rename_json}
+EOF
+
+  python3 - <<'PY'
+import json, csv, sys
+
+# Load inputs
+with open('header.json','r') as fh:
+    header = json.load(fh)
+with open('rows.json','r') as fh:
+    rows = json.load(fh)
+with open('rename.json','r') as fh:
+    rename = json.load(fh)
+
+# Normalize header: strings, trimmed
+header_norm = [ (h or '') for h in header ]
+header_norm = [ str(h).strip() for h in header_norm ]
+
+# Build a mapping from desired header -> actual row key (case-insensitive)
+# Apply rename map FIRST if provided (logical header), THEN match case-insensitively in rows.
+def build_keymap(sample_row):
+    idx = { str(k).strip().lower(): k for k in sample_row.keys() }
+    km = {}
+    for h in header_norm:
+        logical = rename.get(h, h) if isinstance(rename, dict) else h
+        key = idx.get(str(logical).strip().lower())
+        km[h] = key  # may be None
+    return km
+
+delimiter = '\\t' if str('${extension}').strip().lower() == 'tsv' else ','
+out_path = f"{'${sample_sheet_filename}'}-updated.{ '${extension}' }"
+
+with open(out_path, 'w', newline='') as f:
+    writer = csv.writer(f, delimiter=delimiter, quoting=csv.QUOTE_MINIMAL)
+    writer.writerow(header_norm)
+
+    if not rows:
+        print("DEBUG: No rows to write", file=sys.stderr)
+    else:
+        km = build_keymap(rows[0])
+
+        # DEBUG
+        print("DEBUG header_norm:", header_norm, file=sys.stderr)
+        print("DEBUG rename_map:", rename, file=sys.stderr)
+        print("DEBUG sample row keys:", list(rows[0].keys()), file=sys.stderr)
+        print("DEBUG header->row key map:", km, file=sys.stderr)
+
+        for r in rows:
+            vals = []
+            for h in header_norm:
+                rk = km.get(h)
+                v = r.get(rk, '') if rk is not None else ''
+                vals.append('' if v is None else str(v))
+            writer.writerow(vals)
+
+        # DEBUG first 2 rendered rows
+        preview = []
+        for r in rows[:2]:
+            preview.append([ '' if (r.get(km.get(h,''), '') is None) else str(r.get(km.get(h,''), ''))
+                             for h in header_norm ])
+        print("DEBUG first 2 rendered rows:", preview, file=sys.stderr)
+PY
+  """
+}
+
+
+process write_report {
+  container 'alpine:latest'
+  shell 'ash'
+  publishDir params.results_dir, mode: 'copy'
+  debug true
+
+  input:
+    path calls_tsv
+
+  output:
+    path "report.txt", emit: report_file
+
+  script:
+  """
+  set -euo pipefail
+  {
+    echo "APOL1 genotype counts:"
+    grep -h "^APOL1 genotype:" calls.tsv \\
+      | awk '{print \$3}' \\
+      | sort \\
+      | uniq -c \\
+      | awk '{printf "- %s: %d\\n", \$2, \$1}'
+    echo
+    echo "Average age by genotype:"
+    echo "(Not available — age not included in genotype_line inputs.)"
+  } > report.txt
   """
 }

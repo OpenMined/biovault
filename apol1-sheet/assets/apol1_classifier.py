@@ -20,11 +20,16 @@ RS_G1_B = "rs60910145"
 RS_G2 = "rs71785313"
 RS_MERGED = {"rs1317778148", "rs143830837"}
 
+# Heuristic thresholds for inferring 0/0 vs 0/1 vs 1/1 from BAF/AD
 HET_MIN, HET_MAX, HOM_ALT_MIN = 0.20, 0.80, 0.80
 
 
 # ---------- Helpers ----------
 def detect_header_and_stream(lines):
+    """
+    Accepts a TSV-ish stream that may contain comment lines starting with '#'
+    and may or may not contain a header line. Returns (header_fields, data_lines).
+    """
     header_fields, data_lines = None, []
     for raw in lines:
         line = raw.lstrip("\ufeff").rstrip("\r\n")
@@ -51,9 +56,10 @@ def detect_header_and_stream(lines):
 def extract_snps(input_stream):
     header_fields, data_lines = detect_header_and_stream(input_stream)
     reader = csv.DictReader(data_lines, fieldnames=header_fields, delimiter="\t")
-    key_for = lambda needed: next(
-        (k for k in header_fields if k.lower() == needed), None
-    )
+
+    def key_for(needed):
+        return next((k for k in header_fields if k.lower() == needed), None)
+
     key_map = {
         k: key_for(k)
         for k in [
@@ -70,6 +76,7 @@ def extract_snps(input_stream):
             "baf",
         ]
     }
+
     results = {rsid: None for rsid in TARGET_RSIDS}
     for row in reader:
         rsid_key = key_map["rsid"]
@@ -105,6 +112,9 @@ def parse_ad(ad_str):
 
 
 def normalize_gt_like(genostr):
+    """
+    Normalize index-style GT strings like '0/1', '1|1' → '0/1' or '1/1'.
+    """
     if not genostr:
         return None
     m = re.fullmatch(r"\s*([01])[\/|]([01])\s*", genostr)
@@ -112,6 +122,10 @@ def normalize_gt_like(genostr):
 
 
 def two_letter_zygosity(genostr, ref=None, alt=None):
+    """
+    Try to infer 0/0, 0/1, 1/1 from two-letter genotypes (e.g., 'AG', 'TT').
+    If REF/ALT are provided, use them; otherwise, fallback to equality check.
+    """
     if not genostr or len(genostr) < 2:
         return None
     g = genostr.strip().upper().replace(" ", "")
@@ -126,11 +140,16 @@ def two_letter_zygosity(genostr, ref=None, alt=None):
                 return "0/1"
             if a == alt_first and b == alt_first:
                 return "1/1"
+        # no REF/ALT → assume hom letters => 0/0; het letters => 0/1
         return "0/0" if a == b else "0/1"
     return None
 
 
 def call_from_row(row, key_map):
+    """
+    Return site-level genotype in index form: '0/0', '0/1', '1/1', or './.' if unknown.
+    Uses, in order of preference: TYPE/EVENT_GT → AD/DP → GT (index) → two-letter → BAF.
+    """
     if row is None:
         return "./."
 
@@ -150,6 +169,8 @@ def call_from_row(row, key_map):
         get("alt"),
         get("genotype"),
     )
+
+    # 1) Structural-style typed events (DEL/INS) with explicit EVENT_GT
     if typ in ("DEL", "INS") and event_gt in (
         "REF/REF",
         "REF/DEL",
@@ -164,6 +185,8 @@ def call_from_row(row, key_map):
             "REF/INS": "0/1",
             "INS/INS": "1/1",
         }[event_gt]
+
+    # 2) AD/DP counts
     refc, altc = parse_ad(ad)
     if dp <= 0 and (refc + altc) > 0:
         dp = refc + altc
@@ -174,18 +197,25 @@ def call_from_row(row, key_map):
         if HET_MIN <= baf_est < HET_MAX:
             return "0/1"
         return "0/0"
+
+    # 3) Index-style GT like '0/1' or '1|1'
     gt_idx = normalize_gt_like(geno)
     if gt_idx:
         return gt_idx
+
+    # 4) Two-letter genotype (e.g., 'AG'), ideally with REF/ALT
     letter_gt = two_letter_zygosity(geno, ref, alt)
     if letter_gt:
         return letter_gt
+
+    # 5) Bare BAF
     if baf is not None:
         if baf >= HOM_ALT_MIN:
             return "1/1"
         if HET_MIN <= baf < HET_MAX:
             return "0/1"
         return "0/0"
+
     return "./."
 
 
@@ -205,21 +235,20 @@ def g2_count_from_call(c):
 if __name__ == "__main__":
     header_fields, results, key_map = extract_snps(sys.stdin)
 
+    # Pick best records for each signal
     best_g1a, best_g1b = results.get(RS_G1_A), results.get(RS_G1_B)
     G2_CANDIDATES = [RS_G2] + sorted(RS_MERGED)
     g2_id_used = next((rid for rid in G2_CANDIDATES if results.get(rid)), None)
     best_g2 = results.get(g2_id_used) if g2_id_used else None
 
-    call_g1a, call_g1b, call_g2 = (
-        call_from_row(best_g1a, key_map),
-        call_from_row(best_g1b, key_map),
-        call_from_row(best_g2, key_map),
-    )
+    # Site-level calls
+    call_g1a = call_from_row(best_g1a, key_map)
+    call_g1b = call_from_row(best_g1b, key_map)
+    call_g2 = call_from_row(best_g2, key_map)
 
-    g1_count, g2_count = (
-        g1_count_from_two_calls(call_g1a, call_g1b),
-        g2_count_from_call(call_g2),
-    )
+    # Counts → final APOL1 genotype
+    g1_count = g1_count_from_two_calls(call_g1a, call_g1b)
+    g2_count = g2_count_from_call(call_g2)
 
     if g2_count == 2:
         apol1 = "G2/G2"
@@ -237,40 +266,44 @@ if __name__ == "__main__":
     # --- Write outputs with prefix ---
     base = os.environ.get("APOL1_OUT_PREFIX", "apol1_result")
 
-    # 1. rsid/genotype table
+    # 1) rsid/genotype table (now includes ref/alt columns, if present)
     with open(f"{base}.rsid.tsv", "w") as fh:
-        fh.write("rsid\tchromosome\tposition\tgenotype\n")
+        fh.write("rsid\tchromosome\tposition\tgenotype\tref\talt\n")
         for rsid in TARGET_RSIDS:
             row = results[rsid]
             geno = row.get(key_map.get("genotype"), "--") if row else "--"
             chrom = row.get(key_map.get("chromosome"), "--") if row else "--"
             pos = row.get(key_map.get("position"), "--") if row else "--"
-            fh.write(f"{rsid}\t{chrom}\t{pos}\t{geno}\n")
+            ref = row.get(key_map.get("ref"), "--") if row else "--"
+            alt = row.get(key_map.get("alt"), "--") if row else "--"
+            fh.write(f"{rsid}\t{chrom}\t{pos}\t{geno}\t{ref}\t{alt}\n")
 
-    # 2. genotype line only
+    # 2) genotype line only (final APOL1 call)
     with open(f"{base}.genotype.txt", "w") as fh:
         fh.write(f"APOL1 genotype: {apol1}\n")
 
-    # 3. evidence + heuristic
-    def brief_row(rsid, row, call):
+    # 3) evidence + heuristic (now includes bases=<raw genotype> in each line)
+    def brief_row(rsid, row, call, key_map):
         if row is None:
             return f"{rsid}: no row"
-        chrom, pos, typ, ref, alt, ad, dp, baf = (
-            row.get(key_map.get("chromosome"), "--"),
-            row.get(key_map.get("position"), "--"),
-            (row.get(key_map.get("type"), "") or "").upper(),
-            row.get(key_map.get("ref"), "--"),
-            row.get(key_map.get("alt"), "--"),
-            row.get(key_map.get("ad"), "--"),
-            row.get(key_map.get("dp"), "--"),
-            row.get(key_map.get("baf"), "--"),
+        chrom = row.get(key_map.get("chromosome"), "--")
+        pos = row.get(key_map.get("position"), "--")
+        typ = (row.get(key_map.get("type"), "") or "").upper()
+        ref = row.get(key_map.get("ref"), "--")
+        alt = row.get(key_map.get("alt"), "--")
+        ad = row.get(key_map.get("ad"), "--")
+        dp = row.get(key_map.get("dp"), "--")
+        baf = row.get(key_map.get("baf"), "--")
+        geno = row.get(key_map.get("genotype"), "--")
+        return (
+            f"{rsid}\tpos={chrom}:{pos}\ttype={typ}\t"
+            f"GT≈{call}\tbases={geno}\tref={ref} alt={alt}\tAD={ad}\tDP={dp}\tBAF={baf}"
         )
-        return f"{rsid}\tpos={chrom}:{pos}\ttype={typ}\tGT≈{call}\tref={ref} alt={alt}\tAD={ad}\tDP={dp}\tBAF={baf}"
 
     explain = [
-        brief_row(RS_G1_A, best_g1a, call_g1a),
-        brief_row(RS_G1_B, best_g1b, call_g1b),
-        brief_row(g2_id_used or RS_G2, best_g2, call_g2),
+        brief_row(RS_G1_A, best_g1a, call_g1a, key_map),
+        brief_row(RS_G1_B, best_g1b, call_g1b, key_map),
+        brief_row(g2_id_used or RS_G2, best_g2, call_g2, key_map),
         "(Note: rs1317778148 and rs143830837 are merged into rs71785313)",
     ]
 
