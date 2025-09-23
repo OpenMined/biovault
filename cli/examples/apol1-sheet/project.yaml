@@ -1,6 +1,7 @@
-name: sheet-add
+name: apol1-sheet
 author: madhava@openmined.org
 workflow: workflow.nf
 template: sheet
 assets:
   - schema.yaml
+  - apol1_classifier.py

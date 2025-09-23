@@ -5,6 +5,27 @@ import re
 import sys
 from typing import Dict, List, Optional, Set, Tuple
 
+# // https://www.ncbi.nlm.nih.gov/snp/?term=rs73885319
+# // rs73885319
+# // Variant type:SNVAlleles:A>G [Show Flanks]Chromosome:
+# // 22:36265860 (GRCh38)
+# // 22:36661906 (GRCh37)
+# // https://www.ncbi.nlm.nih.gov/snp/?term=rs60910145
+# // rs60910145
+# // Alleles:T>C,G [Show Flanks]Chromosome:
+# // 22:36265988 (GRCh38)
+# // 22:36662034 (GRCh37)
+
+# // https://www.ncbi.nlm.nih.gov/snp/rs71785313
+# // rs71785313
+# // Variant type:INDELAlleles:TTATAA>- [Show Flanks]Chromosome:
+
+# G1 = actually two missense mutations (S342G and I384M) that occur together on the same haplotype.
+# G2 = a 6 base-pair deletion (loss of two amino acids, N388 and Y389).
+# G0/G1 or G0/G2 → “carriers,” usually no major increased risk
+# G1/G1, G1/G2, G2/G2 → “high-risk genotypes” linked to kidney disease progression.
+
+
 # ---------- Config ----------
 TARGET_RSIDS = [
     "rs73885319",  # G1 part A (A>G, sometimes A>C)

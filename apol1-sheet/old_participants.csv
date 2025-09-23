@@ -1,5 +1,0 @@
-participant_id,genotype_file_path,weight,height,age
-NA12345,/data/genotypes/NA12345.vcf.gz,70,175,34
-NA67890,/data/genotypes/NA67890.vcf.gz,82,181,29
-NA24680,/data/genotypes/NA24680.vcf.gz,55,160,17
-NA13579,/data/genotypes/NA13579.vcf.gz,95,190,63
