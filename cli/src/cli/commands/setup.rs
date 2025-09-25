@@ -2,6 +2,7 @@ use super::check::DependencyConfig;
 use crate::Result;
 use anyhow::anyhow;
 use std::env;
+use std::io::{self, Write};
 use std::process::{Command, Stdio};
 
 #[derive(Debug)]
@@ -250,24 +251,78 @@ async fn setup_macos() -> Result<()> {
 
     println!("\nSetting up macOS environment...\n");
 
-    // Check for Homebrew (most macOS installs use brew per deps.yaml)
-    let brew_exists = Command::new("sh")
-        .arg("-c")
-        .arg("command -v brew >/dev/null 2>&1")
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
+    // Check if we're in CI mode (non-interactive)
+    let is_ci = env::var("CI").is_ok() || env::var("GITHUB_ACTIONS").is_ok();
 
-    if !brew_exists {
-        println!("❌ Homebrew not found.");
-        println!("Please install Homebrew first: https://brew.sh");
-        println!("Install command:");
-        println!("  /bin/bash -c \"$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\"");
-        println!("\nAfter installing Homebrew, re-run: bv setup\n");
-        // Still provide SyftBox link
-        print_syftbox_instructions();
-        return Ok(());
+    // Check for Homebrew
+    let brew_in_path = which::which("brew").is_ok();
+    let mut brew_path = None;
+
+    if !brew_in_path {
+        // Check common Homebrew locations even if not in PATH
+        let common_brew_paths = vec![
+            "/opt/homebrew/bin/brew", // Apple Silicon
+            "/usr/local/bin/brew",    // Intel Mac
+        ];
+
+        for path in &common_brew_paths {
+            if std::path::Path::new(path).exists() {
+                brew_path = Some(path.to_string());
+                println!("📦 Found Homebrew at {} (not in PATH)", path);
+                break;
+            }
+        }
     }
+
+    // Install Homebrew if not found
+    if !brew_in_path && brew_path.is_none() {
+        println!("📦 Homebrew not found. Would you like to install it? [Y/n]: ");
+
+        if is_ci {
+            println!("   CI mode: Skipping Homebrew installation.");
+            println!("   Please ensure Homebrew is pre-installed in CI environment.");
+            return Ok(());
+        } else {
+            io::stdout().flush()?;
+            let mut input = String::new();
+            io::stdin().read_line(&mut input)?;
+            let answer = input.trim().to_lowercase();
+
+            if answer.is_empty() || answer == "y" || answer == "yes" {
+                println!("Installing Homebrew...");
+                let install_cmd = "/bin/bash -c \"$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\"";
+                let status = Command::new("sh").arg("-c").arg(install_cmd).status()?;
+
+                if status.success() {
+                    println!("✓ Homebrew installed successfully!");
+                    // Detect where Homebrew was installed
+                    if std::path::Path::new("/opt/homebrew/bin/brew").exists() {
+                        brew_path = Some("/opt/homebrew/bin/brew".to_string());
+                    } else if std::path::Path::new("/usr/local/bin/brew").exists() {
+                        brew_path = Some("/usr/local/bin/brew".to_string());
+                    }
+                } else {
+                    println!("❌ Homebrew installation failed.");
+                    println!("Please install manually from: https://brew.sh");
+                    return Ok(());
+                }
+            } else {
+                println!("Skipping Homebrew installation.");
+                println!("Please install Homebrew manually from: https://brew.sh");
+                println!("Then re-run: bv setup");
+                return Ok(());
+            }
+        }
+    }
+
+    // Use the brew command (either from PATH or specific path)
+    let brew_cmd = if brew_in_path {
+        "brew".to_string()
+    } else if let Some(ref bp) = brew_path {
+        bp.clone()
+    } else {
+        "brew".to_string() // Fallback
+    };
 
     // Load deps.yaml and execute macOS-specific commands
     let deps_yaml = include_str!("../../deps.yaml");
@@ -277,6 +332,7 @@ async fn setup_macos() -> Result<()> {
     let mut skip_count = 0;
     let mut fail_count = 0;
 
+    // Use the brew command for installations
     for dep in &config.dependencies {
         if let Some(environments) = &dep.environments {
             if let Some(env_config) = environments.get("macos") {
@@ -342,10 +398,17 @@ async fn setup_macos() -> Result<()> {
                     let mut all_succeeded = true;
 
                     for cmd in install_commands {
-                        println!("   Running: {}", cmd);
+                        // Replace 'brew' with the actual brew path if needed
+                        let adjusted_cmd = if !brew_in_path && cmd.starts_with("brew ") {
+                            cmd.replace("brew ", &format!("{} ", brew_cmd))
+                        } else {
+                            cmd.clone()
+                        };
+
+                        println!("   Running: {}", adjusted_cmd);
                         let output = Command::new("sh")
                             .arg("-c")
-                            .arg(cmd)
+                            .arg(&adjusted_cmd)
                             .stdout(Stdio::piped())
                             .stderr(Stdio::piped())
                             .output();
@@ -402,9 +465,13 @@ async fn setup_macos() -> Result<()> {
         }
     }
 
+    // After installing Java, check if it needs to be added to PATH
+    if success_count > 0 || skip_count > 0 {
+        check_and_configure_java_path(is_ci).await?;
+    }
+
     println!("\nNotes:");
     println!("- If this is your first time installing Docker Desktop, open it once to finish setup and grant permissions.");
-    println!("- You may need to ensure the OpenJDK 17 binaries are on PATH. Brew usually prints a caveat like adding a PATH export.");
 
     // SyftBox info for manual setup later (we installed in setup-only mode)
     println!("\nSyftBox:");
@@ -997,6 +1064,155 @@ fn map_winget_pkg_to_choco(pkg: &str) -> &'static str {
         // Add other mappings here as needed
         _ => "",
     }
+}
+
+async fn check_and_configure_java_path(is_ci: bool) -> Result<()> {
+    // Check if Java is already in PATH
+    if which::which("java").is_ok() {
+        return Ok(());
+    }
+
+    // Check if Java is installed via brew but not in PATH
+    let java_brew_path = check_java_in_brew_not_in_path();
+
+    if let Some(brew_path) = java_brew_path {
+        println!("\n⚠️  Java is installed via Homebrew but not in your PATH.");
+        println!("   Location: {}", brew_path);
+
+        let shell = env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+        let shell_config = if shell.contains("zsh") {
+            format!(
+                "{}/.zshrc",
+                env::var("HOME").unwrap_or_else(|_| "~".to_string())
+            )
+        } else if shell.contains("bash") {
+            format!(
+                "{}/.bash_profile",
+                env::var("HOME").unwrap_or_else(|_| "~".to_string())
+            )
+        } else {
+            format!(
+                "{}/.profile",
+                env::var("HOME").unwrap_or_else(|_| "~".to_string())
+            )
+        };
+
+        let export_line = format!("export PATH=\"{}:$PATH\"", brew_path);
+
+        if is_ci {
+            // In CI mode, automatically add to PATH configuration
+            println!("   CI mode: Automatically configuring PATH...");
+
+            // Add to the shell config file
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&shell_config)?;
+            writeln!(file, "\n# Added by BioVault setup")?;
+            writeln!(file, "{}", export_line)?;
+
+            println!("   ✓ Added to {}", shell_config);
+            println!("   Note: You'll need to restart your shell or run 'source {}' for changes to take effect.", shell_config);
+        } else {
+            // Interactive mode - prompt the user
+            println!("\n   Would you like to automatically add Java to your PATH? [Y/n]: ");
+            io::stdout().flush()?;
+
+            let mut input = String::new();
+            io::stdin().read_line(&mut input)?;
+            let answer = input.trim().to_lowercase();
+
+            if answer.is_empty() || answer == "y" || answer == "yes" {
+                // Add to the shell config file
+                let mut file = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&shell_config)?;
+                writeln!(file, "\n# Added by BioVault setup")?;
+                writeln!(file, "{}", export_line)?;
+
+                println!("   ✓ Added to {}", shell_config);
+                println!("   Note: You'll need to restart your shell or run 'source {}' for changes to take effect.", shell_config);
+            } else {
+                println!("   Skipped PATH configuration.");
+                println!("   To manually add Java to your PATH, run:");
+                println!("     echo '{}' >> {}", export_line, shell_config);
+                println!("     source {}", shell_config);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn check_java_in_brew_not_in_path() -> Option<String> {
+    // Find brew command (in PATH or common locations)
+    let brew_cmd = find_brew_command();
+    brew_cmd.as_ref()?;
+    let brew_cmd = brew_cmd.unwrap();
+
+    // Check if Java/OpenJDK is installed via brew
+    let output = Command::new(&brew_cmd)
+        .args(["list", "--formula"])
+        .output()
+        .ok()?;
+
+    let installed_packages = String::from_utf8_lossy(&output.stdout);
+
+    // Look for any OpenJDK version
+    let mut found_java_package = None;
+    for line in installed_packages.lines() {
+        if line.starts_with("openjdk") {
+            found_java_package = Some(line.to_string());
+            break;
+        }
+    }
+
+    found_java_package.as_ref()?;
+
+    // Get the actual path where brew installed Java
+    let pkg = found_java_package.unwrap();
+    let prefix_output = Command::new(&brew_cmd)
+        .args(["--prefix", &pkg])
+        .output()
+        .ok()?;
+
+    if !prefix_output.status.success() {
+        return None;
+    }
+
+    let brew_prefix = String::from_utf8_lossy(&prefix_output.stdout)
+        .trim()
+        .to_string();
+    let java_bin_path = format!("{}/bin", brew_prefix);
+
+    // Check if this path contains java binary
+    if std::path::Path::new(&format!("{}/java", java_bin_path)).exists() {
+        Some(java_bin_path)
+    } else {
+        None
+    }
+}
+
+fn find_brew_command() -> Option<String> {
+    // First check if brew is in PATH
+    if which::which("brew").is_ok() {
+        return Some("brew".to_string());
+    }
+
+    // Check common locations
+    let common_brew_paths = vec![
+        "/opt/homebrew/bin/brew", // Apple Silicon
+        "/usr/local/bin/brew",    // Intel Mac
+    ];
+
+    for path in &common_brew_paths {
+        if std::path::Path::new(path).exists() {
+            return Some(path.to_string());
+        }
+    }
+
+    None
 }
 
 #[cfg(test)]
