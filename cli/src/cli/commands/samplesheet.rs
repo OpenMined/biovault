@@ -126,6 +126,12 @@ pub async fn create(
         }
     }
 
+    // Sort by participant_id when extract_cols is used
+    if !extract_pattern.is_empty() {
+        csv_rows.sort_by(|a, b| a.0.cmp(&b.0));
+        info!("Sorted {} participants by participant_id", csv_rows.len());
+    }
+
     let mut csv_content = String::from("participant_id,genotype_file_path\n");
     for (participant_id, file_path) in &csv_rows {
         csv_content.push_str(&format!("{},{}\n", participant_id, file_path.display()));

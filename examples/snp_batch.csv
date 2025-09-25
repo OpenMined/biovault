@@ -1,5 +1,0 @@
-participant_id,snp,ref_version
-USER001,/data/snp/user001.vcf,GRCh38
-USER002,/data/snp/user002.vcf.gz,GRCh38
-USER003,/data/snp/user003_23andme.txt,GRCh37
-USER004,/data/snp/user004_ancestry.txt,GRCh37
