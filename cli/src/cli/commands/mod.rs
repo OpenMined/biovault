@@ -11,6 +11,7 @@ pub mod participant;
 pub mod project;
 pub mod run;
 pub mod sample_data;
+pub mod samplesheet;
 pub mod setup;
 pub mod submit;
 pub mod update;

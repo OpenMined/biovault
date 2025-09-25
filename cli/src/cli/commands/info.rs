@@ -1,3 +1,4 @@
+use crate::config;
 use crate::Result;
 use std::collections::HashMap;
 #[cfg(target_family = "unix")]
@@ -90,6 +91,28 @@ pub async fn execute() -> Result<()> {
     let total_free_space: u128 = device_max_free.values().map(|v| *v as u128).sum();
     let free_space_gb = total_free_space as f64 / (1024.0 * 1024.0 * 1024.0);
     println!("DISK FREE: {:.2} GB", free_space_gb);
+
+    // SyftBox environment info if available
+    if config::is_syftbox_env() {
+        println!("\nSyftBox Environment");
+        println!("===================");
+
+        if let Some(binary) = config::get_syftbox_binary() {
+            println!("SyftBox Binary: {}", binary);
+        }
+
+        if let Some(version) = config::get_syftbox_version() {
+            println!("SyftBox Version: {}", version);
+        }
+
+        if let Ok(data_dir) = std::env::var("SYFTBOX_DATA_DIR") {
+            println!("SyftBox Data Dir: {}", data_dir);
+        }
+
+        if let Ok(email) = std::env::var("SYFTBOX_EMAIL") {
+            println!("SyftBox Email: {}", email);
+        }
+    }
 
     Ok(())
 }

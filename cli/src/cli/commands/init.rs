@@ -158,9 +158,32 @@ pub async fn execute(email: Option<&str>, quiet: bool) -> Result<()> {
             snp_nextflow_config_path
         );
 
+        // Copy sheet templates
+        let sheet_dir = env_dir.join("sheet");
+        if !sheet_dir.exists() {
+            fs::create_dir_all(&sheet_dir)?;
+            info!("Created sheet template directory: {:?}", sheet_dir);
+        }
+
+        // Copy sheet template.nf
+        let sheet_template_nf_content = include_str!("../../templates/sheet/template.nf");
+        let sheet_template_nf_path = sheet_dir.join("template.nf");
+        fs::write(&sheet_template_nf_path, sheet_template_nf_content)?;
+        info!("Created sheet template.nf at: {:?}", sheet_template_nf_path);
+
+        // Copy sheet nextflow.config
+        let sheet_nextflow_config_content = include_str!("../../templates/sheet/nextflow.config");
+        let sheet_nextflow_config_path = sheet_dir.join("nextflow.config");
+        fs::write(&sheet_nextflow_config_path, sheet_nextflow_config_content)?;
+        info!(
+            "Created sheet nextflow.config at: {:?}",
+            sheet_nextflow_config_path
+        );
+
         println!("✓ Nextflow templates installed:");
         println!("  - Default templates: {}", default_dir.display());
         println!("  - SNP templates: {}", snp_dir.display());
+        println!("  - Sheet templates: {}", sheet_dir.display());
 
         // Initialize SyftBox RPC folders for messaging if SyftBox is configured
         match config.get_syftbox_data_dir() {

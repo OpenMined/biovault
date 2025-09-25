@@ -114,6 +114,7 @@ enum ParticipantSource {
     SyftUrl(SyftURL),
     HttpUrl(String),
     SampleDataId(String),
+    RegisteredParticipant(String), // participant ID from ~/.biovault/participants.yaml
 }
 
 impl ParticipantSource {
@@ -123,6 +124,30 @@ impl ParticipantSource {
         } else if source.starts_with("http://") || source.starts_with("https://") {
             Ok(ParticipantSource::HttpUrl(source.to_string()))
         } else {
+            // First check if this is a registered participant (no path separators, no fragment)
+            if !source.contains('/') && !source.contains('#') {
+                // Try to load registered participants
+                if let Ok(participants_path) = crate::config::get_biovault_home() {
+                    let participants_file = participants_path.join("participants.yaml");
+                    if participants_file.exists() {
+                        if let Ok(contents) = fs::read_to_string(&participants_file) {
+                            #[derive(serde::Deserialize)]
+                            struct ParticipantsFile {
+                                participants: std::collections::HashMap<String, serde_yaml::Value>,
+                            }
+                            if let Ok(parsed) = serde_yaml::from_str::<ParticipantsFile>(&contents)
+                            {
+                                if parsed.participants.contains_key(source) {
+                                    return Ok(ParticipantSource::RegisteredParticipant(
+                                        source.to_string(),
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             // Check if this matches a known sample data ID
             #[derive(serde::Deserialize)]
             struct SampleDataConfig {
@@ -151,8 +176,21 @@ impl ParticipantSource {
 
 async fn fetch_participant_file(
     source: &ParticipantSource,
+    auto_download: bool,
 ) -> anyhow::Result<(String, Option<String>)> {
     match source {
+        ParticipantSource::RegisteredParticipant(participant_id) => {
+            // Load the participants file
+            let participants_path = crate::config::get_biovault_home()?.join("participants.yaml");
+            if !participants_path.exists() {
+                return Err(anyhow!("No registered participants found"));
+            }
+            let content = fs::read_to_string(&participants_path).with_context(|| {
+                format!("Failed to read participants file: {:?}", participants_path)
+            })?;
+            // Return the full file content with the participant ID as fragment
+            Ok((content, Some(format!("participants.{}", participant_id))))
+        }
         ParticipantSource::LocalFile(path, fragment) => {
             if !path.exists() {
                 return Err(anyhow!("Local file not found: {:?}", path));
@@ -183,8 +221,30 @@ async fn fetch_participant_file(
                 .map(|content| (content, fragment))
         }
         ParticipantSource::SampleDataId(sample_id) => {
-            // Ensure sample data is fetched
-            crate::cli::commands::sample_data::fetch(Some(vec![sample_id.clone()]), false, true)
+            // Check if sample data exists locally first
+            let biovault_home = crate::config::get_biovault_home()?;
+            let participants_file = biovault_home
+                .join("data")
+                .join("sample")
+                .join("participants.yaml");
+
+            // If participants file doesn't exist or auto_download is false, we need to prompt
+            if !participants_file.exists() && !auto_download {
+                println!("Sample data for '{}' needs to be downloaded.", sample_id);
+                println!("This may take some time depending on the file size.");
+
+                let proceed = dialoguer::Confirm::new()
+                    .with_prompt("Do you want to download the sample data now?")
+                    .default(true)
+                    .interact()?;
+
+                if !proceed {
+                    return Err(anyhow!("Sample data download cancelled by user"));
+                }
+            }
+
+            // Fetch sample data (with quiet=false so user sees progress)
+            crate::cli::commands::sample_data::fetch(Some(vec![sample_id.clone()]), false, false)
                 .await?;
 
             // Load sample_data.yaml to get URLs and compute filenames
@@ -504,6 +564,10 @@ async fn ensure_files_exist(
             // Use a dedicated directory for sample data
             downloads_base.join("sample").join(&participant.id)
         }
+        ParticipantSource::RegisteredParticipant(_) => {
+            // For registered participants, use "registered" subdirectory
+            downloads_base.join("registered").join(&participant.id)
+        }
     };
 
     fs::create_dir_all(&participant_downloads_dir)?;
@@ -733,6 +797,194 @@ async fn ensure_files_exist(
     Ok(local_participant)
 }
 
+async fn execute_sheet_workflow(params: &RunParams, config: &ProjectConfig) -> anyhow::Result<()> {
+    let project_path = PathBuf::from(&params.project_folder);
+
+    println!("Running sheet-based workflow: {}", config.name.cyan());
+
+    // For sheet template, participant_source is the required path to the samplesheet
+    if params.participant_source.is_empty() {
+        return Err(anyhow!(
+            "Sheet template requires a CSV/TSV file path. Usage: bv run {} <path/to/samplesheet.csv>",
+            params.project_folder
+        ));
+    }
+
+    let samplesheet_path = PathBuf::from(&params.participant_source);
+    if !samplesheet_path.exists() {
+        return Err(anyhow!(
+            "Samplesheet file not found: {}",
+            samplesheet_path.display()
+        ));
+    }
+
+    // Determine assets directory and look for schema.yaml there
+    let mut assets_dir = project_path.join("assets");
+    if !config.assets.is_empty() {
+        let candidate = project_path.join(&config.assets[0]);
+        if candidate.is_dir() {
+            assets_dir = candidate;
+        }
+    }
+
+    // Look for schema.yaml in assets directory (preferred) or project root
+    let schema_path = if config.assets.contains(&"schema.yaml".to_string()) {
+        // schema.yaml is listed in assets, find it
+        let schema_in_assets = assets_dir.join("schema.yaml");
+        if schema_in_assets.exists() {
+            schema_in_assets
+        } else {
+            project_path.join("schema.yaml")
+        }
+    } else {
+        project_path.join("schema.yaml")
+    };
+
+    if !schema_path.exists() {
+        println!(
+            "{}",
+            "Warning: schema.yaml not found. Using defaults.".yellow()
+        );
+    }
+
+    // Get BioVault environment directory
+    let biovault_home = crate::config::get_biovault_home()?;
+    let template_name = config
+        .template
+        .clone()
+        .unwrap_or_else(|| "sheet".to_string());
+    let env_dir = biovault_home.join("env").join(&template_name);
+
+    // Check if templates exist
+    let template_nf = env_dir.join("template.nf");
+    let nextflow_config = env_dir.join("nextflow.config");
+
+    if !template_nf.exists() || !nextflow_config.exists() {
+        return Err(Error::TemplatesNotFound.into());
+    }
+
+    println!("Using sheet template from: {}", env_dir.display());
+
+    // Convert to absolute paths for Nextflow
+    let temp_template = template_nf
+        .canonicalize()
+        .unwrap_or_else(|_| template_nf.clone());
+    let temp_config = nextflow_config
+        .canonicalize()
+        .unwrap_or_else(|_| nextflow_config.clone());
+
+    // Get workflow file
+    let workflow_file = project_path
+        .join("workflow.nf")
+        .canonicalize()
+        .context("Failed to resolve workflow.nf path")?;
+
+    // Create assets directory if it doesn't exist (we already determined it above)
+    if !assets_dir.exists() {
+        fs::create_dir_all(&assets_dir)?;
+    }
+
+    let assets_dir = assets_dir
+        .canonicalize()
+        .context("Failed to resolve assets directory path")?;
+
+    // Create results directory
+    let results_base = if params.test {
+        "results-test"
+    } else {
+        "results-real"
+    };
+    let results_dir = project_path.join(results_base);
+    if !results_dir.exists() {
+        fs::create_dir_all(&results_dir)?;
+    }
+
+    let results_dir = results_dir
+        .canonicalize()
+        .context("Failed to resolve results directory path")?;
+
+    info!(
+        "Running sheet workflow '{}' from project '{}'",
+        config.workflow, config.name
+    );
+
+    // Build Nextflow command
+    let mut cmd = Command::new("nextflow");
+
+    // Set working directory to project directory
+    cmd.current_dir(&project_path);
+
+    cmd.arg("run")
+        .arg(&temp_template)
+        .arg("--samplesheet")
+        .arg(samplesheet_path.canonicalize().unwrap_or(samplesheet_path));
+
+    if schema_path.exists() {
+        cmd.arg("--schema_yaml")
+            .arg(schema_path.canonicalize().unwrap_or(schema_path));
+    }
+
+    cmd.arg("--work_flow_file")
+        .arg(workflow_file.to_string_lossy().as_ref())
+        .arg("--assets_dir")
+        .arg(assets_dir.to_string_lossy().as_ref())
+        .arg("--results_dir")
+        .arg(results_dir.to_string_lossy().as_ref());
+
+    if params.resume {
+        cmd.arg("-resume");
+    }
+
+    if let Some(work_dir) = &params.work_dir {
+        cmd.arg("-work-dir");
+        cmd.arg(work_dir);
+    }
+
+    // Docker/Singularity configuration
+    if params.with_docker {
+        cmd.arg("-with-docker");
+    }
+
+    // Add config file
+    cmd.arg("-c").arg(&temp_config);
+
+    // Print the command that will be executed
+    println!("\n{}", "Nextflow command:".green().bold());
+
+    // Build command string for display
+    let mut cmd_str = String::from("nextflow");
+    for arg in cmd.get_args() {
+        cmd_str.push(' ');
+        let arg_str = arg.to_string_lossy();
+        // Quote arguments with spaces
+        if arg_str.contains(' ') {
+            cmd_str.push_str(&format!("'{}'", arg_str));
+        } else {
+            cmd_str.push_str(&arg_str);
+        }
+    }
+    println!("{}\n", cmd_str.cyan());
+
+    if params.dry_run {
+        println!("{}", "[DRY RUN] Would execute the above command".yellow());
+        return Ok(());
+    }
+
+    // Execute Nextflow
+    println!("Executing Nextflow sheet workflow...");
+    let status = cmd.status().context("Failed to execute Nextflow")?;
+
+    if !status.success() {
+        return Err(anyhow!("Nextflow execution failed"));
+    }
+
+    println!(
+        "{}",
+        "Sheet workflow completed successfully!".green().bold()
+    );
+    Ok(())
+}
+
 pub async fn execute(params: RunParams) -> anyhow::Result<()> {
     // Validate project directory
     let project_path = PathBuf::from(&params.project_folder);
@@ -760,11 +1012,22 @@ pub async fn execute(params: RunParams) -> anyhow::Result<()> {
     let config: ProjectConfig =
         serde_yaml::from_str(&config_content).context("Failed to parse project.yaml")?;
 
-    // Parse participant source
+    // Check if this is a sheet template project
+    let is_sheet_template = config
+        .template
+        .as_ref()
+        .map(|t| t == "sheet")
+        .unwrap_or(false);
+
+    if is_sheet_template {
+        return execute_sheet_workflow(&params, &config).await;
+    }
+
+    // Parse participant source for non-sheet workflows
     let source = ParticipantSource::parse(&params.participant_source)?;
 
     // Fetch participant file
-    let (yaml_content, fragment) = fetch_participant_file(&source).await?;
+    let (yaml_content, fragment) = fetch_participant_file(&source, params.download).await?;
 
     // Extract participant data
     let (mut participant, mock_key) =
@@ -1427,10 +1690,13 @@ participants:
 
     #[tokio::test]
     async fn fetch_participant_file_local_missing_errors() {
-        let res = fetch_participant_file(&ParticipantSource::LocalFile(
-            PathBuf::from("/nope/participants.yaml"),
-            Some("participants.X".into()),
-        ))
+        let res = fetch_participant_file(
+            &ParticipantSource::LocalFile(
+                PathBuf::from("/nope/participants.yaml"),
+                Some("participants.X".into()),
+            ),
+            false,
+        )
         .await;
         assert!(res.is_err());
     }

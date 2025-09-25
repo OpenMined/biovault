@@ -199,6 +199,16 @@ pub fn is_syftbox_env() -> bool {
     env::var("SYFTBOX_DATA_DIR").is_ok() || env::var("SYFTBOX_EMAIL").is_ok()
 }
 
+/// Get the SyftBox binary path from environment
+pub fn get_syftbox_binary() -> Option<String> {
+    env::var("SYFTBOX_BINARY").ok()
+}
+
+/// Get the SyftBox version from environment
+pub fn get_syftbox_version() -> Option<String> {
+    env::var("SYFTBOX_VERSION").ok()
+}
+
 // Test utilities to isolate config and paths per test thread.
 // Safe to call from tests; no-ops in normal usage if unset.
 pub fn set_test_config(config: Config) {
