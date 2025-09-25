@@ -88,6 +88,7 @@ Top-level commands
 - `bv config syftbox [--path <config.json>]` Set SyftBox config path
 - `bv fastq combine <input_folder> <output_file> [--validate] [--no-prompt] [--stats-format tsv|yaml|json]` Combine/validate FASTQ files
 - `bv submit <project_path> <destination>` Submit a project (destination is datasite email or full Syft URL)
+- `bv samplesheet create <input_dir> <output_file> [--file_filter <pattern>] [--extract_cols <pattern>] [--ignore]` Create sample sheet CSV from files
 
 Inbox and messaging
 - `bv inbox` Interactive inbox (default; uses single-key shortcuts)
@@ -110,6 +111,16 @@ Examples
 - Combine FASTQs: `bv fastq combine ./fastq_pass ./combined/output.fastq.gz --validate`
 - Interactive inbox: `bv inbox` (press `?` for shortcuts)
 - Plain inbox list: `bv inbox --plain --unread`
+- Create sample sheet from genotype files:
+  ```bash
+  # Extract participant IDs from filenames matching a pattern
+  bv samplesheet create test_dir output.csv --extract_cols="{participant_id}_X_X_GSAv3-DTC_GRCh38-{date}.txt"
+
+  # Example with files: 103704_X_X_GSAv3-DTC_GRCh38-07-01-2025.txt
+  # Produces CSV:
+  # participant_id,genotype_file_path
+  # 103704,/absolute/path/test_dir/103704_X_X_GSAv3-DTC_GRCh38-07-01-2025.txt
+  ```
 
 ## SyftBox VirtualEnv
 If you need to run multiple syftbox instances checkout `sbenv` which will help you to isolate them on your machine:

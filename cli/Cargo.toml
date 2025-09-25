@@ -1,6 +1,6 @@
 [package]
 name = "biovault"
-version = "0.1.35"
+version = "0.1.37"
 edition = "2021"
 authors = ["Madhava Jay <madhava@openmined.org>"]
 description = "A bioinformatics data vault CLI tool"
@@ -37,6 +37,7 @@ uuid = { version = "1.10", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 colored = "2.1"
 glob = "0.3"
+globset = "0.4"
 regex = "1.10"
 flate2 = "1.0"
 walkdir = "2.4"
