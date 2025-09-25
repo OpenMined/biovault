@@ -39,18 +39,102 @@ cleanup_existing() {
 
         # IMPORTANT: Uninstall any existing OpenJDK to test fresh installation
         echo "Checking for existing OpenJDK installations..."
-        if brew list --formula 2>/dev/null | grep -q openjdk; then
-            echo "Found OpenJDK installed via Homebrew:"
-            brew list --formula | grep openjdk || true
+
+        # First, uninstall all Homebrew Java packages
+        if brew list --formula 2>/dev/null | grep -E "(openjdk|java)" | grep -v javascript; then
+            echo "Found Java packages installed via Homebrew:"
+            brew list --formula | grep -E "(openjdk|java)" | grep -v javascript || true
             echo ""
-            echo "Uninstalling all OpenJDK versions to test fresh installation..."
-            for pkg in $(brew list --formula | grep openjdk || true); do
+            echo "Uninstalling all Java packages to test fresh installation..."
+            for pkg in $(brew list --formula | grep -E "(openjdk|java)" | grep -v javascript || true); do
                 echo "  Uninstalling $pkg..."
                 brew uninstall --ignore-dependencies "$pkg" 2>/dev/null || true
             done
-            echo "OpenJDK uninstalled from Homebrew"
+            echo "Java packages uninstalled from Homebrew"
         else
-            echo "No OpenJDK found in Homebrew (good for testing)"
+            echo "No Java packages found in Homebrew"
+        fi
+
+        # Remove any system Java from PATH temporarily
+        echo ""
+        echo "Checking for system Java..."
+        if command_exists java; then
+            JAVA_PATH=$(which java)
+            echo "Found Java in PATH at: $JAVA_PATH"
+            java -version 2>&1 | head -1 || true
+
+            # Check if it's a symlink and where it points
+            if [ -L "$JAVA_PATH" ]; then
+                echo "Java is a symlink pointing to: $(readlink -f "$JAVA_PATH" 2>/dev/null || readlink "$JAVA_PATH")"
+            fi
+
+            # Show JAVA_HOME if set
+            if [ -n "$JAVA_HOME" ]; then
+                echo "JAVA_HOME is set to: $JAVA_HOME"
+            fi
+
+            # GitHub Actions runners have system Java pre-installed
+            # We need to remove it from PATH for our test
+            echo ""
+            echo "Removing system Java from PATH for this test..."
+
+            # Strategy 1: Remove Java-specific directories from PATH
+            CLEANED_PATH=""
+            IFS=':' read -ra PATH_ARRAY <<< "$PATH"
+            for p in "${PATH_ARRAY[@]}"; do
+                # Skip any path that contains Java-specific directories
+                # But keep system directories like /usr/bin
+                if [[ "$p" =~ (java|Java|jdk|jre|JDK|JRE|temurin|zulu|openjdk|microsoft-jdk|graalvm|corretto|liberica|sapmachine|semeru|JavaVirtualMachines) ]]; then
+                    echo "  Removing from PATH: $p"
+                elif [[ "$p" == "$JAVA_HOME"* ]] && [ -n "$JAVA_HOME" ]; then
+                    echo "  Removing JAVA_HOME path: $p"
+                else
+                    if [ -z "$CLEANED_PATH" ]; then
+                        CLEANED_PATH="$p"
+                    else
+                        CLEANED_PATH="$CLEANED_PATH:$p"
+                    fi
+                fi
+            done
+            export PATH="$CLEANED_PATH"
+
+            # Also unset JAVA_HOME if set
+            if [ -n "$JAVA_HOME" ]; then
+                echo "Unsetting JAVA_HOME (was: $JAVA_HOME)"
+                unset JAVA_HOME
+            fi
+
+            # Strategy 2: If Java is still accessible (likely in /usr/bin),
+            # create a function that overrides it
+            if command_exists java; then
+                REMAINING_JAVA=$(which java)
+                echo "Java still accessible at: $REMAINING_JAVA"
+
+                # Override java command with a function that returns "not found"
+                java() {
+                    echo "java: command not found" >&2
+                    return 127
+                }
+                export -f java
+
+                # Also override javac
+                javac() {
+                    echo "javac: command not found" >&2
+                    return 127
+                }
+                export -f javac
+
+                echo "Created override functions to hide java/javac commands"
+            fi
+
+            # Verify Java is no longer accessible
+            if java -version 2>/dev/null; then
+                echo "WARNING: Java somehow still works after all modifications"
+            else
+                echo "✓ Successfully removed/hidden Java from environment"
+            fi
+        else
+            echo "No Java found in current PATH"
         fi
 
         # Remove existing Nextflow if installed via Homebrew
@@ -151,6 +235,16 @@ done
 echo "========================================="
 echo "Verifying Java installation"
 echo "========================================="
+
+# Remove our function overrides if they exist
+if declare -f java >/dev/null 2>&1; then
+    echo "Removing java function override to test real installation..."
+    unset -f java
+fi
+if declare -f javac >/dev/null 2>&1; then
+    echo "Removing javac function override..."
+    unset -f javac
+fi
 
 # First, check if Java is immediately available
 if command_exists java; then
