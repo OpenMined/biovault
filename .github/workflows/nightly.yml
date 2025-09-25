@@ -1,6 +1,9 @@
 name: Nightly Tests
 
 on:
+  # TEMPORARILY - Run on PRs to test macOS install
+  pull_request:
+    branches: [ main ]
   schedule:
     # Run at 2 AM UTC every day
     - cron: '0 2 * * *'
@@ -31,7 +34,9 @@ on:
 jobs:
   colab-test:
     name: Setup Test - Colab
-    if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.run_colab_test) }}
+    # TEMPORARILY DISABLED - Only testing macOS
+    if: false
+    # if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.run_colab_test) }}
     runs-on: ubuntu-latest
 
     steps:
@@ -110,7 +115,9 @@ jobs:
 
   linux-installation-test:
     name: Setup Test - Ubuntu
-    if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.run_linux_test) }}
+    # TEMPORARILY DISABLED - Only testing macOS
+    if: false
+    # if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.run_linux_test) }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -146,7 +153,9 @@ jobs:
 
   macos-installation-test:
     name: Setup Test - macOS
-    if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.run_macos_test) }}
+    # TEMPORARILY - Always run for PR testing
+    if: true
+    # if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.run_macos_test) }}
     runs-on: macos-latest
     steps:
       - name: Checkout code
@@ -182,7 +191,9 @@ jobs:
 
   windows-installation-test:
     name: Setup Test - Windows
-    if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.run_windows_test) }}
+    # TEMPORARILY DISABLED - Only testing macOS
+    if: false
+    # if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.run_windows_test) }}
     runs-on: windows-latest
     steps:
       - name: Checkout code
