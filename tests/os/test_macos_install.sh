@@ -104,32 +104,48 @@ cleanup_existing() {
                 unset JAVA_HOME
             fi
 
-            # Strategy 2: If Java is still accessible (likely in /usr/bin),
-            # create a function that overrides it
+            # Strategy 2: Handle system Java (GitHub Actions installs in hostedtoolcache)
             if command_exists java; then
                 REMAINING_JAVA=$(which java)
                 echo "Java still accessible at: $REMAINING_JAVA"
 
-                # Override java command with a function that returns "not found"
-                java() {
-                    echo "java: command not found" >&2
-                    return 127
-                }
-                export -f java
+                # Check if it's /usr/bin/java (common on GitHub Actions)
+                if [ "$REMAINING_JAVA" = "/usr/bin/java" ]; then
+                    # Check if it's a symlink
+                    if [ -L "$REMAINING_JAVA" ]; then
+                        JAVA_TARGET=$(readlink -f "$REMAINING_JAVA" 2>/dev/null || readlink "$REMAINING_JAVA")
+                        echo "  /usr/bin/java is a symlink to: $JAVA_TARGET"
 
-                # Also override javac
-                javac() {
-                    echo "javac: command not found" >&2
-                    return 127
-                }
-                export -f javac
+                        # On GitHub Actions, we can safely remove this symlink
+                        # since we're in a temporary environment
+                        if [ -n "$GITHUB_ACTIONS" ]; then
+                            echo "  Removing /usr/bin/java symlink (GitHub Actions environment)"
+                            sudo rm -f /usr/bin/java /usr/bin/javac 2>/dev/null || true
 
-                echo "Created override functions to hide java/javac commands"
+                            # Also remove the hostedtoolcache Java if it exists
+                            if [[ "$JAVA_TARGET" =~ "hostedtoolcache" ]]; then
+                                JAVA_ROOT=$(echo "$JAVA_TARGET" | sed 's|/bin/java||')
+                                echo "  Also removing hostedtoolcache Java at: $JAVA_ROOT"
+                                sudo rm -rf "$JAVA_ROOT" 2>/dev/null || true
+                            fi
+                        fi
+                    fi
+                fi
+
+                # If Java is STILL accessible after removal attempts,
+                # try to hide it with PATH manipulation
+                if command_exists java; then
+                    echo "Java still exists after removal attempts"
+                    # Remove /usr/bin from PATH as last resort
+                    export PATH=$(echo "$PATH" | tr ':' '\n' | grep -v "^/usr/bin$" | tr '\n' ':' | sed 's/:$//')
+                    echo "Removed /usr/bin from PATH as last resort"
+                fi
             fi
 
             # Verify Java is no longer accessible
-            if java -version 2>/dev/null; then
-                echo "WARNING: Java somehow still works after all modifications"
+            if command_exists java; then
+                echo "WARNING: Java still accessible after all modifications"
+                echo "Location: $(which java 2>/dev/null || echo 'unknown')"
             else
                 echo "✓ Successfully removed/hidden Java from environment"
             fi
@@ -236,14 +252,10 @@ echo "========================================="
 echo "Verifying Java installation"
 echo "========================================="
 
-# Remove our function overrides if they exist
-if declare -f java >/dev/null 2>&1; then
-    echo "Removing java function override to test real installation..."
-    unset -f java
-fi
-if declare -f javac >/dev/null 2>&1; then
-    echo "Removing javac function override..."
-    unset -f javac
+# If we removed /usr/bin from PATH, restore it for testing the new installation
+if ! echo "$PATH" | grep -q "/usr/bin"; then
+    echo "Restoring /usr/bin to PATH for testing..."
+    export PATH="/usr/bin:$PATH"
 fi
 
 # First, check if Java is immediately available
