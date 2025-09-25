@@ -2,6 +2,16 @@
 
 set -e
 
+# Cleanup function to remove shadow directory on exit
+cleanup() {
+    if [ -n "$BV_TEST_SHADOW_DIR" ] && [ -d "$BV_TEST_SHADOW_DIR" ]; then
+        rm -rf "$BV_TEST_SHADOW_DIR" 2>/dev/null || true
+    fi
+}
+
+# Set up trap to cleanup on exit
+trap cleanup EXIT
+
 echo "========================================="
 echo "BioVault macOS Installation Test"
 echo "========================================="
@@ -104,76 +114,55 @@ cleanup_existing() {
                 unset JAVA_HOME
             fi
 
-            # Strategy 2: Handle system Java (GitHub Actions installs in hostedtoolcache)
+            # Strategy 2: Shadow system Java with fake commands
+            # Since /usr/bin is read-only on macOS GitHub Actions,
+            # we create shadow commands earlier in PATH
             if command_exists java; then
                 REMAINING_JAVA=$(which java)
                 echo "Java still accessible at: $REMAINING_JAVA"
 
-                # On GitHub Actions, we can safely remove Java executables
-                # since we're in a temporary environment
-                if [ -n "$GITHUB_ACTIONS" ]; then
-                    # Check if it's /usr/bin/java
-                    if [ "$REMAINING_JAVA" = "/usr/bin/java" ]; then
-                        # Check if it's a symlink
-                        if [ -L "$REMAINING_JAVA" ]; then
-                            JAVA_TARGET=$(readlink -f "$REMAINING_JAVA" 2>/dev/null || readlink "$REMAINING_JAVA")
-                            echo "  /usr/bin/java is a symlink to: $JAVA_TARGET"
-                        fi
+                # Create a temporary directory for shadow commands
+                SHADOW_DIR="/tmp/bv-test-shadow-$$"
+                mkdir -p "$SHADOW_DIR"
+                echo "Creating shadow directory at: $SHADOW_DIR"
 
-                        echo "  Removing /usr/bin/java and related tools (GitHub Actions environment)"
-                        # Remove without -f to see any errors
-                        echo "  Attempting to remove /usr/bin/java..."
-                        if sudo rm /usr/bin/java 2>&1; then
-                            echo "    ✓ Removed /usr/bin/java"
-                        else
-                            echo "    ✗ Failed to remove /usr/bin/java"
-                            # Try to understand why
-                            ls -la /usr/bin/java 2>&1 || true
-                        fi
+                # Create fake java command that returns "not found"
+                cat > "$SHADOW_DIR/java" << 'EOF'
+#!/bin/bash
+echo "java: command not found" >&2
+exit 127
+EOF
+                chmod +x "$SHADOW_DIR/java"
 
-                        # Remove other Java tools
-                        for tool in javac jar jarsigner javadoc javap jcmd jconsole jdb jdeps jinfo jmap jps jrunscript jstack jstat jstatd keytool; do
-                            if [ -e "/usr/bin/$tool" ]; then
-                                sudo rm -f "/usr/bin/$tool" 2>&1 || true
-                            fi
-                        done
+                # Create fake javac command
+                cat > "$SHADOW_DIR/javac" << 'EOF'
+#!/bin/bash
+echo "javac: command not found" >&2
+exit 127
+EOF
+                chmod +x "$SHADOW_DIR/javac"
 
-                        # Also check for any Java-related executables we might have missed
-                        for java_tool in /usr/bin/j*; do
-                            if [ -f "$java_tool" ] && [ -L "$java_tool" ]; then
-                                if readlink "$java_tool" 2>/dev/null | grep -q -E "(java|jdk|jre|temurin|hostedtoolcache)"; then
-                                    echo "  Also removing: $java_tool"
-                                    sudo rm -f "$java_tool" 2>/dev/null || true
-                                fi
-                            fi
-                        done
-                    fi
-                fi
+                # Also shadow other Java tools
+                for tool in jar jarsigner javadoc javap jcmd jconsole jdb jdeps jinfo jmap jps jrunscript jstack jstat jstatd keytool; do
+                    ln -s "$SHADOW_DIR/java" "$SHADOW_DIR/$tool" 2>/dev/null || true
+                done
+
+                # Put shadow directory first in PATH
+                export PATH="$SHADOW_DIR:$PATH"
+                echo "Added shadow directory to beginning of PATH"
+
+                # Store shadow directory for later cleanup
+                export BV_TEST_SHADOW_DIR="$SHADOW_DIR"
             fi
 
             # Verify Java is no longer accessible
-            if command_exists java; then
-                echo "WARNING: Java still accessible after all modifications"
-                FINAL_JAVA=$(which java 2>/dev/null || echo 'unknown')
-                echo "Location: $FINAL_JAVA"
-
-                # Debug: Show all java locations in PATH
-                echo "  All java locations found in PATH:"
-                which -a java 2>/dev/null || true
-
-                # Debug: Check if it's a different location
-                if [ "$FINAL_JAVA" != "$REMAINING_JAVA" ]; then
-                    echo "  This is a DIFFERENT location than before!"
-                fi
-
-                # Debug: Show file info
-                if [ -e "$FINAL_JAVA" ]; then
-                    echo "  File info:"
-                    ls -la "$FINAL_JAVA" 2>&1 || true
-                    file "$FINAL_JAVA" 2>&1 || true
-                fi
+            if java -version 2>&1 | grep -q "command not found"; then
+                echo "✓ Successfully shadowed Java commands"
+            elif command_exists java; then
+                echo "WARNING: Java still works after shadowing"
+                which java 2>/dev/null || true
             else
-                echo "✓ Successfully removed/hidden Java from environment"
+                echo "✓ Java is not accessible"
             fi
         else
             echo "No Java found in current PATH"
@@ -278,7 +267,14 @@ echo "========================================="
 echo "Verifying Java installation"
 echo "========================================="
 
-# No PATH restoration needed since we only removed Java executables, not directories
+# Remove shadow directory from PATH if it exists
+if [ -n "$BV_TEST_SHADOW_DIR" ] && [ -d "$BV_TEST_SHADOW_DIR" ]; then
+    echo "Removing shadow directory from PATH to test real installation..."
+    export PATH=$(echo "$PATH" | tr ':' '\n' | grep -v "^$BV_TEST_SHADOW_DIR$" | tr '\n' ':' | sed 's/:$//')
+    # Clean up shadow directory
+    rm -rf "$BV_TEST_SHADOW_DIR"
+    echo "Shadow directory removed"
+fi
 
 # First, check if Java is immediately available
 if command_exists java; then
