@@ -222,8 +222,56 @@ echo "========================================="
 echo "Testing bv setup"
 echo "========================================="
 echo "Running bv setup in CI mode (non-interactive)..."
+
+# bv setup will install Java, but the verification will fail because
+# our shadow commands are still in PATH. We need to work around this.
+# Run setup but expect it might report Java as failed
 SETUP_OUTPUT=$(bv setup 2>&1 || true)
 echo "$SETUP_OUTPUT"
+echo ""
+
+# Now check if brew actually installed Java
+echo "Checking if brew installed Java..."
+if brew list --formula 2>/dev/null | grep -q openjdk; then
+    echo "✓ Java WAS installed by brew:"
+    brew list --formula | grep openjdk || true
+
+    # Get the brew Java path
+    JAVA_PKG=$(brew list --formula | grep openjdk | head -1)
+    BREW_JAVA_PATH=$(brew --prefix "$JAVA_PKG")/bin
+    echo "Brew Java location: $BREW_JAVA_PATH"
+
+    # Add brew Java to PATH (before removing shadow)
+    export PATH="$BREW_JAVA_PATH:$PATH"
+    echo "Added brew Java to beginning of PATH"
+else
+    echo "⚠️  Java was NOT installed by brew"
+fi
+
+# Now remove shadow directory
+if [ -n "$BV_TEST_SHADOW_DIR" ] && [ -d "$BV_TEST_SHADOW_DIR" ]; then
+    echo "Removing shadow directory..."
+    export PATH=$(echo "$PATH" | tr ':' '\n' | grep -v "^$BV_TEST_SHADOW_DIR$" | tr '\n' ':' | sed 's/:$//')
+    rm -rf "$BV_TEST_SHADOW_DIR"
+    unset BV_TEST_SHADOW_DIR
+    echo "Shadow directory removed from PATH"
+fi
+
+# Check which Java is now accessible
+if command_exists java; then
+    CURRENT_JAVA=$(which java)
+    echo "Java is now at: $CURRENT_JAVA"
+    java -version 2>&1 | head -1
+
+    # Check if it's the brew one or system one
+    if [[ "$CURRENT_JAVA" =~ "homebrew" ]] || [[ "$CURRENT_JAVA" =~ "openjdk" ]]; then
+        echo "✓ This is the brew-installed Java!"
+    else
+        echo "⚠️  This appears to be system Java, not brew Java"
+    fi
+else
+    echo "❌ Java not found after removing shadow"
+fi
 echo ""
 
 echo "========================================="
@@ -267,13 +315,12 @@ echo "========================================="
 echo "Verifying Java installation"
 echo "========================================="
 
-# Remove shadow directory from PATH if it exists
+# Shadow directory should already be removed, but check just in case
 if [ -n "$BV_TEST_SHADOW_DIR" ] && [ -d "$BV_TEST_SHADOW_DIR" ]; then
-    echo "Removing shadow directory from PATH to test real installation..."
+    echo "Warning: Shadow directory still exists, removing..."
     export PATH=$(echo "$PATH" | tr ':' '\n' | grep -v "^$BV_TEST_SHADOW_DIR$" | tr '\n' ':' | sed 's/:$//')
-    # Clean up shadow directory
     rm -rf "$BV_TEST_SHADOW_DIR"
-    echo "Shadow directory removed"
+    unset BV_TEST_SHADOW_DIR
 fi
 
 # First, check if Java is immediately available
