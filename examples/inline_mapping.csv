@@ -1,0 +1,4 @@
+sample:participant_id,build:ref_version,ref_file:ref,index_file:ref_index,cram_file:aligned,crai_file:aligned_index
+TestSample1,GRCh38,/data/GRCh38.fa,/data/GRCh38.fa.fai,/data/test1.cram,/data/test1.cram.crai
+TestSample2,GRCh38,/data/GRCh38.fa,/data/GRCh38.fa.fai,/data/test2.cram,/data/test2.cram.crai
+TestSample3,GRCh37,/data/GRCh37.fa,/data/GRCh37.fa.fai,/data/test3.cram,/data/test3.cram.crai

@@ -1,0 +1,5 @@
+sample_name,genome_build,reference_genome,reference_idx,alignment_file,alignment_idx,phenotype,batch
+SAMPLE001,hg38,/lab/ref/hg38.fa,/lab/ref/hg38.fa.fai,/lab/alignments/SAMPLE001.cram,/lab/alignments/SAMPLE001.cram.crai,case,batch1
+SAMPLE002,hg38,/lab/ref/hg38.fa,/lab/ref/hg38.fa.fai,/lab/alignments/SAMPLE002.cram,/lab/alignments/SAMPLE002.cram.crai,control,batch1
+SAMPLE003,hg38,/lab/ref/hg38.fa,/lab/ref/hg38.fa.fai,/lab/alignments/SAMPLE003.cram,/lab/alignments/SAMPLE003.cram.crai,case,batch2
+SAMPLE004,hg19,/lab/ref/hg19.fa,/lab/ref/hg19.fa.fai,/lab/alignments/SAMPLE004.cram,/lab/alignments/SAMPLE004.cram.crai,control,batch2

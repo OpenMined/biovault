@@ -1,0 +1,6 @@
+participant_id,ref_version,ref,ref_index,aligned,aligned_index
+NA12878,GRCh38,/data/reference/GRCh38.fa,/data/reference/GRCh38.fa.fai,/data/samples/NA12878.cram,/data/samples/NA12878.cram.crai
+NA12891,GRCh38,/data/reference/GRCh38.fa,/data/reference/GRCh38.fa.fai,/data/samples/NA12891.cram,/data/samples/NA12891.cram.crai
+NA12892,GRCh38,/data/reference/GRCh38.fa,/data/reference/GRCh38.fa.fai,/data/samples/NA12892.cram,/data/samples/NA12892.cram.crai
+HG00096,GRCh37,/data/reference/GRCh37.fa,/data/reference/GRCh37.fa.fai,/data/samples/HG00096.cram,/data/samples/HG00096.cram.crai
+HG00097,GRCh37,/data/reference/GRCh37.fa,/data/reference/GRCh37.fa.fai,/data/samples/HG00097.cram,/data/samples/HG00097.cram.crai
