@@ -48,6 +48,9 @@ pub async fn execute() -> Result<()> {
         println!("ℹ️  Google Colab environment detected\n");
     }
 
+    // Check if we're in CI mode (non-interactive)
+    let is_ci = env::var("CI").is_ok() || env::var("GITHUB_ACTIONS").is_ok();
+
     let mut all_found = true;
     let mut all_running = true;
 
@@ -77,7 +80,14 @@ pub async fn execute() -> Result<()> {
         // Check if the binary exists in PATH
         let exists = which::which(&dep.name).is_ok();
 
-        if !exists {
+        // Special handling for Java on macOS
+        let mut java_brew_path: Option<String> = None;
+        if !exists && dep.name == "java" && std::env::consts::OS == "macos" {
+            // Check if Java is installed via Homebrew but not in PATH
+            java_brew_path = check_java_in_brew_not_in_path();
+        }
+
+        if !exists && java_brew_path.is_none() {
             all_found = false;
             println!("❌ NOT FOUND");
             println!("  Description: {}", dep.description);
@@ -86,6 +96,29 @@ pub async fn execute() -> Result<()> {
                 if !line.trim().is_empty() {
                     println!("    {}", line);
                 }
+            }
+            println!();
+        } else if let Some(brew_path) = java_brew_path {
+            // Java is installed via brew but not in PATH
+            println!("⚠️  Found (not in PATH)");
+            println!("  Java is installed via Homebrew at: {}", brew_path);
+            println!("  But it's not available in your PATH.");
+            println!("  To fix this, add the following to your shell config:");
+            let shell = env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+            let shell_config = if shell.contains("zsh") {
+                "~/.zshrc"
+            } else if shell.contains("bash") {
+                "~/.bash_profile"
+            } else {
+                "your shell config file"
+            };
+            println!(
+                "    echo 'export PATH=\"{}:$PATH\"' >> {}",
+                brew_path, shell_config
+            );
+            println!("    source {}", shell_config);
+            if !is_ci {
+                println!("  Or run 'bv setup' to configure this automatically.");
             }
             println!();
         } else {
@@ -162,7 +195,18 @@ fn check_if_running(service: &str) -> bool {
 
 fn get_start_command(service: &str) -> String {
     match service {
-        "docker" => "Open Docker Desktop or run 'sudo dockerd' (Linux)".to_string(),
+        "docker" => {
+            // Provide OS-specific instructions
+            if std::env::consts::OS == "macos" {
+                "Open Docker Desktop from your Applications folder (/Applications/Docker.app)"
+                    .to_string()
+            } else if std::env::consts::OS == "windows" {
+                "Open Docker Desktop from your Start menu".to_string()
+            } else {
+                "Start Docker daemon with 'sudo systemctl start docker' or open Docker Desktop"
+                    .to_string()
+            }
+        }
         _ => format!("Start {}", service),
     }
 }
@@ -253,6 +297,55 @@ fn is_google_colab() -> bool {
     false
 }
 
+fn check_java_in_brew_not_in_path() -> Option<String> {
+    // Check if brew command exists
+    if which::which("brew").is_err() {
+        return None;
+    }
+
+    // Check if Java/OpenJDK is installed via brew
+    let output = Command::new("brew")
+        .args(["list", "--formula"])
+        .output()
+        .ok()?;
+
+    let installed_packages = String::from_utf8_lossy(&output.stdout);
+
+    // Look for any OpenJDK version
+    let mut found_java_package = None;
+    for line in installed_packages.lines() {
+        if line.starts_with("openjdk") {
+            found_java_package = Some(line.to_string());
+            break;
+        }
+    }
+
+    found_java_package.as_ref()?;
+
+    // Get the actual path where brew installed Java
+    let pkg = found_java_package.unwrap();
+    let prefix_output = Command::new("brew")
+        .args(["--prefix", &pkg])
+        .output()
+        .ok()?;
+
+    if !prefix_output.status.success() {
+        return None;
+    }
+
+    let brew_prefix = String::from_utf8_lossy(&prefix_output.stdout)
+        .trim()
+        .to_string();
+    let java_bin_path = format!("{}/bin", brew_prefix);
+
+    // Check if this path contains java binary
+    if std::path::Path::new(&format!("{}/java", java_bin_path)).exists() {
+        Some(java_bin_path)
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -275,10 +368,25 @@ mod tests {
 
     #[test]
     fn start_command_and_running_checks() {
-        assert_eq!(
-            get_start_command("docker"),
-            "Open Docker Desktop or run 'sudo dockerd' (Linux)"
-        );
+        // Test Docker command - it should return OS-specific instructions
+        let docker_cmd = get_start_command("docker");
+
+        // Check that it returns something meaningful for Docker
+        // The exact message depends on the OS running the test
+        if std::env::consts::OS == "macos" {
+            assert_eq!(
+                docker_cmd,
+                "Open Docker Desktop from your Applications folder (/Applications/Docker.app)"
+            );
+        } else if std::env::consts::OS == "windows" {
+            assert_eq!(docker_cmd, "Open Docker Desktop from your Start menu");
+        } else {
+            assert_eq!(
+                docker_cmd,
+                "Start Docker daemon with 'sudo systemctl start docker' or open Docker Desktop"
+            );
+        }
+
         // Unknown service -> generic
         assert_eq!(get_start_command("xyz"), "Start xyz");
 
