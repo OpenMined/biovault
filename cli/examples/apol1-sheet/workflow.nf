@@ -1,12 +1,13 @@
 /*
- * Module: USER (DSL2-safe; Python writer; report from augmented sheet)
+ * Module: USER (DSL2-safe; Python writer)
  * - Buffers rows once, fans out cleanly (no `into`)
  * - APOL1 classification per PID
  * - Left-join computed_genotype
- * - Adds BMI, age_group
+ * - Adds computed_genotype to sheet
  * - Writes augmented CSV/TSV via Python (robust header mapping)
- * - Report computes counts & average age per genotype from augmented CSV/TSV
  */
+
+import nextflow.Channel
 
 nextflow.enable.dsl=2
 params.results_dir = params.results_dir ?: 'results'
@@ -34,7 +35,7 @@ workflow USER {
     //------------------------------------------------------------------
     // 1) Build output header once
     //------------------------------------------------------------------
-    def new_cols   = ['bmi', 'age_group', 'computed_genotype']
+    def new_cols   = ['computed_genotype']
     def header_v   = mapping_ch.map { m -> (m.orig_headers + new_cols) as List }   // VALUE
     header_v.view { "Header (raw): $it" }
 
@@ -42,7 +43,7 @@ workflow USER {
     def rename_v   = mapping_ch.map { m -> (m.containsKey('rename') && m.rename instanceof Map) ? m.rename : [:] }
 
     //------------------------------------------------------------------
-    // 2) Prepare tuples to classify: (pid, snp_file, age)
+    // 2) Prepare tuples to classify: (pid, snp_file)
     //------------------------------------------------------------------
     def to_classify_ch = rows_for_classify.map { row ->
       def snp_file = file(row.genotype_file_path)
@@ -51,10 +52,7 @@ workflow USER {
 
       tuple(
         row.participant_id as String,
-        snp_file,
-        (row.age instanceof Number) ? row.age.intValue()
-          : (row.age instanceof String && row.age.isInteger()) ? row.age.toInteger()
-          : null
+        snp_file
       )
     }
     to_classify_ch.view { "To classify: $it" }
@@ -94,43 +92,16 @@ workflow USER {
           out.computed_genotype = computed
           out
         }
-    joined_rows_ch.view { "Joined row (pre-metrics): $it" }
+    joined_rows_ch.view { "Joined row: $it" }
 
     //------------------------------------------------------------------
-    // 6) Add BMI and age_group
+    // 6) Collect maps for Python writer
     //------------------------------------------------------------------
-    def enriched_rows_ch = joined_rows_ch.map { row ->
-      BigDecimal weight   = row.weight != null ? new BigDecimal(row.weight.toString()) : null
-      BigDecimal height_m = row.height != null ? new BigDecimal(row.height.toString()).divide(new BigDecimal("100")) : null
-      BigDecimal bmi      = (weight != null && height_m != null && height_m > 0)
-                            ? weight.divide(height_m.multiply(height_m), 6, java.math.RoundingMode.HALF_UP)
-                            : null
-
-      Integer age = (row.age instanceof Number) ? (row.age as Integer)
-                    : (row.age instanceof String && row.age.isInteger()) ? row.age.toInteger()
-                    : null
-
-      def age_group = (age == null) ? null :
-        (age < 18 ? 'child' :
-         age < 30 ? '18-29' :
-         age < 45 ? '30-44' :
-         age < 60 ? '45-59' : '60+')
-
-      def out = new LinkedHashMap(row)
-      out.bmi = bmi
-      out.age_group = age_group
-      out
-    }
-    enriched_rows_ch.view { "Row with metrics: $it" }
-
-    //------------------------------------------------------------------
-    // 7) Collect maps for Python writer
-    //------------------------------------------------------------------
-    def rows_maps_v = enriched_rows_ch.collect()     // VALUE: List<Map>
+    def rows_maps_v = joined_rows_ch.collect()     // VALUE: List<Map>
     rows_maps_v.view { rows -> "Rows collected for writer: ${rows?.size() ?: 0}" }
 
     //------------------------------------------------------------------
-    // 8) Detect base filename & delimiter from original sheet
+    // 7) Detect base filename & delimiter from original sheet
     //------------------------------------------------------------------
     def sample_sheet_filename_v = sample_sheet_ch.map { f ->
       def n = f.name; def i = n.lastIndexOf('.'); i != -1 ? n[0..<i] : n
@@ -141,15 +112,16 @@ workflow USER {
       firstLine.contains('\t') ? 'tsv' : 'csv'
     } // VALUE
 
+    def date_stamp   = java.time.LocalDate.now().format(java.time.format.DateTimeFormatter.ISO_DATE)
+    def date_stamp_v = Channel.value(date_stamp)
+
     //------------------------------------------------------------------
-    // 9) Write augmented sheet (Python) & report from that sheet (Python)
+    // 8) Write augmented sheet (Python)
     //------------------------------------------------------------------
-    def csv_out    = write_sheet_py(header_v, rows_maps_v, rename_v, sample_sheet_filename_v, extension_v)
-    def report_out = write_report(csv_out.augmented_csv)  // <-- now uses the augmented CSV/TSV
+    def csv_out    = write_sheet_py(header_v, rows_maps_v, rename_v, sample_sheet_filename_v, extension_v, date_stamp_v)
 
   emit:
     augmented_csv = csv_out.augmented_csv
-    report        = report_out.report_file
     apol1_rsids   = apol1.rsid_table
     apol1_genos   = apol1.genotype_line
     apol1_evid    = apol1.evidence
@@ -163,7 +135,7 @@ process apol1_classifier {
 
   input:
     path assets_dir
-    tuple val(pid), path(snp_file), val(age)
+    tuple val(pid), path(snp_file)
 
   output:
     path "apol1_${pid}.rsid.tsv",     emit: rsid_table
@@ -172,7 +144,7 @@ process apol1_classifier {
 
   script:
   """
-  echo "Processing PID: ${pid}, SNP file: \$(basename "${snp_file}"), Age: ${age}"
+  echo "Processing PID: ${pid}, SNP file: \$(basename "${snp_file}")"
   set -euo pipefail
   APOL1_OUT_PREFIX="apol1_${pid}" \\
     python3 "${assets_dir}/apol1_classifier.py" < "${snp_file}"
@@ -182,7 +154,7 @@ process apol1_classifier {
 /*
  * Python-based sheet writer. No bash string gymnastics.
  * Inputs are VALUEs: header_list (List), rows_maps (List<Map>), rename (Map),
- *                    sample_sheet_filename (String), extension (String).
+ *                    sample_sheet_filename (String), extension (String), date_stamp (String).
  */
 process write_sheet_py {
   container 'python:3.11-slim'
@@ -195,9 +167,10 @@ process write_sheet_py {
     val rename_map
     val sample_sheet_filename
     val extension
+    val date_stamp
 
   output:
-    path "${sample_sheet_filename}-updated.${extension}", emit: augmented_csv
+    path "${sample_sheet_filename}-${date_stamp}.${extension}", emit: augmented_csv
 
   script:
   // ---- SANITIZE to plain strings to avoid Groovy JSON recursion/stack overflows ----
@@ -255,8 +228,9 @@ def build_keymap(sample_row):
         km[h] = key  # may be None
     return km
 
-delimiter = '\\t' if str('${extension}').strip().lower() == 'tsv' else ','
-out_path = f"{'${sample_sheet_filename}'}-updated.{ '${extension}' }"
+extension = '${extension}'
+delimiter = '\\t' if extension.strip().lower() == 'tsv' else ','
+out_path = f"{'${sample_sheet_filename}'}-{'${date_stamp}'}.{extension}"
 
 with open(out_path, 'w', newline='') as f:
     writer = csv.writer(f, delimiter=delimiter, quoting=csv.QUOTE_MINIMAL)
@@ -287,67 +261,6 @@ with open(out_path, 'w', newline='') as f:
             preview.append([ '' if (r.get(km.get(h,''), '') is None) else str(r.get(km.get(h,''), ''))
                              for h in header_norm ])
         print("DEBUG first 2 rendered rows:", preview, file=sys.stderr)
-PY
-  """
-}
-
-/*
- * New: Report from augmented CSV/TSV (counts + average age by computed_genotype)
- */
-process write_report {
-  container 'python:3.11-slim'
-  publishDir params.results_dir, mode: 'copy'
-  debug true
-
-  input:
-    path augmented_csv
-
-  output:
-    path "report.txt", emit: report_file
-
-  script:
-  """
-  python3 - <<'PY'
-import csv, sys, os
-from collections import defaultdict
-
-infile = os.path.basename("${augmented_csv}")
-# Detect delimiter by header line
-with open(infile, 'r', newline='') as fh:
-    sample = fh.readline()
-    delim = '\\t' if ('\\t' in sample and ',' not in sample) else ','
-# Now read fully
-with open(infile, 'r', newline='') as fh:
-    reader = csv.DictReader(fh, delimiter=delim)
-    counts = defaultdict(int)
-    age_sums = defaultdict(float)
-    age_counts = defaultdict(int)
-
-    # Try both "computed_genotype" and "APOL1 genotype" if someone renamed
-    for row in reader:
-        geno = row.get("computed_genotype") or row.get("APOL1 genotype") or "UNKNOWN"
-        counts[geno] += 1
-        age_raw = row.get("age", "")
-        try:
-            age = float(age_raw)
-        except Exception:
-            age = None
-        if age is not None:
-            age_sums[geno] += age
-            age_counts[geno] += 1
-
-with open("report.txt","w") as out:
-    out.write("APOL1 genotype counts:\\n")
-    for geno in sorted(counts.keys()):
-        out.write(f"- {geno}: {counts[geno]}\\n")
-
-    out.write("\\nAverage age by genotype:\\n")
-    for geno in sorted(counts.keys()):
-        if age_counts[geno] > 0:
-            avg = age_sums[geno] / age_counts[geno]
-            out.write(f"- {geno}: {avg:.1f}\\n")
-        else:
-            out.write(f"- {geno}: (no ages)\\n")
 PY
   """
 }

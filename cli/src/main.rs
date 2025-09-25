@@ -206,6 +206,12 @@ enum Commands {
         #[command(subcommand)]
         command: MessageCommands,
     },
+
+    #[command(about = "Sample sheet operations")]
+    Samplesheet {
+        #[command(subcommand)]
+        command: SamplesheetCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -358,6 +364,36 @@ enum FastqCommands {
             help = "Stats output format (tsv, yaml, json)"
         )]
         stats_format: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum SamplesheetCommands {
+    #[command(about = "Create a sample sheet CSV from a folder of files")]
+    Create {
+        #[arg(help = "Input directory containing files")]
+        input_dir: String,
+
+        #[arg(help = "Output CSV file path")]
+        output_file: String,
+
+        #[arg(
+            long = "file_filter",
+            help = "File pattern filter (e.g., *.txt, default: all files)"
+        )]
+        file_filter: Option<String>,
+
+        #[arg(
+            long = "extract_cols",
+            help = "Pattern for extracting fields from filenames (e.g., {participant_id}_X_X_GSAv3-DTC_GRCh38-{date}.txt)"
+        )]
+        extract_cols: Option<String>,
+
+        #[arg(
+            long = "ignore",
+            help = "Add files even if they don't match the extraction pattern"
+        )]
+        ignore: bool,
     },
 }
 
@@ -708,6 +744,24 @@ async fn main() -> Result<()> {
             MessageCommands::Archive { message_id } => {
                 let config = biovault::config::Config::load()?;
                 commands::messages::archive_message(&config, &message_id)?;
+            }
+        },
+        Commands::Samplesheet { command } => match command {
+            SamplesheetCommands::Create {
+                input_dir,
+                output_file,
+                file_filter,
+                extract_cols,
+                ignore,
+            } => {
+                commands::samplesheet::create(
+                    input_dir,
+                    output_file,
+                    file_filter,
+                    extract_cols,
+                    ignore,
+                )
+                .await?;
             }
         },
     }
