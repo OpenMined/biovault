@@ -58,3 +58,9 @@ examples:
       - assets/apol1_classifier.py
       - participants.csv
       - apol1_test_data.py
+      - apol1_input/case_0001_canonical.tsv
+      - apol1_input/case_0002_canonical.tsv
+      - apol1_input/case_0013_canonical.tsv
+      - apol1_input/case_0014_canonical.tsv
+      - apol1_input/case_0025_canonical.tsv
+      - apol1_input/participants.csv

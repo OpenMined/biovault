@@ -225,3 +225,4 @@ test-clients-docker/
 test-clients-local/
 
 .syftbox_binary_path
+.DS_Store
