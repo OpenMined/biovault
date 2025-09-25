@@ -1,9 +1,8 @@
 name: CI
 
 on:
-  # TEMPORARILY DISABLED - Testing macOS install via nightly
-  # pull_request:
-  #   branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
   # Optionally, allow manual trigger for debugging
   workflow_dispatch:
 
