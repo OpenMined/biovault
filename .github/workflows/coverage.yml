@@ -24,8 +24,11 @@ jobs:
           rustc --version
           cargo --version
 
-      - name: Install llvm-tools component
-        run: rustup component add llvm-tools-preview
+      - name: Install required components
+        run: |
+          rustup component add rustfmt
+          rustup component add clippy
+          rustup component add llvm-tools-preview
 
       - name: Install cargo-llvm-cov
         run: cargo install cargo-llvm-cov --locked
