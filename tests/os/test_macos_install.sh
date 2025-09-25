@@ -109,36 +109,47 @@ cleanup_existing() {
                 REMAINING_JAVA=$(which java)
                 echo "Java still accessible at: $REMAINING_JAVA"
 
-                # Check if it's /usr/bin/java (common on GitHub Actions)
-                if [ "$REMAINING_JAVA" = "/usr/bin/java" ]; then
-                    # Check if it's a symlink
-                    if [ -L "$REMAINING_JAVA" ]; then
-                        JAVA_TARGET=$(readlink -f "$REMAINING_JAVA" 2>/dev/null || readlink "$REMAINING_JAVA")
-                        echo "  /usr/bin/java is a symlink to: $JAVA_TARGET"
-
-                        # On GitHub Actions, we can safely remove this symlink
-                        # since we're in a temporary environment
-                        if [ -n "$GITHUB_ACTIONS" ]; then
-                            echo "  Removing /usr/bin/java symlink (GitHub Actions environment)"
-                            sudo rm -f /usr/bin/java /usr/bin/javac 2>/dev/null || true
-
-                            # Also remove the hostedtoolcache Java if it exists
-                            if [[ "$JAVA_TARGET" =~ "hostedtoolcache" ]]; then
-                                JAVA_ROOT=$(echo "$JAVA_TARGET" | sed 's|/bin/java||')
-                                echo "  Also removing hostedtoolcache Java at: $JAVA_ROOT"
-                                sudo rm -rf "$JAVA_ROOT" 2>/dev/null || true
-                            fi
+                # On GitHub Actions, we can safely remove Java executables
+                # since we're in a temporary environment
+                if [ -n "$GITHUB_ACTIONS" ]; then
+                    # Check if it's /usr/bin/java
+                    if [ "$REMAINING_JAVA" = "/usr/bin/java" ]; then
+                        # Check if it's a symlink
+                        if [ -L "$REMAINING_JAVA" ]; then
+                            JAVA_TARGET=$(readlink -f "$REMAINING_JAVA" 2>/dev/null || readlink "$REMAINING_JAVA")
+                            echo "  /usr/bin/java is a symlink to: $JAVA_TARGET"
                         fi
-                    fi
-                fi
 
-                # If Java is STILL accessible after removal attempts,
-                # try to hide it with PATH manipulation
-                if command_exists java; then
-                    echo "Java still exists after removal attempts"
-                    # Remove /usr/bin from PATH as last resort
-                    export PATH=$(echo "$PATH" | tr ':' '\n' | grep -v "^/usr/bin$" | tr '\n' ':' | sed 's/:$//')
-                    echo "Removed /usr/bin from PATH as last resort"
+                        echo "  Removing /usr/bin/java and /usr/bin/javac (GitHub Actions environment)"
+                        sudo rm -f /usr/bin/java 2>/dev/null || true
+                        sudo rm -f /usr/bin/javac 2>/dev/null || true
+                        sudo rm -f /usr/bin/jar 2>/dev/null || true
+                        sudo rm -f /usr/bin/jarsigner 2>/dev/null || true
+                        sudo rm -f /usr/bin/javadoc 2>/dev/null || true
+                        sudo rm -f /usr/bin/javap 2>/dev/null || true
+                        sudo rm -f /usr/bin/jcmd 2>/dev/null || true
+                        sudo rm -f /usr/bin/jconsole 2>/dev/null || true
+                        sudo rm -f /usr/bin/jdb 2>/dev/null || true
+                        sudo rm -f /usr/bin/jdeps 2>/dev/null || true
+                        sudo rm -f /usr/bin/jinfo 2>/dev/null || true
+                        sudo rm -f /usr/bin/jmap 2>/dev/null || true
+                        sudo rm -f /usr/bin/jps 2>/dev/null || true
+                        sudo rm -f /usr/bin/jrunscript 2>/dev/null || true
+                        sudo rm -f /usr/bin/jstack 2>/dev/null || true
+                        sudo rm -f /usr/bin/jstat 2>/dev/null || true
+                        sudo rm -f /usr/bin/jstatd 2>/dev/null || true
+                        sudo rm -f /usr/bin/keytool 2>/dev/null || true
+
+                        # Also check for any Java-related executables we might have missed
+                        for java_tool in /usr/bin/j*; do
+                            if [ -f "$java_tool" ] && [ -L "$java_tool" ]; then
+                                if readlink "$java_tool" 2>/dev/null | grep -q -E "(java|jdk|jre|temurin|hostedtoolcache)"; then
+                                    echo "  Also removing: $java_tool"
+                                    sudo rm -f "$java_tool" 2>/dev/null || true
+                                fi
+                            fi
+                        done
+                    fi
                 fi
             fi
 
@@ -252,11 +263,7 @@ echo "========================================="
 echo "Verifying Java installation"
 echo "========================================="
 
-# If we removed /usr/bin from PATH, restore it for testing the new installation
-if ! echo "$PATH" | grep -q "/usr/bin"; then
-    echo "Restoring /usr/bin to PATH for testing..."
-    export PATH="/usr/bin:$PATH"
-fi
+# No PATH restoration needed since we only removed Java executables, not directories
 
 # First, check if Java is immediately available
 if command_exists java; then
