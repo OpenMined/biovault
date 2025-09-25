@@ -120,25 +120,23 @@ cleanup_existing() {
                             echo "  /usr/bin/java is a symlink to: $JAVA_TARGET"
                         fi
 
-                        echo "  Removing /usr/bin/java and /usr/bin/javac (GitHub Actions environment)"
-                        sudo rm -f /usr/bin/java 2>/dev/null || true
-                        sudo rm -f /usr/bin/javac 2>/dev/null || true
-                        sudo rm -f /usr/bin/jar 2>/dev/null || true
-                        sudo rm -f /usr/bin/jarsigner 2>/dev/null || true
-                        sudo rm -f /usr/bin/javadoc 2>/dev/null || true
-                        sudo rm -f /usr/bin/javap 2>/dev/null || true
-                        sudo rm -f /usr/bin/jcmd 2>/dev/null || true
-                        sudo rm -f /usr/bin/jconsole 2>/dev/null || true
-                        sudo rm -f /usr/bin/jdb 2>/dev/null || true
-                        sudo rm -f /usr/bin/jdeps 2>/dev/null || true
-                        sudo rm -f /usr/bin/jinfo 2>/dev/null || true
-                        sudo rm -f /usr/bin/jmap 2>/dev/null || true
-                        sudo rm -f /usr/bin/jps 2>/dev/null || true
-                        sudo rm -f /usr/bin/jrunscript 2>/dev/null || true
-                        sudo rm -f /usr/bin/jstack 2>/dev/null || true
-                        sudo rm -f /usr/bin/jstat 2>/dev/null || true
-                        sudo rm -f /usr/bin/jstatd 2>/dev/null || true
-                        sudo rm -f /usr/bin/keytool 2>/dev/null || true
+                        echo "  Removing /usr/bin/java and related tools (GitHub Actions environment)"
+                        # Remove without -f to see any errors
+                        echo "  Attempting to remove /usr/bin/java..."
+                        if sudo rm /usr/bin/java 2>&1; then
+                            echo "    ✓ Removed /usr/bin/java"
+                        else
+                            echo "    ✗ Failed to remove /usr/bin/java"
+                            # Try to understand why
+                            ls -la /usr/bin/java 2>&1 || true
+                        fi
+
+                        # Remove other Java tools
+                        for tool in javac jar jarsigner javadoc javap jcmd jconsole jdb jdeps jinfo jmap jps jrunscript jstack jstat jstatd keytool; do
+                            if [ -e "/usr/bin/$tool" ]; then
+                                sudo rm -f "/usr/bin/$tool" 2>&1 || true
+                            fi
+                        done
 
                         # Also check for any Java-related executables we might have missed
                         for java_tool in /usr/bin/j*; do
@@ -156,7 +154,24 @@ cleanup_existing() {
             # Verify Java is no longer accessible
             if command_exists java; then
                 echo "WARNING: Java still accessible after all modifications"
-                echo "Location: $(which java 2>/dev/null || echo 'unknown')"
+                FINAL_JAVA=$(which java 2>/dev/null || echo 'unknown')
+                echo "Location: $FINAL_JAVA"
+
+                # Debug: Show all java locations in PATH
+                echo "  All java locations found in PATH:"
+                which -a java 2>/dev/null || true
+
+                # Debug: Check if it's a different location
+                if [ "$FINAL_JAVA" != "$REMAINING_JAVA" ]; then
+                    echo "  This is a DIFFERENT location than before!"
+                fi
+
+                # Debug: Show file info
+                if [ -e "$FINAL_JAVA" ]; then
+                    echo "  File info:"
+                    ls -la "$FINAL_JAVA" 2>&1 || true
+                    file "$FINAL_JAVA" 2>&1 || true
+                fi
             else
                 echo "✓ Successfully removed/hidden Java from environment"
             fi
