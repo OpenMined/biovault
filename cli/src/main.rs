@@ -197,6 +197,15 @@ enum Commands {
         #[command(subcommand)]
         command: MessageCommands,
     },
+
+    #[command(
+        name = "hard-reset",
+        about = "Delete all BioVault data and configuration (DESTRUCTIVE)"
+    )]
+    HardReset {
+        #[arg(long, help = "Skip confirmation prompts (use with caution)")]
+        ignore_warning: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -617,6 +626,9 @@ async fn main() -> Result<()> {
                 commands::messages::sync_messages(&config)?;
             }
         },
+        Commands::HardReset { ignore_warning } => {
+            commands::hard_reset::execute(ignore_warning).await?;
+        }
     }
 
     Ok(())
