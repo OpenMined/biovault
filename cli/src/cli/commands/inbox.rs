@@ -67,22 +67,48 @@ fn read_key() -> Result<Key> {
 }
 
 fn read_key_with_timeout(timeout_ms: u64) -> Result<Option<Key>> {
+    use std::os::unix::io::AsRawFd;
     use std::sync::mpsc;
     use std::thread;
+
+    // Set stdin to non-blocking mode temporarily
+    let stdin_fd = io::stdin().as_raw_fd();
+    let flags = unsafe { libc::fcntl(stdin_fd, libc::F_GETFL, 0) };
+    if flags < 0 {
+        return Ok(None);
+    }
+
+    // Set non-blocking
+    unsafe {
+        libc::fcntl(stdin_fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+    }
 
     let (tx, rx) = mpsc::channel();
 
     thread::spawn(move || {
-        if let Ok(key) = read_key() {
-            let _ = tx.send(key);
+        // Try to read with timeout
+        let start = std::time::Instant::now();
+        while start.elapsed().as_millis() < timeout_ms as u128 {
+            if let Ok(key) = read_key() {
+                let _ = tx.send(key);
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
         }
     });
 
-    match rx.recv_timeout(Duration::from_millis(timeout_ms)) {
+    let result = match rx.recv_timeout(Duration::from_millis(timeout_ms)) {
         Ok(key) => Ok(Some(key)),
         Err(mpsc::RecvTimeoutError::Timeout) => Ok(None),
         Err(mpsc::RecvTimeoutError::Disconnected) => Ok(None),
+    };
+
+    // Restore blocking mode
+    unsafe {
+        libc::fcntl(stdin_fd, libc::F_SETFL, flags);
     }
+
+    result
 }
 use std::io::{self, Write};
 
@@ -245,13 +271,18 @@ pub async fn interactive(config: &Config, initial_view: Option<String>) -> Resul
             "BioVault Inbox - {} ({} messages){}",
             current_view.to_uppercase(),
             messages.len(),
-            if new_messages_arrived && daemon_running { " 🆕" } else { "" }
+            if new_messages_arrived && daemon_running {
+                " 🆕"
+            } else {
+                ""
+            }
         );
 
         // Show daemon status with auto-refresh indicator
         let daemon_status = if daemon_running {
             let time_since_refresh = Instant::now().duration_since(last_refresh);
-            let refresh_countdown = refresh_interval.as_secs() - time_since_refresh.as_secs().min(refresh_interval.as_secs());
+            let refresh_countdown = refresh_interval.as_secs()
+                - time_since_refresh.as_secs().min(refresh_interval.as_secs());
             format!("🤖 Daemon: ACTIVE | Auto-refresh in {}s", refresh_countdown)
         } else {
             "⚠️  Daemon: STOPPED".to_string()
@@ -350,7 +381,9 @@ pub async fn interactive(config: &Config, initial_view: Option<String>) -> Resul
                     let _ = sync.sync();
                     println!("Sync complete. Press Enter...");
                 } else {
-                    println!("\n⚠️  Daemon is running - sync happens automatically. Press Enter...");
+                    println!(
+                        "\n⚠️  Daemon is running - sync happens automatically. Press Enter..."
+                    );
                 }
                 let mut t = String::new();
                 io::stdin().read_line(&mut t).ok();

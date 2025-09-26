@@ -133,17 +133,14 @@ impl Daemon {
 
     async fn ensure_syftbox_running(&self) -> Result<()> {
         // Check if SyftBox is running
-        let output = Command::new("pgrep")
-            .arg("-f")
-            .arg("syftbox")
-            .output();
+        let output = Command::new("pgrep").arg("-f").arg("syftbox").output();
 
         let is_running = match output {
             Ok(out) => out.status.success() && !out.stdout.is_empty(),
             Err(_) => {
                 // pgrep might not be available, try alternative check
                 Command::new("ps")
-                    .args(&["aux"])
+                    .args(["aux"])
                     .output()
                     .map(|o| String::from_utf8_lossy(&o.stdout).contains("syftbox"))
                     .unwrap_or(false)
@@ -157,12 +154,13 @@ impl Daemon {
             let syftbox_config_path = self.config.get_syftbox_config_path()?;
 
             // First, check if syftbox command is available
-            let syftbox_check = Command::new("which")
-                .arg("syftbox")
-                .output();
+            let syftbox_check = Command::new("which").arg("syftbox").output();
 
             if syftbox_check.is_err() || !syftbox_check.unwrap().status.success() {
-                self.log("WARN", "syftbox command not found in PATH. Please install SyftBox first.");
+                self.log(
+                    "WARN",
+                    "syftbox command not found in PATH. Please install SyftBox first.",
+                );
                 return Err(anyhow::anyhow!(
                     "SyftBox is not installed. Please install it first: pip install syftbox"
                 ));
@@ -219,7 +217,13 @@ impl Daemon {
 
         // Ensure SyftBox is running first
         if let Err(e) = self.ensure_syftbox_running().await {
-            self.log("WARN", &format!("Could not ensure SyftBox is running: {}. Continuing anyway...", e));
+            self.log(
+                "WARN",
+                &format!(
+                    "Could not ensure SyftBox is running: {}. Continuing anyway...",
+                    e
+                ),
+            );
         }
 
         let data_dir = self.config.get_syftbox_data_dir()?;
@@ -311,7 +315,8 @@ impl Daemon {
 }
 
 fn get_biovault_dir(_config: &Config) -> Result<PathBuf> {
-    let home_dir = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
+    let home_dir =
+        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
     Ok(home_dir.join(".biovault"))
 }
 
@@ -376,14 +381,13 @@ pub async fn start(config: &Config, foreground: bool) -> Result<()> {
     } else {
         println!("🚀 Starting BioVault daemon in background");
 
-        let config_json = serde_json::to_string(config)
-            .context("Failed to serialize config")?;
+        let config_json = serde_json::to_string(config).context("Failed to serialize config")?;
 
-        let current_exe = std::env::current_exe()
-            .context("Failed to get current executable path")?;
+        let current_exe =
+            std::env::current_exe().context("Failed to get current executable path")?;
 
         let mut child = Command::new(current_exe)
-            .args(&["start", "--foreground"])
+            .args(["start", "--foreground"])
             .env("BV_DAEMON_CONFIG", config_json)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -401,7 +405,10 @@ pub async fn start(config: &Config, foreground: bool) -> Result<()> {
         match child.try_wait() {
             Ok(Some(status)) => {
                 let _ = std::fs::remove_file(&pid_path);
-                return Err(anyhow::anyhow!("Daemon process exited with status: {}", status));
+                return Err(anyhow::anyhow!(
+                    "Daemon process exited with status: {}",
+                    status
+                ));
             }
             Ok(None) => {
                 println!("✅ Daemon started successfully (PID: {})", pid);
@@ -430,7 +437,7 @@ pub async fn logs(config: &Config, follow: bool, lines: Option<usize>) -> Result
         println!("════════════════════════════════════════");
 
         let mut child = Command::new("tail")
-            .args(&["-f", &log_path.to_string_lossy()])
+            .args(["-f", &log_path.to_string_lossy()])
             .stdout(Stdio::piped())
             .spawn()
             .context("Failed to start tail command")?;
@@ -453,7 +460,7 @@ pub async fn logs(config: &Config, follow: bool, lines: Option<usize>) -> Result
         println!("═══════════════════════════════════");
 
         let output = Command::new("tail")
-            .args(&["-n", &tail_lines.to_string(), &log_path.to_string_lossy()])
+            .args(["-n", &tail_lines.to_string(), &log_path.to_string_lossy()])
             .output()
             .context("Failed to read log file")?;
 
@@ -471,8 +478,8 @@ pub fn get_daemon_status(config: &Config) -> Result<Option<DaemonStatus>> {
     }
 
     let status_json = std::fs::read_to_string(&status_path)?;
-    let status: DaemonStatus = serde_json::from_str(&status_json)
-        .context("Failed to parse daemon status")?;
+    let status: DaemonStatus =
+        serde_json::from_str(&status_json).context("Failed to parse daemon status")?;
 
     Ok(Some(status))
 }
@@ -518,9 +525,9 @@ pub async fn stop(config: &Config) -> Result<()> {
 fn check_systemd_available() -> Result<()> {
     #[cfg(not(target_os = "linux"))]
     {
-        return Err(anyhow::anyhow!(
+        Err(anyhow::anyhow!(
             "Service installation is only supported on Linux systems"
-        ));
+        ))
     }
 
     #[cfg(target_os = "linux")]
@@ -545,14 +552,12 @@ fn get_service_name() -> String {
 }
 
 fn generate_systemd_service_content(config: &Config) -> Result<String> {
-    let exe_path = std::env::current_exe()
-        .context("Failed to get current executable path")?;
+    let exe_path = std::env::current_exe().context("Failed to get current executable path")?;
 
-    let home_dir = dirs::home_dir()
-        .ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
+    let home_dir =
+        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
 
-    let user = std::env::var("USER")
-        .unwrap_or_else(|_| "nobody".to_string());
+    let user = std::env::var("USER").unwrap_or_else(|_| "nobody".to_string());
 
     let service_content = format!(
         r#"[Unit]
@@ -600,7 +605,7 @@ pub async fn install_service(config: &Config) -> Result<()> {
     // Check if service is already installed
     let service_name = get_service_name();
     let check_output = Command::new("systemctl")
-        .args(&["status", &service_name])
+        .args(["status", &service_name])
         .output()?;
 
     if check_output.status.success() || check_output.status.code() == Some(3) {
@@ -623,7 +628,7 @@ pub async fn install_service(config: &Config) -> Result<()> {
     // Move service file to systemd directory (requires sudo)
     println!("🔐 Installing service (requires sudo)...");
     let install_output = Command::new("sudo")
-        .args(&[
+        .args([
             "mv",
             &temp_service_path,
             &format!("/etc/systemd/system/{}", service_name),
@@ -641,7 +646,7 @@ pub async fn install_service(config: &Config) -> Result<()> {
     // Reload systemd daemon
     println!("🔄 Reloading systemd daemon...");
     let reload_output = Command::new("sudo")
-        .args(&["systemctl", "daemon-reload"])
+        .args(["systemctl", "daemon-reload"])
         .output()
         .context("Failed to reload systemd daemon")?;
 
@@ -655,7 +660,7 @@ pub async fn install_service(config: &Config) -> Result<()> {
     // Enable service to start on boot
     println!("🚀 Enabling service to start on boot...");
     let enable_output = Command::new("sudo")
-        .args(&["systemctl", "enable", &service_name])
+        .args(["systemctl", "enable", &service_name])
         .output()
         .context("Failed to enable service")?;
 
@@ -669,7 +674,7 @@ pub async fn install_service(config: &Config) -> Result<()> {
     // Start the service
     println!("▶️  Starting service...");
     let start_output = Command::new("sudo")
-        .args(&["systemctl", "start", &service_name])
+        .args(["systemctl", "start", &service_name])
         .output()
         .context("Failed to start service")?;
 
@@ -702,7 +707,7 @@ pub async fn uninstall_service(_config: &Config) -> Result<()> {
     // Stop the service if running
     println!("⏹️  Stopping service...");
     let stop_output = Command::new("sudo")
-        .args(&["systemctl", "stop", &service_name])
+        .args(["systemctl", "stop", &service_name])
         .output()?;
 
     if !stop_output.status.success() {
@@ -713,7 +718,7 @@ pub async fn uninstall_service(_config: &Config) -> Result<()> {
     // Disable the service
     println!("🚫 Disabling service...");
     let disable_output = Command::new("sudo")
-        .args(&["systemctl", "disable", &service_name])
+        .args(["systemctl", "disable", &service_name])
         .output()?;
 
     if !disable_output.status.success() {
@@ -723,7 +728,7 @@ pub async fn uninstall_service(_config: &Config) -> Result<()> {
     // Remove service file
     println!("🗑️  Removing service file...");
     let remove_output = Command::new("sudo")
-        .args(&["rm", "-f", &format!("/etc/systemd/system/{}", service_name)])
+        .args(["rm", "-f", &format!("/etc/systemd/system/{}", service_name)])
         .output()?;
 
     if !remove_output.status.success() {
@@ -736,7 +741,7 @@ pub async fn uninstall_service(_config: &Config) -> Result<()> {
     // Reload systemd daemon
     println!("🔄 Reloading systemd daemon...");
     let reload_output = Command::new("sudo")
-        .args(&["systemctl", "daemon-reload"])
+        .args(["systemctl", "daemon-reload"])
         .output()?;
 
     if !reload_output.status.success() {
@@ -758,9 +763,15 @@ pub async fn service_status(config: &Config) -> Result<()> {
         println!("🤖 Daemon Status: RUNNING (manual mode)");
         if let Some(status) = get_daemon_status(config)? {
             println!("   • PID: {}", status.pid);
-            println!("   • Started: {}", status.started_at.format("%Y-%m-%d %H:%M:%S UTC"));
+            println!(
+                "   • Started: {}",
+                status.started_at.format("%Y-%m-%d %H:%M:%S UTC")
+            );
             if let Some(last_sync) = status.last_sync {
-                println!("   • Last sync: {}", last_sync.format("%Y-%m-%d %H:%M:%S UTC"));
+                println!(
+                    "   • Last sync: {}",
+                    last_sync.format("%Y-%m-%d %H:%M:%S UTC")
+                );
             }
             println!("   • Messages processed: {}", status.message_count);
         }
@@ -782,7 +793,8 @@ pub async fn service_status(config: &Config) -> Result<()> {
 
             if output_str.contains("Active: active (running)") {
                 println!("🤖 Daemon Status: RUNNING (systemd service)");
-            } else if output_str.contains("Active: inactive") || output_str.contains("Active: dead") {
+            } else if output_str.contains("Active: inactive") || output_str.contains("Active: dead")
+            {
                 println!("⚠️  Daemon Status: STOPPED");
             } else if output_str.contains("Active: failed") {
                 println!("❌ Daemon Status: FAILED");
@@ -794,7 +806,9 @@ pub async fn service_status(config: &Config) -> Result<()> {
             println!("\n{}", output_str);
 
             if output_str.contains("could not be found") {
-                println!("\n   ℹ️  Service is not installed. Use 'bv daemon install' to install it.");
+                println!(
+                    "\n   ℹ️  Service is not installed. Use 'bv daemon install' to install it."
+                );
             }
         } else if output.status.code() == Some(4) {
             println!("❌ Service '{}' not found", service_name);
