@@ -1,84 +1,13 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, Row};
-use std::fs::{File, OpenOptions};
-use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use super::models::{Message, MessageStatus, SyncStatus};
 
-// Type alias for file sync details to avoid clippy::type_complexity warning
-type FileSyncDetails = (String, i32, Option<String>, Option<String>);
-
-pub struct DatabaseLock {
-    lock_file: File,
-    _lock_path: PathBuf,
-}
-
-impl DatabaseLock {
-    fn acquire(db_path: &Path, timeout: Duration) -> Result<Self> {
-        let lock_path = db_path.with_extension("lock");
-        let start = Instant::now();
-
-        loop {
-            match OpenOptions::new()
-                .create(true)
-                .write(true)
-                .truncate(true)
-                .open(&lock_path)
-            {
-                Ok(mut file) => {
-                    #[cfg(unix)]
-                    {
-                        use std::os::unix::io::AsRawFd;
-                        let fd = file.as_raw_fd();
-                        let lock_result = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
-                        if lock_result != 0 {
-                            if start.elapsed() > timeout {
-                                return Err(anyhow::anyhow!("Database lock timeout"));
-                            }
-                            std::thread::sleep(Duration::from_millis(50));
-                            continue;
-                        }
-                    }
-
-                    let pid = std::process::id();
-                    writeln!(file, "{}", pid)?;
-                    file.flush()?;
-
-                    return Ok(DatabaseLock {
-                        lock_file: file,
-                        _lock_path: lock_path,
-                    });
-                }
-                Err(_) => {
-                    if start.elapsed() > timeout {
-                        return Err(anyhow::anyhow!("Database lock timeout"));
-                    }
-                    std::thread::sleep(Duration::from_millis(50));
-                }
-            }
-        }
-    }
-}
-
-impl Drop for DatabaseLock {
-    fn drop(&mut self) {
-        #[cfg(unix)]
-        {
-            use std::os::unix::io::AsRawFd;
-            let fd = self.lock_file.as_raw_fd();
-            unsafe {
-                libc::flock(fd, libc::LOCK_UN);
-            }
-        }
-    }
-}
-
 pub struct MessageDb {
     conn: Connection,
-    _lock: Option<DatabaseLock>,
 }
 
 impl MessageDb {
@@ -88,12 +17,6 @@ impl MessageDb {
 
     #[allow(unused_variables)]
     pub fn new_with_timeout(db_path: &Path, timeout: Duration) -> Result<Self> {
-        // In tests, use a much shorter timeout and skip lock if it fails
-        #[cfg(test)]
-        let lock = DatabaseLock::acquire(db_path, Duration::from_millis(100)).ok();
-        #[cfg(not(test))]
-        let lock = Some(DatabaseLock::acquire(db_path, timeout)?);
-
         let conn = Connection::open(db_path)
             .with_context(|| format!("Failed to open database at {:?}", db_path))?;
 
@@ -141,23 +64,6 @@ impl MessageDb {
             )?;
         }
 
-        // Migration: Add file sync tracking columns
-        let has_file_sync_status: bool = conn
-            .prepare(
-                "SELECT COUNT(*) FROM pragma_table_info('messages') WHERE name='file_sync_status'",
-            )
-            .and_then(|mut stmt| stmt.query_row([], |row| row.get(0)))
-            .unwrap_or(false);
-
-        if !has_file_sync_status {
-            conn.execute_batch(
-                "ALTER TABLE messages ADD COLUMN file_sync_status TEXT DEFAULT 'pending';
-                 ALTER TABLE messages ADD COLUMN file_sync_verified_at TEXT;
-                 ALTER TABLE messages ADD COLUMN file_sync_attempts INTEGER DEFAULT 0;
-                 ALTER TABLE messages ADD COLUMN file_sync_errors TEXT;",
-            )?;
-        }
-
         // Migration: Add metadata column if it doesn't exist
         let has_metadata: bool = conn
             .prepare("SELECT COUNT(*) FROM pragma_table_info('messages') WHERE name='metadata'")
@@ -194,7 +100,7 @@ impl MessageDb {
             [],
         )?;
 
-        Ok(Self { conn, _lock: lock })
+        Ok(Self { conn })
     }
 
     pub fn insert_message(&self, msg: &Message) -> Result<()> {
@@ -560,61 +466,6 @@ impl MessageDb {
         self.conn
             .execute("DELETE FROM messages WHERE id = ?1", params![id])?;
         Ok(())
-    }
-
-    // File sync tracking methods
-    pub fn update_file_sync_status(
-        &self,
-        msg_id: &str,
-        status: &str,
-        error: Option<&str>,
-    ) -> Result<()> {
-        let now = Utc::now().to_rfc3339();
-        let verified_at = if status == "verified" {
-            Some(&now)
-        } else {
-            None
-        };
-
-        self.conn.execute(
-            "UPDATE messages SET
-             file_sync_status = ?1,
-             file_sync_verified_at = ?2,
-             file_sync_attempts = file_sync_attempts + 1,
-             file_sync_errors = ?3
-             WHERE id = ?4",
-            params![status, verified_at, error, msg_id],
-        )?;
-        Ok(())
-    }
-
-    pub fn get_file_sync_status(&self, msg_id: &str) -> Result<Option<String>> {
-        self.conn
-            .query_row(
-                "SELECT file_sync_status FROM messages WHERE id = ?1",
-                params![msg_id],
-                |row| row.get(0),
-            )
-            .map(Some)
-            .or_else(|e| match e {
-                rusqlite::Error::QueryReturnedNoRows => Ok(None),
-                _ => Err(e.into()),
-            })
-    }
-
-    pub fn get_file_sync_details(&self, msg_id: &str) -> Result<Option<FileSyncDetails>> {
-        self.conn
-            .query_row(
-                "SELECT file_sync_status, file_sync_attempts, file_sync_verified_at, file_sync_errors
-                 FROM messages WHERE id = ?1",
-                params![msg_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-            )
-            .map(Some)
-            .or_else(|e| match e {
-                rusqlite::Error::QueryReturnedNoRows => Ok(None),
-                _ => Err(e.into()),
-            })
     }
 
     fn row_to_message(row: &Row) -> Result<Message> {

@@ -468,13 +468,14 @@ fn send_project_message(
     };
 
     // Add handy paths for the recipient to copy/paste
+    let sender_local_path = submission_path.to_string_lossy().to_string();
     let receiver_local_path_template = format!(
         "$SYFTBOX_DATA_DIR/datasites/{}/shared/biovault/submissions/{}",
         config.email, submission_folder_name
     );
     body.push_str(&format!(
-        "\n\nSubmission location references:\n- syft URL: {}\n- Receiver local path (template): {}\n",
-        submission_syft_url, receiver_local_path_template
+        "\n\nSubmission location references:\n- syft URL: {}\n- Sender local path: {}\n- Receiver local path (template): {}\n",
+        submission_syft_url, sender_local_path, receiver_local_path_template
     ));
 
     // Construct metadata for the message
@@ -488,6 +489,7 @@ fn send_project_message(
         // Explicit list of asset files (if any)
         "assets": project.assets.clone().unwrap_or_default(),
         // Helpful paths for receiver tooling
+        "sender_local_path": sender_local_path,
         "receiver_local_path_template": receiver_local_path_template,
     });
 
