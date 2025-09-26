@@ -66,14 +66,13 @@ fn read_key() -> Result<Key> {
     }
 }
 
-fn read_key_with_timeout(timeout_ms: u64) -> Result<Option<Key>> {
-    use std::sync::mpsc;
-    use std::thread;
-
+fn read_key_with_timeout(_timeout_ms: u64) -> Result<Option<Key>> {
     // Unix-specific non-blocking I/O
     #[cfg(unix)]
     {
         use std::os::unix::io::AsRawFd;
+        use std::sync::mpsc;
+        use std::thread;
 
         // Set stdin to non-blocking mode temporarily
         let stdin_fd = io::stdin().as_raw_fd();
@@ -92,7 +91,7 @@ fn read_key_with_timeout(timeout_ms: u64) -> Result<Option<Key>> {
         thread::spawn(move || {
             // Try to read with timeout
             let start = std::time::Instant::now();
-            while start.elapsed().as_millis() < timeout_ms as u128 {
+            while start.elapsed().as_millis() < _timeout_ms as u128 {
                 if let Ok(key) = read_key() {
                     let _ = tx.send(key);
                     break;
@@ -101,7 +100,7 @@ fn read_key_with_timeout(timeout_ms: u64) -> Result<Option<Key>> {
             }
         });
 
-        let result = match rx.recv_timeout(Duration::from_millis(timeout_ms)) {
+        let result = match rx.recv_timeout(Duration::from_millis(_timeout_ms)) {
             Ok(key) => Ok(Some(key)),
             Err(mpsc::RecvTimeoutError::Timeout) => Ok(None),
             Err(mpsc::RecvTimeoutError::Disconnected) => Ok(None),
@@ -120,7 +119,7 @@ fn read_key_with_timeout(timeout_ms: u64) -> Result<Option<Key>> {
     {
         // On Windows, we'll just do a blocking read since auto-refresh isn't critical
         // The daemon functionality itself is Linux-only anyway
-        Some(read_key())
+        read_key().map(Some)
     }
 
     #[cfg(not(any(unix, windows)))]
