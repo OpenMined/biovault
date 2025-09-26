@@ -258,7 +258,8 @@ pub async fn submit(
 
                         // Update syft.pub.yaml
                         let existing_permissions_path = submission_path.join("syft.pub.yaml");
-                        let updated_permissions = SyftPermissions::new_for_datasite(&datasite_email);
+                        let updated_permissions =
+                            SyftPermissions::new_for_datasite(&datasite_email);
                         updated_permissions.save(&existing_permissions_path)?;
                     }
 
@@ -271,6 +272,8 @@ pub async fn submit(
                         &submission_folder_name,
                         &project_hash,
                         &date_str,
+                        non_interactive,
+                        is_self_submission,
                     );
                 }
             } else {
@@ -387,7 +390,7 @@ fn create_and_submit_project(
     // Create permissions file
     let permissions = SyftPermissions::new_for_datasite(datasite_email);
     let permissions_path = submission_path.join("syft.pub.yaml");
-    permissions.save(&permissions_path)?
+    permissions.save(&permissions_path)?;
 
     println!("✓ Project submitted successfully!");
     println!("  Name: {}", project.name);
@@ -400,6 +403,9 @@ fn create_and_submit_project(
     println!("  Hash: {}", short_hash);
 
     // Send the project message
+    // Determine if this is a self-submission
+    let is_self_submission = datasite_email == config.email;
+
     send_project_message(
         config,
         &final_project,
@@ -408,6 +414,8 @@ fn create_and_submit_project(
         submission_folder_name,
         project_hash,
         date_str,
+        false, // non_interactive is false in create_and_submit_project context
+        is_self_submission,
     )
 }
 
@@ -419,6 +427,8 @@ fn send_project_message(
     submission_folder_name: &str,
     project_hash: &str,
     date_str: &str,
+    non_interactive: bool,
+    is_self_submission: bool,
 ) -> Result<()> {
     // Build a syft:// URL for the saved submission so the receiver can locate it
     let datasite_root = config.get_datasite_path()?;
@@ -543,50 +553,6 @@ fn update_permissions_for_new_recipient(
 
     // Save updated permissions
     permissions.save(&permissions_path.to_path_buf())?;
-    Ok(())
-}
-
-fn hash_file(path: &Path) -> Result<String> {
-    let content =
-        fs::read(path).with_context(|| format!("Failed to read file: {}", path.display()))?;
-    Ok(blake3::hash(&content).to_hex().to_string())
-}
-
-fn copy_project_files(src: &Path, dest: &Path) -> Result<()> {
-    // Copy workflow.nf
-    let src_workflow = src.join("workflow.nf");
-    let dest_workflow = dest.join("workflow.nf");
-    fs::copy(&src_workflow, &dest_workflow)
-        .with_context(|| "Failed to copy workflow.nf".to_string())?;
-
-    // Copy assets directory if it exists
-    let src_assets = src.join("assets");
-    if src_assets.exists() && src_assets.is_dir() {
-        let dest_assets = dest.join("assets");
-        fs::create_dir_all(&dest_assets)?;
-
-        for entry in WalkDir::new(&src_assets)
-            .min_depth(1)
-            .follow_links(false)
-            .into_iter()
-            .filter_map(|e| e.ok())
-        {
-            let src_path = entry.path();
-            let relative_path = src_path.strip_prefix(&src_assets).unwrap();
-            let dest_path = dest_assets.join(relative_path);
-
-            if entry.file_type().is_dir() {
-                fs::create_dir_all(&dest_path)?;
-            } else {
-                if let Some(parent) = dest_path.parent() {
-                    fs::create_dir_all(parent)?;
-                }
-                fs::copy(src_path, &dest_path)
-                    .with_context(|| format!("Failed to copy file: {}", src_path.display()))?;
-            }
-        }
-    }
-
     Ok(())
 }
 
