@@ -1,16 +1,92 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, Row};
-use std::path::Path;
+use std::fs::{File, OpenOptions};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use super::models::{Message, MessageStatus, SyncStatus};
 
+pub struct DatabaseLock {
+    lock_file: File,
+    _lock_path: PathBuf,
+}
+
+impl DatabaseLock {
+    fn acquire(db_path: &Path, timeout: Duration) -> Result<Self> {
+        let lock_path = db_path.with_extension("lock");
+        let start = Instant::now();
+
+        loop {
+            match OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(&lock_path)
+            {
+                Ok(mut file) => {
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::io::AsRawFd;
+                        let fd = file.as_raw_fd();
+                        let lock_result = unsafe {
+                            libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB)
+                        };
+                        if lock_result != 0 {
+                            if start.elapsed() > timeout {
+                                return Err(anyhow::anyhow!("Database lock timeout"));
+                            }
+                            std::thread::sleep(Duration::from_millis(50));
+                            continue;
+                        }
+                    }
+
+                    let pid = std::process::id();
+                    writeln!(file, "{}", pid)?;
+                    file.flush()?;
+
+                    return Ok(DatabaseLock {
+                        lock_file: file,
+                        _lock_path: lock_path,
+                    });
+                }
+                Err(_) => {
+                    if start.elapsed() > timeout {
+                        return Err(anyhow::anyhow!("Database lock timeout"));
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+            }
+        }
+    }
+}
+
+impl Drop for DatabaseLock {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::io::AsRawFd;
+            let fd = self.lock_file.as_raw_fd();
+            unsafe {
+                libc::flock(fd, libc::LOCK_UN);
+            }
+        }
+    }
+}
+
 pub struct MessageDb {
     conn: Connection,
+    _lock: DatabaseLock,
 }
 
 impl MessageDb {
     pub fn new(db_path: &Path) -> Result<Self> {
+        Self::new_with_timeout(db_path, Duration::from_secs(30))
+    }
+
+    pub fn new_with_timeout(db_path: &Path, timeout: Duration) -> Result<Self> {
+        let lock = DatabaseLock::acquire(db_path, timeout)?;
         let conn = Connection::open(db_path)
             .with_context(|| format!("Failed to open database at {:?}", db_path))?;
 
@@ -94,7 +170,7 @@ impl MessageDb {
             [],
         )?;
 
-        Ok(Self { conn })
+        Ok(Self { conn, _lock: lock })
     }
 
     pub fn insert_message(&self, msg: &Message) -> Result<()> {

@@ -48,6 +48,8 @@ base64 = "0.22"
 rusqlite = { version = "0.32", features = ["bundled", "chrono"] }
 include_dir = "0.7"
 lazy_static = "1.4"
+notify = "6.1"
+libc = "0.2"
 
 [build-dependencies]
 serde_yaml = "0.9"

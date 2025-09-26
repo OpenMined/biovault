@@ -1,6 +1,7 @@
 pub mod biobank;
 pub mod check;
 pub mod config_cmd;
+pub mod daemon;
 pub mod fastq;
 pub mod inbox;
 pub mod info;
