@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, Row};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Duration;
 
 use super::models::{Message, MessageStatus, SyncStatus};
