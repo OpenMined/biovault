@@ -1532,10 +1532,13 @@ participants:
         };
 
         // Use a writable cache dir during test
+        // Create the cache directory structure to match what DownloadCache expects
         let cache_td = TempDir::new().unwrap();
+        let cache_dir = cache_td.path().join("data").join("cache");
+        fs::create_dir_all(&cache_dir).unwrap();
         std::env::set_var(
             "BIOVAULT_CACHE_DIR",
-            cache_td.path().to_string_lossy().to_string(),
+            cache_dir.to_string_lossy().to_string(),
         );
         // Should return Ok before trying to execute nextflow
         execute(params).await.expect("dry-run ok");

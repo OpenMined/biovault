@@ -233,6 +233,15 @@ enum Commands {
         #[arg(short, long, help = "Number of lines to show")]
         lines: Option<usize>,
     },
+
+    #[command(
+        name = "hard-reset",
+        about = "Delete all BioVault data and configuration (DESTRUCTIVE)"
+    )]
+    HardReset {
+        #[arg(long, help = "Skip confirmation prompts (use with caution)")]
+        ignore_warning: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -824,6 +833,9 @@ async fn main() -> Result<()> {
         Commands::Logs { follow, lines } => {
             let config = biovault::config::Config::load()?;
             commands::daemon::logs(&config, follow, lines).await?;
+        }
+        Commands::HardReset { ignore_warning } => {
+            commands::hard_reset::execute(ignore_warning).await?;
         }
     }
 

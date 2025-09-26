@@ -437,6 +437,15 @@ async fn setup_macos() -> Result<()> {
                     }
 
                     if all_succeeded {
+                        // Special handling for Java: add brew path before verification
+                        if dep.name == "java" {
+                            if let Some(java_path) = check_java_in_brew_not_in_path() {
+                                // Add the brew Java path to current environment for verification
+                                let current_path = env::var("PATH").unwrap_or_default();
+                                env::set_var("PATH", format!("{}:{}", java_path, current_path));
+                            }
+                        }
+
                         if let Some(verify_cmd) = &env_config.verify_command {
                             print!("   Verifying installation... ");
                             let output = Command::new("sh").arg("-c").arg(verify_cmd).output();
@@ -465,10 +474,9 @@ async fn setup_macos() -> Result<()> {
         }
     }
 
-    // After installing Java, check if it needs to be added to PATH
-    if success_count > 0 || skip_count > 0 {
-        check_and_configure_java_path(is_ci).await?;
-    }
+    // After all installations, check if Java needs PATH configuration
+    // This handles the case where Java was already installed but not in PATH
+    check_and_configure_java_path(is_ci).await?;
 
     println!("\nNotes:");
     println!("- If this is your first time installing Docker Desktop, open it once to finish setup and grant permissions.");
