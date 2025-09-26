@@ -347,16 +347,13 @@ pub fn is_daemon_running(config: &Config) -> Result<bool> {
     let pid_str = std::fs::read_to_string(&pid_path)?;
     let pid: u32 = pid_str.trim().parse().context("Invalid PID file")?;
 
-    #[cfg(unix)]
-    {
+    // Runtime OS check instead of compile-time
+    if cfg!(unix) {
         unsafe {
             let result = libc::kill(pid as i32, 0);
             Ok(result == 0)
         }
-    }
-
-    #[cfg(not(unix))]
-    {
+    } else {
         let output = Command::new("tasklist")
             .args(&["/FI", &format!("PID eq {}", pid)])
             .output()?;
@@ -494,18 +491,15 @@ pub async fn stop(config: &Config) -> Result<()> {
     let pid_str = std::fs::read_to_string(&pid_path)?;
     let pid: u32 = pid_str.trim().parse().context("Invalid PID file")?;
 
-    #[cfg(unix)]
-    {
+    // Runtime OS check instead of compile-time
+    if cfg!(unix) {
         unsafe {
             let result = libc::kill(pid as i32, libc::SIGTERM);
             if result != 0 {
                 return Err(anyhow::anyhow!("Failed to stop daemon"));
             }
         }
-    }
-
-    #[cfg(not(unix))]
-    {
+    } else {
         let output = Command::new("taskkill")
             .args(&["/F", "/PID", &pid.to_string()])
             .output()?;
@@ -523,28 +517,25 @@ pub async fn stop(config: &Config) -> Result<()> {
 }
 
 fn check_systemd_available() -> Result<()> {
-    #[cfg(not(target_os = "linux"))]
-    {
-        Err(anyhow::anyhow!(
+    // Runtime OS check instead of compile-time
+    if !cfg!(target_os = "linux") {
+        return Err(anyhow::anyhow!(
             "Service installation is only supported on Linux systems"
-        ))
+        ));
     }
 
-    #[cfg(target_os = "linux")]
-    {
-        // Check if systemd is available
-        let output = Command::new("systemctl")
-            .arg("--version")
-            .output()
-            .context("systemctl not found. This system doesn't appear to use systemd")?;
+    // Check if systemd is available
+    let output = Command::new("systemctl")
+        .arg("--version")
+        .output()
+        .context("systemctl not found. This system doesn't appear to use systemd")?;
 
-        if !output.status.success() {
-            return Err(anyhow::anyhow!(
-                "systemd is not available on this system. Service installation requires systemd."
-            ));
-        }
-        Ok(())
+    if !output.status.success() {
+        return Err(anyhow::anyhow!(
+            "systemd is not available on this system. Service installation requires systemd."
+        ));
     }
+    Ok(())
 }
 
 fn get_service_name() -> String {
@@ -779,12 +770,11 @@ pub async fn service_status(config: &Config) -> Result<()> {
         return Ok(());
     }
 
-    // Check systemd service status
-    #[cfg(target_os = "linux")]
-    {
+    // Check systemd service status (runtime check)
+    if cfg!(target_os = "linux") {
         let service_name = get_service_name();
         let output = Command::new("systemctl")
-            .args(&["status", &service_name, "--no-pager"])
+            .args(["status", &service_name, "--no-pager"])
             .output()?;
 
         if output.status.success() || output.status.code() == Some(3) {
@@ -817,10 +807,7 @@ pub async fn service_status(config: &Config) -> Result<()> {
             println!("⚠️  Could not determine service status");
             println!("   Error: {}", String::from_utf8_lossy(&output.stderr));
         }
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    {
+    } else {
         println!("⚠️  Daemon Status: NOT RUNNING");
         println!("   Service installation is only supported on Linux");
         println!("   Use 'bv start' to run the daemon manually");
