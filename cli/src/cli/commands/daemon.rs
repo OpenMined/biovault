@@ -355,7 +355,7 @@ pub fn is_daemon_running(config: &Config) -> Result<bool> {
         }
     } else {
         let output = Command::new("tasklist")
-            .args(&["/FI", &format!("PID eq {}", pid)])
+            .args(["/FI", &format!("PID eq {}", pid)])
             .output()?;
         Ok(String::from_utf8_lossy(&output.stdout).contains(&pid.to_string()))
     }
@@ -501,7 +501,7 @@ pub async fn stop(config: &Config) -> Result<()> {
         }
     } else {
         let output = Command::new("taskkill")
-            .args(&["/F", "/PID", &pid.to_string()])
+            .args(["/F", "/PID", &pid.to_string()])
             .output()?;
         if !output.status.success() {
             return Err(anyhow::anyhow!("Failed to stop daemon"));
