@@ -4,29 +4,29 @@ use std::path::{Path, PathBuf};
 
 const PERMISSION_FILE_NAME: &str = "syft.pub.yaml";
 pub const DEFAULT_RPC_PERMISSION_CONTENT: &str = r#"rules:
-- pattern: '**/*.request'
-  access:
-    admin: []
-    read:
-    - '*'
-    write:
-    - '*'
-- pattern: '**/*.response'
-  access:
-    admin: []
-    read:
-    - '*'
-    write:
-    - '*'
+  - pattern: '**/*.request'
+    access:
+      admin: []
+      read:
+        - '*'
+      write:
+        - '*'
+  - pattern: '**/*.response'
+    access:
+      admin: []
+      read:
+        - '*'
+      write:
+        - '*'
 "#;
 
 pub const DEFAULT_APP_PERMISSION_CONTENT: &str = r#"rules:
-- pattern: "**"
-  access:
-    admin: []
-    read:
-    - "*"
-    write: []
+  - pattern: "**"
+    access:
+      admin: []
+      read:
+        - "*"
+      write: []
 "#;
 
 /// Represents a SyftBox application

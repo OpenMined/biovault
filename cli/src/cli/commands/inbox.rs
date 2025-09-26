@@ -4,6 +4,18 @@ use anyhow::Result;
 use dialoguer::{theme::ColorfulTheme, Select};
 use std::io::Read;
 
+/// Expand environment variables in text (specifically $SYFTBOX_DATA_DIR)
+fn expand_env_vars_in_text(text: &str) -> Result<String> {
+    let mut result = text.to_string();
+
+    // Expand $SYFTBOX_DATA_DIR
+    if let Ok(data_dir) = std::env::var("SYFTBOX_DATA_DIR") {
+        result = result.replace("$SYFTBOX_DATA_DIR", &data_dir);
+    }
+
+    Ok(result)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Key {
     Up,
@@ -144,10 +156,11 @@ pub fn list(config: &Config, filters: ListFilters) -> Result<()> {
 
         // Show preview of body
         let preview_len = 80;
-        let preview = if msg.body.len() > preview_len {
-            format!("{}...", &msg.body[..preview_len])
+        let expanded_body = expand_env_vars_in_text(&msg.body)?;
+        let preview = if expanded_body.len() > preview_len {
+            format!("{}...", &expanded_body[..preview_len])
         } else {
-            msg.body.clone()
+            expanded_body
         };
         println!("   {}", preview);
     }
@@ -532,4 +545,360 @@ fn compose_new_message(config: &Config) -> Result<()> {
     io::stdin().read_line(&mut input)?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_list_filters_default() {
+        let filters = ListFilters {
+            sent: false,
+            all: false,
+            unread: false,
+            projects: false,
+            message_type: None,
+            from: None,
+            search: None,
+        };
+        assert!(!filters.sent);
+        assert!(!filters.all);
+        assert!(!filters.unread);
+        assert!(!filters.projects);
+        assert!(filters.message_type.is_none());
+        assert!(filters.from.is_none());
+        assert!(filters.search.is_none());
+    }
+
+    #[test]
+    fn test_key_enum_equality() {
+        assert_eq!(Key::Up, Key::Up);
+        assert_eq!(Key::Down, Key::Down);
+        assert_eq!(Key::Enter, Key::Enter);
+        assert_eq!(Key::Esc, Key::Esc);
+        assert_eq!(Key::Char('a'), Key::Char('a'));
+        assert_ne!(Key::Char('a'), Key::Char('b'));
+        assert_ne!(Key::Up, Key::Down);
+    }
+
+    #[test]
+    fn test_key_enum_debug() {
+        assert_eq!(format!("{:?}", Key::Up), "Up");
+        assert_eq!(format!("{:?}", Key::Down), "Down");
+        assert_eq!(format!("{:?}", Key::Enter), "Enter");
+        assert_eq!(format!("{:?}", Key::Esc), "Esc");
+        assert_eq!(format!("{:?}", Key::Char('x')), "Char('x')");
+    }
+
+    #[test]
+    fn test_list_filters_with_values() {
+        let filters = ListFilters {
+            sent: true,
+            all: false,
+            unread: true,
+            projects: false,
+            message_type: Some("project".to_string()),
+            from: Some("test@example.com".to_string()),
+            search: Some("search term".to_string()),
+        };
+        assert!(filters.sent);
+        assert!(!filters.all);
+        assert!(filters.unread);
+        assert!(!filters.projects);
+        assert_eq!(filters.message_type, Some("project".to_string()));
+        assert_eq!(filters.from, Some("test@example.com".to_string()));
+        assert_eq!(filters.search, Some("search term".to_string()));
+    }
+
+    #[test]
+    fn test_key_char_creation() {
+        let key = Key::Char('a');
+        match key {
+            Key::Char(c) => assert_eq!(c, 'a'),
+            _ => panic!("Expected Char variant"),
+        }
+    }
+
+    #[test]
+    fn test_key_copy_trait() {
+        let key1 = Key::Up;
+        let key2 = key1; // This works because Key implements Copy
+        assert_eq!(key1, key2);
+    }
+
+    #[test]
+    fn test_list_filters_sent_filter() {
+        let filters = ListFilters {
+            sent: true,
+            all: false,
+            unread: false,
+            projects: false,
+            message_type: None,
+            from: None,
+            search: None,
+        };
+        assert!(filters.sent);
+        assert!(!filters.all);
+    }
+
+    #[test]
+    fn test_list_filters_search_filter() {
+        let filters = ListFilters {
+            sent: false,
+            all: false,
+            unread: false,
+            projects: false,
+            message_type: None,
+            from: None,
+            search: Some("test query".to_string()),
+        };
+        assert_eq!(filters.search, Some("test query".to_string()));
+    }
+
+    #[test]
+    fn test_list_filters_message_type_filter() {
+        let filters = ListFilters {
+            sent: false,
+            all: false,
+            unread: false,
+            projects: false,
+            message_type: Some("request".to_string()),
+            from: None,
+            search: None,
+        };
+        assert_eq!(filters.message_type, Some("request".to_string()));
+    }
+
+    #[test]
+    fn test_list_filters_from_filter() {
+        let filters = ListFilters {
+            sent: false,
+            all: false,
+            unread: false,
+            projects: false,
+            message_type: None,
+            from: Some("user@example.com".to_string()),
+            search: None,
+        };
+        assert_eq!(filters.from, Some("user@example.com".to_string()));
+    }
+
+    #[test]
+    fn test_list_filters_projects_filter() {
+        let filters = ListFilters {
+            sent: false,
+            all: false,
+            unread: false,
+            projects: true,
+            message_type: None,
+            from: None,
+            search: None,
+        };
+        assert!(filters.projects);
+        assert!(!filters.sent);
+    }
+
+    #[test]
+    fn test_list_filters_unread_filter() {
+        let filters = ListFilters {
+            sent: false,
+            all: false,
+            unread: true,
+            projects: false,
+            message_type: None,
+            from: None,
+            search: None,
+        };
+        assert!(filters.unread);
+        assert!(!filters.all);
+    }
+
+    #[test]
+    fn test_list_filters_all_filter() {
+        let filters = ListFilters {
+            sent: false,
+            all: true,
+            unread: false,
+            projects: false,
+            message_type: None,
+            from: None,
+            search: None,
+        };
+        assert!(filters.all);
+        assert!(!filters.sent);
+    }
+
+    #[test]
+    fn test_list_filters_combined() {
+        let filters = ListFilters {
+            sent: true,
+            all: false,
+            unread: true,
+            projects: false,
+            message_type: Some("system".to_string()),
+            from: Some("admin@test.com".to_string()),
+            search: Some("important".to_string()),
+        };
+        assert!(filters.sent);
+        assert!(filters.unread);
+        assert_eq!(filters.message_type, Some("system".to_string()));
+        assert_eq!(filters.from, Some("admin@test.com".to_string()));
+        assert_eq!(filters.search, Some("important".to_string()));
+    }
+
+    fn test_config(tmp: &std::path::Path) -> Config {
+        crate::config::set_test_biovault_home(tmp.join(".bv"));
+        crate::config::set_test_syftbox_data_dir(tmp);
+        Config {
+            email: "me@example.com".into(),
+            syftbox_config: None,
+            version: None,
+        }
+    }
+
+    #[test]
+    fn list_handles_empty_db() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let cfg = test_config(tmp.path());
+        let filters = ListFilters {
+            sent: false,
+            all: false,
+            unread: false,
+            projects: false,
+            message_type: None,
+            from: None,
+            search: None,
+        };
+        list(&cfg, filters).unwrap();
+    }
+
+    #[test]
+    fn list_filters_sent_unread_projects_search_from() {
+        use crate::cli::commands::messages::get_message_db_path;
+        use crate::messages::{Message, MessageStatus, MessageType};
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let cfg = test_config(tmp.path());
+        let db_path = get_message_db_path(&cfg).unwrap();
+        let db = crate::messages::MessageDb::new(&db_path).unwrap();
+
+        // Sent/draft message from me
+        let mut m1 = Message::new(
+            "me@example.com".into(),
+            "you@example.com".into(),
+            "hello world".into(),
+        );
+        m1.status = MessageStatus::Sent;
+        db.insert_message(&m1).unwrap();
+
+        // Unread (received) message to me, from alice
+        let mut m2 = Message::new(
+            "alice@example.com".into(),
+            "me@example.com".into(),
+            "body 2".into(),
+        );
+        m2.status = MessageStatus::Received;
+        m2.subject = Some("greetings".into());
+        db.insert_message(&m2).unwrap();
+
+        // Project-type message (counted in projects filter)
+        let mut m3 = Message::new(
+            "bob@example.com".into(),
+            "me@example.com".into(),
+            "proj body".into(),
+        );
+        m3.message_type = MessageType::Project {
+            project_name: "P".into(),
+            submission_id: "S".into(),
+            files_hash: None,
+        };
+        m3.status = MessageStatus::Sent;
+        db.insert_message(&m3).unwrap();
+
+        // sent filter
+        list(
+            &cfg,
+            ListFilters {
+                sent: true,
+                all: false,
+                unread: false,
+                projects: false,
+                message_type: None,
+                from: None,
+                search: None,
+            },
+        )
+        .unwrap();
+        // unread filter
+        list(
+            &cfg,
+            ListFilters {
+                sent: false,
+                all: false,
+                unread: true,
+                projects: false,
+                message_type: None,
+                from: None,
+                search: None,
+            },
+        )
+        .unwrap();
+        // projects filter
+        list(
+            &cfg,
+            ListFilters {
+                sent: false,
+                all: false,
+                unread: false,
+                projects: true,
+                message_type: None,
+                from: None,
+                search: None,
+            },
+        )
+        .unwrap();
+        // message_type filter explicit
+        list(
+            &cfg,
+            ListFilters {
+                sent: false,
+                all: false,
+                unread: false,
+                projects: false,
+                message_type: Some("project".into()),
+                from: None,
+                search: None,
+            },
+        )
+        .unwrap();
+        // search filter by subject/body
+        list(
+            &cfg,
+            ListFilters {
+                sent: false,
+                all: false,
+                unread: false,
+                projects: false,
+                message_type: None,
+                from: None,
+                search: Some("greet".into()),
+            },
+        )
+        .unwrap();
+        // from filter narrows by sender
+        list(
+            &cfg,
+            ListFilters {
+                sent: false,
+                all: true,
+                unread: false,
+                projects: false,
+                message_type: None,
+                from: Some("alice".into()),
+                search: None,
+            },
+        )
+        .unwrap();
+    }
 }

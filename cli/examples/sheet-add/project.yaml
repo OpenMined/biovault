@@ -1,0 +1,6 @@
+name: sheet-add
+author: madhava@openmined.org
+workflow: workflow.nf
+template: sheet
+assets:
+  - schema.yaml

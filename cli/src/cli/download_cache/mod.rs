@@ -37,6 +37,11 @@ impl Default for CacheStrategy {
     }
 }
 
+#[cfg(test)]
+const PARALLEL_THRESHOLD: u64 = 1024 * 1024; // 1MB in tests to keep them fast
+#[cfg(not(test))]
+const PARALLEL_THRESHOLD: u64 = 100 * 1024 * 1024; // 100MB in production
+
 pub fn calculate_blake3(path: &Path) -> Result<String> {
     let mut file = fs::File::open(path)
         .with_context(|| format!("Failed to open file for checksum: {}", path.display()))?;
@@ -44,10 +49,10 @@ pub fn calculate_blake3(path: &Path) -> Result<String> {
     let metadata = file.metadata()?;
     let file_size = metadata.len();
 
-    if file_size > 100 * 1024 * 1024 {
+    if file_size > PARALLEL_THRESHOLD {
         // For files > 100MB, use parallel hashing
         let mut hasher = blake3::Hasher::new();
-        let mut buffer = vec![0; 64 * 1024 * 1024]; // 64MB buffer
+        let mut buffer = vec![0; 8 * 1024 * 1024]; // keep memory modest in tests too
 
         loop {
             let bytes_read = file.read(&mut buffer)?;
@@ -61,7 +66,7 @@ pub fn calculate_blake3(path: &Path) -> Result<String> {
     } else {
         // For smaller files, use regular update
         let mut hasher = blake3::Hasher::new();
-        let mut buffer = vec![0; 8 * 1024 * 1024]; // 8MB buffer
+        let mut buffer = vec![0; 1024 * 1024]; // 1MB buffer
 
         loop {
             let bytes_read = file.read(&mut buffer)?;
@@ -153,5 +158,61 @@ mod tests {
 
         assert!(target.exists());
         assert_eq!(fs::read(&target).unwrap(), b"test content");
+    }
+
+    #[test]
+    fn test_cache_strategy_default_true() {
+        let s = CacheStrategy::default();
+        assert!(s.check_remote);
+    }
+
+    #[test]
+    fn test_calculate_blake3_open_error() {
+        let missing = Path::new("/definitely/not/here.bin");
+        let err = calculate_blake3(missing).err().unwrap();
+        let msg = format!("{}", err);
+        assert!(msg.contains("Failed to open file for checksum"));
+    }
+
+    #[test]
+    fn test_calculate_blake3_large_parallel() {
+        // Create a file > 100MB to hit the parallel hashing path
+        let temp_dir = TempDir::new().unwrap();
+        let big = temp_dir.path().join("big.bin");
+        // In tests the threshold is 1MB, so write ~2MB quickly
+        let mut f = std::fs::File::create(&big).unwrap();
+        let buf = vec![0u8; 2 * 1024 * 1024];
+        use std::io::Write;
+        f.write_all(&buf).unwrap();
+        let h = calculate_blake3(&big).unwrap();
+        assert_eq!(h.len(), 64);
+    }
+
+    #[test]
+    fn test_link_or_copy_parent_dir_create_error() {
+        let temp_dir = TempDir::new().unwrap();
+        let source = temp_dir.path().join("src.txt");
+        std::fs::write(&source, b"x").unwrap();
+        // Create a file where the parent dir should be
+        let parent_file = temp_dir.path().join("subdir");
+        std::fs::write(&parent_file, b"not a dir").unwrap();
+        let target = parent_file.join("target.txt");
+        let err = link_or_copy(&source, &target).err().unwrap();
+        let msg = format!("{}", err);
+        assert!(msg.contains("Failed to create parent directory"));
+    }
+
+    #[test]
+    fn test_link_or_copy_remove_existing_file_error() {
+        let temp_dir = TempDir::new().unwrap();
+        let source = temp_dir.path().join("src2.txt");
+        std::fs::write(&source, b"y").unwrap();
+        let target = temp_dir.path().join("exist/target.txt");
+        // Create parent dir and then create a directory at the target path
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::create_dir(&target).unwrap();
+        let err = link_or_copy(&source, &target).err().unwrap();
+        let msg = format!("{}", err);
+        assert!(msg.contains("Failed to remove existing file"));
     }
 }

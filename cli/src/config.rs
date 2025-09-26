@@ -199,6 +199,16 @@ pub fn is_syftbox_env() -> bool {
     env::var("SYFTBOX_DATA_DIR").is_ok() || env::var("SYFTBOX_EMAIL").is_ok()
 }
 
+/// Get the SyftBox binary path from environment
+pub fn get_syftbox_binary() -> Option<String> {
+    env::var("SYFTBOX_BINARY").ok()
+}
+
+/// Get the SyftBox version from environment
+pub fn get_syftbox_version() -> Option<String> {
+    env::var("SYFTBOX_VERSION").ok()
+}
+
 // Test utilities to isolate config and paths per test thread.
 // Safe to call from tests; no-ops in normal usage if unset.
 pub fn set_test_config(config: Config) {
@@ -235,4 +245,85 @@ pub fn clear_test_biovault_home() {
     TEST_BIOVAULT_HOME.with(|h| {
         *h.borrow_mut() = None;
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    #[test]
+    fn config_save_and_load_round_trip() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.yaml");
+        let cfg = Config {
+            email: "user@example.com".into(),
+            syftbox_config: None,
+            version: Some("1.0.0".into()),
+        };
+        cfg.save(&path).unwrap();
+        let loaded = Config::from_file(&path).unwrap();
+        assert_eq!(loaded.email, "user@example.com");
+        assert_eq!(loaded.version.as_deref(), Some("1.0.0"));
+    }
+
+    #[test]
+    fn config_syftbox_dir_from_json_and_paths() {
+        let tmp = TempDir::new().unwrap();
+        let data_dir = tmp.path().join("syftbox_data");
+        fs::create_dir_all(&data_dir).unwrap();
+
+        let syft_cfg = SyftBoxConfig {
+            data_dir: data_dir.to_string_lossy().to_string(),
+        };
+        let syft_cfg_path = tmp.path().join("syftbox_config.json");
+        fs::write(&syft_cfg_path, serde_json::to_string(&syft_cfg).unwrap()).unwrap();
+
+        let cfg = Config {
+            email: "user@example.com".into(),
+            syftbox_config: Some(syft_cfg_path.to_string_lossy().to_string()),
+            version: None,
+        };
+
+        let dir = cfg.get_syftbox_data_dir().unwrap();
+        assert!(dir.ends_with("syftbox_data"));
+
+        let fake = tmp.path().join("override");
+        fs::create_dir_all(&fake).unwrap();
+        set_test_syftbox_data_dir(&fake);
+        let dir2 = cfg.get_syftbox_data_dir().unwrap();
+        assert_eq!(dir2, fake);
+        clear_test_syftbox_data_dir();
+
+        let datasite = cfg.get_datasite_path().unwrap();
+        assert!(datasite.ends_with(PathBuf::from("datasites/user@example.com")));
+        let shared = cfg.get_shared_submissions_path().unwrap();
+        assert!(shared.ends_with(PathBuf::from(
+            "datasites/user@example.com/shared/biovault/submissions"
+        )));
+    }
+
+    #[test]
+    fn config_biovault_home_threadlocal_override() {
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path().join("home");
+        fs::create_dir_all(&home).unwrap();
+        set_test_biovault_home(&home);
+        let got = get_biovault_home().unwrap();
+        assert_eq!(got, home);
+        clear_test_biovault_home();
+    }
+
+    #[test]
+    fn config_get_config_path_uses_biovault_home() {
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path().join("bv_home");
+        fs::create_dir_all(&home).unwrap();
+        set_test_biovault_home(&home);
+        let p = Config::get_config_path().unwrap();
+        assert!(p.ends_with("config.yaml"));
+        assert!(p.starts_with(&home));
+        clear_test_biovault_home();
+    }
 }

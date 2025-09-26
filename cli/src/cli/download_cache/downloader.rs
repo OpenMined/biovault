@@ -369,3 +369,131 @@ impl DownloadCache {
         self.manifest.save(&self.manifest_path)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::download_cache::manifest::Manifest;
+    use tempfile::TempDir;
+
+    fn write_manifest(parent_dir: &Path, m: &Manifest) {
+        let path = parent_dir.join("manifest.yaml");
+        m.save(&path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn cache_hit_by_expected_hash_links_file() {
+        let tmp = TempDir::new().unwrap();
+        let cache_dir = tmp.path().join("cache");
+        std::fs::create_dir_all(&cache_dir).unwrap();
+
+        // Prepare cached file under by-hash
+        let hash = "abc123".to_string();
+        let by_hash = cache_dir.join("by-hash");
+        std::fs::create_dir_all(&by_hash).unwrap();
+        let cached_file = by_hash.join(&hash);
+        std::fs::write(&cached_file, b"cached").unwrap();
+
+        // Manifest with hash entry (url not needed for this branch)
+        let mut m = Manifest::new();
+        m.add_download("https://example/file".into(), hash.clone(), 6, None, None);
+        write_manifest(tmp.path(), &m);
+
+        let mut dc = DownloadCache::new(Some(cache_dir.clone())).unwrap();
+
+        let target = tmp.path().join("out/target.txt");
+        let opts = DownloadOptions {
+            checksum_policy: ChecksumPolicy {
+                policy_type: ChecksumPolicyType::Required,
+                expected_hash: Some(hash.clone()),
+            },
+            cache_strategy: CacheStrategy { check_remote: true },
+            show_progress: false,
+        };
+
+        let res = dc
+            .download_with_cache("https://irrelevant", &target, opts)
+            .await
+            .unwrap();
+        assert_eq!(res, target);
+        assert_eq!(std::fs::read(&target).unwrap(), b"cached");
+    }
+
+    #[tokio::test]
+    async fn cache_hit_by_url_without_remote_check_links_file() {
+        let tmp = TempDir::new().unwrap();
+        let cache_dir = tmp.path().join("cache");
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        let url = "https://example.com/file".to_string();
+        let hash = "deadbeef".to_string();
+
+        // Prepare cached file and manifest entry for URL
+        let by_hash = cache_dir.join("by-hash");
+        std::fs::create_dir_all(&by_hash).unwrap();
+        let cached_file = by_hash.join(&hash);
+        std::fs::write(&cached_file, b"via-url").unwrap();
+
+        let mut m = Manifest::new();
+        m.add_download(
+            url.clone(),
+            hash.clone(),
+            7,
+            Some("etag".into()),
+            Some("lm".into()),
+        );
+        write_manifest(tmp.path(), &m);
+
+        let mut dc = DownloadCache::new(Some(cache_dir.clone())).unwrap();
+        let target = tmp.path().join("out2/target.txt");
+        let opts = DownloadOptions {
+            checksum_policy: ChecksumPolicy {
+                policy_type: ChecksumPolicyType::Optional,
+                expected_hash: None,
+            },
+            cache_strategy: CacheStrategy {
+                check_remote: false,
+            },
+            show_progress: false,
+        };
+
+        let res = dc.download_with_cache(&url, &target, opts).await.unwrap();
+        assert_eq!(res, target);
+        assert_eq!(std::fs::read(&target).unwrap(), b"via-url");
+    }
+
+    #[tokio::test]
+    #[cfg_attr(not(feature = "slow-tests"), ignore = "slow (network error path)")]
+    async fn cache_miss_attempts_download_and_errors() {
+        let tmp = TempDir::new().unwrap();
+        let cache_dir = tmp.path().join("cache");
+        std::fs::create_dir_all(&cache_dir).unwrap();
+
+        // Manifest with a URL entry but missing cache file to force revalidation/download
+        let mut m = Manifest::new();
+        m.add_download(
+            "http://127.0.0.1:9/nonexistent".into(),
+            "missinghash".into(),
+            0,
+            Some("etag".into()),
+            Some("lm".into()),
+        );
+        write_manifest(tmp.path(), &m);
+
+        let mut dc = DownloadCache::new(Some(cache_dir.clone())).unwrap();
+        let target = tmp.path().join("out/target.txt");
+        let opts = DownloadOptions {
+            checksum_policy: ChecksumPolicy {
+                policy_type: ChecksumPolicyType::Optional,
+                expected_hash: None,
+            },
+            cache_strategy: CacheStrategy { check_remote: true },
+            show_progress: false,
+        };
+
+        // With network restricted and URL unreachable, this should error
+        let res = dc
+            .download_with_cache("http://127.0.0.1:9/nonexistent", &target, opts)
+            .await;
+        assert!(res.is_err());
+    }
+}

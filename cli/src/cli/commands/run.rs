@@ -114,6 +114,7 @@ enum ParticipantSource {
     SyftUrl(SyftURL),
     HttpUrl(String),
     SampleDataId(String),
+    RegisteredParticipant(String), // participant ID from ~/.biovault/participants.yaml
 }
 
 impl ParticipantSource {
@@ -123,6 +124,30 @@ impl ParticipantSource {
         } else if source.starts_with("http://") || source.starts_with("https://") {
             Ok(ParticipantSource::HttpUrl(source.to_string()))
         } else {
+            // First check if this is a registered participant (no path separators, no fragment)
+            if !source.contains('/') && !source.contains('#') {
+                // Try to load registered participants
+                if let Ok(participants_path) = crate::config::get_biovault_home() {
+                    let participants_file = participants_path.join("participants.yaml");
+                    if participants_file.exists() {
+                        if let Ok(contents) = fs::read_to_string(&participants_file) {
+                            #[derive(serde::Deserialize)]
+                            struct ParticipantsFile {
+                                participants: std::collections::HashMap<String, serde_yaml::Value>,
+                            }
+                            if let Ok(parsed) = serde_yaml::from_str::<ParticipantsFile>(&contents)
+                            {
+                                if parsed.participants.contains_key(source) {
+                                    return Ok(ParticipantSource::RegisteredParticipant(
+                                        source.to_string(),
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             // Check if this matches a known sample data ID
             #[derive(serde::Deserialize)]
             struct SampleDataConfig {
@@ -151,8 +176,21 @@ impl ParticipantSource {
 
 async fn fetch_participant_file(
     source: &ParticipantSource,
+    auto_download: bool,
 ) -> anyhow::Result<(String, Option<String>)> {
     match source {
+        ParticipantSource::RegisteredParticipant(participant_id) => {
+            // Load the participants file
+            let participants_path = crate::config::get_biovault_home()?.join("participants.yaml");
+            if !participants_path.exists() {
+                return Err(anyhow!("No registered participants found"));
+            }
+            let content = fs::read_to_string(&participants_path).with_context(|| {
+                format!("Failed to read participants file: {:?}", participants_path)
+            })?;
+            // Return the full file content with the participant ID as fragment
+            Ok((content, Some(format!("participants.{}", participant_id))))
+        }
         ParticipantSource::LocalFile(path, fragment) => {
             if !path.exists() {
                 return Err(anyhow!("Local file not found: {:?}", path));
@@ -183,8 +221,30 @@ async fn fetch_participant_file(
                 .map(|content| (content, fragment))
         }
         ParticipantSource::SampleDataId(sample_id) => {
-            // Ensure sample data is fetched
-            crate::cli::commands::sample_data::fetch(Some(vec![sample_id.clone()]), false, true)
+            // Check if sample data exists locally first
+            let biovault_home = crate::config::get_biovault_home()?;
+            let participants_file = biovault_home
+                .join("data")
+                .join("sample")
+                .join("participants.yaml");
+
+            // If participants file doesn't exist or auto_download is false, we need to prompt
+            if !participants_file.exists() && !auto_download {
+                println!("Sample data for '{}' needs to be downloaded.", sample_id);
+                println!("This may take some time depending on the file size.");
+
+                let proceed = dialoguer::Confirm::new()
+                    .with_prompt("Do you want to download the sample data now?")
+                    .default(true)
+                    .interact()?;
+
+                if !proceed {
+                    return Err(anyhow!("Sample data download cancelled by user"));
+                }
+            }
+
+            // Fetch sample data (with quiet=false so user sees progress)
+            crate::cli::commands::sample_data::fetch(Some(vec![sample_id.clone()]), false, false)
                 .await?;
 
             // Load sample_data.yaml to get URLs and compute filenames
@@ -504,6 +564,10 @@ async fn ensure_files_exist(
             // Use a dedicated directory for sample data
             downloads_base.join("sample").join(&participant.id)
         }
+        ParticipantSource::RegisteredParticipant(_) => {
+            // For registered participants, use "registered" subdirectory
+            downloads_base.join("registered").join(&participant.id)
+        }
     };
 
     fs::create_dir_all(&participant_downloads_dir)?;
@@ -733,6 +797,194 @@ async fn ensure_files_exist(
     Ok(local_participant)
 }
 
+async fn execute_sheet_workflow(params: &RunParams, config: &ProjectConfig) -> anyhow::Result<()> {
+    let project_path = PathBuf::from(&params.project_folder);
+
+    println!("Running sheet-based workflow: {}", config.name.cyan());
+
+    // For sheet template, participant_source is the required path to the samplesheet
+    if params.participant_source.is_empty() {
+        return Err(anyhow!(
+            "Sheet template requires a CSV/TSV file path. Usage: bv run {} <path/to/samplesheet.csv>",
+            params.project_folder
+        ));
+    }
+
+    let samplesheet_path = PathBuf::from(&params.participant_source);
+    if !samplesheet_path.exists() {
+        return Err(anyhow!(
+            "Samplesheet file not found: {}",
+            samplesheet_path.display()
+        ));
+    }
+
+    // Determine assets directory and look for schema.yaml there
+    let mut assets_dir = project_path.join("assets");
+    if !config.assets.is_empty() {
+        let candidate = project_path.join(&config.assets[0]);
+        if candidate.is_dir() {
+            assets_dir = candidate;
+        }
+    }
+
+    // Look for schema.yaml in assets directory (preferred) or project root
+    let schema_path = if config.assets.contains(&"schema.yaml".to_string()) {
+        // schema.yaml is listed in assets, find it
+        let schema_in_assets = assets_dir.join("schema.yaml");
+        if schema_in_assets.exists() {
+            schema_in_assets
+        } else {
+            project_path.join("schema.yaml")
+        }
+    } else {
+        project_path.join("schema.yaml")
+    };
+
+    if !schema_path.exists() {
+        println!(
+            "{}",
+            "Warning: schema.yaml not found. Using defaults.".yellow()
+        );
+    }
+
+    // Get BioVault environment directory
+    let biovault_home = crate::config::get_biovault_home()?;
+    let template_name = config
+        .template
+        .clone()
+        .unwrap_or_else(|| "sheet".to_string());
+    let env_dir = biovault_home.join("env").join(&template_name);
+
+    // Check if templates exist
+    let template_nf = env_dir.join("template.nf");
+    let nextflow_config = env_dir.join("nextflow.config");
+
+    if !template_nf.exists() || !nextflow_config.exists() {
+        return Err(Error::TemplatesNotFound.into());
+    }
+
+    println!("Using sheet template from: {}", env_dir.display());
+
+    // Convert to absolute paths for Nextflow
+    let temp_template = template_nf
+        .canonicalize()
+        .unwrap_or_else(|_| template_nf.clone());
+    let temp_config = nextflow_config
+        .canonicalize()
+        .unwrap_or_else(|_| nextflow_config.clone());
+
+    // Get workflow file
+    let workflow_file = project_path
+        .join("workflow.nf")
+        .canonicalize()
+        .context("Failed to resolve workflow.nf path")?;
+
+    // Create assets directory if it doesn't exist (we already determined it above)
+    if !assets_dir.exists() {
+        fs::create_dir_all(&assets_dir)?;
+    }
+
+    let assets_dir = assets_dir
+        .canonicalize()
+        .context("Failed to resolve assets directory path")?;
+
+    // Create results directory
+    let results_base = if params.test {
+        "results-test"
+    } else {
+        "results-real"
+    };
+    let results_dir = project_path.join(results_base);
+    if !results_dir.exists() {
+        fs::create_dir_all(&results_dir)?;
+    }
+
+    let results_dir = results_dir
+        .canonicalize()
+        .context("Failed to resolve results directory path")?;
+
+    info!(
+        "Running sheet workflow '{}' from project '{}'",
+        config.workflow, config.name
+    );
+
+    // Build Nextflow command
+    let mut cmd = Command::new("nextflow");
+
+    // Set working directory to project directory
+    cmd.current_dir(&project_path);
+
+    cmd.arg("run")
+        .arg(&temp_template)
+        .arg("--samplesheet")
+        .arg(samplesheet_path.canonicalize().unwrap_or(samplesheet_path));
+
+    if schema_path.exists() {
+        cmd.arg("--schema_yaml")
+            .arg(schema_path.canonicalize().unwrap_or(schema_path));
+    }
+
+    cmd.arg("--work_flow_file")
+        .arg(workflow_file.to_string_lossy().as_ref())
+        .arg("--assets_dir")
+        .arg(assets_dir.to_string_lossy().as_ref())
+        .arg("--results_dir")
+        .arg(results_dir.to_string_lossy().as_ref());
+
+    if params.resume {
+        cmd.arg("-resume");
+    }
+
+    if let Some(work_dir) = &params.work_dir {
+        cmd.arg("-work-dir");
+        cmd.arg(work_dir);
+    }
+
+    // Docker/Singularity configuration
+    if params.with_docker {
+        cmd.arg("-with-docker");
+    }
+
+    // Add config file
+    cmd.arg("-c").arg(&temp_config);
+
+    // Print the command that will be executed
+    println!("\n{}", "Nextflow command:".green().bold());
+
+    // Build command string for display
+    let mut cmd_str = String::from("nextflow");
+    for arg in cmd.get_args() {
+        cmd_str.push(' ');
+        let arg_str = arg.to_string_lossy();
+        // Quote arguments with spaces
+        if arg_str.contains(' ') {
+            cmd_str.push_str(&format!("'{}'", arg_str));
+        } else {
+            cmd_str.push_str(&arg_str);
+        }
+    }
+    println!("{}\n", cmd_str.cyan());
+
+    if params.dry_run {
+        println!("{}", "[DRY RUN] Would execute the above command".yellow());
+        return Ok(());
+    }
+
+    // Execute Nextflow
+    println!("Executing Nextflow sheet workflow...");
+    let status = cmd.status().context("Failed to execute Nextflow")?;
+
+    if !status.success() {
+        return Err(anyhow!("Nextflow execution failed"));
+    }
+
+    println!(
+        "{}",
+        "Sheet workflow completed successfully!".green().bold()
+    );
+    Ok(())
+}
+
 pub async fn execute(params: RunParams) -> anyhow::Result<()> {
     // Validate project directory
     let project_path = PathBuf::from(&params.project_folder);
@@ -760,11 +1012,22 @@ pub async fn execute(params: RunParams) -> anyhow::Result<()> {
     let config: ProjectConfig =
         serde_yaml::from_str(&config_content).context("Failed to parse project.yaml")?;
 
-    // Parse participant source
+    // Check if this is a sheet template project
+    let is_sheet_template = config
+        .template
+        .as_ref()
+        .map(|t| t == "sheet")
+        .unwrap_or(false);
+
+    if is_sheet_template {
+        return execute_sheet_workflow(&params, &config).await;
+    }
+
+    // Parse participant source for non-sheet workflows
     let source = ParticipantSource::parse(&params.participant_source)?;
 
     // Fetch participant file
-    let (yaml_content, fragment) = fetch_participant_file(&source).await?;
+    let (yaml_content, fragment) = fetch_participant_file(&source, params.download).await?;
 
     // Extract participant data
     let (mut participant, mock_key) =
@@ -796,8 +1059,13 @@ pub async fn execute(params: RunParams) -> anyhow::Result<()> {
     println!("Using template: {}", template_name);
 
     // Use templates directly from env dir instead of copying to temp
-    let temp_template = template_nf;
-    let temp_config = nextflow_config;
+    // Convert to absolute paths for Nextflow
+    let temp_template = template_nf
+        .canonicalize()
+        .unwrap_or_else(|_| template_nf.clone());
+    let temp_config = nextflow_config
+        .canonicalize()
+        .unwrap_or_else(|_| nextflow_config.clone());
 
     // Determine assets directory
     // Prefer the conventional 'assets' folder. If the first assets entry is an existing directory,
@@ -882,7 +1150,14 @@ pub async fn execute(params: RunParams) -> anyhow::Result<()> {
 
     // Add SNP-specific parameters if present
     if let Some(snp) = &participant.snp {
-        cmd.arg("--snp").arg(snp);
+        // Convert to absolute path if it's a file path
+        let snp_path = PathBuf::from(snp);
+        let snp_abs = if snp_path.exists() {
+            snp_path.canonicalize().unwrap_or(snp_path)
+        } else {
+            snp_path
+        };
+        cmd.arg("--snp").arg(snp_abs);
     }
 
     cmd.arg("--work_flow_file")
@@ -941,4 +1216,505 @@ pub async fn execute(params: RunParams) -> anyhow::Result<()> {
 
     println!("{}", "Workflow completed successfully!".green().bold());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[allow(unused_imports)]
+    use crate::cli::download_cache::manifest::Manifest;
+    use crate::config::{clear_test_biovault_home, set_test_biovault_home};
+    use std::fs;
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_deserialize_string_as_vec() {
+        #[derive(Deserialize)]
+        struct TestStruct {
+            #[serde(deserialize_with = "deserialize_string_or_vec")]
+            assets: Vec<String>,
+        }
+
+        let yaml_str = "assets: single_asset";
+        let result: TestStruct = serde_yaml::from_str(yaml_str).unwrap();
+        assert_eq!(result.assets, vec!["single_asset"]);
+
+        let yaml_list = "assets:\n  - asset1\n  - asset2";
+        let result: TestStruct = serde_yaml::from_str(yaml_list).unwrap();
+        assert_eq!(result.assets, vec!["asset1", "asset2"]);
+    }
+
+    #[test]
+    fn test_project_config_deserialize() {
+        let yaml = r#"
+name: test_project
+author: test@example.com
+workflow: test.nf
+template: test_template
+assets: test_asset
+participants:
+  - p1
+  - p2
+"#;
+        let config: ProjectConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.name, "test_project");
+        assert_eq!(config.author, "test@example.com");
+        assert_eq!(config.workflow, "test.nf");
+        assert_eq!(config.template, Some("test_template".to_string()));
+        assert_eq!(config.assets, vec!["test_asset"]);
+        assert_eq!(config.participants, vec!["p1", "p2"]);
+    }
+
+    #[test]
+    fn test_participant_data_serialize() {
+        let participant = ParticipantData {
+            id: "test_id".to_string(),
+            ref_version: Some("GRCh38".to_string()),
+            ref_path: Some("/path/to/ref.fa".to_string()),
+            ref_index: Some("/path/to/ref.fa.fai".to_string()),
+            aligned: Some("/path/to/aligned.cram".to_string()),
+            aligned_index: Some("/path/to/aligned.cram.crai".to_string()),
+            ref_b3sum: None,
+            ref_index_b3sum: None,
+            aligned_b3sum: None,
+            aligned_index_b3sum: None,
+            snp: None,
+            snp_b3sum: None,
+            uncompress: None,
+        };
+
+        let yaml = serde_yaml::to_string(&participant).unwrap();
+        assert!(yaml.contains("id: test_id"));
+        assert!(yaml.contains("ref_version: GRCh38"));
+        assert!(yaml.contains("ref: /path/to/ref.fa"));
+    }
+
+    #[test]
+    fn test_participant_data_snp_variant() {
+        let participant = ParticipantData {
+            id: "snp_test".to_string(),
+            ref_version: None,
+            ref_path: None,
+            ref_index: None,
+            aligned: None,
+            aligned_index: None,
+            ref_b3sum: None,
+            ref_index_b3sum: None,
+            aligned_b3sum: None,
+            aligned_index_b3sum: None,
+            snp: Some("/path/to/snp.vcf".to_string()),
+            snp_b3sum: Some("abc123".to_string()),
+            uncompress: Some(true),
+        };
+
+        assert_eq!(participant.id, "snp_test");
+        assert_eq!(participant.snp, Some("/path/to/snp.vcf".to_string()));
+        assert_eq!(participant.snp_b3sum, Some("abc123".to_string()));
+        assert_eq!(participant.uncompress, Some(true));
+    }
+
+    #[test]
+    fn test_run_params_default() {
+        let params = RunParams {
+            project_folder: "/test".to_string(),
+            participant_source: "participants.yaml#TEST".to_string(),
+            test: false,
+            download: false,
+            dry_run: false,
+            with_docker: false,
+            work_dir: None,
+            resume: false,
+            template: None,
+        };
+
+        assert_eq!(params.project_folder, "/test");
+        assert_eq!(params.participant_source, "participants.yaml#TEST");
+        assert!(!params.test);
+        assert!(!params.download);
+        assert!(!params.with_docker);
+        assert!(!params.dry_run);
+        assert!(params.work_dir.is_none());
+        assert!(!params.resume);
+        assert!(params.template.is_none());
+    }
+
+    #[test]
+    fn test_participant_data_clone() {
+        let original = ParticipantData {
+            id: "clone_test".to_string(),
+            ref_version: Some("GRCh37".to_string()),
+            ref_path: None,
+            ref_index: None,
+            aligned: None,
+            aligned_index: None,
+            ref_b3sum: None,
+            ref_index_b3sum: None,
+            aligned_b3sum: None,
+            aligned_index_b3sum: None,
+            snp: None,
+            snp_b3sum: None,
+            uncompress: None,
+        };
+
+        let cloned = original.clone();
+        assert_eq!(cloned.id, original.id);
+        assert_eq!(cloned.ref_version, original.ref_version);
+    }
+
+    #[test]
+    fn test_project_config_minimal() {
+        let yaml = r#"
+name: minimal
+author: user@example.com
+workflow: main.nf
+"#;
+        let config: ProjectConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.name, "minimal");
+        assert_eq!(config.author, "user@example.com");
+        assert_eq!(config.workflow, "main.nf");
+        assert!(config.template.is_none());
+        assert!(config.assets.is_empty());
+        assert!(config.participants.is_empty());
+    }
+
+    #[test]
+    fn participant_source_parse_variants() {
+        // Local file with fragment
+        let ps = ParticipantSource::parse("/tmp/p.yml#participants.A").unwrap();
+        match ps {
+            ParticipantSource::LocalFile(path, frag) => {
+                assert!(path.ends_with("p.yml"));
+                assert_eq!(frag.as_deref(), Some("participants.A"));
+            }
+            _ => panic!("expected LocalFile"),
+        }
+
+        // HTTP url
+        let ps = ParticipantSource::parse("https://example.com/p.yml#participants.A").unwrap();
+        match ps {
+            ParticipantSource::HttpUrl(u) => assert!(u.starts_with("https://example.com")),
+            _ => panic!("expected HttpUrl"),
+        }
+
+        // Syft URL
+        let ps = ParticipantSource::parse("syft://user@example.com/path#participants.A").unwrap();
+        match ps {
+            ParticipantSource::SyftUrl(u) => {
+                assert_eq!(u.email, "user@example.com");
+            }
+            _ => panic!("expected SyftUrl"),
+        }
+
+        // Sample data id present in embedded config (uses include_str)
+        let ps = ParticipantSource::parse("NA06985").unwrap();
+        match ps {
+            ParticipantSource::SampleDataId(id) => assert_eq!(id, "NA06985"),
+            _ => panic!("expected SampleDataId"),
+        }
+    }
+
+    #[test]
+    fn extract_participant_data_happy_and_error_paths() {
+        // Happy path
+        let yaml = r#"
+participants:
+  TEST:
+    ref_version: GRCh38
+"#;
+        let (p, mock) = extract_participant_data(yaml, Some("participants.TEST".into()), false)
+            .expect("parse ok");
+        assert_eq!(p.id, "TEST");
+        assert_eq!(p.ref_version.as_deref(), Some("GRCh38"));
+        assert!(mock.is_none());
+
+        // Missing fragment
+        let err = extract_participant_data(yaml, None, false).unwrap_err();
+        assert!(format!("{}", err).contains("No participant specified"));
+
+        // Wrong fragment prefix
+        let err = extract_participant_data(yaml, Some("foo.TEST".into()), false).unwrap_err();
+        assert!(format!("{}", err).contains("Invalid fragment"));
+
+        // Participant not found
+        let err = extract_participant_data(yaml, Some("participants.X".into()), false).unwrap_err();
+        assert!(format!("{}", err).contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn ensure_files_exist_with_local_paths() {
+        // Prepare local files
+        let td = TempDir::new().unwrap();
+        let refp = td.path().join("ref.fa");
+        let refi = td.path().join("ref.fa.fai");
+        let cram = td.path().join("aln.cram");
+        let crai = td.path().join("aln.cram.crai");
+        fs::write(&refp, b"ref").unwrap();
+        fs::write(&refi, b"idx").unwrap();
+        fs::write(&cram, b"cram").unwrap();
+        fs::write(&crai, b"crai").unwrap();
+
+        // Participant with local paths
+        let p = ParticipantData {
+            id: "P1".into(),
+            ref_version: Some("GRCh38".into()),
+            ref_path: Some(refp.to_string_lossy().to_string()),
+            ref_index: Some(refi.to_string_lossy().to_string()),
+            aligned: Some(cram.to_string_lossy().to_string()),
+            aligned_index: Some(crai.to_string_lossy().to_string()),
+            ref_b3sum: None,
+            ref_index_b3sum: None,
+            aligned_b3sum: None,
+            aligned_index_b3sum: None,
+            snp: None,
+            snp_b3sum: None,
+            uncompress: None,
+        };
+
+        // Ensure BIOVAULT home is isolated
+        let home = TempDir::new().unwrap();
+        set_test_biovault_home(home.path());
+
+        let src = ParticipantSource::LocalFile(PathBuf::from("participants.yaml"), None);
+        // Point cache dir to a writable temp to avoid platform HOME surprises
+        let cache_td = TempDir::new().unwrap();
+        std::env::set_var(
+            "BIOVAULT_CACHE_DIR",
+            cache_td.path().to_string_lossy().to_string(),
+        );
+        let out = ensure_files_exist(&p, false, &src, None).await.unwrap();
+        std::env::remove_var("BIOVAULT_CACHE_DIR");
+        assert_eq!(out.ref_path.as_deref(), p.ref_path.as_deref());
+        assert_eq!(out.ref_index.as_deref(), p.ref_index.as_deref());
+        assert_eq!(out.aligned.as_deref(), p.aligned.as_deref());
+        assert_eq!(out.aligned_index.as_deref(), p.aligned_index.as_deref());
+
+        clear_test_biovault_home();
+    }
+
+    #[tokio::test]
+    async fn execute_dry_run_minimal_project() {
+        // Isolate BIOVAULT home and create template files
+        let bv_home = TempDir::new().unwrap();
+        let env_dir = bv_home.path().join("env").join("test_tpl");
+        fs::create_dir_all(&env_dir).unwrap();
+        fs::write(env_dir.join("template.nf"), "// template").unwrap();
+        fs::write(env_dir.join("nextflow.config"), "// config").unwrap();
+        set_test_biovault_home(bv_home.path());
+
+        // Create minimal project
+        let proj = TempDir::new().unwrap();
+        fs::write(
+            proj.path().join("project.yaml"),
+            "name: p\nauthor: a\nworkflow: main.nf\ntemplate: test_tpl\n",
+        )
+        .unwrap();
+        fs::write(proj.path().join("workflow.nf"), "// wf").unwrap();
+        fs::write(
+            proj.path().join("participants.yaml"),
+            "participants:\n  X:\n    ref_version: GRCh38\n",
+        )
+        .unwrap();
+
+        let params = RunParams {
+            project_folder: proj.path().to_string_lossy().to_string(),
+            participant_source: proj
+                .path()
+                .join("participants.yaml#participants.X")
+                .to_string_lossy()
+                .to_string(),
+            test: false,
+            download: false,
+            dry_run: true,
+            with_docker: false,
+            work_dir: None,
+            resume: false,
+            template: Some("test_tpl".into()),
+        };
+
+        // Use a writable cache dir during test
+        let cache_td = TempDir::new().unwrap();
+        std::env::set_var(
+            "BIOVAULT_CACHE_DIR",
+            cache_td.path().to_string_lossy().to_string(),
+        );
+        // Should return Ok before trying to execute nextflow
+        execute(params).await.expect("dry-run ok");
+        std::env::remove_var("BIOVAULT_CACHE_DIR");
+
+        clear_test_biovault_home();
+    }
+
+    #[tokio::test]
+    async fn execute_dry_run_with_all_params_and_fields() {
+        // Isolate BIOVAULT home and create template files
+        let bv_home = TempDir::new().unwrap();
+        let env_dir = bv_home.path().join("env").join("full_tpl");
+        fs::create_dir_all(&env_dir).unwrap();
+        fs::write(env_dir.join("template.nf"), "// template").unwrap();
+        fs::write(env_dir.join("nextflow.config"), "// config").unwrap();
+        set_test_biovault_home(bv_home.path());
+
+        // Create minimal project with assets dir
+        let proj = TempDir::new().unwrap();
+        fs::create_dir_all(proj.path().join("assets")).unwrap();
+        fs::write(
+            proj.path().join("project.yaml"),
+            "name: p\nauthor: a\nworkflow: main.nf\ntemplate: full_tpl\nassets: assets\n",
+        )
+        .unwrap();
+        fs::write(proj.path().join("workflow.nf"), "// wf").unwrap();
+
+        // Participant with many optional fields set and corresponding local files
+        fs::write(proj.path().join("ref.fa"), b"ref").unwrap();
+        fs::write(proj.path().join("ref.fa.fai"), b"idx").unwrap();
+        fs::write(proj.path().join("aln.cram"), b"cram").unwrap();
+        fs::write(proj.path().join("aln.cram.crai"), b"crai").unwrap();
+        fs::write(proj.path().join("snp.vcf"), b"##vcf\n").unwrap();
+        // Participant with many optional fields set
+        let participants_yaml = format!(
+            "participants:\n  Y:\n    ref_version: GRCh38\n    ref: {}\n    ref_index: {}\n    aligned: {}\n    aligned_index: {}\n    snp: {}\n",
+            proj.path().join("ref.fa").display(),
+            proj.path().join("ref.fa.fai").display(),
+            proj.path().join("aln.cram").display(),
+            proj.path().join("aln.cram.crai").display(),
+            proj.path().join("snp.vcf").display(),
+        );
+        fs::write(proj.path().join("participants.yaml"), participants_yaml).unwrap();
+
+        let params = RunParams {
+            project_folder: proj.path().to_string_lossy().to_string(),
+            participant_source: proj
+                .path()
+                .join("participants.yaml#participants.Y")
+                .to_string_lossy()
+                .to_string(),
+            test: false,
+            download: false,
+            dry_run: true,
+            with_docker: true,
+            work_dir: Some("workdir".into()),
+            resume: true,
+            template: Some("full_tpl".into()),
+        };
+
+        let cache_td = TempDir::new().unwrap();
+        std::env::set_var("BIOVAULT_CACHE_DIR", cache_td.path());
+        execute(params).await.expect("dry-run ok");
+        std::env::remove_var("BIOVAULT_CACHE_DIR");
+
+        clear_test_biovault_home();
+    }
+
+    // Removed HTTP cache test to avoid network in restricted environments
+
+    #[tokio::test]
+    async fn execute_errors_when_paths_missing() {
+        // Missing project directory
+        let params = RunParams {
+            project_folder: "/definitely/not/here".into(),
+            participant_source: "participants.yaml#participants.X".into(),
+            test: false,
+            download: false,
+            dry_run: true,
+            with_docker: false,
+            work_dir: None,
+            resume: false,
+            template: None,
+        };
+        assert!(execute(params).await.is_err());
+
+        // Project exists but missing project.yaml
+        let proj = TempDir::new().unwrap();
+        let params = RunParams {
+            project_folder: proj.path().to_string_lossy().to_string(),
+            participant_source: "participants.yaml#participants.X".into(),
+            test: false,
+            download: false,
+            dry_run: true,
+            with_docker: false,
+            work_dir: None,
+            resume: false,
+            template: None,
+        };
+        assert!(execute(params).await.is_err());
+
+        // project.yaml present, workflow.nf missing
+        fs::write(
+            proj.path().join("project.yaml"),
+            "name: p\nauthor: a\nworkflow: main.nf\n",
+        )
+        .unwrap();
+        let params = RunParams {
+            project_folder: proj.path().to_string_lossy().to_string(),
+            participant_source: "participants.yaml#participants.X".into(),
+            test: false,
+            download: false,
+            dry_run: true,
+            with_docker: false,
+            work_dir: None,
+            resume: false,
+            template: None,
+        };
+        assert!(execute(params).await.is_err());
+
+        // workflow present but template missing in env dir -> TemplatesNotFound
+        fs::write(proj.path().join("workflow.nf"), "// wf").unwrap();
+        // Participants file with minimal entry
+        fs::write(
+            proj.path().join("participants.yaml"),
+            "participants:\n  X:\n    ref_version: GRCh38\n",
+        )
+        .unwrap();
+        // point test home to an empty env dir
+        let bv_home = TempDir::new().unwrap();
+        set_test_biovault_home(bv_home.path());
+        let params = RunParams {
+            project_folder: proj.path().to_string_lossy().to_string(),
+            participant_source: proj
+                .path()
+                .join("participants.yaml#participants.X")
+                .to_string_lossy()
+                .to_string(),
+            test: false,
+            download: false,
+            dry_run: true,
+            with_docker: false,
+            work_dir: None,
+            resume: false,
+            template: Some("missing_tpl".into()),
+        };
+        assert!(execute(params).await.is_err());
+
+        clear_test_biovault_home();
+    }
+
+    #[tokio::test]
+    async fn fetch_participant_file_local_missing_errors() {
+        let res = fetch_participant_file(
+            &ParticipantSource::LocalFile(
+                PathBuf::from("/nope/participants.yaml"),
+                Some("participants.X".into()),
+            ),
+            false,
+        )
+        .await;
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn extract_participant_data_mock_branch() {
+        let yaml = r#"
+participants:
+  P:
+    mock:
+      ref_version: GRCh38
+      aligned: /tmp/test.cram
+      aligned_index: /tmp/test.cram.crai
+"#;
+        let (p, mock) =
+            extract_participant_data(yaml, Some("participants.P".into()), true).unwrap();
+        assert_eq!(p.id, "P");
+        assert_eq!(p.ref_version.as_deref(), Some("GRCh38"));
+        assert_eq!(mock.as_deref(), Some("mock_data_grch38"));
+    }
 }

@@ -14,6 +14,18 @@ use std::path::PathBuf;
 
 const MESSAGE_ENDPOINT: &str = "/message";
 
+/// Expand environment variables in text (specifically $SYFTBOX_DATA_DIR)
+fn expand_env_vars_in_text(text: &str) -> Result<String> {
+    let mut result = text.to_string();
+
+    // Expand $SYFTBOX_DATA_DIR
+    if let Ok(data_dir) = std::env::var("SYFTBOX_DATA_DIR") {
+        result = result.replace("$SYFTBOX_DATA_DIR", &data_dir);
+    }
+
+    Ok(result)
+}
+
 /// Get the path to the message database
 pub fn get_message_db_path(config: &Config) -> Result<PathBuf> {
     let biovault_dir = config.get_biovault_dir()?;
@@ -25,6 +37,28 @@ pub fn get_message_db_path(config: &Config) -> Result<PathBuf> {
     }
 
     Ok(db_path)
+}
+
+#[cfg(test)]
+mod tests_fast_helpers {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn get_message_db_path_creates_parent_dir() {
+        let tmp = TempDir::new().unwrap();
+        crate::config::set_test_biovault_home(tmp.path().join(".bvtest"));
+        let cfg = Config {
+            email: "e@example".into(),
+            syftbox_config: None,
+            version: None,
+        };
+        let path = get_message_db_path(&cfg).unwrap();
+        // Parent dir should exist now
+        assert!(path.parent().unwrap().exists());
+        assert!(path.ends_with("messages.db"));
+        crate::config::clear_test_biovault_home();
+    }
 }
 
 /// Initialize the message system
@@ -128,7 +162,12 @@ pub fn delete_message(config: &Config, message_id: &str) -> Result<()> {
 }
 
 /// List messages
-pub fn list_messages(config: &Config, unread_only: bool) -> Result<()> {
+pub fn list_messages(
+    config: &Config,
+    unread_only: bool,
+    sent_only: bool,
+    projects_only: bool,
+) -> Result<()> {
     let (db, sync) = init_message_system(config)?;
 
     // Quietly sync to get latest messages and show notification if new
@@ -137,11 +176,23 @@ pub fn list_messages(config: &Config, unread_only: bool) -> Result<()> {
         println!("🆕 {} new message(s) received", count);
     }
 
-    let messages = if unread_only {
+    let mut messages = if unread_only {
         db.list_unread_messages()?
+    } else if sent_only {
+        db.list_sent_messages(Some(50))?
     } else {
         db.list_messages(Some(50))?
     };
+
+    // Filter for projects if requested
+    if projects_only {
+        messages.retain(|msg| {
+            matches!(
+                msg.message_type,
+                crate::messages::MessageType::Project { .. }
+            )
+        });
+    }
 
     if messages.is_empty() {
         if unread_only {
@@ -235,7 +286,10 @@ pub async fn read_message(config: &Config, message_id: &str) -> Result<()> {
 
     println!("\nBody:");
     println!("─────");
-    println!("{}", msg.body);
+
+    // Expand environment variables in message body
+    let expanded_body = expand_env_vars_in_text(&msg.body)?;
+    println!("{}", expanded_body);
 
     // If this is a project message with metadata, attempt verification and show details
     if let Some(meta) = &msg.metadata {
@@ -412,6 +466,107 @@ pub async fn perform_project_action(
         ProjectAction::RunTest => run_project_test(config, &msg).await?,
         ProjectAction::RunReal => run_project_real(config, &msg).await?,
     }
+    Ok(())
+}
+
+/// Process a project message non-interactively (for automated testing)
+pub async fn process_project_message(
+    config: &Config,
+    message_id: &str,
+    test: bool,
+    _real: bool,
+    participant: Option<String>,
+    approve: bool,
+    _non_interactive: bool, // Currently always non-interactive
+) -> anyhow::Result<()> {
+    let (db, _sync) = init_message_system(config)?;
+    let msg = db
+        .get_message(message_id)?
+        .ok_or_else(|| anyhow::anyhow!("Message not found: {}", message_id))?;
+
+    // Verify it's a project message
+    if !matches!(
+        msg.message_type,
+        crate::messages::MessageType::Project { .. }
+    ) {
+        return Err(anyhow::anyhow!(
+            "Message {} is not a project message",
+            message_id
+        ));
+    }
+
+    // Build the project copy in private directory
+    let dest = build_run_project_copy(config, &msg)?;
+
+    // Determine participant source
+    let participant_source = if let Some(ref p) = participant {
+        // Normalize the participant source if it's just an ID
+        if !test {
+            // For real data, normalize the participant ID to full path
+            normalize_participant_source_for_real(p)?
+        } else {
+            // For test data, just use the ID as-is (sample data)
+            p.clone()
+        }
+    } else {
+        return Err(anyhow::anyhow!(
+            "No participant specified. Please provide a participant source with --participant"
+        ));
+    };
+
+    // Run the project
+    use crate::cli::commands::run::{execute as run_execute, RunParams};
+
+    let result = run_execute(RunParams {
+        project_folder: dest.to_string_lossy().to_string(),
+        participant_source: participant_source.clone(),
+        test,
+        download: true,
+        dry_run: false,
+        with_docker: false,
+        work_dir: None,
+        resume: false,
+        template: Some("snp".to_string()),
+    })
+    .await;
+
+    match result {
+        Ok(_) => {
+            println!(
+                "✓ Project processed successfully with participant: {}",
+                participant_source
+            );
+
+            // Show results location
+            let results_base = if test { "results-test" } else { "results-real" };
+            let results_dir = dest.join(results_base).join(&participant_source);
+            if results_dir.exists() {
+                println!("Results saved to: {}", results_dir.display());
+            }
+
+            // Approve if requested
+            if approve {
+                approve_project_non_interactive(config, &msg).await?;
+                println!("✓ Project approved and results sent to sender");
+            }
+        }
+        Err(e) => {
+            eprintln!("✗ Failed to process project: {}", e);
+            return Err(e);
+        }
+    }
+
+    Ok(())
+}
+
+/// Archive a message (for non-interactive use)
+pub fn archive_message(config: &Config, message_id: &str) -> anyhow::Result<()> {
+    let (db, _sync) = init_message_system(config)?;
+    let msg = db
+        .get_message(message_id)?
+        .ok_or_else(|| anyhow::anyhow!("Message not found: {}", message_id))?;
+
+    archive_project(config, &msg)?;
     Ok(())
 }
 
@@ -677,6 +832,82 @@ async fn run_project_real(config: &Config, msg: &Message) -> anyhow::Result<()> 
     Ok(())
 }
 
+/// Non-interactive version of approve_project for automated testing
+async fn approve_project_non_interactive(config: &Config, msg: &Message) -> anyhow::Result<()> {
+    let dest = build_run_project_copy(config, msg)?;
+    let results_dir = dest.join("results-real");
+    let needs_run = !results_dir.exists()
+        || fs::read_dir(&results_dir)
+            .map(|mut i| i.next().is_none())
+            .unwrap_or(true);
+    if needs_run {
+        println!("No results found. Running on real data before approval...");
+        run_project_real(config, msg).await?;
+    }
+
+    // Release results to sender shared location
+    let meta = msg
+        .metadata
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("missing metadata"))?;
+    let (sender_root, _folder) = sender_project_root(config, meta)?;
+    let sender_results = sender_root.join("results");
+    copy_dir_recursive(&results_dir, &sender_results)?;
+
+    // Get project details for the message
+    let project_location = meta
+        .get("project_location")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+
+    // Check if results exist and get basic info
+    let results_info = if sender_results.exists() {
+        let mut info = Vec::new();
+        if let Ok(entries) = fs::read_dir(&sender_results) {
+            for entry in entries.flatten() {
+                if entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+                    info.push(format!("{}/", entry.file_name().to_string_lossy()));
+                } else {
+                    info.push(entry.file_name().to_string_lossy().to_string());
+                }
+            }
+        }
+        if info.is_empty() {
+            "No results found".to_string()
+        } else {
+            format!("Results:\n  {}", info.join("\n  "))
+        }
+    } else {
+        "Results directory not found".to_string()
+    };
+
+    // Create relative path for results location
+    let data_dir = config.get_syftbox_data_dir()?;
+    let relative_results = if sender_results.starts_with(&data_dir) {
+        format!(
+            "$SYFTBOX_DATA_DIR/{}",
+            sender_results.strip_prefix(&data_dir)?.to_string_lossy()
+        )
+    } else {
+        sender_results.to_string_lossy().to_string()
+    };
+
+    // Create the default approval message with results location
+    let body = format!(
+        "Your project has been approved.\n\nProject location: {}\nResults location: {}\n\n{}",
+        project_location, relative_results, results_info
+    );
+
+    // Include results_path in the status update so sender can see it directly
+    let extra = json!({ "results_path": relative_results });
+    send_status_ack_with_meta(config, msg, "approved", Some(body), Some(extra))?;
+    println!(
+        "{}",
+        "Approved, results released, and sender notified.".green()
+    );
+    Ok(())
+}
+
 async fn approve_project(config: &Config, msg: &Message) -> anyhow::Result<()> {
     let dest = build_run_project_copy(config, msg)?;
     let results_dir = dest.join("results-real");
@@ -725,12 +956,21 @@ async fn approve_project(config: &Config, msg: &Message) -> anyhow::Result<()> {
         "Results directory not found".to_string()
     };
 
+    // Create relative path for results location
+    let data_dir = config.get_syftbox_data_dir()?;
+    let relative_results = if sender_results.starts_with(&data_dir) {
+        format!(
+            "$SYFTBOX_DATA_DIR/{}",
+            sender_results.strip_prefix(&data_dir)?.to_string_lossy()
+        )
+    } else {
+        sender_results.to_string_lossy().to_string()
+    };
+
     // Create the default approval message with results location
     let default_message = format!(
         "Your project has been approved.\n\nProject location: {}\nResults location: {}\n\n{}",
-        project_location,
-        sender_results.display(),
-        results_info
+        project_location, relative_results, results_info
     );
 
     // Optional approval message
@@ -751,7 +991,7 @@ async fn approve_project(config: &Config, msg: &Message) -> anyhow::Result<()> {
     };
 
     // Include results_path in the status update so sender can see it directly
-    let extra = json!({ "results_path": sender_results.to_string_lossy().to_string() });
+    let extra = json!({ "results_path": relative_results });
     send_status_ack_with_meta(config, msg, "approved", body, Some(extra))?;
     println!(
         "{}",
@@ -851,7 +1091,9 @@ pub fn view_thread(config: &Config, thread_id: &str) -> Result<()> {
             println!("Subject: {}", subj);
         }
 
-        println!("{}", msg.body);
+        // Expand environment variables in message body
+        let expanded_body = expand_env_vars_in_text(&msg.body)?;
+        println!("{}", expanded_body);
         println!("─────────────────────");
     }
 
@@ -939,6 +1181,7 @@ fn verify_project_from_metadata(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use tempfile::TempDir;
 
     fn create_test_config() -> Config {
@@ -1012,6 +1255,260 @@ mod tests {
         let messages_after_delete = db.list_messages(None)?;
         assert_eq!(messages_after_delete.len(), 0);
 
+        Ok(())
+    }
+
+    #[test]
+    fn normalize_participant_source_for_real_behaviour() -> Result<()> {
+        let tmp = TempDir::new()?;
+        crate::config::set_test_biovault_home(tmp.path().join(".bv"));
+
+        // Existing URL/path strings are preserved
+        assert_eq!(
+            normalize_participant_source_for_real("syft://x/y#z")?,
+            "syft://x/y#z"
+        );
+        assert_eq!(
+            normalize_participant_source_for_real("/abs/path/participants.yaml#p.ID")?,
+            "/abs/path/participants.yaml#p.ID"
+        );
+
+        // Bare ID resolves to participants.yaml under BIOVAULT home
+        let got = normalize_participant_source_for_real("TESTID")?;
+        assert!(got.ends_with("participants.yaml#participants.TESTID"));
+        Ok(())
+    }
+
+    #[test]
+    fn resolve_and_paths_and_copy_dir() -> Result<()> {
+        let tmp = TempDir::new()?;
+        // SyftBox data dir and config email
+        crate::config::set_test_syftbox_data_dir(tmp.path());
+        let cfg = Config {
+            email: "u@example.com".into(),
+            syftbox_config: None,
+            version: None,
+        };
+
+        // Build a fake project tree under datasites/u@example.com/app_data/biovault/submissions/proj1
+        let root = tmp
+            .path()
+            .join("datasites/u@example.com/app_data/biovault/submissions/proj1");
+        std::fs::create_dir_all(root.join("a/b")).unwrap();
+        std::fs::write(root.join("a/b/file.txt"), b"hi").unwrap();
+        // This file should be skipped when copying
+        std::fs::write(root.join("a/syft.pub.yaml"), b"rules:").unwrap();
+
+        // sender_project_root from metadata
+        let loc = format!(
+            "syft://u@example.com/app_data/biovault/submissions/{}",
+            "proj1"
+        );
+        let meta = json!({
+            "project_location": loc
+        });
+        let (sender_root, folder) = sender_project_root(&cfg, &meta)?;
+        assert_eq!(folder, "proj1");
+        assert!(sender_root.ends_with("proj1"));
+
+        // receiver path
+        let recv = receiver_private_submissions_path(&cfg)?;
+        assert!(recv.ends_with("datasites/u@example.com/private/app_data/biovault/submissions"));
+
+        // Copy behaviour: skip syft.pub.yaml and recreate tree
+        let dest = recv.join(&folder);
+        copy_dir_recursive(&sender_root, &dest)?;
+        assert!(dest.join("a/b/file.txt").exists());
+        assert!(!dest.join("a/syft.pub.yaml").exists());
+
+        Ok(())
+    }
+
+    #[test]
+    fn build_run_project_copy_creates_dest_once() -> Result<()> {
+        let tmp = TempDir::new()?;
+        crate::config::set_test_syftbox_data_dir(tmp.path());
+        let cfg = Config {
+            email: "u@example.com".into(),
+            syftbox_config: None,
+            version: None,
+        };
+
+        // Make sender tree and one file
+        let proj = tmp
+            .path()
+            .join("datasites/u@example.com/app_data/biovault/submissions/projX");
+        std::fs::create_dir_all(proj.join("dir")).unwrap();
+        std::fs::write(proj.join("dir/f.txt"), b"x").unwrap();
+        let meta =
+            json!({"project_location": "syft://u@example.com/app_data/biovault/submissions/projX"});
+        let mut msg = Message::new("u@example.com".into(), "v@example.com".into(), "b".into());
+        msg.metadata = Some(meta);
+
+        let dest1 = build_run_project_copy(&cfg, &msg)?;
+        assert!(dest1.join("dir/f.txt").exists());
+        // Call again; should not error and keep same path
+        let dest2 = build_run_project_copy(&cfg, &msg)?;
+        assert_eq!(dest1, dest2);
+        Ok(())
+    }
+
+    #[test]
+    fn verify_project_from_metadata_ok_and_fail() -> Result<()> {
+        let tmp = TempDir::new()?;
+        crate::config::set_test_syftbox_data_dir(tmp.path());
+        let cfg = Config {
+            email: "u@example.com".into(),
+            syftbox_config: None,
+            version: None,
+        };
+
+        // Build project root with two files and compute blake3
+        let root = tmp
+            .path()
+            .join("datasites/u@example.com/app_data/biovault/submissions/projZ");
+        std::fs::create_dir_all(&root).unwrap();
+        let f1 = root.join("a.txt");
+        let f2 = root.join("b.txt");
+        std::fs::write(&f1, b"A").unwrap();
+        std::fs::write(&f2, b"B").unwrap();
+        let h1 = blake3::hash(&std::fs::read(&f1).unwrap())
+            .to_hex()
+            .to_string();
+        let h2 = blake3::hash(&std::fs::read(&f2).unwrap())
+            .to_hex()
+            .to_string();
+
+        // Construct embedded project.yaml equivalent in metadata
+        let project = json!({
+            "name": "n", "author":"a", "workflow":"w",
+            "b3_hashes": {"a.txt": h1, "b.txt": h2}
+        });
+        let meta_ok = json!({
+            "project": project,
+            "project_location": "syft://u@example.com/app_data/biovault/submissions/projZ"
+        });
+        let (ok, note) = verify_project_from_metadata(&cfg, &meta_ok)?;
+        assert!(ok, "expected OK, got note: {}", note);
+
+        // Now break one file and expect failure with note
+        std::fs::write(&f2, b"BROKEN").unwrap();
+        let (ok2, note2) = verify_project_from_metadata(&cfg, &meta_ok)?;
+        assert!(!ok2);
+        assert!(!note2.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn list_messages_displays_without_actions() -> Result<()> {
+        let tmp = TempDir::new()?;
+        crate::config::set_test_syftbox_data_dir(tmp.path());
+        crate::config::set_test_biovault_home(tmp.path().join(".bv"));
+        let cfg = Config {
+            email: "me@example.com".into(),
+            syftbox_config: None,
+            version: None,
+        };
+        // Init DB only
+        let db_path = get_message_db_path(&cfg)?;
+        let db = MessageDb::new(&db_path)?;
+        // Insert a simple draft message from me -> other (so no interactive recipient actions)
+        let m = Message::new(
+            "me@example.com".into(),
+            "you@example.com".into(),
+            "body".into(),
+        );
+        db.insert_message(&m)?;
+        // Should render list without interacting
+        list_messages(&cfg, false, false, false)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn read_message_marks_received_as_read() -> Result<()> {
+        let tmp = TempDir::new()?;
+        crate::config::set_test_syftbox_data_dir(tmp.path());
+        crate::config::set_test_biovault_home(tmp.path().join(".bv"));
+        let cfg = Config {
+            email: "me@example.com".into(),
+            syftbox_config: None,
+            version: None,
+        };
+        let db_path = get_message_db_path(&cfg)?;
+        let db = MessageDb::new(&db_path)?;
+
+        let mut m = Message::new(
+            "you@example.com".into(),
+            "me@example.com".into(),
+            "hi".into(),
+        );
+        m.status = crate::messages::MessageStatus::Received;
+        db.insert_message(&m)?;
+
+        read_message(&cfg, &m.id).await?;
+        let updated = db.get_message(&m.id)?.unwrap();
+        assert_eq!(updated.status, crate::messages::MessageStatus::Read);
+        Ok(())
+    }
+
+    #[test]
+    fn send_and_delete_message_flow() -> Result<()> {
+        let tmp = TempDir::new()?;
+        // Point syftbox data dir and biovault home to temp
+        crate::config::set_test_syftbox_data_dir(tmp.path());
+        crate::config::set_test_biovault_home(tmp.path().join(".bv"));
+        let cfg = create_test_config();
+
+        // Send a message to another recipient
+        super::send_message(&cfg, "you@example.com", "hello", Some("subj"))?;
+
+        // Validate DB has a sent message
+        let db_path = get_message_db_path(&cfg)?;
+        let db = MessageDb::new(&db_path)?;
+        let msgs = db.list_sent_messages(None)?;
+        assert!(!msgs.is_empty());
+        let first = &msgs[0];
+        assert_eq!(first.status, crate::messages::MessageStatus::Sent);
+        assert_eq!(first.to, "you@example.com");
+
+        // Delete the message (soft delete)
+        super::delete_message(&cfg, &first.id)?;
+        let after = db.get_message(&first.id)?.unwrap();
+        assert_eq!(after.status, crate::messages::MessageStatus::Deleted);
+        Ok(())
+    }
+
+    #[test]
+    fn reply_message_creates_response() -> Result<()> {
+        let tmp = TempDir::new()?;
+        crate::config::set_test_syftbox_data_dir(tmp.path());
+        crate::config::set_test_biovault_home(tmp.path().join(".bv"));
+        let cfg = create_test_config();
+        // Initialize DB and insert an incoming message to reply to
+        let db_path = get_message_db_path(&cfg)?;
+        let db = MessageDb::new(&db_path)?;
+        let mut original = Message::new("alice@example.com".into(), cfg.email.clone(), "hi".into());
+        original.status = crate::messages::MessageStatus::Received;
+        db.insert_message(&original)?;
+
+        super::reply_message(&cfg, &original.id, "re: hi")?;
+
+        // Should have at least one sent message now
+        let sent = db.list_sent_messages(None)?;
+        assert!(!sent.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn list_messages_smoke() -> Result<()> {
+        let tmp = TempDir::new()?;
+        crate::config::set_test_syftbox_data_dir(tmp.path());
+        crate::config::set_test_biovault_home(tmp.path().join(".bv"));
+        let cfg = create_test_config();
+
+        // With empty DB
+        super::list_messages(&cfg, false, false, false)?;
+        super::list_messages(&cfg, true, false, false)?;
         Ok(())
     }
 }

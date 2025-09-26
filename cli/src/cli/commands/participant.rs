@@ -160,6 +160,9 @@ pub async fn add(
     aligned: Option<String>,
     template: Option<String>,
     snp: Option<String>,
+    reference: Option<String>,
+    ref_version: Option<String>,
+    non_interactive: bool,
 ) -> Result<()> {
     println!("{}", "Adding new participant...".green().bold());
 
@@ -178,22 +181,34 @@ pub async fn add(
 
     let participant_id = match id {
         Some(id) => id,
-        None => Input::<String>::new()
-            .with_prompt("Enter participant ID")
-            .interact_text()?,
+        None => {
+            if non_interactive {
+                return Err(anyhow!(
+                    "Participant ID is required in non-interactive mode"
+                ));
+            }
+            Input::<String>::new()
+                .with_prompt("Enter participant ID")
+                .interact_text()?
+        }
     };
 
     if participants_file.participants.contains_key(&participant_id) {
-        let overwrite = Confirm::new()
-            .with_prompt(format!(
-                "Participant '{}' already exists. Overwrite?",
-                participant_id
-            ))
-            .interact()?;
+        if non_interactive {
+            // In non-interactive mode, just overwrite
+            println!("⚠ Overwriting existing participant '{}'", participant_id);
+        } else {
+            let overwrite = Confirm::new()
+                .with_prompt(format!(
+                    "Participant '{}' already exists. Overwrite?",
+                    participant_id
+                ))
+                .interact()?;
 
-        if !overwrite {
-            println!("Cancelled.");
-            return Ok(());
+            if !overwrite {
+                println!("Cancelled.");
+                return Ok(());
+            }
         }
     }
 
@@ -201,17 +216,24 @@ pub async fn add(
     if template_type == "snp" {
         let snp_file = match snp {
             Some(file) => file,
-            None => Input::<String>::new()
-                .with_prompt("Enter SNP file path")
-                .validate_with(|input: &String| -> Result<(), &str> {
-                    let expanded = expand_tilde(input);
-                    if Path::new(&expanded).exists() {
-                        Ok(())
-                    } else {
-                        Err("File does not exist")
-                    }
-                })
-                .interact_text()?,
+            None => {
+                if non_interactive {
+                    return Err(anyhow!(
+                        "SNP file path is required for SNP template in non-interactive mode"
+                    ));
+                }
+                Input::<String>::new()
+                    .with_prompt("Enter SNP file path")
+                    .validate_with(|input: &String| -> Result<(), &str> {
+                        let expanded = expand_tilde(input);
+                        if Path::new(&expanded).exists() {
+                            Ok(())
+                        } else {
+                            Err("File does not exist")
+                        }
+                    })
+                    .interact_text()?
+            }
         };
 
         let snp_file_normalized = normalize_path(&snp_file)?;
@@ -252,17 +274,24 @@ pub async fn add(
 
     let aligned_file = match aligned {
         Some(file) => file,
-        None => Input::<String>::new()
-            .with_prompt("Enter aligned file path (.cram, .bam, or .sam)")
-            .validate_with(|input: &String| -> Result<(), &str> {
-                let expanded = expand_tilde(input);
-                if Path::new(&expanded).exists() {
-                    Ok(())
-                } else {
-                    Err("File does not exist")
-                }
-            })
-            .interact_text()?,
+        None => {
+            if non_interactive {
+                return Err(anyhow!(
+                    "Aligned file path is required for default template in non-interactive mode"
+                ));
+            }
+            Input::<String>::new()
+                .with_prompt("Enter aligned file path (.cram, .bam, or .sam)")
+                .validate_with(|input: &String| -> Result<(), &str> {
+                    let expanded = expand_tilde(input);
+                    if Path::new(&expanded).exists() {
+                        Ok(())
+                    } else {
+                        Err("File does not exist")
+                    }
+                })
+                .interact_text()?
+        }
     };
 
     let aligned_file = normalize_path(&aligned_file)?;
@@ -280,16 +309,26 @@ pub async fn add(
     }
 
     let use_aligned_index = if aligned_index_exists {
-        Confirm::new()
-            .with_prompt(format!("Use this index file: {}?", aligned_index))
-            .default(true)
-            .interact()?
+        if non_interactive {
+            true // Use the auto-detected index in non-interactive mode
+        } else {
+            Confirm::new()
+                .with_prompt(format!("Use this index file: {}?", aligned_index))
+                .default(true)
+                .interact()?
+        }
     } else {
         false
     };
 
     let final_aligned_index = if use_aligned_index {
         aligned_index.clone()
+    } else if non_interactive {
+        // In non-interactive mode, use the default index path
+        if !Path::new(&aligned_index).exists() && check_samtools_installed() {
+            index_jobs.push((aligned_file.clone(), true));
+        }
+        aligned_index
     } else {
         let custom_index = Input::<String>::new()
             .with_prompt("Enter aligned index file path")
@@ -314,32 +353,47 @@ pub async fn add(
         .map(|v| format!(" (Possibly {} detected)", v))
         .unwrap_or_default();
 
-    let ref_version_choices = vec!["GRCh38", "GRCh37"];
-    let default_selection = match detected_version.as_deref() {
-        Some("GRCh38") => 0,
-        Some("GRCh37") => 1,
-        _ => 0,
+    let ref_version_str = if let Some(version) = ref_version {
+        version
+    } else if non_interactive {
+        // Use detected version or default to GRCh38
+        detected_version.unwrap_or_else(|| "GRCh38".to_string())
+    } else {
+        let ref_version_choices = vec!["GRCh38", "GRCh37"];
+        let default_selection = match detected_version.as_deref() {
+            Some("GRCh38") => 0,
+            Some("GRCh37") => 1,
+            _ => 0,
+        };
+
+        let ref_version_idx = Select::new()
+            .with_prompt(format!("Select reference version{}", version_hint))
+            .items(&ref_version_choices)
+            .default(default_selection)
+            .interact()?;
+
+        ref_version_choices[ref_version_idx].to_string()
     };
 
-    let ref_version_idx = Select::new()
-        .with_prompt(format!("Select reference version{}", version_hint))
-        .items(&ref_version_choices)
-        .default(default_selection)
-        .interact()?;
-
-    let ref_version = ref_version_choices[ref_version_idx].to_string();
-
-    let ref_file = Input::<String>::new()
-        .with_prompt("Enter reference genome file path (.fa or .fasta)")
-        .validate_with(|input: &String| -> Result<(), &str> {
-            let expanded = expand_tilde(input);
-            if Path::new(&expanded).exists() {
-                Ok(())
-            } else {
-                Err("File does not exist")
-            }
-        })
-        .interact_text()?;
+    let ref_file = if let Some(ref_path) = reference {
+        ref_path
+    } else if non_interactive {
+        return Err(anyhow!(
+            "Reference genome file path is required in non-interactive mode"
+        ));
+    } else {
+        Input::<String>::new()
+            .with_prompt("Enter reference genome file path (.fa or .fasta)")
+            .validate_with(|input: &String| -> Result<(), &str> {
+                let expanded = expand_tilde(input);
+                if Path::new(&expanded).exists() {
+                    Ok(())
+                } else {
+                    Err("File does not exist")
+                }
+            })
+            .interact_text()?
+    };
 
     let ref_file = normalize_path(&ref_file)?;
 
@@ -353,16 +407,26 @@ pub async fn add(
     }
 
     let use_ref_index = if ref_index_exists {
-        Confirm::new()
-            .with_prompt(format!("Use this reference index file: {}?", ref_index))
-            .default(true)
-            .interact()?
+        if non_interactive {
+            true // Use the auto-detected reference index in non-interactive mode
+        } else {
+            Confirm::new()
+                .with_prompt(format!("Use this reference index file: {}?", ref_index))
+                .default(true)
+                .interact()?
+        }
     } else {
         false
     };
 
     let final_ref_index = if use_ref_index {
         ref_index.clone()
+    } else if non_interactive {
+        // In non-interactive mode, use the default reference index path
+        if !Path::new(&ref_index).exists() && check_samtools_installed() {
+            index_jobs.push((ref_file.clone(), false));
+        }
+        ref_index
     } else {
         let custom_index = Input::<String>::new()
             .with_prompt("Enter reference index file path")
@@ -383,7 +447,7 @@ pub async fn add(
 
     let participant = Participant {
         id: participant_id.clone(),
-        ref_version: Some(ref_version),
+        ref_version: Some(ref_version_str),
         r#ref: Some(ref_file.clone()),
         ref_index: Some(normalize_path(&final_ref_index)?),
         aligned: Some(aligned_file.clone()),
@@ -645,4 +709,286 @@ pub async fn validate(id: Option<String>) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn index_file_path_rules() {
+        assert_eq!(get_index_file_path("x.cram", true), "x.cram.crai");
+        assert_eq!(get_index_file_path("x.bam", true), "x.bam.bai");
+        assert_eq!(get_index_file_path("x.sam", true), "x.sam.sai");
+        assert_eq!(get_index_file_path("x.xyz", true), "x.xyz.idx");
+        assert_eq!(get_index_file_path("ref.fa", false), "ref.fa.fai");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    #[cfg(unix)]
+    fn expand_tilde_resolves_home_unix() {
+        let tmp = TempDir::new().unwrap();
+        std::env::set_var("HOME", tmp.path());
+        let expanded = super::expand_tilde("~/file.txt");
+        assert_eq!(
+            std::path::Path::new(&expanded),
+            &tmp.path().join("file.txt")
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    #[cfg(windows)]
+    fn expand_tilde_resolves_home_windows() {
+        let tmp = TempDir::new().unwrap();
+        std::env::set_var("USERPROFILE", tmp.path());
+        let expanded = super::expand_tilde("~/file.txt");
+        assert_eq!(
+            std::path::Path::new(&expanded),
+            &tmp.path().join("file.txt")
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn normalize_path_makes_absolute_and_keeps_tail() {
+        let tmp = TempDir::new().unwrap();
+        let cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmp.path()).unwrap();
+        let abs = super::normalize_path("rel/path").unwrap();
+        let p = std::path::Path::new(&abs);
+        assert!(p.is_absolute());
+        assert!(p.ends_with(std::path::Path::new("rel").join("path")));
+        std::env::set_current_dir(cwd).unwrap();
+    }
+
+    #[test]
+    fn test_participant_serialize_deserialize() {
+        let participant = Participant {
+            id: "test123".to_string(),
+            ref_version: Some("GRCh38".to_string()),
+            r#ref: Some("/path/to/ref.fa".to_string()),
+            ref_index: Some("/path/to/ref.fa.fai".to_string()),
+            aligned: Some("/path/to/aligned.cram".to_string()),
+            aligned_index: Some("/path/to/aligned.cram.crai".to_string()),
+            snp: None,
+        };
+
+        let serialized = serde_yaml::to_string(&participant).unwrap();
+        assert!(serialized.contains("id: test123"));
+        assert!(serialized.contains("ref_version: GRCh38"));
+        assert!(serialized.contains("ref: /path/to/ref.fa"));
+
+        let deserialized: Participant = serde_yaml::from_str(&serialized).unwrap();
+        assert_eq!(deserialized.id, "test123");
+        assert_eq!(deserialized.ref_version, Some("GRCh38".to_string()));
+    }
+
+    #[test]
+    fn test_participant_snp_variant() {
+        let participant = Participant {
+            id: "snp_test".to_string(),
+            ref_version: None,
+            r#ref: None,
+            ref_index: None,
+            aligned: None,
+            aligned_index: None,
+            snp: Some("/path/to/snp.vcf".to_string()),
+        };
+
+        assert_eq!(participant.id, "snp_test");
+        assert_eq!(participant.snp, Some("/path/to/snp.vcf".to_string()));
+        assert!(participant.aligned.is_none());
+        assert!(participant.ref_version.is_none());
+    }
+
+    #[test]
+    fn test_participants_file_default() {
+        let pf = ParticipantsFile::default();
+        assert!(pf.participants.is_empty());
+    }
+
+    #[test]
+    fn test_participants_file_with_multiple_entries() {
+        let mut pf = ParticipantsFile::new();
+
+        let p1 = Participant {
+            id: "p1".to_string(),
+            ref_version: Some("GRCh37".to_string()),
+            r#ref: None,
+            ref_index: None,
+            aligned: None,
+            aligned_index: None,
+            snp: None,
+        };
+
+        let p2 = Participant {
+            id: "p2".to_string(),
+            ref_version: Some("GRCh38".to_string()),
+            r#ref: None,
+            ref_index: None,
+            aligned: None,
+            aligned_index: None,
+            snp: None,
+        };
+
+        pf.participants.insert("p1".to_string(), p1.clone());
+        pf.participants.insert("p2".to_string(), p2.clone());
+
+        assert_eq!(pf.participants.len(), 2);
+        assert!(pf.participants.contains_key("p1"));
+        assert!(pf.participants.contains_key("p2"));
+        assert_eq!(
+            pf.participants["p1"].ref_version,
+            Some("GRCh37".to_string())
+        );
+        assert_eq!(
+            pf.participants["p2"].ref_version,
+            Some("GRCh38".to_string())
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_participants_file_load_nonexistent() {
+        let temp = TempDir::new().unwrap();
+        std::env::set_var("BIOVAULT_HOME", temp.path());
+
+        let pf = ParticipantsFile::load().unwrap();
+        assert!(pf.participants.is_empty());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_participants_file_save_and_reload() {
+        let temp = TempDir::new().unwrap();
+        std::env::set_var("BIOVAULT_HOME", temp.path());
+
+        let mut pf = ParticipantsFile::new();
+        let participant = Participant {
+            id: "save_test".to_string(),
+            ref_version: Some("GRCh38".to_string()),
+            r#ref: Some("/ref.fa".to_string()),
+            ref_index: Some("/ref.fa.fai".to_string()),
+            aligned: Some("/aligned.cram".to_string()),
+            aligned_index: Some("/aligned.cram.crai".to_string()),
+            snp: None,
+        };
+
+        pf.participants.insert("save_test".to_string(), participant);
+        pf.save().unwrap();
+
+        // Verify file was created
+        let file_path = temp.path().join("participants.yaml");
+        assert!(file_path.exists());
+
+        // Load and verify
+        let loaded = ParticipantsFile::load().unwrap();
+        assert_eq!(loaded.participants.len(), 1);
+        assert!(loaded.participants.contains_key("save_test"));
+        assert_eq!(loaded.participants["save_test"].id, "save_test");
+        assert_eq!(
+            loaded.participants["save_test"].ref_version,
+            Some("GRCh38".to_string())
+        );
+    }
+
+    #[test]
+    fn test_get_index_file_path_edge_cases() {
+        // Test various file extensions for aligned files (function is case-sensitive)
+        assert_eq!(get_index_file_path("test.CRAM", true), "test.CRAM.idx"); // Uppercase not recognized
+        assert_eq!(get_index_file_path("test.BAM", true), "test.BAM.idx"); // Uppercase not recognized
+        assert_eq!(get_index_file_path("test.SAM", true), "test.SAM.idx"); // Uppercase not recognized
+        assert_eq!(get_index_file_path("test", true), "test.idx");
+        assert_eq!(get_index_file_path("test.txt", true), "test.txt.idx");
+
+        // Test lowercase extensions work correctly
+        assert_eq!(get_index_file_path("test.cram", true), "test.cram.crai");
+        assert_eq!(get_index_file_path("test.bam", true), "test.bam.bai");
+        assert_eq!(get_index_file_path("test.sam", true), "test.sam.sai");
+
+        // Test reference files (always get .fai regardless of extension)
+        assert_eq!(
+            get_index_file_path("genome.fasta", false),
+            "genome.fasta.fai"
+        );
+        assert_eq!(get_index_file_path("genome.FA", false), "genome.FA.fai");
+        assert_eq!(get_index_file_path("genome", false), "genome.fai");
+    }
+
+    #[test]
+    fn test_expand_tilde_edge_cases() {
+        // Test non-tilde paths
+        assert_eq!(expand_tilde(""), "");
+        assert_eq!(expand_tilde("~"), "~");
+        assert_eq!(expand_tilde("~user/file"), "~user/file"); // Not expanded
+        assert_eq!(expand_tilde("/~/file"), "/~/file"); // Not at start
+        assert_eq!(expand_tilde("./~/file"), "./~/file"); // Not at start
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_normalize_path_with_tilde() {
+        let temp = TempDir::new().unwrap();
+        let temp_path = temp.path().to_string_lossy().to_string();
+
+        if cfg!(unix) {
+            std::env::set_var("HOME", &temp_path);
+        } else {
+            std::env::set_var("USERPROFILE", &temp_path);
+        }
+
+        let result = normalize_path("~/test.txt").unwrap();
+        assert!(result.contains("test.txt"));
+        assert!(std::path::Path::new(&result).is_absolute());
+    }
+
+    #[test]
+    fn test_participant_clone() {
+        let original = Participant {
+            id: "clone_test".to_string(),
+            ref_version: Some("GRCh38".to_string()),
+            r#ref: Some("/ref.fa".to_string()),
+            ref_index: None,
+            aligned: None,
+            aligned_index: None,
+            snp: None,
+        };
+
+        let cloned = original.clone();
+        assert_eq!(cloned.id, original.id);
+        assert_eq!(cloned.ref_version, original.ref_version);
+        assert_eq!(cloned.r#ref, original.r#ref);
+    }
+
+    #[test]
+    fn test_participant_debug_format() {
+        let participant = Participant {
+            id: "debug_test".to_string(),
+            ref_version: None,
+            r#ref: None,
+            ref_index: None,
+            aligned: None,
+            aligned_index: None,
+            snp: Some("/snp.vcf".to_string()),
+        };
+
+        let debug_str = format!("{:?}", participant);
+        assert!(debug_str.contains("debug_test"));
+        assert!(debug_str.contains("snp"));
+        assert!(debug_str.contains("/snp.vcf"));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_get_participants_file_path() {
+        let temp = TempDir::new().unwrap();
+        std::env::set_var("BIOVAULT_HOME", temp.path());
+
+        let path = get_participants_file_path().unwrap();
+        assert!(path.ends_with("participants.yaml"));
+        assert!(path.starts_with(temp.path()));
+    }
 }

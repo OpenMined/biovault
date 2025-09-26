@@ -218,3 +218,10 @@ submission/results/*
 **/work/*
 **/results/*
 **/.nextflow.log*
+
+# Test directories
+test-clients/
+test-clients-docker/
+test-clients-local/
+
+.syftbox_binary_path

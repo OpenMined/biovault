@@ -122,4 +122,112 @@ mod tests {
         crate::config::clear_test_biovault_home();
         Ok(())
     }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_syftbox_reset_and_errors() -> crate::error::Result<()> {
+        let tmp = TempDir::new()?;
+        crate::config::set_test_biovault_home(tmp.path().join(".bv"));
+        fs::create_dir_all(tmp.path().join(".bv")).unwrap();
+        // Seed config
+        let cfg = Config {
+            email: "e@example".into(),
+            syftbox_config: None,
+            version: None,
+        };
+        cfg.save(tmp.path().join(".bv/config.yaml"))?;
+
+        // set_syftbox(None) resets to default
+        set_syftbox(None).await?;
+        let cfg2 = Config::load()?;
+        assert!(cfg2.syftbox_config.is_none());
+
+        // Missing file path returns error
+        let err = set_syftbox(Some(
+            tmp.path()
+                .join("no/such.json")
+                .to_string_lossy()
+                .to_string(),
+        ))
+        .await;
+        assert!(err.is_err());
+
+        // Invalid JSON returns error
+        let bad = tmp.path().join("bad.json");
+        fs::write(&bad, "not json").unwrap();
+        let err2 = set_syftbox(Some(bad.to_string_lossy().to_string())).await;
+        assert!(err2.is_err());
+        crate::config::clear_test_biovault_home();
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_show_config() -> crate::error::Result<()> {
+        let temp_dir = TempDir::new()?;
+        crate::config::set_test_biovault_home(temp_dir.path().join(".biovault"));
+
+        let config_dir = temp_dir.path().join(".biovault");
+        fs::create_dir_all(&config_dir)?;
+
+        let config = Config {
+            email: "show@example.com".to_string(),
+            syftbox_config: Some("/custom/syftbox.json".to_string()),
+            version: Some("1.0.0".to_string()),
+        };
+        config.save(config_dir.join("config.yaml"))?;
+
+        // This function prints to stdout, so we just verify it doesn't panic
+        let result = show().await;
+        assert!(result.is_ok());
+
+        crate::config::clear_test_biovault_home();
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_email_validation() -> crate::error::Result<()> {
+        let temp_dir = TempDir::new()?;
+        crate::config::set_test_biovault_home(temp_dir.path().join(".biovault"));
+
+        let config_dir = temp_dir.path().join(".biovault");
+        fs::create_dir_all(&config_dir)?;
+
+        // Create initial config
+        let initial_config = Config {
+            email: "initial@example.com".to_string(),
+            syftbox_config: None,
+            version: None,
+        };
+        initial_config.save(config_dir.join("config.yaml"))?;
+
+        // Set various email formats
+        set_email("user@example.com".to_string()).await?;
+        let config = Config::load()?;
+        assert_eq!(config.email, "user@example.com");
+
+        set_email("user.name+tag@example.co.uk".to_string()).await?;
+        let config = Config::load()?;
+        assert_eq!(config.email, "user.name+tag@example.co.uk");
+
+        crate::config::clear_test_biovault_home();
+        Ok(())
+    }
+
+    #[test]
+    fn test_show_without_config() {
+        // Test that show handles missing config gracefully
+        let temp_dir = TempDir::new().unwrap();
+        crate::config::set_test_biovault_home(temp_dir.path().join(".biovault"));
+
+        // Don't create any config file
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _result = runtime.block_on(show());
+
+        // Should either succeed with defaults or fail gracefully
+        // We're just making sure it doesn't panic
+
+        crate::config::clear_test_biovault_home();
+    }
 }

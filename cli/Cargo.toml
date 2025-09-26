@@ -1,6 +1,6 @@
 [package]
 name = "biovault"
-version = "0.1.18"
+version = "0.1.35"
 edition = "2021"
 authors = ["Madhava Jay <madhava@openmined.org>"]
 description = "A bioinformatics data vault CLI tool"
@@ -57,3 +57,8 @@ assert_cmd = "2.0"
 predicates = "3.1"
 tempfile = "3.12"
 serial_test = "3.1"
+
+[features]
+# Enable to include slower, IO-heavy tests (e.g., FASTQ helpers)
+slow-tests = []
+e2e-tests = []

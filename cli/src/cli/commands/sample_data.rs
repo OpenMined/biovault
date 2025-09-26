@@ -813,3 +813,103 @@ pub async fn list() -> anyhow::Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod list_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn sample_list_runs() {
+        // Should print available sample info without error
+        list().await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn filename_extraction_handles_fragments_and_queries() {
+        assert_eq!(
+            extract_filename_from_url("https://x/y/file.txt").unwrap(),
+            "file.txt"
+        );
+        assert_eq!(
+            extract_filename_from_url("https://x/y/file.txt?download=1").unwrap(),
+            "file.txt"
+        );
+        assert_eq!(
+            extract_filename_from_url("https://x/y/file.txt#frag").unwrap(),
+            "file.txt"
+        );
+    }
+
+    #[test]
+    fn determine_participants_selection_rules() {
+        let mut map = std::collections::HashMap::new();
+        map.insert(
+            "A".to_string(),
+            ParticipantData {
+                ref_version: None,
+                ref_url: None,
+                ref_index: None,
+                aligned: None,
+                aligned_index: None,
+                ref_b3sum: None,
+                ref_index_b3sum: None,
+                aligned_b3sum: None,
+                aligned_index_b3sum: None,
+                snp: None,
+                snp_b3sum: None,
+                snp_post_process: None,
+            },
+        );
+        let cfg = SampleDataConfig {
+            sample_data_urls: map,
+        };
+        // all=true picks all keys
+        let mut ids = determine_participants_to_fetch(&cfg, None, true).unwrap();
+        ids.sort();
+        assert_eq!(ids, vec!["A".to_string()]);
+
+        // explicit list must exist
+        let ids2 = determine_participants_to_fetch(&cfg, Some(vec!["A".into()]), false).unwrap();
+        assert_eq!(ids2, vec!["A".to_string()]);
+        // non-existent yields error
+        assert!(determine_participants_to_fetch(&cfg, Some(vec!["B".into()]), false).is_err());
+        // none provided and all=false -> error
+        assert!(determine_participants_to_fetch(&cfg, None, false).is_err());
+    }
+
+    #[test]
+    fn load_or_create_and_save_participants_file() {
+        let tmp = TempDir::new().unwrap();
+        let p = tmp.path().join("participants.yaml");
+        // create new empty
+        let pf = load_or_create_participants_file(&p).unwrap();
+        assert!(pf.participant.is_empty());
+        // save and load back
+        save_participants_file(&p, &pf).unwrap();
+        let pf2 = load_or_create_participants_file(&p).unwrap();
+        assert!(pf2.participant.is_empty());
+    }
+
+    #[test]
+    fn aligned_url_and_checksum_to_vec() {
+        let u1 = AlignedUrl::Single("http://x/file.cram".into());
+        assert_eq!(u1.to_vec(), vec!["http://x/file.cram".to_string()]);
+        let u2 = AlignedUrl::Multiple(vec!["u1".into(), "u2".into()]);
+        assert_eq!(u2.to_vec(), vec!["u1".to_string(), "u2".to_string()]);
+
+        let c1 = AlignedChecksum::Single("abc".into());
+        assert_eq!(c1.to_vec(), vec!["abc".to_string()]);
+        let c2 = AlignedChecksum::Multiple(vec!["a".into(), "b".into()]);
+        assert_eq!(c2.to_vec(), vec!["a".to_string(), "b".to_string()]);
+
+        // Default is a single empty string
+        let def = AlignedChecksum::default();
+        assert_eq!(def.to_vec(), vec![String::new()]);
+    }
+}

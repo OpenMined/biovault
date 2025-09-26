@@ -13,7 +13,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
-pub async fn submit(project_path: String, destination: String) -> Result<()> {
+pub async fn submit(
+    project_path: String,
+    destination: String,
+    non_interactive: bool,
+    force: bool,
+) -> Result<()> {
     let config = Config::load()?;
 
     // Parse destination - could be email or full syft URL
@@ -176,65 +181,56 @@ pub async fn submit(project_path: String, destination: String) -> Result<()> {
                 .to_string();
 
             if existing_hash == project_hash {
-                // Project hasn't changed - ask if they want to re-submit
-                println!("⚠️  This project has already been submitted.");
-                println!("   Location: {}", submission_path.display());
-                println!("   Hash: {}", short_hash);
-
-                let resubmit = Confirm::new()
-                    .with_prompt("Do you want to re-submit this project?")
-                    .default(false)
-                    .interact()
-                    .unwrap_or(false);
-
-                if !resubmit {
-                    println!("Submission cancelled.");
+                if !force {
+                    println!("⚠️  This exact project version has already been submitted.");
+                    println!("   Location: {}", submission_path.display());
+                    println!("   Hash: {}", short_hash);
+                    println!("   Use --force to resend the message.");
                     return Ok(());
+                } else {
+                    println!(
+                        "ℹ️  Project already submitted, but --force flag used. Sending message..."
+                    );
+                    println!("   Location: {}", submission_path.display());
+                    println!("   Hash: {}", short_hash);
+
+                    // Check if destination has changed
+                    let existing_datasites = existing_project.datasites.clone().unwrap_or_default();
+                    let destination_changed = !existing_datasites.contains(&datasite_email);
+
+                    if destination_changed {
+                        // Update project.yaml and syft.pub.yaml with new destination
+                        println!("✓ Updating destination to: {}", datasite_email);
+
+                        // Update project.yaml with new datasite
+                        let mut updated_project = existing_project.clone();
+                        updated_project.datasites = Some(vec![datasite_email.clone()]);
+                        updated_project.participants = participant_url.clone().map(|url| vec![url]);
+                        updated_project.save(&existing_project_yaml)?;
+
+                        // Update syft.pub.yaml
+                        let existing_permissions_path = submission_path.join("syft.pub.yaml");
+                        let updated_permissions = SyftPermissions::new_for_datasite(&datasite_email);
+                        updated_permissions.save(&existing_permissions_path)?;
+                    }
+
+                    // Send new request message for same project
+                    return send_project_message(
+                        &config,
+                        &project,
+                        &datasite_email,
+                        &submission_path,
+                        &submission_folder_name,
+                        &project_hash,
+                        &date_str,
+                    );
                 }
-
-                // Check if destination has changed
-                let existing_permissions_path = submission_path.join("syft.pub.yaml");
-                let existing_datasites = existing_project.datasites.clone().unwrap_or_default();
-                let destination_changed = !existing_datasites.contains(&datasite_email);
-
-                if destination_changed {
-                    // Update project.yaml and syft.pub.yaml with new destination
-                    println!("✓ Updating destination to: {}", datasite_email);
-
-                    // Update project.yaml with new datasite
-                    let mut updated_project = existing_project.clone();
-                    updated_project.datasites = Some(vec![datasite_email.clone()]);
-                    updated_project.participants = participant_url.clone().map(|url| vec![url]);
-                    updated_project.save(&existing_project_yaml)?;
-
-                    // Update syft.pub.yaml
-                    let updated_permissions = SyftPermissions::new_for_datasite(&datasite_email);
-                    updated_permissions.save(&existing_permissions_path)?;
-                }
-
-                // Send new request message for same project
-                return send_project_message(
-                    &config,
-                    &project,
-                    &datasite_email,
-                    &submission_path,
-                    &submission_folder_name,
-                    &project_hash,
-                    &date_str,
-                );
             } else {
-                // Project has changed - ask if they want to create a new version
-                println!("⚠️  A submission exists with the same name but different content.");
-                println!("   Existing: {}", submission_path.display());
-
-                let create_new = Confirm::new()
-                    .with_prompt("Do you want to create a new version of this project?")
-                    .default(true)
-                    .interact()
-                    .unwrap_or(false);
-
-                if !create_new {
-                    println!("Submission cancelled.");
+                // Project has changed
+                if !force {
+                    println!("⚠️  A submission exists with the same name but different content.");
+                    println!("   Existing: {}", submission_path.display());
+                    println!("   Use --force to create a new version.");
                     return Ok(());
                 }
 
@@ -392,19 +388,24 @@ fn send_project_message(
 
     // Prepare default message body and allow user to override
     let default_body = "I would like to run the following project.".to_string();
-    let use_custom = Confirm::new()
-        .with_prompt("Write a custom message body?")
-        .default(false)
-        .interact()
-        .unwrap_or(false);
-
-    let mut body = if use_custom {
-        match Editor::new().edit(&default_body) {
-            Ok(Some(content)) if !content.trim().is_empty() => content,
-            _ => default_body.clone(),
-        }
-    } else {
+    let mut body = if non_interactive {
+        // In non-interactive mode, use default message
         default_body.clone()
+    } else {
+        let use_custom = Confirm::new()
+            .with_prompt("Write a custom message body?")
+            .default(false)
+            .interact()
+            .unwrap_or(false);
+
+        if use_custom {
+            match Editor::new().edit(&default_body) {
+                Ok(Some(content)) if !content.trim().is_empty() => content,
+                _ => default_body.clone(),
+            }
+        } else {
+            default_body.clone()
+        }
     };
 
     // Add handy paths for the recipient to copy/paste
@@ -456,4 +457,210 @@ fn send_project_message(
     println!("  Submission URL: {}", submission_syft_url);
 
     Ok(())
+}
+
+fn hash_file(path: &Path) -> Result<String> {
+    let content =
+        fs::read(path).with_context(|| format!("Failed to read file: {}", path.display()))?;
+    Ok(blake3::hash(&content).to_hex().to_string())
+}
+
+fn copy_project_files(src: &Path, dest: &Path) -> Result<()> {
+    // Copy workflow.nf
+    let src_workflow = src.join("workflow.nf");
+    let dest_workflow = dest.join("workflow.nf");
+    fs::copy(&src_workflow, &dest_workflow)
+        .with_context(|| "Failed to copy workflow.nf".to_string())?;
+
+    // Copy assets directory if it exists
+    let src_assets = src.join("assets");
+    if src_assets.exists() && src_assets.is_dir() {
+        let dest_assets = dest.join("assets");
+        fs::create_dir_all(&dest_assets)?;
+
+        for entry in WalkDir::new(&src_assets)
+            .min_depth(1)
+            .follow_links(false)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
+            let src_path = entry.path();
+            let relative_path = src_path.strip_prefix(&src_assets).unwrap();
+            let dest_path = dest_assets.join(relative_path);
+
+            if entry.file_type().is_dir() {
+                fs::create_dir_all(&dest_path)?;
+            } else {
+                if let Some(parent) = dest_path.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                fs::copy(src_path, &dest_path)
+                    .with_context(|| format!("Failed to copy file: {}", src_path.display()))?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn hash_file_computes_blake3() {
+        let tmp = TempDir::new().unwrap();
+        let f = tmp.path().join("a.txt");
+        fs::write(&f, b"content").unwrap();
+        let h = hash_file(&f).unwrap();
+        assert_eq!(h.len(), 64);
+    }
+
+    #[test]
+    fn copy_project_files_copies_workflow_and_assets() {
+        let tmp = TempDir::new().unwrap();
+        let src = tmp.path().join("src");
+        let dest = tmp.path().join("dest");
+        fs::create_dir_all(&dest).unwrap();
+        fs::create_dir_all(src.join("assets/nested")).unwrap();
+        fs::write(src.join("workflow.nf"), b"wf").unwrap();
+        fs::write(src.join("assets/nested/file.bin"), b"x").unwrap();
+
+        copy_project_files(&src, &dest).unwrap();
+
+        assert!(dest.join("workflow.nf").exists());
+        assert!(dest.join("assets/nested/file.bin").exists());
+
+        // No assets dir case should still succeed
+        let src2 = tmp.path().join("src2");
+        fs::create_dir_all(&src2).unwrap();
+        fs::write(src2.join("workflow.nf"), b"wf").unwrap();
+        let dest2 = tmp.path().join("dest2");
+        fs::create_dir_all(&dest2).unwrap();
+        copy_project_files(&src2, &dest2).unwrap();
+    }
+
+    #[test]
+    fn test_hash_file_with_different_content() {
+        let tmp = TempDir::new().unwrap();
+
+        let file1 = tmp.path().join("file1.txt");
+        fs::write(&file1, b"content1").unwrap();
+        let hash1 = hash_file(&file1).unwrap();
+
+        let file2 = tmp.path().join("file2.txt");
+        fs::write(&file2, b"content2").unwrap();
+        let hash2 = hash_file(&file2).unwrap();
+
+        // Different content should produce different hashes
+        assert_ne!(hash1, hash2);
+
+        // Same content should produce same hash
+        let file3 = tmp.path().join("file3.txt");
+        fs::write(&file3, b"content1").unwrap();
+        let hash3 = hash_file(&file3).unwrap();
+        assert_eq!(hash1, hash3);
+    }
+
+    #[test]
+    fn test_hash_file_empty_file() {
+        let tmp = TempDir::new().unwrap();
+        let empty_file = tmp.path().join("empty.txt");
+        fs::write(&empty_file, b"").unwrap();
+        let hash = hash_file(&empty_file).unwrap();
+        // Blake3 hash of empty string is a known value
+        assert_eq!(hash.len(), 64);
+    }
+
+    #[test]
+    fn test_copy_project_files_missing_workflow() {
+        let tmp = TempDir::new().unwrap();
+        let src = tmp.path().join("src");
+        let dest = tmp.path().join("dest");
+        fs::create_dir_all(&src).unwrap();
+        fs::create_dir_all(&dest).unwrap();
+        // No workflow.nf file
+
+        let result = copy_project_files(&src, &dest);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_copy_project_files_with_symlinks() {
+        let tmp = TempDir::new().unwrap();
+        let src = tmp.path().join("src");
+        let dest = tmp.path().join("dest");
+
+        fs::create_dir_all(&src).unwrap();
+        fs::create_dir_all(&dest).unwrap();
+        fs::create_dir_all(src.join("assets")).unwrap();
+
+        fs::write(src.join("workflow.nf"), b"workflow").unwrap();
+        fs::write(src.join("assets/real_file.txt"), b"real").unwrap();
+
+        // Create a symlink (this test will only work on Unix-like systems)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            let _ = symlink(
+                src.join("assets/real_file.txt"),
+                src.join("assets/link_file.txt"),
+            );
+        }
+
+        let result = copy_project_files(&src, &dest);
+        assert!(result.is_ok());
+        assert!(dest.join("workflow.nf").exists());
+    }
+
+    #[test]
+    fn test_copy_project_files_deeply_nested() {
+        let tmp = TempDir::new().unwrap();
+        let src = tmp.path().join("src");
+        let dest = tmp.path().join("dest");
+
+        fs::create_dir_all(&dest).unwrap();
+        fs::create_dir_all(src.join("assets/a/b/c/d")).unwrap();
+        fs::write(src.join("workflow.nf"), b"wf").unwrap();
+        fs::write(src.join("assets/a/b/c/d/deep.txt"), b"deep").unwrap();
+
+        copy_project_files(&src, &dest).unwrap();
+
+        assert!(dest.join("workflow.nf").exists());
+        assert!(dest.join("assets/a/b/c/d/deep.txt").exists());
+
+        let content = fs::read(dest.join("assets/a/b/c/d/deep.txt")).unwrap();
+        assert_eq!(content, b"deep");
+    }
+
+    #[test]
+    fn test_copy_project_files_preserves_content() {
+        let tmp = TempDir::new().unwrap();
+        let src = tmp.path().join("src");
+        let dest = tmp.path().join("dest");
+
+        fs::create_dir_all(&dest).unwrap();
+        fs::create_dir_all(src.join("assets")).unwrap();
+
+        let workflow_content = b"nextflow.enable.dsl=2\nworkflow { }";
+        let asset_content = b"important data";
+
+        fs::write(src.join("workflow.nf"), workflow_content).unwrap();
+        fs::write(src.join("assets/data.csv"), asset_content).unwrap();
+
+        copy_project_files(&src, &dest).unwrap();
+
+        let copied_workflow = fs::read(dest.join("workflow.nf")).unwrap();
+        let copied_asset = fs::read(dest.join("assets/data.csv")).unwrap();
+
+        assert_eq!(copied_workflow, workflow_content);
+        assert_eq!(copied_asset, asset_content);
+    }
+
+    #[test]
+    fn test_hash_file_nonexistent() {
+        let result = hash_file(Path::new("/nonexistent/file.txt"));
+        assert!(result.is_err());
+    }
 }

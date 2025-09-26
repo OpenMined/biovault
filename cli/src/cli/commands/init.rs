@@ -6,7 +6,7 @@ use std::fs;
 use std::io::IsTerminal;
 use tracing::info;
 
-pub async fn execute(email: Option<&str>) -> Result<()> {
+pub async fn execute(email: Option<&str>, quiet: bool) -> Result<()> {
     // Get the BioVault home directory (respects env vars)
     let biovault_dir = get_biovault_home()?;
 
@@ -18,7 +18,10 @@ pub async fn execute(email: Option<&str>) -> Result<()> {
     let email = if let Some(email) = email {
         email.to_string()
     } else if let Ok(syftbox_email) = env::var("SYFTBOX_EMAIL") {
-        if std::io::stdin().is_terminal() {
+        if quiet {
+            // In quiet mode, auto-accept SYFTBOX_EMAIL
+            syftbox_email
+        } else if std::io::stdin().is_terminal() {
             println!("Detected SyftBox environment email: {}", syftbox_email);
             let use_syftbox = Confirm::with_theme(&ColorfulTheme::default())
                 .with_prompt("Use this email for BioVault?")
@@ -38,7 +41,7 @@ pub async fn execute(email: Option<&str>) -> Result<()> {
             // Non-interactive environment: auto-accept SYFTBOX_EMAIL
             syftbox_email
         }
-    } else if std::io::stdin().is_terminal() {
+    } else if std::io::stdin().is_terminal() && !quiet {
         Input::with_theme(&ColorfulTheme::default())
             .with_prompt("Enter email address")
             .interact_text()
@@ -95,7 +98,7 @@ pub async fn execute(email: Option<&str>) -> Result<()> {
         let config = Config {
             email: email.to_string(),
             syftbox_config: syftbox_config.clone(),
-            version: Some("0.1.16".to_string()),
+            version: Some("0.1.27".to_string()),
         };
 
         config.save(&config_file)?;
@@ -155,9 +158,32 @@ pub async fn execute(email: Option<&str>) -> Result<()> {
             snp_nextflow_config_path
         );
 
+        // Copy sheet templates
+        let sheet_dir = env_dir.join("sheet");
+        if !sheet_dir.exists() {
+            fs::create_dir_all(&sheet_dir)?;
+            info!("Created sheet template directory: {:?}", sheet_dir);
+        }
+
+        // Copy sheet template.nf
+        let sheet_template_nf_content = include_str!("../../templates/sheet/template.nf");
+        let sheet_template_nf_path = sheet_dir.join("template.nf");
+        fs::write(&sheet_template_nf_path, sheet_template_nf_content)?;
+        info!("Created sheet template.nf at: {:?}", sheet_template_nf_path);
+
+        // Copy sheet nextflow.config
+        let sheet_nextflow_config_content = include_str!("../../templates/sheet/nextflow.config");
+        let sheet_nextflow_config_path = sheet_dir.join("nextflow.config");
+        fs::write(&sheet_nextflow_config_path, sheet_nextflow_config_content)?;
+        info!(
+            "Created sheet nextflow.config at: {:?}",
+            sheet_nextflow_config_path
+        );
+
         println!("✓ Nextflow templates installed:");
         println!("  - Default templates: {}", default_dir.display());
         println!("  - SNP templates: {}", snp_dir.display());
+        println!("  - Sheet templates: {}", sheet_dir.display());
 
         // Initialize SyftBox RPC folders for messaging if SyftBox is configured
         match config.get_syftbox_data_dir() {
@@ -181,4 +207,104 @@ pub async fn execute(email: Option<&str>) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn test_execute_with_email_arg() {
+        let temp_dir = TempDir::new().unwrap();
+        crate::config::set_test_biovault_home(temp_dir.path().join(".biovault"));
+
+        // Initialize with email argument
+        let result = execute(Some("test@example.com"), false).await;
+        assert!(result.is_ok());
+
+        // Verify config was created
+        let config = Config::load().unwrap();
+        assert_eq!(config.email, "test@example.com");
+
+        crate::config::clear_test_biovault_home();
+    }
+
+    #[tokio::test]
+    async fn test_execute_with_syftbox_email_env() {
+        let temp_dir = TempDir::new().unwrap();
+        crate::config::set_test_biovault_home(temp_dir.path().join(".biovault"));
+
+        // Set SYFTBOX_EMAIL env var
+        env::set_var("SYFTBOX_EMAIL", "syftbox@example.com");
+
+        // In non-interactive mode, it should use the env var
+        // We can't easily test interactive mode in unit tests
+        let result = execute(None, true).await;
+
+        // Clean up env var
+        env::remove_var("SYFTBOX_EMAIL");
+        crate::config::clear_test_biovault_home();
+
+        // The result depends on whether we're in TTY or not
+        // In CI/test environment, it's usually non-TTY
+        let _ = result;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_execute_overwrite_existing_config() {
+        let temp_dir = TempDir::new().unwrap();
+        crate::config::set_test_biovault_home(temp_dir.path().join(".biovault"));
+
+        // Create initial config
+        let initial_config = Config {
+            email: "old@example.com".to_string(),
+            syftbox_config: None,
+            version: None,
+        };
+        let config_path = temp_dir.path().join(".biovault").join("config.yaml");
+        fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        initial_config.save(&config_path).unwrap();
+
+        // Re-initialize with new email - this might prompt in TTY mode
+        // We'll just test that the function doesn't panic
+        let _ = execute(Some("new@example.com"), true).await;
+
+        crate::config::clear_test_biovault_home();
+    }
+
+    #[tokio::test]
+    async fn test_execute_creates_biovault_dir() {
+        let temp_dir = TempDir::new().unwrap();
+        let biovault_path = temp_dir.path().join(".biovault");
+        crate::config::set_test_biovault_home(biovault_path.clone());
+
+        // Directory shouldn't exist initially
+        assert!(!biovault_path.exists());
+
+        // Execute init
+        let result = execute(Some("test@example.com"), false).await;
+        assert!(result.is_ok());
+
+        // Directory should now exist
+        assert!(biovault_path.exists());
+
+        crate::config::clear_test_biovault_home();
+    }
+
+    #[tokio::test]
+    async fn test_execute_no_email_non_tty() {
+        let temp_dir = TempDir::new().unwrap();
+        crate::config::set_test_biovault_home(temp_dir.path().join(".biovault"));
+
+        // Make sure SYFTBOX_EMAIL is not set
+        env::remove_var("SYFTBOX_EMAIL");
+
+        // In non-TTY mode (like CI), this should error without email
+        // Note: we can't easily control TTY state in tests
+        // The actual behavior depends on the test environment
+
+        crate::config::clear_test_biovault_home();
+    }
 }

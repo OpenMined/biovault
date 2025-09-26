@@ -1,5 +1,6 @@
 use super::check::DependencyConfig;
 use crate::Result;
+use anyhow::anyhow;
 use std::env;
 use std::process::{Command, Stdio};
 
@@ -416,6 +417,7 @@ async fn setup_macos() -> Result<()> {
     if fail_count > 0 {
         println!("  ❌ Failed: {}", fail_count);
         println!("\n⚠️  Some installations failed. Please check the errors above.");
+        return Err(anyhow!("Some installations failed").into());
     } else {
         println!(
             "\n✅ Setup completed successfully!\n   Run 'bv check' to verify all dependencies."
@@ -620,6 +622,7 @@ async fn setup_ubuntu() -> Result<()> {
     if fail_count > 0 {
         println!("  ❌ Failed: {}", fail_count);
         println!("\n⚠️  Some installations failed. Please check the errors above.");
+        return Err(anyhow!("Some installations failed").into());
     } else {
         println!(
             "\n✅ Setup completed successfully!\n   Run 'bv check' to verify all dependencies."
@@ -770,6 +773,7 @@ async fn setup_arch() -> Result<()> {
     if fail_count > 0 {
         println!("  ❌ Failed: {}", fail_count);
         println!("\n⚠️  Some installations failed. Please check the errors above.");
+        return Err(anyhow!("Some installations failed").into());
     } else {
         println!(
             "\n✅ Setup completed successfully!\n   Run 'bv check' to verify all dependencies."
@@ -791,19 +795,30 @@ async fn setup_windows() -> Result<()> {
         .map(|s| s.success())
         .unwrap_or(false);
 
-    if !winget_exists {
-        println!("❌ WinGet (Windows Package Manager) not found.");
-        println!("WinGet is required for automated Windows installation.");
+    // Check for Chocolatey availability (fallback)
+    let choco_exists = Command::new("choco")
+        .arg("-v")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+
+    if winget_exists {
+        println!("✓ WinGet found");
+    } else if choco_exists {
+        println!("❌ WinGet not found. Using Chocolatey fallback.");
+    } else {
+        println!("❌ Neither WinGet nor Chocolatey found.");
+        println!("Automated installation is unavailable on this system.");
         println!("\nTo install WinGet:");
         println!("1. Update Windows to the latest version (WinGet comes with modern Windows)");
         println!("2. Or install from Microsoft Store: 'App Installer'");
         println!("3. Or download from: https://github.com/microsoft/winget-cli/releases");
-        println!("\nAfter installing WinGet, re-run: bv setup");
+        println!("\nAlternatively, install Chocolatey from https://chocolatey.org/install");
         print_windows_manual_instructions();
         return Ok(());
     }
-
-    println!("✓ WinGet found");
 
     let deps_yaml = include_str!("../../deps.yaml");
     let config: DependencyConfig = serde_yaml::from_str(deps_yaml)?;
@@ -870,9 +885,27 @@ async fn setup_windows() -> Result<()> {
                     for cmd in install_commands {
                         println!("   Running: {}", cmd);
                         let status = if cmd.starts_with("winget") {
-                            Command::new("winget")
-                                .args(cmd.split_whitespace().skip(1))
-                                .status()
+                            if winget_exists {
+                                Command::new("winget")
+                                    .args(cmd.split_whitespace().skip(1))
+                                    .status()
+                            } else {
+                                // Chocolatey fallback for common packages
+                                let mut parts = cmd.split_whitespace();
+                                let _ = parts.next(); // winget
+                                let _ = parts.next(); // install
+                                let pkg = parts.next().unwrap_or("");
+                                let choco_pkg = map_winget_pkg_to_choco(pkg);
+                                if choco_pkg.is_empty() {
+                                    Err(std::io::Error::other("No Chocolatey mapping for package"))
+                                } else {
+                                    Command::new("choco")
+                                        .arg("install")
+                                        .arg(choco_pkg)
+                                        .arg("-y")
+                                        .status()
+                                }
+                            }
                         } else {
                             Command::new("powershell").arg("-Command").arg(cmd).status()
                         };
@@ -933,6 +966,7 @@ async fn setup_windows() -> Result<()> {
     if fail_count > 0 {
         println!("  ❌ Failed: {}", fail_count);
         println!("\n⚠️  Some installations failed. Please check the errors above.");
+        return Err(anyhow!("Some installations failed").into());
     } else {
         println!(
             "\n✅ Setup completed successfully!\n   Run 'bv check' to verify all dependencies."
@@ -952,4 +986,163 @@ fn print_windows_manual_instructions() {
     );
     println!("Nextflow: Download from https://www.nextflow.io/ or use PowerShell script");
     println!("SyftBox: Download from https://github.com/OpenMined/syftbox/releases/latest");
+}
+
+// Map common WinGet package IDs to Chocolatey package names for fallback
+fn map_winget_pkg_to_choco(pkg: &str) -> &'static str {
+    match pkg.to_ascii_lowercase().as_str() {
+        // Java/OpenJDK
+        // WinGet: Microsoft.OpenJDK => Chocolatey: openjdk (generic)
+        "microsoft.openjdk" => "openjdk",
+        // Add other mappings here as needed
+        _ => "",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn java_parse_various_formats() {
+        let cases = [
+            ("openjdk version \"17.0.2\" 2022-01-18", Some(17)),
+            ("java version \"1.8.0_321\"", Some(8)),
+            ("openjdk version \"11.0.14\" 2022-01-18", Some(11)),
+            ("java version \"21\"", Some(21)),
+            ("garbage", None),
+        ];
+        for (s, want) in cases {
+            assert_eq!(parse_java_version(s), want);
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn google_colab_detection_via_env() {
+        // Ensure variable not set
+        std::env::remove_var("COLAB_RELEASE_TAG");
+        for (k, _) in std::env::vars() {
+            if k.starts_with("COLAB_") {
+                std::env::remove_var(k);
+            }
+        }
+        assert!(!is_google_colab());
+        // Set specific var and detect
+        std::env::set_var("COLAB_RELEASE_TAG", "test");
+        assert!(is_google_colab());
+        std::env::remove_var("COLAB_RELEASE_TAG");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn detect_system_prefers_colab_env() {
+        // Force Colab-like environment
+        std::env::set_var("COLAB_RELEASE_TAG", "1");
+        match detect_system() {
+            SystemType::GoogleColab => {}
+            other => panic!("expected GoogleColab, got {:?}", other),
+        }
+        std::env::remove_var("COLAB_RELEASE_TAG");
+    }
+
+    #[test]
+    fn print_syftbox_instructions_runs() {
+        // Just ensure it doesn't panic; covers simple printing logic
+        super::print_syftbox_instructions();
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn is_google_colab_detects_prefix_env() {
+        std::env::remove_var("COLAB_RELEASE_TAG");
+        std::env::set_var("COLAB_FOO", "1");
+        assert!(super::is_google_colab());
+        std::env::remove_var("COLAB_FOO");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    #[cfg(target_os = "macos")]
+    fn detect_system_reports_macos_on_macos() {
+        // Ensure no COLAB_* noise affects detection
+        std::env::remove_var("COLAB_RELEASE_TAG");
+        let keys: Vec<String> = std::env::vars()
+            .filter(|(k, _)| k.starts_with("COLAB_"))
+            .map(|(k, _)| k)
+            .collect();
+        for k in keys {
+            std::env::remove_var(k);
+        }
+        match super::detect_system() {
+            super::SystemType::MacOs => {}
+            other => panic!("expected MacOs, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    #[cfg(target_os = "macos")]
+    async fn setup_ubuntu_returns_ok_when_apt_missing() {
+        super::setup_ubuntu().await.unwrap();
+    }
+
+    #[tokio::test]
+    #[cfg(target_os = "macos")]
+    async fn setup_arch_returns_ok_when_pacman_missing() {
+        super::setup_arch().await.unwrap();
+    }
+
+    #[test]
+    fn winget_to_choco_mapping() {
+        assert_eq!(
+            super::map_winget_pkg_to_choco("Microsoft.OpenJDK"),
+            "openjdk"
+        );
+        // Unknown returns empty mapping
+        assert_eq!(super::map_winget_pkg_to_choco("Unknown.Package"), "");
+    }
+
+    #[tokio::test]
+    #[cfg_attr(not(feature = "slow-tests"), ignore = "slow env-setup path")]
+    async fn setup_google_colab_runs_without_panic() {
+        super::setup_google_colab().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn setup_macos_returns_ok_without_brew() {
+        // Only run when brew is not available; otherwise skip to avoid invoking installs
+        let brew_exists = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("command -v brew >/dev/null 2>&1")
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !brew_exists {
+            super::setup_macos().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    #[cfg(target_os = "windows")]
+    #[cfg_attr(
+        not(feature = "e2e-tests"),
+        ignore = "runs installer commands; e2e-only"
+    )]
+    async fn setup_windows_returns_ok_when_tools_missing() {
+        super::setup_windows().await.unwrap();
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    #[cfg_attr(not(feature = "slow-tests"), ignore = "slow env-setup path")]
+    async fn setup_execute_colab_branch() {
+        std::env::set_var("COLAB_RELEASE_TAG", "1");
+        super::execute().await.unwrap();
+        std::env::remove_var("COLAB_RELEASE_TAG");
+    }
+
+    #[test]
+    fn print_windows_manual_instructions_runs() {
+        super::print_windows_manual_instructions();
+    }
 }

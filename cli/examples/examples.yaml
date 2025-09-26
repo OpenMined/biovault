@@ -36,3 +36,25 @@ examples:
       - project.yaml
       - workflow.nf
       - assets/count_number_of_snps.py
+
+  sheet-add:
+    name: "Sheet Add"
+    description: "Add derived columns to participant data"
+    template: sheet
+    files:
+      - project.yaml
+      - workflow.nf
+      - assets/schema.yaml
+      - participants.csv
+
+  apol1-sheet:
+    name: "APOL1 Sheet Analysis"
+    description: "Analyze APOL1 genotypes and add derived columns to participant data"
+    template: sheet
+    files:
+      - project.yaml
+      - workflow.nf
+      - assets/schema.yaml
+      - assets/apol1_classifier.py
+      - participants.csv
+      - apol1_test_data.py

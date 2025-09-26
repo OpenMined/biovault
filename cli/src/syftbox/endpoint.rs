@@ -156,6 +156,7 @@ impl Endpoint {
 mod tests {
     use super::*;
     use crate::syftbox::types::RpcRequest;
+    use base64::Engine as _;
     use tempfile::TempDir;
 
     #[test]
@@ -186,7 +187,8 @@ mod tests {
             req,
             "test@example.com".to_string(),
             &serde_json::json!({"reply": "Hi!"}),
-        )?;
+        )
+        .expect("ok_json");
 
         endpoint.send_response(req_path, &response)?;
 
@@ -195,6 +197,105 @@ mod tests {
 
         let responses = endpoint.check_responses()?;
         assert_eq!(responses.len(), 1);
+
+        Ok(())
+    }
+
+    #[test]
+    fn malformed_request_and_response_cleanup_and_error_paths() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let app = SyftBoxApp::new(temp_dir.path(), "test@example.com", "test_app")?;
+        let endpoint = Endpoint::new(&app, "/message")?;
+
+        // 1) Malformed request file should be skipped without panic
+        let bad_req_path = endpoint.path.join("bad.request");
+        std::fs::write(&bad_req_path, "{not json}")?;
+        let reqs = endpoint.check_requests()?;
+        assert!(reqs.is_empty());
+
+        // Also a directory named *.request triggers read error path
+        let dir_req_path = endpoint.path.join("dir.request");
+        std::fs::create_dir_all(&dir_req_path)?;
+        let reqs2 = endpoint.check_requests()?;
+        assert!(reqs2.is_empty());
+
+        // 2) Create a valid response file and then cleanup
+        let req = RpcRequest::new(
+            "sender@example.com".to_string(),
+            app.build_syft_url("/message"),
+            "POST".to_string(),
+            b"Hello".to_vec(),
+        );
+        // Write a minimal response JSON with required fields
+        let resp_path = endpoint.path.join(format!("{}.response", req.id));
+        std::fs::write(
+            &resp_path,
+            serde_json::json!({
+                "id": req.id,
+                "sender": "r@example.com",
+                "url": req.url,
+                "headers": {},
+                "created": chrono::Utc::now().to_rfc3339(),
+                "expires": chrono::Utc::now().to_rfc3339(),
+                "status_code": 200,
+                "body": base64::engine::general_purpose::STANDARD.encode(b"{}"),
+            })
+            .to_string(),
+        )?;
+
+        let resps = endpoint.check_responses()?;
+        assert_eq!(resps.len(), 1);
+        let (resp_file, _resp) = &resps[0];
+        endpoint.cleanup_response(resp_file)?;
+        assert!(!resp_file.exists());
+
+        // 3) Invalid response JSON should be skipped
+        let bad_resp_path = endpoint.path.join("oops.response");
+        std::fs::write(&bad_resp_path, "not json")?;
+        let resps2 = endpoint.check_responses()?;
+        // It should skip invalid file and not error
+        assert!(resps2.is_empty());
+
+        // 5) Early-return branches when endpoint directory is missing
+        // Remove the endpoint directory and ensure both checks return empty
+        std::fs::remove_dir_all(&endpoint.path)?;
+        let none_reqs = endpoint.check_requests()?;
+        let none_resps = endpoint.check_responses()?;
+        assert!(none_reqs.is_empty());
+        assert!(none_resps.is_empty());
+
+        // 6) Unrelated extension files are ignored
+        std::fs::create_dir_all(&endpoint.path)?;
+        std::fs::write(endpoint.path.join("note.txt"), b"ignore")?;
+        let ig_reqs = endpoint.check_requests()?;
+        let ig_resps = endpoint.check_responses()?;
+        assert!(ig_reqs.is_empty());
+        assert!(ig_resps.is_empty());
+
+        // 4) send_response with invalid request path should return error
+        let bogus = std::path::Path::new("");
+        let ok_resp =
+            crate::syftbox::types::RpcResponse::error(&req, "r@example.com".into(), 500, "err");
+        assert!(endpoint.send_response(bogus, &ok_resp).is_err());
+
+        // 7) send_response with directory-as-request should fail on remove_file
+        let dir_as_req = endpoint.path.join("dirlike.request");
+        std::fs::create_dir_all(&dir_as_req)?;
+        // This will succeed writing response but fail deleting the dir
+        let result = endpoint.send_response(&dir_as_req, &ok_resp);
+        assert!(result.is_err());
+
+        // 8) create_request fails when a directory with same name exists
+        let clash = RpcRequest::new(
+            "sender@example.com".to_string(),
+            app.build_syft_url("/message"),
+            "POST".to_string(),
+            b"Hi".to_vec(),
+        );
+        let clash_dir = endpoint.path.join(format!("{}.request", clash.id));
+        std::fs::create_dir_all(&clash_dir)?;
+        let create_err = endpoint.create_request(&clash);
+        assert!(create_err.is_err());
 
         Ok(())
     }

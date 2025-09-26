@@ -118,7 +118,7 @@ For this tutorial, we'll work with a 23andMe genome file format. This is a simpl
 
 Let's copy the count-snps example which includes a sample 23andMe genome file:
 ```bash
-# TODO: ADD EXAMPLE DATA DOWNLOAD
+bv sample-data fetch 23andme
 ```
 
 This copies:
@@ -181,7 +181,7 @@ The workflow will:
 ## Step 8: Run Your First Analysis
 Now let's run the SNP counting analysis on our 23andMe genome file:
 ```bash
-bv run ./count-snps genome_23andMe_v4_Full.txt
+bv run ./count-snps 23andme
 ```
 
 This command tells BioVault to:

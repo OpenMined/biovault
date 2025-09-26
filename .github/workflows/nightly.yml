@@ -4,7 +4,7 @@ on:
   schedule:
     # Run at 2 AM UTC every day
     - cron: '0 2 * * *'
-  # Allow manual trigger for testing
+  # Allow manual trigger for testing with per-platform toggles
   workflow_dispatch:
     inputs:
       run_colab_test:
@@ -12,38 +12,106 @@ on:
         required: false
         default: true
         type: boolean
-      run_os_tests:
-        description: 'Run OS-specific installation tests'
+      run_linux_test:
+        description: 'Run Linux install test (Ubuntu)'
+        required: false
+        default: true
+        type: boolean
+      run_macos_test:
+        description: 'Run macOS install test'
+        required: false
+        default: true
+        type: boolean
+      run_windows_test:
+        description: 'Run Windows install test'
         required: false
         default: true
         type: boolean
 
 jobs:
   colab-test:
-    name: Google Colab Environment Test
+    name: Setup Test - Colab
     if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.run_colab_test) }}
-    uses: ./.github/workflows/reusable-colab-test.yml
-    with:
-      event_name: ${{ github.event_name }}
+    runs-on: ubuntu-latest
 
-  os-installation-test:
-    name: OS Installation Test - ${{ matrix.os }}
-    if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.run_os_tests) }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            name: Ubuntu
-            test_script: test_ubuntu_install.sh
-          - os: macos-latest
-            name: macOS
-            test_script: test_macos_install.sh
-          - os: windows-latest
-            name: Windows
-            test_script: test_windows_install.ps1
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
 
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Set up local BuildKit cache only
+      - name: Set up Docker cache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/.buildx-cache
+          key: ${{ runner.os }}-buildx-colab-${{ hashFiles('tests/docker/Dockerfile') }}
+          restore-keys: |
+            ${{ runner.os }}-buildx-colab-
+
+      - name: Display environment
+        run: |
+          echo "Event: ${{ github.event_name }}"
+          echo "Runner: ${{ runner.os }} / ${{ runner.arch }}"
+          echo "Architecture: $(uname -m)"
+          echo "Docker version: $(docker --version)"
+
+      # Build with local caching only
+      - name: Build Docker image with cache
+        uses: docker/build-push-action@v6
+        with:
+          context: tests/docker
+          file: tests/docker/Dockerfile
+          tags: biovault-colab-test:latest
+          load: true  # Load into local Docker daemon for testing
+          cache-from: type=local,src=/tmp/.buildx-cache
+          cache-to: type=local,dest=/tmp/.buildx-cache-new,mode=max
+          push: false  # Don't push the test image
+
+      # Move cache to avoid growing indefinitely
+      - name: Move cache
+        run: |
+          rm -rf /tmp/.buildx-cache
+          mv /tmp/.buildx-cache-new /tmp/.buildx-cache || true
+
+      - name: Run Colab environment test
+        run: |
+          cd tests/docker
+          chmod +x test_colab_install.sh
+          # Use the locally built image
+          export DOCKER_IMAGE_NAME="biovault-colab-test:latest"
+          ./test_colab_install.sh
+        env:
+          CI: true
+          GITHUB_ACTIONS: true
+        timeout-minutes: 30
+
+      - name: Report success
+        if: success()
+        run: |
+          echo "✅ Colab environment test passed"
+
+      - name: Upload test logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: colab-test-logs-${{ github.run_id }}
+          path: |
+            tests/docker/*.log
+            /tmp/colab-test-*.log
+          retention-days: 7
+
+      - name: Report failure
+        if: failure()
+        run: |
+          echo "❌ Colab environment test failed"
+          exit 1
+
+  linux-installation-test:
+    name: Setup Test - Ubuntu
+    if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.run_linux_test) }}
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -57,22 +125,11 @@ jobs:
           echo "Installed bv to: $(which bv)"
           bv --version
 
-      - name: Run OS-specific installation test (Unix)
-        if: matrix.os != 'windows-latest'
+      - name: Run Ubuntu installation test
         run: |
           cd tests/os
-          chmod +x ${{ matrix.test_script }}
-          ./${{ matrix.test_script }}
-        env:
-          CI: true
-          GITHUB_ACTIONS: true
-
-      - name: Run OS-specific installation test (Windows)
-        if: matrix.os == 'windows-latest'
-        shell: powershell
-        run: |
-          cd tests/os
-          ./${{ matrix.test_script }}
+          chmod +x test_ubuntu_install.sh
+          ./test_ubuntu_install.sh
         env:
           CI: true
           GITHUB_ACTIONS: true
@@ -81,8 +138,82 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.name }}-test-logs-${{ github.run_id }}
+          name: Ubuntu-test-logs-${{ github.run_id }}
           path: |
             tests/os/*.log
             /tmp/bv-test-*.log
           retention-days: 7
+
+  macos-installation-test:
+    name: Setup Test - macOS
+    if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.run_macos_test) }}
+    runs-on: macos-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install BioVault CLI
+        run: |
+          cargo install --path cli --force
+          echo "Installed bv to: $(which bv)"
+          bv --version
+
+      - name: Run macOS installation test
+        run: |
+          cd tests/os
+          chmod +x test_macos_install.sh
+          ./test_macos_install.sh
+        env:
+          CI: true
+          GITHUB_ACTIONS: true
+
+      - name: Upload test logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macOS-test-logs-${{ github.run_id }}
+          path: |
+            tests/os/*.log
+            /tmp/bv-test-*.log
+          retention-days: 7
+
+  windows-installation-test:
+    name: Setup Test - Windows
+    if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.run_windows_test) }}
+    runs-on: windows-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install BioVault CLI
+        shell: bash
+        run: |
+          cargo install --path cli --force
+          echo "Installed bv to: $(which bv || where bv)"
+          bv --version
+
+      - name: Run Windows installation test
+        shell: pwsh
+        run: |
+          cd tests/os
+          ./test_windows_install.ps1
+        env:
+          CI: true
+          GITHUB_ACTIONS: true
+
+      - name: Upload test logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Windows-test-logs-${{ github.run_id }}
+          path: |
+            tests\os\*.log
+          retention-days: 7
+
+  
