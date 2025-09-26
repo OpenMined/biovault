@@ -3,6 +3,7 @@ use crate::messages::{MessageDb, MessageType};
 use anyhow::Result;
 use dialoguer::{theme::ColorfulTheme, Select};
 use std::io::Read;
+use std::time::{Duration, Instant};
 
 /// Expand environment variables in text (specifically $SYFTBOX_DATA_DIR)
 fn expand_env_vars_in_text(text: &str) -> Result<String> {
@@ -62,6 +63,68 @@ fn read_key() -> Result<Key> {
             Ok(Key::Esc)
         }
         b => Ok(Key::Char(b as char)),
+    }
+}
+
+fn read_key_with_timeout(_timeout_ms: u64) -> Result<Option<Key>> {
+    // Unix-specific non-blocking I/O
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        use std::sync::mpsc;
+        use std::thread;
+
+        // Set stdin to non-blocking mode temporarily
+        let stdin_fd = io::stdin().as_raw_fd();
+        let flags = unsafe { libc::fcntl(stdin_fd, libc::F_GETFL, 0) };
+        if flags < 0 {
+            return Ok(None);
+        }
+
+        // Set non-blocking
+        unsafe {
+            libc::fcntl(stdin_fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+        }
+
+        let (tx, rx) = mpsc::channel();
+
+        thread::spawn(move || {
+            // Try to read with timeout
+            let start = std::time::Instant::now();
+            while start.elapsed().as_millis() < _timeout_ms as u128 {
+                if let Ok(key) = read_key() {
+                    let _ = tx.send(key);
+                    break;
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+        });
+
+        let result = match rx.recv_timeout(Duration::from_millis(_timeout_ms)) {
+            Ok(key) => Ok(Some(key)),
+            Err(mpsc::RecvTimeoutError::Timeout) => Ok(None),
+            Err(mpsc::RecvTimeoutError::Disconnected) => Ok(None),
+        };
+
+        // Restore blocking mode
+        unsafe {
+            libc::fcntl(stdin_fd, libc::F_SETFL, flags);
+        }
+
+        result
+    }
+
+    // Windows doesn't support non-blocking stdin easily, so we'll use a simpler approach
+    #[cfg(windows)]
+    {
+        // On Windows, we'll just do a blocking read since auto-refresh isn't critical
+        // The daemon functionality itself is Linux-only anyway
+        read_key().map(Some)
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        Ok(None)
     }
 }
 use std::io::{self, Write};
@@ -176,15 +239,23 @@ pub async fn interactive(config: &Config, initial_view: Option<String>) -> Resul
     let db_path = super::messages::get_message_db_path(config)?;
     let db = MessageDb::new(&db_path)?;
 
-    // Sync messages first
-    let sync = super::messages::init_message_system(config)?.1;
-    let _ = sync.sync_quiet();
+    // Check if daemon is running - if so, don't sync manually
+    let daemon_running = super::daemon::is_daemon_running(config).unwrap_or(false);
+    if !daemon_running {
+        // Sync messages first only if daemon is not running
+        let sync = super::messages::init_message_system(config)?.1;
+        let _ = sync.sync_quiet();
+    }
 
     let mut current_view = initial_view.unwrap_or_else(|| "inbox".to_string());
 
     // Use raw mode and a simple key-driven UI (via stty)
     enable_raw_mode_cmd()?;
     let mut selected: usize = 0; // index into current messages; extra index for Quit
+    let mut last_refresh = Instant::now();
+    let mut last_message_count = 0;
+    let refresh_interval = Duration::from_secs(5); // Refresh every 5 seconds when daemon is active
+
     loop {
         // Load messages for current view
         let messages = match current_view.as_str() {
@@ -196,6 +267,14 @@ pub async fn interactive(config: &Config, initial_view: Option<String>) -> Resul
             _ => db.list_inbox_messages(Some(200))?,
         };
 
+        // Check if new messages arrived (for notification)
+        let new_messages_arrived = messages.len() > last_message_count && last_message_count > 0;
+        if new_messages_arrived && daemon_running {
+            // Reset selection to top to highlight new messages
+            selected = 0;
+        }
+        last_message_count = messages.len();
+
         // Bound selection to range [0 .. messages.len()] where last is Quit
         if selected > messages.len() {
             selected = messages.len();
@@ -206,10 +285,26 @@ pub async fn interactive(config: &Config, initial_view: Option<String>) -> Resul
         io::stdout().flush()?;
         println!("======================================================");
         println!(
-            "BioVault Inbox - {} ({} messages)",
+            "BioVault Inbox - {} ({} messages){}",
             current_view.to_uppercase(),
-            messages.len()
+            messages.len(),
+            if new_messages_arrived && daemon_running {
+                " 🆕"
+            } else {
+                ""
+            }
         );
+
+        // Show daemon status with auto-refresh indicator
+        let daemon_status = if daemon_running {
+            let time_since_refresh = Instant::now().duration_since(last_refresh);
+            let refresh_countdown = refresh_interval.as_secs()
+                - time_since_refresh.as_secs().min(refresh_interval.as_secs());
+            format!("🤖 Daemon: ACTIVE | Auto-refresh in {}s", refresh_countdown)
+        } else {
+            "⚠️  Daemon: STOPPED".to_string()
+        };
+        println!("Status: {}", daemon_status);
         println!("======================================================");
         println!("(Press '?' for shortcuts)");
         println!("------------------------------------------------------");
@@ -251,8 +346,35 @@ pub async fn interactive(config: &Config, initial_view: Option<String>) -> Resul
             if selected == messages.len() { ">" } else { " " }
         );
 
-        // Wait for a key event
-        match read_key()? {
+        // Wait for a key event (with auto-refresh if daemon is running)
+        let key_opt = if daemon_running {
+            // Check if it's time to refresh
+            if Instant::now().duration_since(last_refresh) >= refresh_interval {
+                last_refresh = Instant::now();
+                // Force a refresh by continuing the loop
+                read_key_with_timeout(100)?
+            } else {
+                // Poll for key with short timeout
+                read_key_with_timeout(500)?
+            }
+        } else {
+            // Blocking read when daemon is not running
+            Some(read_key()?)
+        };
+
+        // If no key was pressed and daemon is running, continue loop for refresh
+        let key = match key_opt {
+            Some(k) => k,
+            None => {
+                if daemon_running {
+                    continue; // This will reload messages and refresh the display
+                } else {
+                    continue;
+                }
+            }
+        };
+
+        match key {
             Key::Char('q') | Key::Esc => {
                 disable_raw_mode_cmd()?;
                 break;
@@ -270,9 +392,16 @@ pub async fn interactive(config: &Config, initial_view: Option<String>) -> Resul
             }
             Key::Char('s') | Key::Char('S') => {
                 disable_raw_mode_cmd()?;
-                println!("\nSyncing messages...");
-                let _ = sync.sync();
-                println!("Sync complete. Press Enter...");
+                if !daemon_running {
+                    println!("\nSyncing messages...");
+                    let sync = super::messages::init_message_system(config)?.1;
+                    let _ = sync.sync();
+                    println!("Sync complete. Press Enter...");
+                } else {
+                    println!(
+                        "\n⚠️  Daemon is running - sync happens automatically. Press Enter..."
+                    );
+                }
                 let mut t = String::new();
                 io::stdin().read_line(&mut t).ok();
                 enable_raw_mode_cmd()?;

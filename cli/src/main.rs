@@ -213,6 +213,27 @@ enum Commands {
         command: SamplesheetCommands,
     },
 
+    #[command(about = "Manage the BioVault daemon")]
+    Daemon {
+        #[command(subcommand)]
+        command: DaemonCommands,
+    },
+
+    #[command(about = "Start the BioVault daemon for automatic message processing")]
+    Start {
+        #[arg(long, help = "Run daemon in foreground (no background)")]
+        foreground: bool,
+    },
+
+    #[command(about = "View daemon logs")]
+    Logs {
+        #[arg(short, long, help = "Follow log output (tail -f)")]
+        follow: bool,
+
+        #[arg(short, long, help = "Number of lines to show")]
+        lines: Option<usize>,
+    },
+
     #[command(
         name = "hard-reset",
         about = "Delete all BioVault data and configuration (DESTRUCTIVE)"
@@ -221,6 +242,21 @@ enum Commands {
         #[arg(long, help = "Skip confirmation prompts (use with caution)")]
         ignore_warning: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum DaemonCommands {
+    #[command(about = "Install daemon as a systemd service (Linux only)")]
+    Install,
+
+    #[command(about = "Uninstall daemon systemd service")]
+    Uninstall,
+
+    #[command(about = "Check daemon service status")]
+    Status,
+
+    #[command(about = "Stop the running daemon")]
+    Stop,
 }
 
 #[derive(Subcommand)]
@@ -773,6 +809,31 @@ async fn main() -> Result<()> {
                 .await?;
             }
         },
+        Commands::Daemon { command } => {
+            let config = biovault::config::Config::load()?;
+            match command {
+                DaemonCommands::Install => {
+                    commands::daemon::install_service(&config).await?;
+                }
+                DaemonCommands::Uninstall => {
+                    commands::daemon::uninstall_service(&config).await?;
+                }
+                DaemonCommands::Status => {
+                    commands::daemon::service_status(&config).await?;
+                }
+                DaemonCommands::Stop => {
+                    commands::daemon::stop(&config).await?;
+                }
+            }
+        }
+        Commands::Start { foreground } => {
+            let config = biovault::config::Config::load()?;
+            commands::daemon::start(&config, foreground).await?;
+        }
+        Commands::Logs { follow, lines } => {
+            let config = biovault::config::Config::load()?;
+            commands::daemon::logs(&config, follow, lines).await?;
+        }
         Commands::HardReset { ignore_warning } => {
             commands::hard_reset::execute(ignore_warning).await?;
         }
