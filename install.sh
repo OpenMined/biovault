@@ -187,29 +187,192 @@ install_biovault() {
 
 # Verify installation
 verify_installation() {
+    local install_dir="$1"
+
+    # Check if binary exists in install dir
+    if [[ ! -f "${install_dir}/bv" ]]; then
+        print_error "Installation failed. Binary not found at ${install_dir}/bv"
+        return 1
+    fi
+
+    # Check if bv is directly available in current session
     if command -v bv >/dev/null 2>&1; then
         local installed_version
         installed_version=$(bv --version 2>/dev/null | head -1 || echo "unknown")
         print_success "Installation verified: ${installed_version}"
-        print_status "You can now use 'bv' command!"
         print_status ""
-        print_status "Quick start:"
-        print_status "  bv --help         # Show all available options"
+        print_status "🎉 BioVault is ready to use!"
+        print_status ""
+        print_status "Next steps:"
+        print_status "  bv check          # Check system dependencies"
+        print_status "  bv setup          # Install missing dependencies"
         print_status "  bv init <email>   # Initialize BioVault"
-        print_status "  bv info           # Show system information"
         print_status ""
         print_status "For more information, run: bv --help"
+        return 0
     else
-        print_error "Installation verification failed. bv command not found in PATH."
-        print_warning "You may need to restart your shell or update your PATH."
-        return 1
+        # Binary exists but not in PATH yet
+        print_status "bv was installed to ${install_dir}"
+        print_status ""
+        configure_shell_path "${install_dir}"
+
+        # After configuring, check again if it's available now
+        if command -v bv >/dev/null 2>&1; then
+            local installed_version
+            installed_version=$(bv --version 2>/dev/null | head -1 || echo "unknown")
+            print_success "Installation verified: ${installed_version}"
+            print_status ""
+            print_status "🎉 BioVault is ready to use!"
+            print_status ""
+            print_status "Next steps:"
+            print_status "  bv check          # Check system dependencies"
+            print_status "  bv setup          # Install missing dependencies"
+            print_status "  bv init <email>   # Initialize BioVault"
+        fi
+        return 0
+    fi
+}
+
+# Detect user's shell
+detect_shell() {
+    local shell_name=""
+    if [[ -n "$SHELL" ]]; then
+        shell_name=$(basename "$SHELL")
+    fi
+
+    # Fallback detection
+    if [[ -z "$shell_name" ]]; then
+        if [[ -f "/etc/passwd" ]]; then
+            shell_name=$(grep "^$(whoami):" /etc/passwd | cut -d: -f7 | xargs basename)
+        fi
+    fi
+
+    echo "${shell_name:-bash}"
+}
+
+# Get shell config file
+get_shell_config() {
+    local shell_name="$1"
+    local config_file=""
+
+    case "$shell_name" in
+        zsh)
+            config_file="$HOME/.zshrc"
+            ;;
+        bash)
+            # On macOS, use .bash_profile for login shells
+            if [[ "$(uname)" == "Darwin" ]]; then
+                config_file="$HOME/.bash_profile"
+            else
+                config_file="$HOME/.bashrc"
+            fi
+            ;;
+        fish)
+            config_file="$HOME/.config/fish/config.fish"
+            ;;
+        *)
+            config_file="$HOME/.profile"
+            ;;
+    esac
+
+    echo "$config_file"
+}
+
+# Configure shell PATH
+configure_shell_path() {
+    local install_dir="$1"
+    local shell_name
+    local config_file
+
+    shell_name=$(detect_shell)
+    config_file=$(get_shell_config "$shell_name")
+
+    print_status "Detected shell: $shell_name"
+    print_status "Shell config file: $config_file"
+
+    # Check if we're in CI/non-interactive mode or piped install
+    local is_interactive=true
+    if [[ -n "$CI" ]] || [[ -n "$GITHUB_ACTIONS" ]] || [[ ! -t 0 ]]; then
+        is_interactive=false
+    fi
+
+    # For piped installs (curl | bash), we want to auto-configure
+    local should_configure=false
+
+    if [[ "$is_interactive" == "false" ]]; then
+        # In non-interactive mode, auto-configure for piped installs
+        if [[ -z "$CI" ]] && [[ -z "$GITHUB_ACTIONS" ]]; then
+            # This is a piped install (curl | bash), not CI
+            print_status "Auto-configuring PATH for piped installation..."
+            should_configure=true
+        else
+            # This is CI, just show instructions
+            print_status "Running in CI mode."
+            print_warning "Please add the following to your shell config manually:"
+            if [[ "$shell_name" == "fish" ]]; then
+                print_status "  set -gx PATH $install_dir \$PATH"
+            else
+                print_status "  export PATH=\"$install_dir:\$PATH\""
+            fi
+            return
+        fi
+    else
+        # Interactive mode - ask user
+        print_status ""
+        print_status "Would you like to automatically add $install_dir to your PATH? [Y/n]: "
+        read -r response
+        response=${response:-Y}
+        if [[ "$response" =~ ^[Yy] ]]; then
+            should_configure=true
+        fi
+    fi
+
+    if [[ "$should_configure" == "true" ]]; then
+        # Create config file if it doesn't exist
+        if [[ ! -f "$config_file" ]]; then
+            touch "$config_file"
+        fi
+
+        # Check if PATH update already exists
+        if grep -q "$install_dir" "$config_file" 2>/dev/null; then
+            print_status "PATH configuration already exists in $config_file"
+        else
+            # Add PATH configuration
+            echo "" >> "$config_file"
+            echo "# Added by BioVault installer on $(date)" >> "$config_file"
+
+            if [[ "$shell_name" == "fish" ]]; then
+                echo "set -gx PATH $install_dir \$PATH" >> "$config_file"
+            else
+                echo "export PATH=\"$install_dir:\$PATH\"" >> "$config_file"
+            fi
+
+            print_success "PATH configuration added to $config_file"
+        fi
+
+        # Export PATH for current session
+        export PATH="$install_dir:$PATH"
+        print_success "PATH updated for current session"
+
+        print_status ""
+        print_success "Installation complete! You can now run 'bv' commands."
+        print_status "Note: New terminal sessions will have 'bv' in PATH automatically."
+    else
+        print_status "Skipping PATH configuration."
+        print_status "To add manually, add the following to $config_file:"
+        if [[ "$shell_name" == "fish" ]]; then
+            print_status "  set -gx PATH $install_dir \$PATH"
+        else
+            print_status "  export PATH=\"$install_dir:\$PATH\""
+        fi
+        print_status "Then run: source $config_file"
     fi
 }
 
 # Check prerequisites
 check_prerequisites() {
     print_status "Checking prerequisites..."
-    
+
     # Currently no specific prerequisites required
     print_success "All prerequisites met!"
 }
@@ -275,44 +438,90 @@ main() {
         fi
         print_status "Using specified directory: $install_dir"
     else
-        # First, check system directories that are likely in PATH and writable
-        for dir in "/usr/local/bin" "/opt/bin"; do
-            if [[ ":$PATH:" == *":$dir:"* ]] && [[ -w "$dir" ]]; then
-                install_dir="$dir"
-                print_status "Using system directory: $install_dir (already in PATH)"
-                break
+        # First, try to find a writable directory that's already in PATH
+        local path_dirs
+        IFS=':' read -ra path_dirs <<< "$PATH"
+
+        # Priority 1: Check directories already in PATH that are writable
+        # Prefer user directories to avoid needing sudo
+        local checked_dirs=()
+
+        for dir in "${path_dirs[@]}"; do
+            # Skip empty entries and duplicates
+            [[ -z "$dir" ]] && continue
+            [[ " ${checked_dirs[@]} " =~ " ${dir} " ]] && continue
+            checked_dirs+=("$dir")
+
+            # Check if directory exists and is writable
+            if [[ -d "$dir" ]] && [[ -w "$dir" ]]; then
+                # Prefer user directories over system directories
+                if [[ "$dir" == "$HOME"* ]]; then
+                    install_dir="$dir"
+                    print_status "Found writable user directory in PATH: $install_dir"
+                    break
+                elif [[ -z "$install_dir" ]]; then
+                    # Keep system directory as fallback
+                    install_dir="$dir"
+                fi
             fi
         done
-        
-        # If no system directory is writable, check for user-writable directories in PATH
+
+        # If we found a system directory but not a user directory, use it
+        if [[ -n "$install_dir" ]] && [[ "$install_dir" != "$HOME"* ]]; then
+            print_status "Found writable system directory in PATH: $install_dir"
+        fi
+
+        # Priority 2: Check common general-purpose bin directories that might be in PATH
+        # Only use general bin directories, not package-manager-specific ones
         if [[ -z "$install_dir" ]]; then
-            for dir in "$HOME/.local/bin" "$HOME/bin" "$HOME/.cargo/bin"; do
+            local common_user_dirs=(
+                "$HOME/.local/bin"      # XDG standard (Linux/macOS)
+                "$HOME/bin"             # Traditional Unix user bin
+                "$HOME/.bin"            # Hidden user bin (some distros)
+            )
+
+            for dir in "${common_user_dirs[@]}"; do
+                # Check if it's already in PATH
                 if [[ ":$PATH:" == *":$dir:"* ]]; then
+                    # Create if needed (user directory)
                     if [[ ! -d "$dir" ]]; then
                         print_status "Creating directory: $dir"
                         mkdir -p "$dir"
                     fi
+                    # Check if writable
                     if [[ -w "$dir" ]]; then
                         install_dir="$dir"
-                        print_status "Using local directory: $install_dir (no sudo required)"
+                        print_status "Using existing PATH directory: $install_dir"
                         break
                     fi
                 fi
             done
         fi
+
+        # Priority 3: Try system directories if no user directory found
+        if [[ -z "$install_dir" ]]; then
+            local system_dirs=("/usr/local/bin" "/opt/bin")
+            for dir in "${system_dirs[@]}"; do
+                if [[ ":$PATH:" == *":$dir:"* ]] && [[ -d "$dir" ]] && [[ -w "$dir" ]]; then
+                    install_dir="$dir"
+                    print_status "Using system directory: $install_dir (already in PATH)"
+                    break
+                fi
+            done
+        fi
         
-        # If no directory in PATH is writable, try to use ~/.local/bin and add to PATH
+        # If no directory in PATH is writable, try to use ~/.local/bin
         if [[ -z "$install_dir" ]]; then
             install_dir="$HOME/.local/bin"
             if [[ ! -d "$install_dir" ]]; then
                 print_status "Creating local bin directory: $install_dir"
                 mkdir -p "$install_dir"
             fi
-            
+
+            # Note: We'll handle PATH configuration after installation
             if [[ ":$PATH:" != *":$install_dir:"* ]]; then
-                print_warning "Directory $install_dir is not in PATH"
-                print_status "Add the following to your shell config (.bashrc, .zshrc, etc.):"
-                print_status "  export PATH=\"\$HOME/.local/bin:\$PATH\""
+                print_warning "Directory $install_dir is not currently in PATH"
+                print_status "We'll help you configure this after installation."
             fi
         fi
         
@@ -325,9 +534,9 @@ main() {
     
     # Install biovault
     install_biovault "$platform" "$version" "$install_dir"
-    
+
     # Verify installation
-    verify_installation
+    verify_installation "$install_dir"
 }
 
 # Run main function

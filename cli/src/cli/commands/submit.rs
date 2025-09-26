@@ -8,6 +8,7 @@ use anyhow::Context;
 use chrono::Local;
 use dialoguer::{Confirm, Editor};
 use serde_json::json;
+use serde_yaml;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -40,6 +41,12 @@ pub async fn submit(
             "Invalid destination: must be either an email address or a syft:// URL"
         )));
     };
+
+    // Check if this is a self-submission (for testing)
+    let is_self_submission = datasite_email == config.email;
+    if is_self_submission {
+        println!("🧪 Self-submission detected (testing mode)");
+    }
 
     // Determine project directory
     let project_dir = PathBuf::from(&project_path);
@@ -181,7 +188,48 @@ pub async fn submit(
                 .to_string();
 
             if existing_hash == project_hash {
-                if !force {
+                // Check if we're submitting to a different recipient
+                let existing_permissions_path = submission_path.join("syft.pub.yaml");
+                if existing_permissions_path.exists() && datasite_email != config.email {
+                    println!(
+                        "📝 Updating submission with new recipient: {}",
+                        datasite_email
+                    );
+
+                    // Update permissions to include new recipient
+                    update_permissions_for_new_recipient(
+                        &existing_permissions_path,
+                        &datasite_email,
+                    )?;
+
+                    // Update project.yaml with new datasites
+                    let mut existing_project = ProjectYaml::from_file(&existing_project_yaml)?;
+                    if let Some(ref mut datasites) = existing_project.datasites {
+                        if !datasites.contains(&datasite_email) {
+                            datasites.push(datasite_email.clone());
+                        }
+                    } else {
+                        existing_project.datasites = Some(vec![datasite_email.clone()]);
+                    }
+
+                    // Handle participants from destination URL
+                    if let Some(new_participant) = participant_url.clone() {
+                        if let Some(ref mut participants) = existing_project.participants {
+                            if !participants.contains(&new_participant) {
+                                participants.push(new_participant);
+                            }
+                        } else {
+                            existing_project.participants = Some(vec![new_participant]);
+                        }
+                    }
+
+                    existing_project.save(&existing_project_yaml)?;
+
+                    println!("✓ Permissions updated for existing submission");
+                    println!("  Location: {}", submission_path.display());
+
+                    // Continue to send the message to the new recipient
+                } else if !force {
                     println!("⚠️  This exact project version has already been submitted.");
                     println!("   Location: {}", submission_path.display());
                     println!("   Hash: {}", short_hash);
@@ -253,11 +301,6 @@ pub async fn submit(
                 );
             }
         }
-
-        return Err(Error::from(anyhow::anyhow!(
-            "A submission with this name and date already exists but with different content: {}",
-            submission_path.display()
-        )));
     }
 
     // New submission - create and submit
@@ -344,7 +387,7 @@ fn create_and_submit_project(
     // Create permissions file
     let permissions = SyftPermissions::new_for_datasite(datasite_email);
     let permissions_path = submission_path.join("syft.pub.yaml");
-    permissions.save(&permissions_path)?;
+    permissions.save(&permissions_path)?
 
     println!("✓ Project submitted successfully!");
     println!("  Name: {}", project.name);
@@ -384,7 +427,12 @@ fn send_project_message(
         .unwrap_or(submission_path)
         .to_string_lossy()
         .to_string();
-    let submission_syft_url = format!("syft://{}/{}", config.email, rel_from_datasite);
+    let submission_syft_url = if is_self_submission {
+        // For self-submission, the URL should point to own datasite
+        format!("syft://{}/{}", config.email, rel_from_datasite)
+    } else {
+        format!("syft://{}/{}", config.email, rel_from_datasite)
+    };
 
     // Prepare default message body and allow user to override
     let default_body = "I would like to run the following project.".to_string();
@@ -447,6 +495,13 @@ fn send_project_message(
     msg.metadata = Some(metadata);
 
     db.insert_message(&msg)?;
+
+    if is_self_submission {
+        // For self-submission, write directly to our own inbox
+        println!("🧪 Writing message directly to own inbox for testing");
+        // The sync system will handle this correctly as a self-message
+    }
+
     // Try to send immediately; if offline, it will remain queued locally
     let _ = sync.send_message(&msg.id);
 
@@ -456,6 +511,38 @@ fn send_project_message(
     }
     println!("  Submission URL: {}", submission_syft_url);
 
+    Ok(())
+}
+
+fn update_permissions_for_new_recipient(
+    permissions_path: &Path,
+    new_recipient: &str,
+) -> Result<()> {
+    let yaml_content = fs::read_to_string(permissions_path).with_context(|| {
+        format!(
+            "Failed to read permissions file: {}",
+            permissions_path.display()
+        )
+    })?;
+
+    let mut permissions: SyftPermissions =
+        serde_yaml::from_str(&yaml_content).with_context(|| "Failed to parse permissions YAML")?;
+
+    // Add new recipient to all rules
+    for rule in &mut permissions.rules {
+        if !rule.access.read.contains(&new_recipient.to_string()) {
+            rule.access.read.push(new_recipient.to_string());
+        }
+
+        // For results pattern, also add write permission
+        if rule.pattern == "results/**/*" && !rule.access.write.contains(&new_recipient.to_string())
+        {
+            rule.access.write.push(new_recipient.to_string());
+        }
+    }
+
+    // Save updated permissions
+    permissions.save(&permissions_path.to_path_buf())?;
     Ok(())
 }
 
