@@ -134,11 +134,17 @@ mod hard_reset_tests {
     fn is_safe_test_path(path: &Path) -> bool {
         // Path must be in a temp directory or contain "test" or "tmp"
         let path_str = path.to_string_lossy().to_lowercase();
-        path_str.contains("/tmp/")
-            || path_str.contains("/temp/")
-            || path_str.contains("test")
-            || path_str.contains("tempfile")
-            || path_str.contains("/var/folders/") // macOS temp dirs
+
+        // Handle both forward and backslashes (Windows uses backslashes)
+        let normalized = path_str.replace('\\', "/");
+
+        normalized.contains("/tmp/")
+            || normalized.contains("/temp/")
+            || normalized.contains("test")
+            || normalized.contains("tempfile")
+            || normalized.contains("/var/folders/") // macOS temp dirs
+            || normalized.contains("appdata/local/temp") // Windows temp dirs
+            || path_str.contains(".tmp") // Rust tempfile crate pattern
     }
 
     fn delete_path_safely(path: &Path) -> Result<()> {
