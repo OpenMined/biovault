@@ -67,48 +67,66 @@ fn read_key() -> Result<Key> {
 }
 
 fn read_key_with_timeout(timeout_ms: u64) -> Result<Option<Key>> {
-    use std::os::unix::io::AsRawFd;
     use std::sync::mpsc;
     use std::thread;
 
-    // Set stdin to non-blocking mode temporarily
-    let stdin_fd = io::stdin().as_raw_fd();
-    let flags = unsafe { libc::fcntl(stdin_fd, libc::F_GETFL, 0) };
-    if flags < 0 {
-        return Ok(None);
-    }
+    // Unix-specific non-blocking I/O
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
 
-    // Set non-blocking
-    unsafe {
-        libc::fcntl(stdin_fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
-    }
-
-    let (tx, rx) = mpsc::channel();
-
-    thread::spawn(move || {
-        // Try to read with timeout
-        let start = std::time::Instant::now();
-        while start.elapsed().as_millis() < timeout_ms as u128 {
-            if let Ok(key) = read_key() {
-                let _ = tx.send(key);
-                break;
-            }
-            thread::sleep(Duration::from_millis(10));
+        // Set stdin to non-blocking mode temporarily
+        let stdin_fd = io::stdin().as_raw_fd();
+        let flags = unsafe { libc::fcntl(stdin_fd, libc::F_GETFL, 0) };
+        if flags < 0 {
+            return Ok(None);
         }
-    });
 
-    let result = match rx.recv_timeout(Duration::from_millis(timeout_ms)) {
-        Ok(key) => Ok(Some(key)),
-        Err(mpsc::RecvTimeoutError::Timeout) => Ok(None),
-        Err(mpsc::RecvTimeoutError::Disconnected) => Ok(None),
-    };
+        // Set non-blocking
+        unsafe {
+            libc::fcntl(stdin_fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+        }
 
-    // Restore blocking mode
-    unsafe {
-        libc::fcntl(stdin_fd, libc::F_SETFL, flags);
+        let (tx, rx) = mpsc::channel();
+
+        thread::spawn(move || {
+            // Try to read with timeout
+            let start = std::time::Instant::now();
+            while start.elapsed().as_millis() < timeout_ms as u128 {
+                if let Ok(key) = read_key() {
+                    let _ = tx.send(key);
+                    break;
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+        });
+
+        let result = match rx.recv_timeout(Duration::from_millis(timeout_ms)) {
+            Ok(key) => Ok(Some(key)),
+            Err(mpsc::RecvTimeoutError::Timeout) => Ok(None),
+            Err(mpsc::RecvTimeoutError::Disconnected) => Ok(None),
+        };
+
+        // Restore blocking mode
+        unsafe {
+            libc::fcntl(stdin_fd, libc::F_SETFL, flags);
+        }
+
+        result
     }
 
-    result
+    // Windows doesn't support non-blocking stdin easily, so we'll use a simpler approach
+    #[cfg(windows)]
+    {
+        // On Windows, we'll just do a blocking read since auto-refresh isn't critical
+        // The daemon functionality itself is Linux-only anyway
+        Some(read_key())
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        Ok(None)
+    }
 }
 use std::io::{self, Write};
 

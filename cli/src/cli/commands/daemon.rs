@@ -347,17 +347,26 @@ pub fn is_daemon_running(config: &Config) -> Result<bool> {
     let pid_str = std::fs::read_to_string(&pid_path)?;
     let pid: u32 = pid_str.trim().parse().context("Invalid PID file")?;
 
-    // Runtime OS check instead of compile-time
-    if cfg!(unix) {
+    // Runtime OS check with compile-time guards for platform-specific code
+    #[cfg(unix)]
+    {
         unsafe {
             let result = libc::kill(pid as i32, 0);
             Ok(result == 0)
         }
-    } else {
+    }
+
+    #[cfg(windows)]
+    {
         let output = Command::new("tasklist")
             .args(["/FI", &format!("PID eq {}", pid)])
             .output()?;
         Ok(String::from_utf8_lossy(&output.stdout).contains(&pid.to_string()))
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        Ok(false)
     }
 }
 
@@ -491,21 +500,32 @@ pub async fn stop(config: &Config) -> Result<()> {
     let pid_str = std::fs::read_to_string(&pid_path)?;
     let pid: u32 = pid_str.trim().parse().context("Invalid PID file")?;
 
-    // Runtime OS check instead of compile-time
-    if cfg!(unix) {
+    // Platform-specific process termination
+    #[cfg(unix)]
+    {
         unsafe {
             let result = libc::kill(pid as i32, libc::SIGTERM);
             if result != 0 {
                 return Err(anyhow::anyhow!("Failed to stop daemon"));
             }
         }
-    } else {
+    }
+
+    #[cfg(windows)]
+    {
         let output = Command::new("taskkill")
             .args(["/F", "/PID", &pid.to_string()])
             .output()?;
         if !output.status.success() {
             return Err(anyhow::anyhow!("Failed to stop daemon"));
         }
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        return Err(anyhow::anyhow!(
+            "Stopping daemon not supported on this platform"
+        ));
     }
 
     // Clean up PID and status files
