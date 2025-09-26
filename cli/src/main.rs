@@ -212,6 +212,15 @@ enum Commands {
         #[command(subcommand)]
         command: SamplesheetCommands,
     },
+
+    #[command(
+        name = "hard-reset",
+        about = "Delete all BioVault data and configuration (DESTRUCTIVE)"
+    )]
+    HardReset {
+        #[arg(long, help = "Skip confirmation prompts (use with caution)")]
+        ignore_warning: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -764,6 +773,9 @@ async fn main() -> Result<()> {
                 .await?;
             }
         },
+        Commands::HardReset { ignore_warning } => {
+            commands::hard_reset::execute(ignore_warning).await?;
+        }
     }
 
     Ok(())
