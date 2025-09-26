@@ -242,118 +242,200 @@ pub async fn submit(
                     println!("   Location: {}", submission_path.display());
                     println!("   Hash: {}", short_hash);
 
-                    // Skip to message sending part since files already exist
-                    // Build the syft URL and send the message
-                    let datasite_root = config.get_datasite_path()?;
-                    let rel_from_datasite = submission_path
-                        .strip_prefix(&datasite_root)
-                        .unwrap_or(&submission_path)
-                        .to_string_lossy()
-                        .to_string();
-                    let submission_syft_url =
-                        format!("syft://{}/{}", config.email, rel_from_datasite);
+                    // Check if destination has changed
+                    let existing_datasites = existing_project.datasites.clone().unwrap_or_default();
+                    let destination_changed = !existing_datasites.contains(&datasite_email);
 
-                    // Use project data from existing submission
-                    let default_body = "I would like to run the following project.".to_string();
-                    let mut body = if non_interactive {
-                        default_body.clone()
-                    } else {
-                        let use_custom = Confirm::new()
-                            .with_prompt("Write a custom message body?")
-                            .default(false)
-                            .interact()
-                            .unwrap_or(false);
+                    if destination_changed {
+                        // Update project.yaml and syft.pub.yaml with new destination
+                        println!("✓ Updating destination to: {}", datasite_email);
 
-                        if use_custom {
-                            match Editor::new().edit(&default_body) {
-                                Ok(Some(content)) if !content.trim().is_empty() => content,
-                                _ => default_body.clone(),
-                            }
-                        } else {
-                            default_body.clone()
-                        }
-                    };
+                        // Update project.yaml with new datasite
+                        let mut updated_project = existing_project.clone();
+                        updated_project.datasites = Some(vec![datasite_email.clone()]);
+                        updated_project.participants = participant_url.clone().map(|url| vec![url]);
+                        updated_project.save(&existing_project_yaml)?;
 
-                    let receiver_local_path_template = format!(
-                        "$SYFTBOX_DATA_DIR/datasites/{}/shared/biovault/submissions/{}",
-                        config.email, submission_folder_name
-                    );
-                    body.push_str(&format!(
-                        "\n\nSubmission location references:\n- syft URL: {}\n- Receiver local path (template): {}\n",
-                        submission_syft_url, receiver_local_path_template
-                    ));
-
-                    let metadata = json!({
-                        "project": existing_project,
-                        "project_location": submission_syft_url,
-                        "participants": "With your participants: ALL",
-                        "date": date_str,
-                        "assets": existing_project.assets.clone().unwrap_or_default(),
-                        "receiver_local_path_template": receiver_local_path_template,
-                    });
-
-                    let (db, sync) = init_message_system(&config)?;
-
-                    let mut msg = Message::new(config.email.clone(), datasite_email.clone(), body);
-                    msg.subject = Some(format!("Project Request - {}", existing_project.name));
-                    msg.message_type = MessageType::Project {
-                        project_name: existing_project.name.clone(),
-                        submission_id: submission_folder_name.clone(),
-                        files_hash: Some(existing_hash.clone()),
-                    };
-                    msg.metadata = Some(metadata);
-
-                    db.insert_message(&msg)?;
-                    let _ = sync.send_message(&msg.id);
-
-                    println!("✉️  Project message prepared for {}", datasite_email);
-                    if let Some(subj) = &msg.subject {
-                        println!("  Subject: {}", subj);
+                        // Update syft.pub.yaml
+                        let existing_permissions_path = submission_path.join("syft.pub.yaml");
+                        let updated_permissions =
+                            SyftPermissions::new_for_datasite(&datasite_email);
+                        updated_permissions.save(&existing_permissions_path)?;
                     }
-                    println!("  Submission URL: {}", submission_syft_url);
 
-                    return Ok(());
+                    // Send new request message for same project
+                    return send_project_message(
+                        &config,
+                        &project,
+                        &datasite_email,
+                        &submission_path,
+                        &submission_folder_name,
+                        &project_hash,
+                        &date_str,
+                        non_interactive,
+                        is_self_submission,
+                    );
                 }
             } else {
-                return Err(Error::from(anyhow::anyhow!(
-                    "A submission with this name and date already exists but with different content: {}",
-                    submission_path.display()
-                )));
+                // Project has changed
+                if !force {
+                    println!("⚠️  A submission exists with the same name but different content.");
+                    println!("   Existing: {}", submission_path.display());
+                    println!("   Use --force to create a new version.");
+                    return Ok(());
+                }
+
+                // Create new submission with updated timestamp
+                let new_date_str = Local::now().format("%Y-%m-%d_%H-%M-%S").to_string();
+                let new_submission_folder =
+                    format!("{}-{}-{}", project.name, new_date_str, short_hash);
+                let new_submission_path = submissions_path.join(&new_submission_folder);
+
+                return create_and_submit_project(
+                    &config,
+                    &project,
+                    &datasite_email,
+                    &project_dir,
+                    &new_submission_path,
+                    &new_submission_folder,
+                    &project_hash,
+                    &new_date_str,
+                    participant_url,
+                );
             }
         }
     }
 
-    // Only create new submission if it doesn't exist
-    if !submission_path.exists() {
-        // Create submission directory
-        fs::create_dir_all(&submission_path)?;
+    // New submission - create and submit
+    create_and_submit_project(
+        &config,
+        &project,
+        &datasite_email,
+        &project_dir,
+        &submission_path,
+        &submission_folder_name,
+        &project_hash,
+        &date_str,
+        participant_url,
+    )
+}
 
-        // Copy project files
-        copy_project_files(&project_dir, &submission_path)?;
+fn hash_file(path: &Path) -> Result<String> {
+    let content =
+        fs::read(path).with_context(|| format!("Failed to read file: {}", path.display()))?;
+    Ok(blake3::hash(&content).to_hex().to_string())
+}
 
-        // Save updated project.yaml
-        project.save(&submission_path.join("project.yaml"))?;
+fn copy_project_files(src: &Path, dest: &Path) -> Result<()> {
+    // Copy workflow.nf
+    let src_workflow = src.join("workflow.nf");
+    let dest_workflow = dest.join("workflow.nf");
+    fs::copy(&src_workflow, &dest_workflow)
+        .with_context(|| "Failed to copy workflow.nf".to_string())?;
 
-        // Create permissions file
-        let permissions = SyftPermissions::new_for_datasite(&datasite_email);
-        let permissions_path = submission_path.join("syft.pub.yaml");
-        permissions.save(&permissions_path)?;
+    // Copy assets directory if it exists
+    let src_assets = src.join("assets");
+    if src_assets.exists() && src_assets.is_dir() {
+        let dest_assets = dest.join("assets");
+        fs::create_dir_all(&dest_assets)?;
+
+        for entry in WalkDir::new(&src_assets)
+            .min_depth(1)
+            .follow_links(false)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
+            let src_path = entry.path();
+            let relative_path = src_path.strip_prefix(&src_assets).unwrap();
+            let dest_path = dest_assets.join(relative_path);
+
+            if entry.file_type().is_dir() {
+                fs::create_dir_all(&dest_path)?;
+            } else {
+                if let Some(parent) = dest_path.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                fs::copy(src_path, &dest_path)
+                    .with_context(|| format!("Failed to copy file: {}", src_path.display()))?;
+            }
+        }
     }
+
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn create_and_submit_project(
+    config: &Config,
+    project: &ProjectYaml,
+    datasite_email: &str,
+    project_dir: &Path,
+    submission_path: &Path,
+    submission_folder_name: &str,
+    project_hash: &str,
+    date_str: &str,
+    participant_url: Option<String>,
+) -> Result<()> {
+    // Create submission directory
+    fs::create_dir_all(submission_path)?;
+
+    // Copy project files
+    copy_project_files(project_dir, submission_path)?;
+
+    // Save updated project.yaml
+    let mut final_project = project.clone();
+    final_project.participants = participant_url.map(|url| vec![url]);
+    final_project.save(&submission_path.join("project.yaml"))?;
+
+    // Create permissions file
+    let permissions = SyftPermissions::new_for_datasite(datasite_email);
+    let permissions_path = submission_path.join("syft.pub.yaml");
+    permissions.save(&permissions_path)?;
 
     println!("✓ Project submitted successfully!");
     println!("  Name: {}", project.name);
     println!("  To: {}", datasite_email);
-    if let Some(participants) = &project.participants {
+    if let Some(participants) = &final_project.participants {
         println!("  Participants: {}", participants.join(", "));
     }
     println!("  Location: {}", submission_path.display());
+    let short_hash = &project_hash[0..8];
     println!("  Hash: {}", short_hash);
 
+    // Send the project message
+    // Determine if this is a self-submission
+    let is_self_submission = datasite_email == config.email;
+
+    send_project_message(
+        config,
+        &final_project,
+        datasite_email,
+        submission_path,
+        submission_folder_name,
+        project_hash,
+        date_str,
+        false, // non_interactive is false in create_and_submit_project context
+        is_self_submission,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn send_project_message(
+    config: &Config,
+    project: &ProjectYaml,
+    datasite_email: &str,
+    submission_path: &Path,
+    submission_folder_name: &str,
+    project_hash: &str,
+    date_str: &str,
+    non_interactive: bool,
+    is_self_submission: bool,
+) -> Result<()> {
     // Build a syft:// URL for the saved submission so the receiver can locate it
     let datasite_root = config.get_datasite_path()?;
     let rel_from_datasite = submission_path
         .strip_prefix(&datasite_root)
-        .unwrap_or(&submission_path)
+        .unwrap_or(submission_path)
         .to_string_lossy()
         .to_string();
     let submission_syft_url = if is_self_submission {
@@ -410,14 +492,14 @@ pub async fn submit(
     });
 
     // Initialize messaging system and send a project message
-    let (db, sync) = init_message_system(&config)?;
+    let (db, sync) = init_message_system(config)?;
 
-    let mut msg = Message::new(config.email.clone(), datasite_email.clone(), body);
+    let mut msg = Message::new(config.email.clone(), datasite_email.to_string(), body);
     msg.subject = Some(format!("Project Request - {}", project.name));
     msg.message_type = MessageType::Project {
         project_name: project.name.clone(),
-        submission_id: submission_folder_name.clone(),
-        files_hash: Some(project_hash.clone()),
+        submission_id: submission_folder_name.to_string(),
+        files_hash: Some(project_hash.to_string()),
     };
     msg.metadata = Some(metadata);
 
@@ -470,50 +552,6 @@ fn update_permissions_for_new_recipient(
 
     // Save updated permissions
     permissions.save(&permissions_path.to_path_buf())?;
-    Ok(())
-}
-
-fn hash_file(path: &Path) -> Result<String> {
-    let content =
-        fs::read(path).with_context(|| format!("Failed to read file: {}", path.display()))?;
-    Ok(blake3::hash(&content).to_hex().to_string())
-}
-
-fn copy_project_files(src: &Path, dest: &Path) -> Result<()> {
-    // Copy workflow.nf
-    let src_workflow = src.join("workflow.nf");
-    let dest_workflow = dest.join("workflow.nf");
-    fs::copy(&src_workflow, &dest_workflow)
-        .with_context(|| "Failed to copy workflow.nf".to_string())?;
-
-    // Copy assets directory if it exists
-    let src_assets = src.join("assets");
-    if src_assets.exists() && src_assets.is_dir() {
-        let dest_assets = dest.join("assets");
-        fs::create_dir_all(&dest_assets)?;
-
-        for entry in WalkDir::new(&src_assets)
-            .min_depth(1)
-            .follow_links(false)
-            .into_iter()
-            .filter_map(|e| e.ok())
-        {
-            let src_path = entry.path();
-            let relative_path = src_path.strip_prefix(&src_assets).unwrap();
-            let dest_path = dest_assets.join(relative_path);
-
-            if entry.file_type().is_dir() {
-                fs::create_dir_all(&dest_path)?;
-            } else {
-                if let Some(parent) = dest_path.parent() {
-                    fs::create_dir_all(parent)?;
-                }
-                fs::copy(src_path, &dest_path)
-                    .with_context(|| format!("Failed to copy file: {}", src_path.display()))?;
-            }
-        }
-    }
-
     Ok(())
 }
 
