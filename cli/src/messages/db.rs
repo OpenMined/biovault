@@ -1,9 +1,11 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, Row};
-use std::fs::{File, OpenOptions};
-use std::io::Write;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use super::models::{Message, MessageStatus, SyncStatus};
@@ -11,67 +13,191 @@ use super::models::{Message, MessageStatus, SyncStatus};
 // Type alias for file sync details to avoid clippy::type_complexity warning
 type FileSyncDetails = (String, i32, Option<String>, Option<String>);
 
-pub struct DatabaseLock {
-    lock_file: File,
-    _lock_path: PathBuf,
+#[derive(Serialize, Deserialize)]
+struct LockInfo {
+    pid: u32,
+    timestamp: DateTime<Utc>,
 }
 
+pub struct DatabaseLock {
+    lock_path: PathBuf,
+}
+
+static LOCK_REGISTRY: OnceLock<Mutex<HashMap<PathBuf, usize>>> = OnceLock::new();
+
 impl DatabaseLock {
+    fn registry() -> &'static Mutex<HashMap<PathBuf, usize>> {
+        LOCK_REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    fn increment_if_held(lock_path: &Path) -> bool {
+        let registry = Self::registry();
+        let mut map = registry.lock().unwrap();
+        if let Some(count) = map.get_mut(lock_path) {
+            *count += 1;
+            return true;
+        }
+        false
+    }
+
+    fn increment_with_owner(lock_path: &Path) {
+        let registry = Self::registry();
+        let mut map = registry.lock().unwrap();
+        let entry = map.entry(lock_path.to_path_buf()).or_insert(1);
+        *entry += 1;
+    }
+
+    fn register_owner(lock_path: &Path) {
+        let registry = Self::registry();
+        let mut map = registry.lock().unwrap();
+        let entry = map.entry(lock_path.to_path_buf()).or_insert(0);
+        if *entry == 0 {
+            *entry = 1;
+        }
+    }
+
+    fn release_handle(lock_path: &Path) -> bool {
+        let registry = Self::registry();
+        let mut map = registry.lock().unwrap();
+        if let Some(count) = map.get_mut(lock_path) {
+            if *count > 1 {
+                *count -= 1;
+                return false;
+            }
+            map.remove(lock_path);
+            return true;
+        }
+        true
+    }
+
     fn acquire(db_path: &Path, timeout: Duration) -> Result<Self> {
         let lock_path = db_path.with_extension("lock");
         let start = Instant::now();
+        let current_pid = std::process::id();
 
         loop {
-            match OpenOptions::new()
-                .create(true)
-                .write(true)
-                .truncate(true)
-                .open(&lock_path)
-            {
-                Ok(mut file) => {
-                    #[cfg(unix)]
-                    {
-                        use std::os::unix::io::AsRawFd;
-                        let fd = file.as_raw_fd();
-                        let lock_result = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
-                        if lock_result != 0 {
+            // If this process already holds the lock, allow re-entrant access
+            if Self::increment_if_held(&lock_path) {
+                return Ok(DatabaseLock {
+                    lock_path: lock_path.clone(),
+                });
+            }
+
+            // Check if lock file exists
+            if lock_path.exists() {
+                // Try to read existing lock info
+                if let Ok(content) = fs::read_to_string(&lock_path) {
+                    if let Ok(lock_info) = serde_json::from_str::<LockInfo>(&content) {
+                        if lock_info.pid == current_pid {
+                            Self::increment_with_owner(&lock_path);
+                            return Ok(DatabaseLock {
+                                lock_path: lock_path.clone(),
+                            });
+                        }
+                        let age = Utc::now() - lock_info.timestamp;
+
+                        // Check if process is still alive first (more important than age)
+                        let mut should_remove = false;
+                        let mut process_exists = true;
+
+                        #[cfg(unix)]
+                        {
+                            unsafe {
+                                let result = libc::kill(lock_info.pid as i32, 0);
+                                if result != 0 {
+                                    // Process doesn't exist, remove stale lock
+                                    should_remove = true;
+                                    process_exists = false;
+                                }
+                            }
+                        }
+
+                        // Also check if lock is stale (older than 30 seconds for faster recovery)
+                        if age.num_seconds() > 30 {
+                            should_remove = true;
+                        }
+
+                        if should_remove {
+                            let _ = fs::remove_file(&lock_path);
+                            // Continue to retry immediately after removing stale lock
+                            continue;
+                        } else if !process_exists {
+                            // Process doesn't exist but we couldn't remove - try harder
+                            let _ = fs::remove_file(&lock_path);
+                            continue;
+                        } else {
+                            // Lock is valid - wait or timeout
                             if start.elapsed() > timeout {
-                                return Err(anyhow::anyhow!("Database lock timeout"));
+                                return Err(anyhow::anyhow!(
+                                    "Database lock timeout - held by active PID {} since {}",
+                                    lock_info.pid,
+                                    lock_info.timestamp.format("%Y-%m-%d %H:%M:%S UTC")
+                                ));
                             }
                             std::thread::sleep(Duration::from_millis(50));
                             continue;
                         }
+                    } else {
+                        // Invalid lock file format, remove it
+                        let _ = fs::remove_file(&lock_path);
                     }
-
-                    let pid = std::process::id();
-                    writeln!(file, "{}", pid)?;
-                    file.flush()?;
-
-                    return Ok(DatabaseLock {
-                        lock_file: file,
-                        _lock_path: lock_path,
-                    });
-                }
-                Err(_) => {
-                    if start.elapsed() > timeout {
-                        return Err(anyhow::anyhow!("Database lock timeout"));
-                    }
-                    std::thread::sleep(Duration::from_millis(50));
                 }
             }
+
+            // Try to create lock file atomically
+            let lock_info = LockInfo {
+                pid: current_pid,
+                timestamp: Utc::now(),
+            };
+
+            // Try to create the lock file atomically using temp file + rename
+            let temp_lock_path = lock_path.with_extension("tmp");
+            match fs::write(&temp_lock_path, serde_json::to_string(&lock_info)?) {
+                Ok(_) => {
+                    // Try atomic rename - this is the true lock acquisition
+                    match fs::rename(&temp_lock_path, &lock_path) {
+                        Ok(_) => {
+                            Self::register_owner(&lock_path);
+                            return Ok(DatabaseLock {
+                                lock_path: lock_path.clone(),
+                            });
+                        }
+                        Err(_) => {
+                            // Another process got the lock first, clean up our temp file
+                            let _ = fs::remove_file(&temp_lock_path);
+                            // Loop will check stale lock on next iteration
+                        }
+                    }
+                }
+                Err(_) => {
+                    // Could not create temp file, wait and retry
+                }
+            }
+
+            // If we get here, lock acquisition failed - wait and retry
+            if start.elapsed() > timeout {
+                // Try to provide better error info
+                if let Ok(content) = fs::read_to_string(&lock_path) {
+                    if let Ok(info) = serde_json::from_str::<LockInfo>(&content) {
+                        return Err(anyhow::anyhow!(
+                            "Database lock timeout - held by PID {} since {}",
+                            info.pid,
+                            info.timestamp.format("%Y-%m-%d %H:%M:%S UTC")
+                        ));
+                    }
+                }
+                return Err(anyhow::anyhow!("Database lock timeout"));
+            }
+            std::thread::sleep(Duration::from_millis(50));
         }
     }
 }
 
 impl Drop for DatabaseLock {
     fn drop(&mut self) {
-        #[cfg(unix)]
-        {
-            use std::os::unix::io::AsRawFd;
-            let fd = self.lock_file.as_raw_fd();
-            unsafe {
-                libc::flock(fd, libc::LOCK_UN);
-            }
+        if DatabaseLock::release_handle(&self.lock_path) {
+            // Remove the lock file when the last holder in this process releases it
+            let _ = fs::remove_file(&self.lock_path);
         }
     }
 }
@@ -88,9 +214,9 @@ impl MessageDb {
 
     #[allow(unused_variables)]
     pub fn new_with_timeout(db_path: &Path, timeout: Duration) -> Result<Self> {
-        // In tests, use a much shorter timeout and skip lock if it fails
+        // In tests, use a shorter timeout but still fail if can't acquire lock
         #[cfg(test)]
-        let lock = DatabaseLock::acquire(db_path, Duration::from_millis(100)).ok();
+        let lock = Some(DatabaseLock::acquire(db_path, Duration::from_secs(10))?);
         #[cfg(not(test))]
         let lock = Some(DatabaseLock::acquire(db_path, timeout)?);
 
@@ -711,6 +837,66 @@ impl MessageDb {
             _ => anyhow::bail!("Unknown sync status: {}", s),
         }
     }
+
+    /// Clean up stale database locks
+    pub fn clean_stale_lock(db_path: &Path) -> Result<bool> {
+        let lock_path = db_path.with_extension("lock");
+
+        if !lock_path.exists() {
+            return Ok(false);
+        }
+
+        // Try to read lock info
+        match fs::read_to_string(&lock_path) {
+            Ok(content) => {
+                if let Ok(lock_info) = serde_json::from_str::<LockInfo>(&content) {
+                    let age = Utc::now() - lock_info.timestamp;
+
+                    // Check if lock is stale (older than 60 seconds)
+                    if age.num_seconds() > 60 {
+                        fs::remove_file(&lock_path)?;
+                        println!(
+                            "🧹 Removed stale lock from PID {} (age: {}s)",
+                            lock_info.pid,
+                            age.num_seconds()
+                        );
+                        return Ok(true);
+                    }
+
+                    // Check if process is still alive
+                    #[cfg(unix)]
+                    {
+                        unsafe {
+                            let result = libc::kill(lock_info.pid as i32, 0);
+                            if result != 0 {
+                                fs::remove_file(&lock_path)?;
+                                println!("🧹 Removed stale lock from dead PID {}", lock_info.pid);
+                                return Ok(true);
+                            }
+                        }
+                    }
+
+                    println!(
+                        "🔒 Lock is held by active PID {} since {}",
+                        lock_info.pid,
+                        lock_info.timestamp.format("%Y-%m-%d %H:%M:%S UTC")
+                    );
+                    Ok(false)
+                } else {
+                    // Invalid lock file format, remove it
+                    fs::remove_file(&lock_path)?;
+                    println!("🧹 Removed corrupted lock file");
+                    Ok(true)
+                }
+            }
+            Err(_) => {
+                // Can't read lock file, remove it
+                fs::remove_file(&lock_path)?;
+                println!("🧹 Removed unreadable lock file");
+                Ok(true)
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -722,6 +908,34 @@ mod tests {
     fn new_db(tmp: &TempDir) -> MessageDb {
         let db_path = tmp.path().join("msgs.sqlite");
         MessageDb::new(&db_path).expect("create db")
+    }
+
+    #[test]
+    fn reentrant_lock_allows_multiple_connections() {
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("msgs.sqlite");
+        let lock_path = db_path.with_extension("lock");
+
+        let db1 = MessageDb::new(&db_path).expect("first db");
+        assert!(lock_path.exists(), "lock file should be created");
+
+        let db2 = MessageDb::new(&db_path).expect("second db");
+        assert!(
+            lock_path.exists(),
+            "lock file should persist while both handles are active"
+        );
+
+        drop(db1);
+        assert!(
+            lock_path.exists(),
+            "lock should remain until last handle drops"
+        );
+
+        drop(db2);
+        assert!(
+            !lock_path.exists(),
+            "lock file should be removed after final handle"
+        );
     }
 
     #[test]

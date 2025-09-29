@@ -69,3 +69,12 @@ jobs:
 
       - name: Build
         run: cd cli && cargo build --verbose
+
+  # Run the BioVault integration tests with local clients
+  local-integration-test:
+    name: BioVault Integration Test - Local
+    needs: test
+    uses: ./.github/workflows/biovault-integration-test-local.yml
+    with:
+      cleanup_after_success: true
+      update_submodules: false  # Don't update submodules in PR tests

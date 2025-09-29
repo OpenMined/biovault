@@ -167,6 +167,12 @@ enum Commands {
         force: bool,
     },
 
+    #[command(about = "Clean up stale database locks")]
+    Cleanup {
+        #[arg(long, help = "Clean all locks in all virtualenvs")]
+        all: bool,
+    },
+
     #[command(about = "View and manage inbox messages")]
     Inbox {
         #[arg(short = 'i', long, help = "Interactive mode (default)")]
@@ -694,6 +700,10 @@ async fn main() -> Result<()> {
             force,
         } => {
             commands::submit::submit(project_path, destination, non_interactive, force).await?;
+        }
+        Commands::Cleanup { all } => {
+            let config = biovault::config::Config::load()?;
+            commands::messages::cleanup_locks(&config, all)?;
         }
         Commands::Inbox {
             interactive,
