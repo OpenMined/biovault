@@ -204,7 +204,6 @@ impl Drop for DatabaseLock {
 
 pub struct MessageDb {
     conn: Connection,
-    _lock: Option<DatabaseLock>,
 }
 
 impl MessageDb {
@@ -267,23 +266,6 @@ impl MessageDb {
             )?;
         }
 
-        // Migration: Add file sync tracking columns
-        let has_file_sync_status: bool = conn
-            .prepare(
-                "SELECT COUNT(*) FROM pragma_table_info('messages') WHERE name='file_sync_status'",
-            )
-            .and_then(|mut stmt| stmt.query_row([], |row| row.get(0)))
-            .unwrap_or(false);
-
-        if !has_file_sync_status {
-            conn.execute_batch(
-                "ALTER TABLE messages ADD COLUMN file_sync_status TEXT DEFAULT 'pending';
-                 ALTER TABLE messages ADD COLUMN file_sync_verified_at TEXT;
-                 ALTER TABLE messages ADD COLUMN file_sync_attempts INTEGER DEFAULT 0;
-                 ALTER TABLE messages ADD COLUMN file_sync_errors TEXT;",
-            )?;
-        }
-
         // Migration: Add metadata column if it doesn't exist
         let has_metadata: bool = conn
             .prepare("SELECT COUNT(*) FROM pragma_table_info('messages') WHERE name='metadata'")
@@ -320,7 +302,7 @@ impl MessageDb {
             [],
         )?;
 
-        Ok(Self { conn, _lock: lock })
+        Ok(Self { conn })
     }
 
     pub fn insert_message(&self, msg: &Message) -> Result<()> {
@@ -686,61 +668,6 @@ impl MessageDb {
         self.conn
             .execute("DELETE FROM messages WHERE id = ?1", params![id])?;
         Ok(())
-    }
-
-    // File sync tracking methods
-    pub fn update_file_sync_status(
-        &self,
-        msg_id: &str,
-        status: &str,
-        error: Option<&str>,
-    ) -> Result<()> {
-        let now = Utc::now().to_rfc3339();
-        let verified_at = if status == "verified" {
-            Some(&now)
-        } else {
-            None
-        };
-
-        self.conn.execute(
-            "UPDATE messages SET
-             file_sync_status = ?1,
-             file_sync_verified_at = ?2,
-             file_sync_attempts = file_sync_attempts + 1,
-             file_sync_errors = ?3
-             WHERE id = ?4",
-            params![status, verified_at, error, msg_id],
-        )?;
-        Ok(())
-    }
-
-    pub fn get_file_sync_status(&self, msg_id: &str) -> Result<Option<String>> {
-        self.conn
-            .query_row(
-                "SELECT file_sync_status FROM messages WHERE id = ?1",
-                params![msg_id],
-                |row| row.get(0),
-            )
-            .map(Some)
-            .or_else(|e| match e {
-                rusqlite::Error::QueryReturnedNoRows => Ok(None),
-                _ => Err(e.into()),
-            })
-    }
-
-    pub fn get_file_sync_details(&self, msg_id: &str) -> Result<Option<FileSyncDetails>> {
-        self.conn
-            .query_row(
-                "SELECT file_sync_status, file_sync_attempts, file_sync_verified_at, file_sync_errors
-                 FROM messages WHERE id = ?1",
-                params![msg_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-            )
-            .map(Some)
-            .or_else(|e| match e {
-                rusqlite::Error::QueryReturnedNoRows => Ok(None),
-                _ => Err(e.into()),
-            })
     }
 
     fn row_to_message(row: &Row) -> Result<Message> {
