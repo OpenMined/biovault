@@ -201,6 +201,7 @@ impl Drop for DatabaseLock {
 
 pub struct MessageDb {
     conn: Connection,
+    _lock: Option<DatabaseLock>,
 }
 
 impl MessageDb {
@@ -208,13 +209,13 @@ impl MessageDb {
         Self::new_with_timeout(db_path, Duration::from_secs(30))
     }
 
-    #[allow(unused_variables)]
     pub fn new_with_timeout(db_path: &Path, timeout: Duration) -> Result<Self> {
         // In tests, use a shorter timeout but still fail if can't acquire lock
-        #[cfg(test)]
-        let lock = Some(DatabaseLock::acquire(db_path, Duration::from_secs(10))?);
-        #[cfg(not(test))]
-        let lock = Some(DatabaseLock::acquire(db_path, timeout)?);
+        let lock = if cfg!(test) {
+            Some(DatabaseLock::acquire(db_path, Duration::from_secs(10))?)
+        } else {
+            Some(DatabaseLock::acquire(db_path, timeout)?)
+        };
 
         let conn = Connection::open(db_path)
             .with_context(|| format!("Failed to open database at {:?}", db_path))?;
@@ -299,7 +300,7 @@ impl MessageDb {
             [],
         )?;
 
-        Ok(Self { conn })
+        Ok(Self { conn, _lock: lock })
     }
 
     pub fn insert_message(&self, msg: &Message) -> Result<()> {
