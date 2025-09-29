@@ -10,9 +10,6 @@ use std::time::{Duration, Instant};
 
 use super::models::{Message, MessageStatus, SyncStatus};
 
-// Type alias for file sync details to avoid clippy::type_complexity warning
-type FileSyncDetails = (String, i32, Option<String>, Option<String>);
-
 #[derive(Serialize, Deserialize)]
 struct LockInfo {
     pid: u32,
