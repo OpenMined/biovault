@@ -71,10 +71,62 @@ jobs:
         run: cd cli && cargo build --verbose
 
   # Run the BioVault integration tests with local clients
+  # Note: Inlined here instead of using workflow_call so it runs on PR immediately
   local-integration-test:
     name: BioVault Integration Test - Local
     needs: test
-    uses: ./.github/workflows/biovault-integration-test-local.yml
-    with:
-      cleanup_after_success: true
-      update_submodules: false  # Don't update submodules in PR tests
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Install just
+      uses: extractions/setup-just@v1
+
+    - name: Install Rust
+      uses: actions-rs/toolchain@v1
+      with:
+        toolchain: stable
+        profile: minimal
+        override: true
+
+    - name: Install cargo-nextest
+      uses: taiki-e/install-action@v2
+      with:
+        tool: nextest
+
+    - name: Add minio to /etc/hosts
+      run: |
+        echo "127.0.0.1 minio" | sudo tee -a /etc/hosts
+        cat /etc/hosts | grep minio
+
+    - name: Run integration tests with local clients
+      shell: bash
+      run: |
+        # Export CI environment variable so the justfile knows we're in CI
+        export CI=true
+        just test-integration-local
+
+    - name: Show logs on failure
+      if: failure()
+      run: |
+        echo "=== Server Logs ==="
+        docker logs syftbox-server || true
+        echo "=== Client 1 Directory ==="
+        ls -la test-clients-local/client1@syftbox.net/ || true
+        ls -la test-clients-local/client1@syftbox.net/.syftbox/ || true
+        echo "=== Client 1 Logs ==="
+        cat test-clients-local/client1@syftbox.net/.syftbox/logs/client.log || echo "No client1 log file found"
+        echo "=== Client 2 Directory ==="
+        ls -la test-clients-local/client2@syftbox.net/ || true
+        ls -la test-clients-local/client2@syftbox.net/.syftbox/ || true
+        echo "=== Client 2 Logs ==="
+        cat test-clients-local/client2@syftbox.net/.syftbox/logs/client.log || echo "No client2 log file found"
+        echo "=== Test files ==="
+        ls -la test-clients-local/ || true
+        echo "=== Check syftbox installation ==="
+        which syftbox || echo "syftbox not in PATH"
+        echo "=== Python packages ==="
+        pip list | grep -i syft || true
