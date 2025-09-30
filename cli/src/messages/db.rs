@@ -220,6 +220,11 @@ impl MessageDb {
         let conn = Connection::open(db_path)
             .with_context(|| format!("Failed to open database at {:?}", db_path))?;
 
+        // Enable WAL mode for better concurrency (allows multiple readers with one writer)
+        // PRAGMA commands return results, so we need to query and ignore the result
+        conn.query_row("PRAGMA journal_mode=WAL", [], |_| Ok(()))?;
+        conn.query_row("PRAGMA busy_timeout=5000", [], |_| Ok(()))?;
+
         // Create tables if they don't exist
         conn.execute(
             "CREATE TABLE IF NOT EXISTS messages (

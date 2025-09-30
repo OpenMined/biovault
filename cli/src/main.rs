@@ -826,7 +826,14 @@ async fn main() -> Result<()> {
             }
         },
         Commands::Daemon { command } => {
-            let config = biovault::config::Config::load()?;
+            // If BV_DAEMON_CONFIG env var is set, use it (for spawned daemon processes)
+            // Otherwise load config normally
+            let config = if let Ok(config_json) = std::env::var("BV_DAEMON_CONFIG") {
+                serde_json::from_str(&config_json)?
+            } else {
+                biovault::config::Config::load()?
+            };
+
             match command {
                 DaemonCommands::Start { foreground } => {
                     commands::daemon::start(&config, foreground).await?;
