@@ -107,6 +107,7 @@ pub struct RunParams {
     pub work_dir: Option<String>,
     pub resume: bool,
     pub template: Option<String>,
+    pub results_dir: Option<String>,
 }
 
 enum ParticipantSource {
@@ -889,7 +890,9 @@ async fn execute_sheet_workflow(params: &RunParams, config: &ProjectConfig) -> a
         .context("Failed to resolve assets directory path")?;
 
     // Create results directory
-    let results_base = if params.test {
+    let results_base = if let Some(ref custom_dir) = params.results_dir {
+        custom_dir.as_str()
+    } else if params.test {
         "results-test"
     } else {
         "results-real"
@@ -1091,7 +1094,9 @@ pub async fn execute(params: RunParams) -> anyhow::Result<()> {
     // Create results directory for this participant
     // Use results-test for sample data or if test flag is set
     let is_sample_data = matches!(source, ParticipantSource::SampleDataId(_));
-    let results_base = if params.test || is_sample_data {
+    let results_base = if let Some(ref custom_dir) = params.results_dir {
+        custom_dir.as_str()
+    } else if params.test || is_sample_data {
         "results-test"
     } else {
         "results-real"
@@ -1325,6 +1330,7 @@ participants:
             work_dir: None,
             resume: false,
             template: None,
+            results_dir: None,
         };
 
         assert_eq!(params.project_folder, "/test");
@@ -1529,6 +1535,7 @@ participants:
             work_dir: None,
             resume: false,
             template: Some("test_tpl".into()),
+            results_dir: None,
         };
 
         // Use a writable cache dir during test
@@ -1598,6 +1605,7 @@ participants:
             work_dir: Some("workdir".into()),
             resume: true,
             template: Some("full_tpl".into()),
+            results_dir: None,
         };
 
         let cache_td = TempDir::new().unwrap();
@@ -1623,6 +1631,7 @@ participants:
             work_dir: None,
             resume: false,
             template: None,
+            results_dir: None,
         };
         assert!(execute(params).await.is_err());
 
@@ -1638,6 +1647,7 @@ participants:
             work_dir: None,
             resume: false,
             template: None,
+            results_dir: None,
         };
         assert!(execute(params).await.is_err());
 
@@ -1657,6 +1667,7 @@ participants:
             work_dir: None,
             resume: false,
             template: None,
+            results_dir: None,
         };
         assert!(execute(params).await.is_err());
 
@@ -1685,6 +1696,7 @@ participants:
             work_dir: None,
             resume: false,
             template: Some("missing_tpl".into()),
+            results_dir: None,
         };
         assert!(execute(params).await.is_err());
 

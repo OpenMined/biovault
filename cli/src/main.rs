@@ -115,6 +115,9 @@ enum Commands {
 
         #[arg(long, help = "Template to use (default, snp, etc.)")]
         template: Option<String>,
+
+        #[arg(long, help = "Custom results directory name")]
+        results_dir: Option<String>,
     },
 
     #[command(name = "sample-data", about = "Manage sample data")]
@@ -581,6 +584,7 @@ async fn main() -> Result<()> {
             work_dir,
             resume,
             template,
+            results_dir,
         } => {
             commands::run::execute(commands::run::RunParams {
                 project_folder,
@@ -592,6 +596,7 @@ async fn main() -> Result<()> {
                 work_dir,
                 resume,
                 template,
+                results_dir,
             })
             .await?;
         }
