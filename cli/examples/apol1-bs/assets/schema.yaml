@@ -1,0 +1,7 @@
+required:
+  - participant_id
+  - genotype_file_path
+
+types:
+  participant_id: string
+  genotype_file_path: path
