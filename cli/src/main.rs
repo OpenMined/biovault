@@ -272,6 +272,9 @@ enum DaemonCommands {
 
     #[command(about = "Uninstall daemon systemd service (Linux only)")]
     Uninstall,
+
+    #[command(about = "List all installed daemon services")]
+    List,
 }
 
 #[derive(Subcommand)]
@@ -865,6 +868,9 @@ async fn main() -> Result<()> {
                 }
                 DaemonCommands::Uninstall => {
                     commands::daemon::uninstall_service(&config).await?;
+                }
+                DaemonCommands::List => {
+                    commands::daemon::list_services().await?;
                 }
             }
         }
