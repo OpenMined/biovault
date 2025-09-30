@@ -211,6 +211,7 @@ fn get_start_command(service: &str) -> String {
     }
 }
 
+#[allow(dead_code)]
 fn check_version(tool: &str, min_version: u32) -> bool {
     match tool {
         "java" => check_java_version(min_version),
@@ -218,6 +219,7 @@ fn check_version(tool: &str, min_version: u32) -> bool {
     }
 }
 
+#[allow(dead_code)]
 fn check_java_version(min_version: u32) -> bool {
     // Try to execute java -version
     let output = Command::new("java").arg("-version").output();
