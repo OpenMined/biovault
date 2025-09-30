@@ -1,4 +1,4 @@
-name: apol1-sheet
+name: apol1-bs
 author: madhava@openmined.org
 workflow: workflow.nf
 template: sheet

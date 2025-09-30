@@ -74,7 +74,6 @@ jobs:
   # Note: Inlined here instead of using workflow_call so it runs on PR immediately
   local-integration-test:
     name: BioVault Integration Test - Local
-    needs: test
     runs-on: ubuntu-latest
 
     steps:
