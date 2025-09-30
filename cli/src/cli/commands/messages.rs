@@ -14,6 +14,26 @@ use std::path::PathBuf;
 
 const MESSAGE_ENDPOINT: &str = "/message";
 
+/// Clean up stale database locks
+pub fn cleanup_locks(config: &Config, all: bool) -> Result<()> {
+    use crate::messages::MessageDb;
+
+    if all {
+        println!("🧹 Scanning all BioVault virtualenvs for stale locks...");
+        // This would be more complex - scan all possible BioVault installations
+        println!("⚠️  --all mode not yet implemented. Cleaning current environment only.");
+    }
+
+    let db_path = get_message_db_path(config)?;
+    let cleaned = MessageDb::clean_stale_lock(&db_path)?;
+
+    if !cleaned {
+        println!("✅ No stale locks found");
+    }
+
+    Ok(())
+}
+
 /// Expand environment variables in text (specifically $SYFTBOX_DATA_DIR)
 fn expand_env_vars_in_text(text: &str) -> Result<String> {
     let mut result = text.to_string();

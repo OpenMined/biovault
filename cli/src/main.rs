@@ -170,6 +170,12 @@ enum Commands {
         force: bool,
     },
 
+    #[command(about = "Clean up stale database locks")]
+    Cleanup {
+        #[arg(long, help = "Clean all locks in all virtualenvs")]
+        all: bool,
+    },
+
     #[command(about = "View and manage inbox messages")]
     Inbox {
         #[arg(short = 'i', long, help = "Interactive mode (default)")]
@@ -216,25 +222,10 @@ enum Commands {
         command: SamplesheetCommands,
     },
 
-    #[command(about = "Manage the BioVault daemon")]
+    #[command(about = "Manage the BioVault daemon for automatic message processing")]
     Daemon {
         #[command(subcommand)]
         command: DaemonCommands,
-    },
-
-    #[command(about = "Start the BioVault daemon for automatic message processing")]
-    Start {
-        #[arg(long, help = "Run daemon in foreground (no background)")]
-        foreground: bool,
-    },
-
-    #[command(about = "View daemon logs")]
-    Logs {
-        #[arg(short, long, help = "Follow log output (tail -f)")]
-        follow: bool,
-
-        #[arg(short, long, help = "Number of lines to show")]
-        lines: Option<usize>,
     },
 
     #[command(
@@ -249,17 +240,38 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum DaemonCommands {
-    #[command(about = "Install daemon as a systemd service (Linux only)")]
-    Install,
-
-    #[command(about = "Uninstall daemon systemd service")]
-    Uninstall,
-
-    #[command(about = "Check daemon service status")]
-    Status,
+    #[command(about = "Start the BioVault daemon")]
+    Start {
+        #[arg(long, help = "Run daemon in foreground (no background)")]
+        foreground: bool,
+    },
 
     #[command(about = "Stop the running daemon")]
     Stop,
+
+    #[command(about = "Restart the daemon (stop if running, then start)")]
+    Restart {
+        #[arg(long, help = "Run daemon in foreground after restart")]
+        foreground: bool,
+    },
+
+    #[command(about = "Check daemon status")]
+    Status,
+
+    #[command(about = "View daemon logs")]
+    Logs {
+        #[arg(short, long, help = "Follow log output (tail -f)")]
+        follow: bool,
+
+        #[arg(short, long, help = "Number of lines to show (default: 50)")]
+        lines: Option<usize>,
+    },
+
+    #[command(about = "Install daemon as a systemd service (Linux only)")]
+    Install,
+
+    #[command(about = "Uninstall daemon systemd service (Linux only)")]
+    Uninstall,
 }
 
 #[derive(Subcommand)]
@@ -700,6 +712,10 @@ async fn main() -> Result<()> {
         } => {
             commands::submit::submit(project_path, destination, non_interactive, force).await?;
         }
+        Commands::Cleanup { all } => {
+            let config = biovault::config::Config::load()?;
+            commands::messages::cleanup_locks(&config, all)?;
+        }
         Commands::Inbox {
             interactive,
             plain,
@@ -815,29 +831,42 @@ async fn main() -> Result<()> {
             }
         },
         Commands::Daemon { command } => {
-            let config = biovault::config::Config::load()?;
+            // If BV_DAEMON_CONFIG env var is set, use it (for spawned daemon processes)
+            // Otherwise load config normally
+            let config = if let Ok(config_json) = std::env::var("BV_DAEMON_CONFIG") {
+                serde_json::from_str(&config_json)?
+            } else {
+                biovault::config::Config::load()?
+            };
+
             match command {
+                DaemonCommands::Start { foreground } => {
+                    commands::daemon::start(&config, foreground).await?;
+                }
+                DaemonCommands::Stop => {
+                    commands::daemon::stop(&config).await?;
+                }
+                DaemonCommands::Restart { foreground } => {
+                    // Stop the daemon if it's running
+                    let _ = commands::daemon::stop(&config).await;
+                    // Small delay to ensure clean shutdown
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    // Start it again
+                    commands::daemon::start(&config, foreground).await?;
+                }
+                DaemonCommands::Status => {
+                    commands::daemon::service_status(&config).await?;
+                }
+                DaemonCommands::Logs { follow, lines } => {
+                    commands::daemon::logs(&config, follow, lines).await?;
+                }
                 DaemonCommands::Install => {
                     commands::daemon::install_service(&config).await?;
                 }
                 DaemonCommands::Uninstall => {
                     commands::daemon::uninstall_service(&config).await?;
                 }
-                DaemonCommands::Status => {
-                    commands::daemon::service_status(&config).await?;
-                }
-                DaemonCommands::Stop => {
-                    commands::daemon::stop(&config).await?;
-                }
             }
-        }
-        Commands::Start { foreground } => {
-            let config = biovault::config::Config::load()?;
-            commands::daemon::start(&config, foreground).await?;
-        }
-        Commands::Logs { follow, lines } => {
-            let config = biovault::config::Config::load()?;
-            commands::daemon::logs(&config, follow, lines).await?;
         }
         Commands::HardReset { ignore_warning } => {
             commands::hard_reset::execute(ignore_warning).await?;

@@ -9,7 +9,6 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::signal;
-use tokio::time::sleep;
 use tracing::{debug, error, info, warn};
 
 use crate::config::Config;
@@ -131,48 +130,88 @@ impl Daemon {
         }
     }
 
-    async fn ensure_syftbox_running(&self) -> Result<()> {
-        // Check if SyftBox is running
-        let output = Command::new("pgrep").arg("-f").arg("syftbox").output();
+    fn is_in_sbenv(&self) -> Result<bool> {
+        // Check if we're in an sbenv by looking for .sbenv file
+        let data_dir = self.config.get_syftbox_data_dir()?;
+        let sbenv_file = data_dir.join(".sbenv");
+        Ok(sbenv_file.exists())
+    }
 
-        let is_running = match output {
-            Ok(out) => out.status.success() && !out.stdout.is_empty(),
-            Err(_) => {
-                // pgrep might not be available, try alternative check
-                Command::new("ps")
-                    .args(["aux"])
-                    .output()
-                    .map(|o| String::from_utf8_lossy(&o.stdout).contains("syftbox"))
-                    .unwrap_or(false)
+    fn check_syftbox_running(&self) -> Result<bool> {
+        let data_dir = self.config.get_syftbox_data_dir()?;
+        let config_path = self.config.get_syftbox_config_path()?;
+
+        // Try to find syftbox process using the specific config file
+        let output = Command::new("ps").args(["aux"]).output()?;
+
+        let ps_output = String::from_utf8_lossy(&output.stdout);
+        let config_str = config_path.to_string_lossy();
+
+        // Check if there's a syftbox process using our config
+        let is_running = ps_output.lines().any(|line| {
+            line.contains("syftbox")
+                && (line.contains(&*config_str)
+                    || line.contains(data_dir.to_string_lossy().as_ref()))
+        });
+
+        Ok(is_running)
+    }
+
+    async fn start_syftbox(&self) -> Result<()> {
+        let data_dir = self.config.get_syftbox_data_dir()?;
+        let is_sbenv = self.is_in_sbenv()?;
+
+        if is_sbenv {
+            self.log("INFO", "Starting SyftBox via sbenv...");
+
+            // Change to the data directory and run sbenv start
+            let output = Command::new("sbenv")
+                .arg("start")
+                .arg("--skip-login-check")
+                .current_dir(&data_dir)
+                .output();
+
+            match output {
+                Ok(out) => {
+                    if out.status.success() {
+                        self.log("INFO", "Successfully started SyftBox via sbenv");
+                        tokio::time::sleep(Duration::from_secs(2)).await;
+                        Ok(())
+                    } else {
+                        let stderr = String::from_utf8_lossy(&out.stderr);
+                        self.log("ERROR", &format!("sbenv start failed: {}", stderr));
+                        Err(anyhow::anyhow!(
+                            "Failed to start SyftBox via sbenv: {}",
+                            stderr
+                        ))
+                    }
+                }
+                Err(e) => {
+                    self.log("ERROR", &format!("Failed to run sbenv: {}", e));
+                    Err(anyhow::anyhow!(
+                        "Failed to run sbenv: {}. Is sbenv installed?",
+                        e
+                    ))
+                }
             }
-        };
+        } else {
+            self.log("INFO", "Starting SyftBox directly...");
 
-        if !is_running {
-            self.log("INFO", "SyftBox is not running, attempting to start it...");
-
-            // Try to start SyftBox
             let syftbox_config_path = self.config.get_syftbox_config_path()?;
 
-            // First, check if syftbox command is available
+            // Check if syftbox command is available
             let syftbox_check = Command::new("which").arg("syftbox").output();
 
-            if syftbox_check.is_err() || !syftbox_check.unwrap().status.success() {
-                self.log(
-                    "WARN",
-                    "syftbox command not found in PATH. Please install SyftBox first.",
-                );
+            if syftbox_check.is_err() || !syftbox_check.as_ref().unwrap().status.success() {
+                self.log("ERROR", "syftbox command not found in PATH");
                 return Err(anyhow::anyhow!(
-                    "SyftBox is not installed. Please install it first: pip install syftbox"
+                    "SyftBox is not installed. Please install it: pip install syftbox"
                 ));
             }
 
-            // Start SyftBox with the config from BioVault's configuration
+            // Start SyftBox with the config
             let mut start_cmd = Command::new("syftbox");
-
-            // If we have a specific config path, use it
-            if syftbox_config_path.exists() {
-                start_cmd.arg("--config").arg(&syftbox_config_path);
-            }
+            start_cmd.arg("-c").arg(&syftbox_config_path);
 
             let start_output = start_cmd
                 .stdin(Stdio::null())
@@ -182,38 +221,67 @@ impl Daemon {
 
             match start_output {
                 Ok(mut child) => {
-                    // Give it a moment to start
                     tokio::time::sleep(Duration::from_secs(3)).await;
 
-                    // Check if it's still running
                     match child.try_wait() {
                         Ok(None) => {
                             self.log("INFO", "Successfully started SyftBox");
                             Ok(())
                         }
                         Ok(Some(status)) => {
-                            self.log("ERROR", &format!("SyftBox exited with status: {}", status));
-                            Err(anyhow::anyhow!("SyftBox failed to start: {}", status))
+                            let msg = format!("SyftBox exited with status: {}", status);
+                            self.log("ERROR", &msg);
+                            Err(anyhow::anyhow!(msg))
                         }
                         Err(e) => {
-                            self.log("ERROR", &format!("Failed to check SyftBox status: {}", e));
-                            Err(anyhow::anyhow!("Failed to check SyftBox status: {}", e))
+                            let msg = format!("Failed to check SyftBox status: {}", e);
+                            self.log("ERROR", &msg);
+                            Err(anyhow::anyhow!(msg))
                         }
                     }
                 }
                 Err(e) => {
-                    self.log("ERROR", &format!("Failed to start SyftBox: {}", e));
-                    Err(anyhow::anyhow!("Failed to start SyftBox: {}", e))
+                    let msg = format!("Failed to start SyftBox: {}", e);
+                    self.log("ERROR", &msg);
+                    Err(anyhow::anyhow!(msg))
                 }
             }
-        } else {
+        }
+    }
+
+    async fn ensure_syftbox_running(&self) -> Result<()> {
+        if self.check_syftbox_running()? {
             self.log("INFO", "SyftBox is already running");
             Ok(())
+        } else {
+            self.log("WARN", "SyftBox is not running, attempting to start it...");
+            self.start_syftbox().await
         }
     }
 
     pub async fn run(&self) -> Result<()> {
         self.log("INFO", "BioVault daemon starting");
+        self.log("INFO", &format!("Config email: {}", self.config.email));
+        self.log(
+            "INFO",
+            &format!("Config syftbox_config: {:?}", self.config.syftbox_config),
+        );
+
+        // Debug: check environment variables
+        if let Ok(syftbox_data_dir) = std::env::var("SYFTBOX_DATA_DIR") {
+            self.log(
+                "INFO",
+                &format!("ENV SYFTBOX_DATA_DIR: {}", syftbox_data_dir),
+            );
+        } else {
+            self.log("WARN", "ENV SYFTBOX_DATA_DIR not set");
+        }
+
+        let data_dir = self.config.get_syftbox_data_dir()?;
+        self.log("INFO", &format!("SyftBox data_dir: {:?}", data_dir));
+
+        let is_sbenv = self.is_in_sbenv()?;
+        self.log("INFO", &format!("Is sbenv: {}", is_sbenv));
 
         // Ensure SyftBox is running first
         if let Err(e) = self.ensure_syftbox_running().await {
@@ -226,7 +294,6 @@ impl Daemon {
             );
         }
 
-        let data_dir = self.config.get_syftbox_data_dir()?;
         let app = SyftBoxApp::new(&data_dir, &self.config.email, "biovault")?;
         let watch_path = app
             .data_dir
@@ -258,9 +325,31 @@ impl Daemon {
 
         watcher.watch(&watch_path, RecursiveMode::Recursive)?;
 
-        let sync_interval = Duration::from_secs(30);
         let mut last_sync = Utc::now();
         let mut last_syftbox_check = Utc::now();
+        let mut syftbox_restart_attempts = 0;
+        const MAX_RESTART_ATTEMPTS: u32 = 3;
+        const SYFTBOX_CHECK_INTERVAL_SECS: i64 = 10; // Health check every 10 seconds for testing
+        const MESSAGE_SYNC_INTERVAL_SECS: i64 = 30;
+
+        // Use tokio interval for periodic checks (runs every 1 second)
+        let mut check_interval = tokio::time::interval(Duration::from_secs(1));
+        check_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        self.log(
+            "INFO",
+            &format!(
+                "Health check interval: {} seconds",
+                SYFTBOX_CHECK_INTERVAL_SECS
+            ),
+        );
+        self.log(
+            "INFO",
+            &format!(
+                "Message sync interval: {} seconds",
+                MESSAGE_SYNC_INTERVAL_SECS
+            ),
+        );
 
         loop {
             tokio::select! {
@@ -268,30 +357,19 @@ impl Daemon {
                     self.log("INFO", "Received shutdown signal");
                     break;
                 }
-                _ = sleep(sync_interval) => {
+                _ = check_interval.tick() => {
                     let now = Utc::now();
 
-                    // Periodic SyftBox health check
-                    if (now - last_syftbox_check).num_seconds() >= 300 {
-                        if let Err(e) = self.ensure_syftbox_running().await {
-                            self.log("WARN", &format!("SyftBox health check failed: {}", e));
-                        }
-                        last_syftbox_check = now;
-                    }
-
-                    // Regular message sync
-                    if (now - last_sync).num_seconds() >= 30 {
-                        if let Err(e) = self.sync_messages().await {
-                            self.log("ERROR", &format!("Scheduled sync failed: {}", e));
-                        }
-                        last_sync = now;
-                    }
-                }
-                _ = tokio::time::sleep(Duration::from_millis(100)) => {
+                    // Check for file system events (checked every second for fast response)
                     let rx_clone = Arc::clone(&rx);
                     let has_event = tokio::task::spawn_blocking(move || {
                         if let Ok(rx) = rx_clone.lock() {
-                            rx.try_recv().is_ok()
+                            // Drain all pending events
+                            let mut found_event = false;
+                            while rx.try_recv().is_ok() {
+                                found_event = true;
+                            }
+                            found_event
                         } else {
                             false
                         }
@@ -302,7 +380,50 @@ impl Daemon {
                         if let Err(e) = self.sync_messages().await {
                             self.log("ERROR", &format!("Event-triggered sync failed: {}", e));
                         }
-                        last_sync = Utc::now();
+                        last_sync = now;
+                    }
+
+                    // Periodic SyftBox health check
+                    let seconds_since_check = (now - last_syftbox_check).num_seconds();
+                    if seconds_since_check >= SYFTBOX_CHECK_INTERVAL_SECS {
+                        self.log("INFO", &format!("Running SyftBox health check (last check {} seconds ago)...", seconds_since_check));
+
+                        match self.ensure_syftbox_running().await {
+                            Ok(_) => {
+                                // Reset restart attempts on successful check
+                                syftbox_restart_attempts = 0;
+                                self.log("INFO", "SyftBox health check passed");
+                            }
+                            Err(e) => {
+                                syftbox_restart_attempts += 1;
+                                self.log("ERROR", &format!(
+                                    "SyftBox health check failed (attempt {}/{}): {}",
+                                    syftbox_restart_attempts, MAX_RESTART_ATTEMPTS, e
+                                ));
+
+                                if syftbox_restart_attempts >= MAX_RESTART_ATTEMPTS {
+                                    self.log("FATAL", &format!(
+                                        "Failed to restart SyftBox after {} attempts. Daemon will exit.",
+                                        MAX_RESTART_ATTEMPTS
+                                    ));
+                                    return Err(anyhow::anyhow!(
+                                        "Unable to keep SyftBox running after {} attempts",
+                                        MAX_RESTART_ATTEMPTS
+                                    ));
+                                }
+                            }
+                        }
+                        last_syftbox_check = now;
+                    }
+
+                    // Regular message sync
+                    let seconds_since_sync = (now - last_sync).num_seconds();
+                    if seconds_since_sync >= MESSAGE_SYNC_INTERVAL_SECS {
+                        self.log("DEBUG", &format!("Running message sync (last sync {} seconds ago)...", seconds_since_sync));
+                        if let Err(e) = self.sync_messages().await {
+                            self.log("ERROR", &format!("Scheduled sync failed: {}", e));
+                        }
+                        last_sync = now;
                     }
                 }
             }
@@ -314,10 +435,10 @@ impl Daemon {
     }
 }
 
-fn get_biovault_dir(_config: &Config) -> Result<PathBuf> {
-    let home_dir =
-        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
-    Ok(home_dir.join(".biovault"))
+fn get_biovault_dir(config: &Config) -> Result<PathBuf> {
+    // Use the syftbox data dir as the base, then add .biovault
+    let data_dir = config.get_syftbox_data_dir()?;
+    Ok(data_dir.join(".biovault"))
 }
 
 fn get_pid_file_path(config: &Config) -> Result<PathBuf> {
@@ -338,30 +459,71 @@ fn get_log_file_path(config: &Config) -> Result<PathBuf> {
 
 pub fn is_daemon_running(config: &Config) -> Result<bool> {
     let pid_path = get_pid_file_path(config)?;
-    let status_path = get_status_file_path(config)?;
 
-    if !pid_path.exists() || !status_path.exists() {
+    if !pid_path.exists() {
         return Ok(false);
     }
 
     let pid_str = std::fs::read_to_string(&pid_path)?;
-    let pid: u32 = pid_str.trim().parse().context("Invalid PID file")?;
+    let pid: u32 = match pid_str.trim().parse() {
+        Ok(p) => p,
+        Err(_) => {
+            // Invalid PID file, clean it up
+            let _ = std::fs::remove_file(&pid_path);
+            return Ok(false);
+        }
+    };
 
-    // Runtime OS check with compile-time guards for platform-specific code
+    // Check if process exists and is actually a bv daemon process
+    let is_running = check_process_running(pid)?;
+
+    if !is_running {
+        // Clean up stale PID file
+        let _ = std::fs::remove_file(&pid_path);
+        let _ = std::fs::remove_file(get_status_file_path(config)?);
+    }
+
+    Ok(is_running)
+}
+
+fn check_process_running(pid: u32) -> Result<bool> {
     #[cfg(unix)]
     {
-        unsafe {
+        // First check if process exists
+        let exists = unsafe {
             let result = libc::kill(pid as i32, 0);
-            Ok(result == 0)
+            result == 0
+        };
+
+        if !exists {
+            return Ok(false);
         }
+
+        // Verify it's actually a bv daemon process
+        let output = Command::new("ps")
+            .args(["-p", &pid.to_string(), "-o", "command="])
+            .output()?;
+
+        if !output.status.success() {
+            return Ok(false);
+        }
+
+        let cmd = String::from_utf8_lossy(&output.stdout);
+        Ok(cmd.contains("bv daemon") || cmd.contains("biovault"))
     }
 
     #[cfg(windows)]
     {
         let output = Command::new("tasklist")
-            .args(["/FI", &format!("PID eq {}", pid)])
+            .args(["/FI", &format!("PID eq {}", pid), "/NH", "/FO", "CSV"])
             .output()?;
-        Ok(String::from_utf8_lossy(&output.stdout).contains(&pid.to_string()))
+
+        if !output.status.success() {
+            return Ok(false);
+        }
+
+        let output_str = String::from_utf8_lossy(&output.stdout);
+        Ok(output_str.contains(&pid.to_string()) && output_str.contains("bv"))
     }
 
     #[cfg(not(any(unix, windows)))]
@@ -371,7 +533,18 @@ pub fn is_daemon_running(config: &Config) -> Result<bool> {
 }
 
 pub async fn start(config: &Config, foreground: bool) -> Result<()> {
+    // Clean up stale PID files first
+    cleanup_stale_pid_files(config)?;
+
+    // Check if daemon is already running
     if is_daemon_running(config)? {
+        let pid_path = get_pid_file_path(config)?;
+        if let Ok(pid_str) = std::fs::read_to_string(&pid_path) {
+            if let Ok(pid) = pid_str.trim().parse::<u32>() {
+                println!("❌ Daemon is already running (PID: {})", pid);
+                return Ok(());
+            }
+        }
         println!("❌ Daemon is already running");
         return Ok(());
     }
@@ -382,48 +555,133 @@ pub async fn start(config: &Config, foreground: bool) -> Result<()> {
 
     if foreground {
         println!("🚀 Starting BioVault daemon in foreground mode");
+
+        let pid = std::process::id();
+
+        // Check if we're spawned from background start
+        let pid_file_path = if let Ok(path_str) = std::env::var("BV_DAEMON_PID_FILE") {
+            // We're a spawned daemon, use the provided PID file path
+            Some(PathBuf::from(path_str))
+        } else {
+            // We're a manual foreground daemon, use the default PID path
+            let path = get_pid_file_path(config)?;
+            Some(path)
+        };
+
+        // Write PID file
+        if let Some(ref pid_path) = pid_file_path {
+            std::fs::write(pid_path, pid.to_string())
+                .with_context(|| format!("Failed to write PID file: {:?}", pid_path))?;
+        }
+
         let daemon = Daemon::new(config)?;
-        daemon.run().await?;
+        let result = daemon.run().await;
+
+        // Clean up PID file on exit
+        if let Some(ref pid_path) = pid_file_path {
+            let _ = std::fs::remove_file(pid_path);
+        }
+
+        result?;
     } else {
         println!("🚀 Starting BioVault daemon in background");
 
         let config_json = serde_json::to_string(config).context("Failed to serialize config")?;
 
+        // Get the syftbox data dir now (before spawning) to ensure it's available to child
+        let syftbox_data_dir = config.get_syftbox_data_dir()?;
+
         let current_exe =
             std::env::current_exe().context("Failed to get current executable path")?;
 
+        // Redirect output to log file instead of /dev/null for debugging
+        let log_path = get_log_file_path(config)?;
+
+        // Ensure logs directory exists
+        if let Some(log_dir) = log_path.parent() {
+            std::fs::create_dir_all(log_dir)
+                .with_context(|| format!("Failed to create logs directory: {:?}", log_dir))?;
+        }
+
+        let log_file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .context("Failed to open log file for daemon spawn")?;
+
+        let log_file_stderr = log_file.try_clone()?;
+
+        // Pass the PID file path as an environment variable so the child can write it
+        let pid_path = get_pid_file_path(config)?;
+
         let mut child = Command::new(current_exe)
-            .args(["start", "--foreground"])
+            .args(["daemon", "start", "--foreground"])
             .env("BV_DAEMON_CONFIG", config_json)
+            .env("BV_DAEMON_PID_FILE", pid_path.to_string_lossy().to_string())
+            .env(
+                "SYFTBOX_DATA_DIR",
+                syftbox_data_dir.to_string_lossy().to_string(),
+            )
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stdout(Stdio::from(log_file))
+            .stderr(Stdio::from(log_file_stderr))
             .spawn()
             .context("Failed to spawn daemon process")?;
 
         let pid = child.id();
-        let pid_path = get_pid_file_path(config)?;
-        std::fs::write(&pid_path, pid.to_string())
-            .with_context(|| format!("Failed to write PID file: {:?}", pid_path))?;
 
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        // Wait a moment for the child to start and write its PID file
+        tokio::time::sleep(Duration::from_millis(1500)).await;
 
+        // Check if child exited
         match child.try_wait() {
             Ok(Some(status)) => {
-                let _ = std::fs::remove_file(&pid_path);
                 return Err(anyhow::anyhow!(
                     "Daemon process exited with status: {}",
                     status
                 ));
             }
             Ok(None) => {
-                println!("✅ Daemon started successfully (PID: {})", pid);
-                println!("📝 Use 'bv logs' to view daemon logs");
+                // Child is still running, verify PID file was written
+                if pid_path.exists() {
+                    println!("✅ Daemon started successfully (PID: {})", pid);
+                    println!("📝 Use 'bv daemon logs' to view daemon logs");
+                } else {
+                    return Err(anyhow::anyhow!(
+                        "Daemon started but PID file was not created"
+                    ));
+                }
             }
             Err(e) => {
-                let _ = std::fs::remove_file(&pid_path);
                 return Err(anyhow::anyhow!("Failed to check daemon status: {}", e));
             }
+        }
+    }
+
+    Ok(())
+}
+
+fn cleanup_stale_pid_files(config: &Config) -> Result<()> {
+    let pid_path = get_pid_file_path(config)?;
+    let status_path = get_status_file_path(config)?;
+
+    if !pid_path.exists() {
+        return Ok(());
+    }
+
+    // Try to read and validate PID
+    if let Ok(pid_str) = std::fs::read_to_string(&pid_path) {
+        if let Ok(pid) = pid_str.trim().parse::<u32>() {
+            // Check if process is actually running
+            if let Ok(false) = check_process_running(pid) {
+                // Process not running, clean up stale files
+                let _ = std::fs::remove_file(&pid_path);
+                let _ = std::fs::remove_file(&status_path);
+            }
+        } else {
+            // Invalid PID file, clean it up
+            let _ = std::fs::remove_file(&pid_path);
+            let _ = std::fs::remove_file(&status_path);
         }
     }
 
@@ -434,7 +692,7 @@ pub async fn logs(config: &Config, follow: bool, lines: Option<usize>) -> Result
     let log_path = get_log_file_path(config)?;
 
     if !log_path.exists() {
-        println!("📝 No log file found. Start the daemon with 'bv start' to generate logs.");
+        println!("📝 No log file found. Start the daemon with 'bv daemon start' to generate logs.");
         return Ok(());
     }
 
@@ -786,7 +1044,7 @@ pub async fn service_status(config: &Config) -> Result<()> {
             }
             println!("   • Messages processed: {}", status.message_count);
         }
-        println!("\n   ℹ️  Note: Daemon was started manually with 'bv start'");
+        println!("\n   ℹ️  Note: Daemon was started manually with 'bv daemon start'");
         return Ok(());
     }
 
@@ -830,7 +1088,7 @@ pub async fn service_status(config: &Config) -> Result<()> {
     } else {
         println!("⚠️  Daemon Status: NOT RUNNING");
         println!("   Service installation is only supported on Linux");
-        println!("   Use 'bv start' to run the daemon manually");
+        println!("   Use 'bv daemon start' to run the daemon manually");
     }
 
     Ok(())
