@@ -1,0 +1,6 @@
+participant_id,genotype_file_path
+PID00001,case_0001_canonical.tsv
+PID00002,case_0002_canonical.tsv
+PID00013,case_0013_canonical.tsv
+PID00014,case_0014_canonical.tsv
+PID00025,case_0025_canonical.tsv
