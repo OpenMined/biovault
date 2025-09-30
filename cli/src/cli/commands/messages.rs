@@ -72,6 +72,8 @@ mod tests_fast_helpers {
             email: "e@example".into(),
             syftbox_config: None,
             version: None,
+        
+            binary_paths: None,
         };
         let path = get_message_db_path(&cfg).unwrap();
         // Parent dir should exist now
@@ -1212,6 +1214,8 @@ mod tests {
             email: "test@example.com".to_string(),
             syftbox_config: None,
             version: None,
+        
+            binary_paths: None,
         }
     }
 
@@ -1311,6 +1315,8 @@ mod tests {
             email: "u@example.com".into(),
             syftbox_config: None,
             version: None,
+        
+            binary_paths: None,
         };
 
         // Build a fake project tree under datasites/u@example.com/app_data/biovault/submissions/proj1
@@ -1355,6 +1361,8 @@ mod tests {
             email: "u@example.com".into(),
             syftbox_config: None,
             version: None,
+        
+            binary_paths: None,
         };
 
         // Make sender tree and one file
@@ -1384,6 +1392,8 @@ mod tests {
             email: "u@example.com".into(),
             syftbox_config: None,
             version: None,
+        
+            binary_paths: None,
         };
 
         // Build project root with two files and compute blake3
@@ -1431,6 +1441,8 @@ mod tests {
             email: "me@example.com".into(),
             syftbox_config: None,
             version: None,
+        
+            binary_paths: None,
         };
         // Init DB only
         let db_path = get_message_db_path(&cfg)?;
@@ -1456,6 +1468,8 @@ mod tests {
             email: "me@example.com".into(),
             syftbox_config: None,
             version: None,
+        
+            binary_paths: None,
         };
         let db_path = get_message_db_path(&cfg)?;
         let db = MessageDb::new(&db_path)?;

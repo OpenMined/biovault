@@ -708,6 +708,8 @@ mod tests {
             email: email.to_string(),
             syftbox_config: Some(syftbox_config_path.to_str().unwrap().to_string()),
             version: None,
+        
+            binary_paths: None,
         };
 
         let config_path = config_dir.join("config.yaml");
@@ -772,6 +774,8 @@ mod tests {
             email: email.to_string(),
             syftbox_config: Some(syftbox_config_path.to_string_lossy().to_string()),
             version: None,
+        
+            binary_paths: None,
         });
 
         // Setup test environment - create datasites for the email we're using
@@ -1033,6 +1037,8 @@ participants:
                     .to_string(),
             ),
             version: None,
+        
+            binary_paths: None,
         };
         config.save(config_dir.join("config.yaml"))?;
 
