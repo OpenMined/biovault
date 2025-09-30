@@ -216,4 +216,12 @@ jobs:
             tests\os\*.log
           retention-days: 7
 
-  
+  # Run the BioVault integration tests with local clients
+  local-integration-test:
+    name: BioVault Integration Test - Local
+    uses: ./.github/workflows/biovault-integration-test-local.yml
+    with:
+      cleanup_after_success: true
+      update_submodules: true
+
+

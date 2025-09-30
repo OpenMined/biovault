@@ -148,15 +148,23 @@ pub fn get_config() -> anyhow::Result<Config> {
 
 /// Get the BioVault home directory
 /// Priority order:
-/// 1. BIOVAULT_HOME env var
-/// 2. SYFTBOX_DATA_DIR/.biovault (if in virtualenv)
-/// 3. BIOVAULT_TEST_HOME (for tests)
-/// 4. ~/.biovault (default)
+/// 1. Thread-local test override (internal)
+/// 2. BIOVAULT_TEST_HOME (for tests)
+/// 3. BIOVAULT_HOME env var
+/// 4. SYFTBOX_DATA_DIR/.biovault (if in virtualenv)
+/// 5. Walk up from cwd looking for .biovault/config.yaml (for sbenv)
+/// 6. ~/.biovault (default)
 pub fn get_biovault_home() -> anyhow::Result<PathBuf> {
     // Thread-local test override first
     if let Some(home) = TEST_BIOVAULT_HOME.with(|h| h.borrow().clone()) {
         return Ok(home);
     }
+
+    // Check for test environment (must be before directory walk to prevent finding global config)
+    if let Ok(test_home) = env::var("BIOVAULT_TEST_HOME") {
+        return Ok(PathBuf::from(test_home).join(".biovault"));
+    }
+
     // Check for explicit BIOVAULT_HOME
     if let Ok(biovault_home) = env::var("BIOVAULT_HOME") {
         return Ok(PathBuf::from(biovault_home));
@@ -167,9 +175,21 @@ pub fn get_biovault_home() -> anyhow::Result<PathBuf> {
         return Ok(PathBuf::from(syftbox_data_dir).join(".biovault"));
     }
 
-    // Check for test environment
-    if let Ok(test_home) = env::var("BIOVAULT_TEST_HOME") {
-        return Ok(PathBuf::from(test_home).join(".biovault"));
+    // Walk up from current directory looking for .biovault/config.yaml (for sbenv)
+    if let Ok(current_dir) = env::current_dir() {
+        let mut dir = current_dir.as_path();
+        loop {
+            let biovault_dir = dir.join(".biovault");
+            let config_file = biovault_dir.join("config.yaml");
+            if config_file.exists() {
+                return Ok(biovault_dir);
+            }
+
+            match dir.parent() {
+                Some(parent) => dir = parent,
+                None => break,
+            }
+        }
     }
 
     // Default to home directory
