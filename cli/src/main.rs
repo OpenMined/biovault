@@ -71,10 +71,16 @@ enum Commands {
     },
 
     #[command(about = "Show system information")]
-    Info,
+    Info {
+        #[arg(long, help = "Output as JSON")]
+        json: bool,
+    },
 
     #[command(about = "Check for required dependencies")]
-    Check,
+    Check {
+        #[arg(long, help = "Output as JSON")]
+        json: bool,
+    },
 
     #[command(about = "Setup environment for known systems (e.g., Google Colab)")]
     Setup,
@@ -142,6 +148,9 @@ enum Commands {
     Config {
         #[command(subcommand)]
         command: Option<ConfigCommands>,
+
+        #[arg(long, help = "Output as JSON")]
+        json: bool,
     },
 
     #[command(about = "FASTQ file operations")]
@@ -635,11 +644,11 @@ async fn async_main() -> Result<()> {
         Commands::Init { email, quiet } => {
             commands::init::execute(email.as_deref(), quiet).await?;
         }
-        Commands::Info => {
-            commands::info::execute().await?;
+        Commands::Info { json } => {
+            commands::info::execute(json).await?;
         }
-        Commands::Check => {
-            commands::check::execute().await?;
+        Commands::Check { json } => {
+            commands::check::execute(json).await?;
         }
         Commands::Setup => {
             commands::setup::execute().await?;
@@ -742,7 +751,7 @@ async fn async_main() -> Result<()> {
                 commands::biobank::unpublish(participant_id, all).await?;
             }
         },
-        Commands::Config { command } => {
+        Commands::Config { command, json } => {
             if let Some(cmd) = command {
                 match cmd {
                     ConfigCommands::Email { email } => {
@@ -753,7 +762,7 @@ async fn async_main() -> Result<()> {
                     }
                 }
             } else {
-                commands::config_cmd::show().await?;
+                commands::config_cmd::show(json).await?;
             }
         }
         Commands::Fastq { command } => match command {

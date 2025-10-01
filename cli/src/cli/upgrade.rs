@@ -257,6 +257,8 @@ mod tests {
             email: email.into(),
             syftbox_config: Some(syft_cfg.to_string_lossy().to_string()),
             version: Some("0.1.0".into()),
+
+            binary_paths: None,
         };
         cfg.save(&cfg_path).unwrap();
 
