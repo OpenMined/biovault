@@ -281,6 +281,15 @@ enum DaemonCommands {
 
     #[command(about = "Uninstall daemon systemd service (Linux only)")]
     Uninstall,
+
+    #[command(about = "List all installed daemon services")]
+    List,
+
+    #[command(about = "Show the systemd service file")]
+    Show,
+
+    #[command(about = "Reinstall daemon service (uninstall + install)")]
+    Reinstall,
 }
 
 #[derive(Subcommand)]
@@ -550,8 +559,69 @@ enum MessageCommands {
     },
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
+    // Set up panic hook to log crashes
+    std::panic::set_hook(Box::new(|panic_info| {
+        let payload = panic_info.payload();
+        let message = if let Some(s) = payload.downcast_ref::<&str>() {
+            s.to_string()
+        } else if let Some(s) = payload.downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "Unknown panic payload".to_string()
+        };
+
+        let location = panic_info
+            .location()
+            .map(|loc| format!("{}:{}:{}", loc.file(), loc.line(), loc.column()))
+            .unwrap_or_else(|| "unknown location".to_string());
+
+        let crash_log = format!(
+            "\n=== PANIC/CRASH DETECTED ===\n\
+             Time: {}\n\
+             Message: {}\n\
+             Location: {}\n\
+             Backtrace: use RUST_BACKTRACE=1 for details\n\
+             ============================\n",
+            chrono::Utc::now().format("%Y-%m-%d %H:%M:%S%.3f UTC"),
+            message,
+            location
+        );
+
+        // Try to write to daemon log if we're in daemon mode
+        if let Ok(syftbox_dir) = std::env::var("SYFTBOX_DATA_DIR") {
+            let log_path = std::path::PathBuf::from(&syftbox_dir)
+                .join(".biovault")
+                .join("logs")
+                .join("daemon.log");
+
+            if let Ok(mut file) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&log_path)
+            {
+                use std::io::Write;
+                let _ = writeln!(file, "{}", crash_log);
+            }
+        }
+
+        // Also write to stderr
+        eprintln!("{}", crash_log);
+    }));
+
+    // Use a minimal tokio runtime - this is just a file-watching daemon, not a web server
+    // 2 worker threads is plenty for occasional I/O operations
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .thread_name("bv-worker")
+        .enable_all()
+        .build()
+        .expect("Failed to create tokio runtime");
+
+    runtime.block_on(async_main())
+}
+
+async fn async_main() -> Result<()> {
     let cli = Cli::parse();
 
     let filter_level = if cli.verbose { "debug" } else { "info" };
@@ -874,6 +944,15 @@ async fn main() -> Result<()> {
                 }
                 DaemonCommands::Uninstall => {
                     commands::daemon::uninstall_service(&config).await?;
+                }
+                DaemonCommands::List => {
+                    commands::daemon::list_services().await?;
+                }
+                DaemonCommands::Show => {
+                    commands::daemon::show_service(&config).await?;
+                }
+                DaemonCommands::Reinstall => {
+                    commands::daemon::reinstall_service(&config).await?;
                 }
             }
         }
