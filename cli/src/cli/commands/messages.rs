@@ -72,7 +72,7 @@ mod tests_fast_helpers {
             email: "e@example".into(),
             syftbox_config: None,
             version: None,
-        
+
             binary_paths: None,
         };
         let path = get_message_db_path(&cfg).unwrap();
@@ -1214,7 +1214,7 @@ mod tests {
             email: "test@example.com".to_string(),
             syftbox_config: None,
             version: None,
-        
+
             binary_paths: None,
         }
     }
@@ -1315,7 +1315,7 @@ mod tests {
             email: "u@example.com".into(),
             syftbox_config: None,
             version: None,
-        
+
             binary_paths: None,
         };
 
@@ -1361,7 +1361,7 @@ mod tests {
             email: "u@example.com".into(),
             syftbox_config: None,
             version: None,
-        
+
             binary_paths: None,
         };
 
@@ -1392,7 +1392,7 @@ mod tests {
             email: "u@example.com".into(),
             syftbox_config: None,
             version: None,
-        
+
             binary_paths: None,
         };
 
@@ -1441,7 +1441,7 @@ mod tests {
             email: "me@example.com".into(),
             syftbox_config: None,
             version: None,
-        
+
             binary_paths: None,
         };
         // Init DB only
@@ -1468,7 +1468,7 @@ mod tests {
             email: "me@example.com".into(),
             syftbox_config: None,
             version: None,
-        
+
             binary_paths: None,
         };
         let db_path = get_message_db_path(&cfg)?;

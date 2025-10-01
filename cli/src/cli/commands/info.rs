@@ -1,38 +1,48 @@
 use crate::config;
 use crate::Result;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 #[cfg(target_family = "unix")]
 use std::os::unix::fs::MetadataExt;
 use sysinfo::{Disks, System};
 
-pub async fn execute() -> Result<()> {
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SystemInfo {
+    pub os: String,
+    pub os_version: String,
+    pub cpu_arch: String,
+    pub cpu_count: usize,
+    pub ram_gb: f64,
+    pub disk_free_gb: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub syftbox: Option<SyftBoxInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyftBoxInfo {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub binary: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data_dir: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+}
+
+pub async fn execute(json: bool) -> Result<()> {
     let mut sys = System::new_all();
     sys.refresh_all();
 
-    println!("System Information");
-    println!("==================");
-
-    // OS
-    println!(
-        "OS: {} {}",
-        System::name().unwrap_or_else(|| "Unknown".to_string()),
-        System::os_version().unwrap_or_default()
-    );
-
-    // CPU Architecture
-    println!(
-        "CPU Arch: {}",
-        System::cpu_arch().unwrap_or_else(|| "Unknown".to_string())
-    );
-
-    // CPU count
+    // Collect OS info
+    let os_name = System::name().unwrap_or_else(|| "Unknown".to_string());
+    let os_version = System::os_version().unwrap_or_default();
+    let cpu_arch = System::cpu_arch().unwrap_or_else(|| "Unknown".to_string());
     let cpu_count = sys.cpus().len();
-    println!("CPUs: {}", cpu_count);
 
     // RAM
     let total_memory = sys.total_memory();
     let total_memory_gb = total_memory as f64 / (1024.0 * 1024.0 * 1024.0);
-    println!("RAM: {:.2} GB", total_memory_gb);
 
     // Disk Free Space (deduplicated by filesystem device and excluding virtual FS)
     let disks = Disks::new_with_refreshed_list();
@@ -90,27 +100,59 @@ pub async fn execute() -> Result<()> {
 
     let total_free_space: u128 = device_max_free.values().map(|v| *v as u128).sum();
     let free_space_gb = total_free_space as f64 / (1024.0 * 1024.0 * 1024.0);
-    println!("DISK FREE: {:.2} GB", free_space_gb);
 
-    // SyftBox environment info if available
-    if config::is_syftbox_env() {
-        println!("\nSyftBox Environment");
-        println!("===================");
+    // Collect SyftBox environment info if available
+    let syftbox_info = if config::is_syftbox_env() {
+        Some(SyftBoxInfo {
+            binary: config::get_syftbox_binary(),
+            version: config::get_syftbox_version(),
+            data_dir: std::env::var("SYFTBOX_DATA_DIR").ok(),
+            email: std::env::var("SYFTBOX_EMAIL").ok(),
+        })
+    } else {
+        None
+    };
 
-        if let Some(binary) = config::get_syftbox_binary() {
-            println!("SyftBox Binary: {}", binary);
-        }
+    let info = SystemInfo {
+        os: os_name.clone(),
+        os_version: os_version.clone(),
+        cpu_arch: cpu_arch.clone(),
+        cpu_count,
+        ram_gb: total_memory_gb,
+        disk_free_gb: free_space_gb,
+        syftbox: syftbox_info.clone(),
+    };
 
-        if let Some(version) = config::get_syftbox_version() {
-            println!("SyftBox Version: {}", version);
-        }
+    if json {
+        println!("{}", serde_json::to_string_pretty(&info)?);
+    } else {
+        println!("System Information");
+        println!("==================");
+        println!("OS: {} {}", os_name, os_version);
+        println!("CPU Arch: {}", cpu_arch);
+        println!("CPUs: {}", cpu_count);
+        println!("RAM: {:.2} GB", total_memory_gb);
+        println!("DISK FREE: {:.2} GB", free_space_gb);
 
-        if let Ok(data_dir) = std::env::var("SYFTBOX_DATA_DIR") {
-            println!("SyftBox Data Dir: {}", data_dir);
-        }
+        if let Some(syftbox) = syftbox_info {
+            println!("\nSyftBox Environment");
+            println!("===================");
 
-        if let Ok(email) = std::env::var("SYFTBOX_EMAIL") {
-            println!("SyftBox Email: {}", email);
+            if let Some(binary) = syftbox.binary {
+                println!("SyftBox Binary: {}", binary);
+            }
+
+            if let Some(version) = syftbox.version {
+                println!("SyftBox Version: {}", version);
+            }
+
+            if let Some(data_dir) = syftbox.data_dir {
+                println!("SyftBox Data Dir: {}", data_dir);
+            }
+
+            if let Some(email) = syftbox.email {
+                println!("SyftBox Email: {}", email);
+            }
         }
     }
 
@@ -124,6 +166,6 @@ mod tests {
     #[tokio::test]
     async fn info_execute_runs() {
         // Just ensure the function executes without error; it queries local sysinfo only
-        execute().await.unwrap();
+        execute(false).await.unwrap();
     }
 }

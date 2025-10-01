@@ -1,25 +1,67 @@
 use crate::config::Config;
 use crate::error::Error;
 use anyhow::Context;
+use serde::{Deserialize, Serialize};
 
-pub async fn show() -> crate::error::Result<()> {
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ConfigDisplay {
+    pub config_file: String,
+    pub email: String,
+    pub syftbox_config: String,
+    pub syftbox_data_dir: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub binary_paths: Option<crate::config::BinaryPaths>,
+}
+
+pub async fn show(json: bool) -> crate::error::Result<()> {
     let config = Config::load()?;
     let config_path = Config::get_config_path()?;
 
-    println!("BioVault Configuration");
-    println!("----------------------");
-    println!("Config file: {}", config_path.display());
-    println!("Email: {}", config.email);
-
-    if let Some(ref syftbox_path) = config.syftbox_config {
-        println!("SyftBox config: {}", syftbox_path);
+    let syftbox_config_str = if let Some(ref syftbox_path) = config.syftbox_config {
+        syftbox_path.clone()
     } else {
-        println!("SyftBox config: ~/.syftbox/config.json (default)");
-    }
+        "~/.syftbox/config.json (default)".to_string()
+    };
 
-    match config.get_syftbox_data_dir() {
-        Ok(data_dir) => println!("SyftBox data dir: {}", data_dir.display()),
-        Err(e) => println!("SyftBox data dir: <error: {}>", e),
+    let syftbox_data_dir_str = match config.get_syftbox_data_dir() {
+        Ok(data_dir) => Some(data_dir.display().to_string()),
+        Err(_) => None,
+    };
+
+    let display = ConfigDisplay {
+        config_file: config_path.display().to_string(),
+        email: config.email.clone(),
+        syftbox_config: syftbox_config_str.clone(),
+        syftbox_data_dir: syftbox_data_dir_str.clone(),
+        binary_paths: config.binary_paths.clone(),
+    };
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&display)?);
+    } else {
+        println!("BioVault Configuration");
+        println!("----------------------");
+        println!("Config file: {}", config_path.display());
+        println!("Email: {}", config.email);
+        println!("SyftBox config: {}", syftbox_config_str);
+
+        match config.get_syftbox_data_dir() {
+            Ok(data_dir) => println!("SyftBox data dir: {}", data_dir.display()),
+            Err(e) => println!("SyftBox data dir: <error: {}>", e),
+        }
+
+        if let Some(ref bp) = config.binary_paths {
+            println!("\nCustom Binary Paths:");
+            if let Some(ref java) = bp.java {
+                println!("  Java: {}", java);
+            }
+            if let Some(ref docker) = bp.docker {
+                println!("  Docker: {}", docker);
+            }
+            if let Some(ref nextflow) = bp.nextflow {
+                println!("  Nextflow: {}", nextflow);
+            }
+        }
     }
 
     Ok(())
@@ -94,7 +136,7 @@ mod tests {
             email: "initial@example.com".to_string(),
             syftbox_config: None,
             version: None,
-        
+
             binary_paths: None,
         };
         initial_config.save(config_dir.join("config.yaml"))?;
@@ -136,7 +178,7 @@ mod tests {
             email: "e@example".into(),
             syftbox_config: None,
             version: None,
-        
+
             binary_paths: None,
         };
         cfg.save(tmp.path().join(".bv/config.yaml"))?;
@@ -178,13 +220,13 @@ mod tests {
             email: "show@example.com".to_string(),
             syftbox_config: Some("/custom/syftbox.json".to_string()),
             version: Some("1.0.0".to_string()),
-        
+
             binary_paths: None,
         };
         config.save(config_dir.join("config.yaml"))?;
 
         // This function prints to stdout, so we just verify it doesn't panic
-        let result = show().await;
+        let result = show(false).await;
         assert!(result.is_ok());
 
         crate::config::clear_test_biovault_home();
@@ -205,7 +247,7 @@ mod tests {
             email: "initial@example.com".to_string(),
             syftbox_config: None,
             version: None,
-        
+
             binary_paths: None,
         };
         initial_config.save(config_dir.join("config.yaml"))?;
@@ -231,7 +273,7 @@ mod tests {
 
         // Don't create any config file
         let runtime = tokio::runtime::Runtime::new().unwrap();
-        let _result = runtime.block_on(show());
+        let _result = runtime.block_on(show(false));
 
         // Should either succeed with defaults or fail gracefully
         // We're just making sure it doesn't panic

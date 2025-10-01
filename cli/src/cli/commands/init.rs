@@ -263,7 +263,7 @@ mod tests {
             email: "old@example.com".to_string(),
             syftbox_config: None,
             version: None,
-        
+
             binary_paths: None,
         };
         let config_path = temp_dir.path().join(".biovault").join("config.yaml");

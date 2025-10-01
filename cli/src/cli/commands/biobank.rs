@@ -708,7 +708,7 @@ mod tests {
             email: email.to_string(),
             syftbox_config: Some(syftbox_config_path.to_str().unwrap().to_string()),
             version: None,
-        
+
             binary_paths: None,
         };
 
@@ -774,7 +774,7 @@ mod tests {
             email: email.to_string(),
             syftbox_config: Some(syftbox_config_path.to_string_lossy().to_string()),
             version: None,
-        
+
             binary_paths: None,
         });
 
@@ -1037,7 +1037,7 @@ participants:
                     .to_string(),
             ),
             version: None,
-        
+
             binary_paths: None,
         };
         config.save(config_dir.join("config.yaml"))?;

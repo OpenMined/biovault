@@ -293,7 +293,7 @@ mod tests {
             email: "user@example.com".into(),
             syftbox_config: None,
             version: Some("1.0.0".into()),
-        
+
             binary_paths: None,
         };
         cfg.save(&path).unwrap();
@@ -318,7 +318,7 @@ mod tests {
             email: "user@example.com".into(),
             syftbox_config: Some(syft_cfg_path.to_string_lossy().to_string()),
             version: None,
-        
+
             binary_paths: None,
         };
 
