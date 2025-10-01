@@ -816,21 +816,46 @@ fn check_systemd_available() -> Result<()> {
     Ok(())
 }
 
-fn get_service_name() -> String {
-    "biovault-daemon.service".to_string()
+fn get_service_name(config: &Config) -> String {
+    // Create unique service name per email/sbenv
+    let safe_email = config.email.replace('@', "-at-").replace('.', "-");
+    format!("biovault-daemon-{}.service", safe_email)
 }
 
 fn generate_systemd_service_content(config: &Config) -> Result<String> {
-    let exe_path = std::env::current_exe().context("Failed to get current executable path")?;
-
     let home_dir =
         dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
 
     let user = std::env::var("USER").unwrap_or_else(|_| "nobody".to_string());
 
+    // Get the data dir for this sbenv
+    let data_dir = config.get_syftbox_data_dir()?;
+    let data_dir_str = data_dir.to_string_lossy();
+
+    // Check if we're in an sbenv
+    let sbenv_file = data_dir.join(".sbenv");
+    let is_sbenv = sbenv_file.exists();
+
+    // Generate the ExecStart command
+    let exec_start = if is_sbenv {
+        // Use sbenv exec to run bv within the sbenv context
+        format!("sbenv exec {} bv daemon start --foreground", config.email)
+    } else {
+        // Get the current bv executable path
+        let exe_path = std::env::current_exe().context("Failed to get current executable path")?;
+        format!("{} daemon start --foreground", exe_path.display())
+    };
+
+    // Set working directory to the data dir for sbenv context
+    let working_dir = if is_sbenv {
+        data_dir_str.to_string()
+    } else {
+        home_dir.display().to_string()
+    };
+
     let service_content = format!(
         r#"[Unit]
-Description=BioVault Daemon - Automatic message processing for BioVault
+Description=BioVault Daemon ({email})
 After=network.target
 Wants=network-online.target
 
@@ -838,15 +863,14 @@ Wants=network-online.target
 Type=simple
 User={user}
 Group={user}
-WorkingDirectory={home_dir}
-ExecStart={exe_path} start --foreground
+WorkingDirectory={working_dir}
+ExecStart={exec_start}
 Restart=on-failure
 RestartSec=10
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=biovault-daemon
+SyslogIdentifier=biovault-{safe_email}
 Environment="HOME={home_dir}"
-Environment="BV_DAEMON_EMAIL={email}"
 Environment="PATH=/usr/local/bin:/usr/bin:/bin:{home_dir}/.local/bin"
 
 # Security settings
@@ -854,15 +878,18 @@ PrivateTmp=true
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths={home_dir}/.biovault {home_dir}/.syftbox {home_dir}/dev
+ReadWritePaths={data_dir}
 
 [Install]
 WantedBy=multi-user.target
 "#,
         user = user,
         home_dir = home_dir.display(),
-        exe_path = exe_path.display(),
         email = config.email,
+        safe_email = config.email.replace('@', "-at-").replace('.', "-"),
+        exec_start = exec_start,
+        working_dir = working_dir,
+        data_dir = data_dir_str,
     );
 
     Ok(service_content)
@@ -872,7 +899,7 @@ pub async fn install_service(config: &Config) -> Result<()> {
     check_systemd_available()?;
 
     // Check if service is already installed
-    let service_name = get_service_name();
+    let service_name = get_service_name(config);
     let check_output = Command::new("systemctl")
         .args(["status", &service_name])
         .output()?;
@@ -966,10 +993,10 @@ pub async fn install_service(config: &Config) -> Result<()> {
     Ok(())
 }
 
-pub async fn uninstall_service(_config: &Config) -> Result<()> {
+pub async fn uninstall_service(config: &Config) -> Result<()> {
     check_systemd_available()?;
 
-    let service_name = get_service_name();
+    let service_name = get_service_name(config);
 
     println!("🗑️  Uninstalling BioVault daemon service...");
 
@@ -1024,6 +1051,99 @@ pub async fn uninstall_service(_config: &Config) -> Result<()> {
     Ok(())
 }
 
+pub async fn list_services() -> Result<()> {
+    // Check if systemd is available (runtime check)
+    if !cfg!(target_os = "linux") {
+        println!("⚠️  Service listing is only supported on Linux systems");
+        return Ok(());
+    }
+
+    // Check if systemctl is available
+    let check = Command::new("systemctl").arg("--version").output();
+
+    if check.is_err() || !check.as_ref().unwrap().status.success() {
+        println!("⚠️  systemd is not available on this system");
+        return Ok(());
+    }
+
+    println!("🔍 Searching for BioVault daemon services...\n");
+
+    // List all biovault-daemon services
+    let output = Command::new("systemctl")
+        .args([
+            "list-units",
+            "--all",
+            "--no-pager",
+            "biovault-daemon-*.service",
+        ])
+        .output()?;
+
+    if !output.status.success() {
+        println!("⚠️  Failed to list services");
+        return Ok(());
+    }
+
+    let output_str = String::from_utf8_lossy(&output.stdout);
+    let lines: Vec<&str> = output_str.lines().collect();
+
+    // Parse the systemctl output to extract service information
+    let mut services = Vec::new();
+    for line in lines.iter().skip(1) {
+        // Skip header
+        if line.contains("biovault-daemon-") && line.contains(".service") {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if let Some(name) = parts.first() {
+                if name.starts_with("biovault-daemon-") {
+                    // Extract email from service name
+                    let email_part = name
+                        .trim_start_matches("biovault-daemon-")
+                        .trim_end_matches(".service")
+                        .replace("-at-", "@")
+                        .replace("-", ".");
+
+                    // Get status
+                    let status = if line.contains("active") && line.contains("running") {
+                        "RUNNING"
+                    } else if line.contains("failed") {
+                        "FAILED"
+                    } else if line.contains("inactive") || line.contains("dead") {
+                        "STOPPED"
+                    } else {
+                        "UNKNOWN"
+                    };
+
+                    services.push((name.to_string(), email_part, status));
+                }
+            }
+        }
+    }
+
+    if services.is_empty() {
+        println!("📝 No BioVault daemon services found");
+        println!("   Use 'bv daemon install' to install a service");
+    } else {
+        println!("📋 Found {} BioVault daemon service(s):\n", services.len());
+        for (service_name, email, status) in services {
+            let status_icon = match status {
+                "RUNNING" => "✅",
+                "FAILED" => "❌",
+                "STOPPED" => "⏹️",
+                _ => "❓",
+            };
+            println!("   {} {} ({})", status_icon, email, status);
+            println!("      Service: {}", service_name);
+            println!();
+        }
+        println!("💡 Commands:");
+        println!("   • Status:  sudo systemctl status <service-name>");
+        println!("   • Stop:    sudo systemctl stop <service-name>");
+        println!("   • Start:   sudo systemctl start <service-name>");
+        println!("   • Logs:    sudo journalctl -u <service-name> -f");
+    }
+
+    Ok(())
+}
+
 pub async fn service_status(config: &Config) -> Result<()> {
     // First check if daemon is running the old way (manual start)
     let manual_running = is_daemon_running(config).unwrap_or(false);
@@ -1050,7 +1170,7 @@ pub async fn service_status(config: &Config) -> Result<()> {
 
     // Check systemd service status (runtime check)
     if cfg!(target_os = "linux") {
-        let service_name = get_service_name();
+        let service_name = get_service_name(config);
         let output = Command::new("systemctl")
             .args(["status", &service_name, "--no-pager"])
             .output()?;
