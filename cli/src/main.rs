@@ -275,6 +275,12 @@ enum DaemonCommands {
 
     #[command(about = "List all installed daemon services")]
     List,
+
+    #[command(about = "Show the systemd service file")]
+    Show,
+
+    #[command(about = "Reinstall daemon service (uninstall + install)")]
+    Reinstall,
 }
 
 #[derive(Subcommand)]
@@ -932,6 +938,12 @@ async fn async_main() -> Result<()> {
                 }
                 DaemonCommands::List => {
                     commands::daemon::list_services().await?;
+                }
+                DaemonCommands::Show => {
+                    commands::daemon::show_service(&config).await?;
+                }
+                DaemonCommands::Reinstall => {
+                    commands::daemon::reinstall_service(&config).await?;
                 }
             }
         }

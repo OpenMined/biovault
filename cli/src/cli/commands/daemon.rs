@@ -908,14 +908,47 @@ fn generate_systemd_service_content(config: &Config) -> Result<String> {
     let sbenv_file = data_dir.join(".sbenv");
     let is_sbenv = sbenv_file.exists();
 
+    // Find the full path to bv (current executable)
+    let bv_path = std::env::current_exe()
+        .context("Failed to get current executable path")?
+        .to_string_lossy()
+        .to_string();
+
     // Generate the ExecStart command
     let exec_start = if is_sbenv {
+        // Find the full path to sbenv
+        let sbenv_path = Command::new("which")
+            .arg("sbenv")
+            .output()
+            .ok()
+            .and_then(|out| {
+                if out.status.success() {
+                    String::from_utf8(out.stdout)
+                        .ok()
+                        .map(|s| s.trim().to_string())
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| {
+                // Default fallback to common installation paths
+                let cargo_bin = format!("{}/.cargo/bin/sbenv", home_dir.display());
+                let local_bin = format!("{}/.local/bin/sbenv", home_dir.display());
+                if std::path::Path::new(&cargo_bin).exists() {
+                    cargo_bin
+                } else {
+                    local_bin
+                }
+            });
+
         // Use sbenv exec to run bv within the sbenv context
-        format!("sbenv exec {} bv daemon start --foreground", config.email)
+        format!(
+            "{} exec {} {} daemon start --foreground",
+            sbenv_path, config.email, bv_path
+        )
     } else {
-        // Get the current bv executable path
-        let exe_path = std::env::current_exe().context("Failed to get current executable path")?;
-        format!("{} daemon start --foreground", exe_path.display())
+        // Use the bv path directly
+        format!("{} daemon start --foreground", bv_path)
     };
 
     // Set working directory to the data dir for sbenv context
@@ -943,14 +976,12 @@ StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=biovault-{safe_email}
 Environment="HOME={home_dir}"
-Environment="PATH=/usr/local/bin:/usr/bin:/bin:{home_dir}/.local/bin"
+Environment="PATH=/usr/local/bin:/usr/bin:/bin:{home_dir}/.local/bin:{home_dir}/.cargo/bin"
 
 # Security settings
 PrivateTmp=true
 NoNewPrivileges=true
 ProtectSystem=full
-ProtectHome=read-only
-ReadWritePaths={data_dir}
 
 [Install]
 WantedBy=multi-user.target
@@ -961,7 +992,6 @@ WantedBy=multi-user.target
         safe_email = config.email.replace('@', "-at-").replace('.', "-"),
         exec_start = exec_start,
         working_dir = working_dir,
-        data_dir = data_dir_str,
     );
 
     Ok(service_content)
@@ -1282,6 +1312,54 @@ pub async fn service_status(config: &Config) -> Result<()> {
         println!("   Service installation is only supported on Linux");
         println!("   Use 'bv daemon start' to run the daemon manually");
     }
+
+    Ok(())
+}
+
+pub async fn show_service(config: &Config) -> Result<()> {
+    check_systemd_available()?;
+
+    let service_name = get_service_name(config);
+    let service_path = format!("/etc/systemd/system/{}", service_name);
+
+    if !std::path::Path::new(&service_path).exists() {
+        println!("❌ Service file not found: {}", service_path);
+        println!("   Use 'bv daemon install' to install the service");
+        return Ok(());
+    }
+
+    println!("📄 Service file: {}", service_path);
+    println!("════════════════════════════════════════");
+
+    let content = std::fs::read_to_string(&service_path)
+        .with_context(|| format!("Failed to read service file: {}", service_path))?;
+
+    println!("{}", content);
+
+    Ok(())
+}
+
+pub async fn reinstall_service(config: &Config) -> Result<()> {
+    check_systemd_available()?;
+
+    println!("🔄 Reinstalling BioVault daemon service...\n");
+
+    // Check if service exists
+    let service_name = get_service_name(config);
+    let check_output = Command::new("systemctl")
+        .args(["status", &service_name])
+        .output()?;
+
+    if check_output.status.success() || check_output.status.code() == Some(3) {
+        // Service exists, uninstall it first
+        println!("📤 Uninstalling existing service...");
+        uninstall_service(config).await?;
+        println!();
+    }
+
+    // Install the service
+    println!("📥 Installing service...");
+    install_service(config).await?;
 
     Ok(())
 }
