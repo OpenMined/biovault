@@ -1280,6 +1280,20 @@ mod tests {
     }
 
     #[test]
+    fn skip_install_commands_env_behavior() {
+        env::remove_var("BIOVAULT_SKIP_INSTALLS");
+        assert!(!super::skip_install_commands());
+
+        env::set_var("BIOVAULT_SKIP_INSTALLS", "1");
+        assert!(super::skip_install_commands());
+
+        env::set_var("BIOVAULT_SKIP_INSTALLS", "0");
+        assert!(!super::skip_install_commands());
+
+        env::remove_var("BIOVAULT_SKIP_INSTALLS");
+    }
+
+    #[test]
     fn java_parse_various_formats() {
         let cases = [
             ("openjdk version \"17.0.2\" 2022-01-18", Some(17)),
@@ -1381,7 +1395,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg_attr(not(feature = "slow-tests"), ignore = "slow env-setup path")]
     async fn setup_google_colab_runs_without_panic() {
         let _guard = SkipInstallGuard::new();
         super::setup_google_colab().await.unwrap();
@@ -1415,7 +1428,6 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial]
-    #[cfg_attr(not(feature = "slow-tests"), ignore = "slow env-setup path")]
     async fn setup_execute_colab_branch() {
         let _guard = SkipInstallGuard::new();
         std::env::set_var("COLAB_RELEASE_TAG", "1");

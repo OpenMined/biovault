@@ -24,6 +24,50 @@ fn validate_example_name(s: &str) -> Result<String, String> {
 mod tests {
     use super::*;
     use clap::Parser;
+    use tempfile::TempDir;
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(prev) = &self.previous {
+                std::env::set_var(self.key, prev);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
+
+    struct TestHomeGuard {
+        _temp: TempDir,
+    }
+
+    impl TestHomeGuard {
+        fn new() -> Self {
+            let temp = TempDir::new().unwrap();
+            let home = temp.path().join(".biovault");
+            std::fs::create_dir_all(&home).unwrap();
+            biovault::config::set_test_biovault_home(&home);
+            Self { _temp: temp }
+        }
+    }
+
+    impl Drop for TestHomeGuard {
+        fn drop(&mut self) {
+            biovault::config::clear_test_biovault_home();
+        }
+    }
 
     #[test]
     fn validate_example_name_accepts_known_and_rejects_unknown() {
@@ -177,6 +221,44 @@ mod tests {
             },
             _ => panic!("unexpected command variant"),
         }
+    }
+
+    #[test]
+    fn async_main_with_sample_data_list_executes() {
+        let _home_guard = TestHomeGuard::new();
+        let _skip_guard = EnvVarGuard::set("BIOVAULT_SKIP_UPDATE_CHECK", "1");
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+
+        let cli = Cli {
+            command: Commands::SampleData {
+                command: SampleDataCommands::List,
+            },
+            verbose: false,
+            config: None,
+        };
+
+        runtime
+            .block_on(async { super::async_main_with(cli).await })
+            .unwrap();
+    }
+
+    #[test]
+    fn async_main_with_project_examples_executes() {
+        let _home_guard = TestHomeGuard::new();
+        let _skip_guard = EnvVarGuard::set("BIOVAULT_SKIP_UPDATE_CHECK", "1");
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+
+        let cli = Cli {
+            command: Commands::Project {
+                command: ProjectCommands::Examples,
+            },
+            verbose: true,
+            config: None,
+        };
+
+        runtime
+            .block_on(async { super::async_main_with(cli).await })
+            .unwrap();
     }
 }
 
@@ -770,15 +852,13 @@ fn main() -> Result<()> {
     runtime.block_on(async_main())
 }
 
-async fn async_main() -> Result<()> {
-    let cli = Cli::parse();
-
+async fn async_main_with(cli: Cli) -> Result<()> {
     let filter_level = if cli.verbose { "debug" } else { "info" };
 
-    tracing_subscriber::registry()
+    let _ = tracing_subscriber::registry()
         .with(fmt::layer())
         .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(filter_level)))
-        .init();
+        .try_init();
 
     // Random version check on startup (10% chance)
     let _ = commands::update::check_and_notify_random().await;
@@ -1184,4 +1264,9 @@ async fn async_main() -> Result<()> {
     }
 
     Ok(())
+}
+
+async fn async_main() -> Result<()> {
+    let cli = Cli::parse();
+    async_main_with(cli).await
 }

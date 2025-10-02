@@ -331,6 +331,7 @@ mod tests {
             email: "user@example.com".into(),
             syftbox_config: None,
             version: None,
+            binary_paths: None,
         }
     }
 
