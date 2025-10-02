@@ -315,3 +315,150 @@ pub async fn execute(ignore_warning: bool) -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{
+        clear_test_biovault_home, clear_test_syftbox_data_dir, set_test_biovault_home,
+        set_test_syftbox_data_dir,
+    };
+    use std::fs;
+    use tempfile::TempDir;
+
+    fn test_config() -> Config {
+        Config {
+            email: "user@example.com".into(),
+            syftbox_config: None,
+            version: None,
+            binary_paths: None,
+        }
+    }
+
+    #[test]
+    fn cleanup_paths_cover_root_data_dir() {
+        let tmp = TempDir::new().unwrap();
+        let bv_home = tmp.path().join("biovault_home");
+        fs::create_dir_all(&bv_home).unwrap();
+        set_test_biovault_home(&bv_home);
+
+        let root = tmp.path().join("syftbox");
+        let datasite = root.join("datasites").join("user@example.com");
+        let public = datasite.join("public").join("biovault");
+        let shared = datasite.join("shared").join("biovault").join("submissions");
+        let app_data = datasite.join("app_data").join("biovault");
+        let private = root.join("private").join("app_data").join("biovault");
+
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&public).unwrap();
+        fs::create_dir_all(&shared).unwrap();
+        fs::create_dir_all(&app_data).unwrap();
+        fs::create_dir_all(&private).unwrap();
+        set_test_syftbox_data_dir(&root);
+
+        let config = test_config();
+        let paths = get_cleanup_paths(&config);
+
+        assert_eq!(paths.len(), 5);
+        assert!(paths.iter().any(|p| p.path == bv_home && p.exists));
+        assert!(paths.iter().any(|p| p.path == public && p.exists));
+        assert!(paths.iter().any(|p| p.path == shared && p.exists));
+        assert!(paths.iter().any(|p| p.path == app_data && p.exists));
+        assert!(paths.iter().any(|p| p.path == private && p.exists));
+
+        clear_test_biovault_home();
+        clear_test_syftbox_data_dir();
+    }
+
+    #[test]
+    fn cleanup_paths_handles_datasite_data_dir() {
+        let tmp = TempDir::new().unwrap();
+        let bv_home = tmp.path().join("biovault_home");
+        fs::create_dir_all(&bv_home).unwrap();
+        set_test_biovault_home(&bv_home);
+
+        let root = tmp.path().join("syftbox");
+        let datasite = root.join("datasites").join("user@example.com");
+        let public = datasite.join("public").join("biovault");
+        let shared = datasite.join("shared").join("biovault").join("submissions");
+        let app_data = datasite.join("app_data").join("biovault");
+        let private = root.join("private").join("app_data").join("biovault");
+
+        fs::create_dir_all(&datasite).unwrap();
+        fs::create_dir_all(&public).unwrap();
+        fs::create_dir_all(&shared).unwrap();
+        fs::create_dir_all(&app_data).unwrap();
+        fs::create_dir_all(&private).unwrap();
+        set_test_syftbox_data_dir(&datasite);
+
+        let config = test_config();
+        let paths = get_cleanup_paths(&config);
+
+        assert_eq!(paths.len(), 5);
+        assert!(paths.iter().any(|p| p.path == bv_home && p.exists));
+        assert!(paths.iter().any(|p| p.path == public && p.exists));
+        assert!(paths.iter().any(|p| p.path == shared && p.exists));
+        assert!(paths.iter().any(|p| p.path == app_data && p.exists));
+        assert!(paths.iter().any(|p| p.path == private && p.exists));
+
+        clear_test_biovault_home();
+        clear_test_syftbox_data_dir();
+    }
+
+    #[test]
+    fn delete_path_removes_files_and_directories() {
+        let tmp = TempDir::new().unwrap();
+        let file_path = tmp.path().join("file.txt");
+        fs::write(&file_path, "data").unwrap();
+        delete_path(&file_path).unwrap();
+        assert!(!file_path.exists());
+
+        let dir_path = tmp.path().join("dir");
+        fs::create_dir_all(dir_path.join("nested")).unwrap();
+        delete_path(&dir_path).unwrap();
+        assert!(!dir_path.exists());
+    }
+
+    #[test]
+    fn execute_removes_all_known_paths_in_ignore_mode() {
+        let tmp = TempDir::new().unwrap();
+        let bv_home = tmp.path().join("biovault_home");
+        fs::create_dir_all(&bv_home).unwrap();
+        set_test_biovault_home(&bv_home);
+
+        let config_path = bv_home.join("config.yaml");
+        test_config().save(&config_path).unwrap();
+
+        let root = tmp.path().join("syftbox");
+        let datasite = root.join("datasites").join("user@example.com");
+        let public = datasite.join("public").join("biovault");
+        let shared = datasite.join("shared").join("biovault").join("submissions");
+        let app_data = datasite.join("app_data").join("biovault");
+        let private = root.join("private").join("app_data").join("biovault");
+
+        fs::create_dir_all(&public).unwrap();
+        fs::create_dir_all(&shared).unwrap();
+        fs::create_dir_all(&app_data).unwrap();
+        fs::create_dir_all(&private).unwrap();
+        fs::write(public.join("file"), "contents").unwrap();
+        fs::write(private.join("file"), "contents").unwrap();
+        set_test_syftbox_data_dir(&root);
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            execute(true).await.unwrap();
+        });
+
+        assert!(!bv_home.exists());
+        assert!(!public.exists());
+        assert!(!shared.exists());
+        assert!(!app_data.exists());
+        assert!(!private.exists());
+
+        clear_test_biovault_home();
+        clear_test_syftbox_data_dir();
+    }
+}

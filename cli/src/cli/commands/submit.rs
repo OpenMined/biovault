@@ -79,7 +79,9 @@ pub async fn submit(
     project.datasites = Some(vec![datasite_email.clone()]);
 
     // Handle participants from destination URL
-    project.participants = participant_url.clone().map(|url| vec![url]);
+    if let Some(ref url) = participant_url {
+        project.participants = Some(vec![url.clone()]);
+    }
 
     // Hash workflow.nf
     let workflow_path = project_dir.join("workflow.nf");
@@ -213,13 +215,13 @@ pub async fn submit(
                     }
 
                     // Handle participants from destination URL
-                    if let Some(new_participant) = participant_url.clone() {
+                    if let Some(ref new_participant) = participant_url {
                         if let Some(ref mut participants) = existing_project.participants {
-                            if !participants.contains(&new_participant) {
-                                participants.push(new_participant);
+                            if !participants.contains(new_participant) {
+                                participants.push(new_participant.clone());
                             }
                         } else {
-                            existing_project.participants = Some(vec![new_participant]);
+                            existing_project.participants = Some(vec![new_participant.clone()]);
                         }
                     }
 
@@ -253,7 +255,9 @@ pub async fn submit(
                         // Update project.yaml with new datasite
                         let mut updated_project = existing_project.clone();
                         updated_project.datasites = Some(vec![datasite_email.clone()]);
-                        updated_project.participants = participant_url.clone().map(|url| vec![url]);
+                        if let Some(ref url) = participant_url {
+                            updated_project.participants = Some(vec![url.clone()]);
+                        }
                         updated_project.save(&existing_project_yaml)?;
 
                         // Update syft.pub.yaml
@@ -301,6 +305,7 @@ pub async fn submit(
                     &project_hash,
                     &new_date_str,
                     participant_url,
+                    non_interactive,
                 );
             }
         }
@@ -317,6 +322,7 @@ pub async fn submit(
         &project_hash,
         &date_str,
         participant_url,
+        non_interactive,
     )
 }
 
@@ -375,6 +381,7 @@ fn create_and_submit_project(
     project_hash: &str,
     date_str: &str,
     participant_url: Option<String>,
+    non_interactive: bool,
 ) -> Result<()> {
     // Create submission directory
     fs::create_dir_all(submission_path)?;
@@ -414,7 +421,7 @@ fn create_and_submit_project(
         submission_folder_name,
         project_hash,
         date_str,
-        false, // non_interactive is false in create_and_submit_project context
+        non_interactive,
         is_self_submission,
     )
 }
@@ -560,7 +567,82 @@ fn update_permissions_for_new_recipient(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::commands::messages::get_message_db_path;
+    use crate::config::{
+        clear_test_biovault_home, clear_test_syftbox_data_dir, set_test_biovault_home,
+        set_test_syftbox_data_dir,
+    };
+    use crate::messages::{MessageDb, MessageType};
+    use serial_test::serial;
+    use std::collections::HashMap;
+    use std::time::Duration;
     use tempfile::TempDir;
+
+    fn write_project_yaml(path: &Path, datasites: Option<Vec<String>>) {
+        let project = ProjectYaml {
+            name: "demo-project".into(),
+            author: "author@example.com".into(),
+            datasites,
+            participants: None,
+            workflow: "workflow.nf".into(),
+            template: None,
+            assets: Some(vec!["assets/data.csv".into()]),
+            b3_hashes: None,
+        };
+        project.save(&path.to_path_buf()).unwrap();
+    }
+
+    fn setup_submit_env(temp: &TempDir, config_email: &str) -> (PathBuf, PathBuf, PathBuf) {
+        let bv_home = temp.path().join(".biovault");
+        fs::create_dir_all(&bv_home).unwrap();
+        set_test_biovault_home(&bv_home);
+
+        let config = Config {
+            email: config_email.into(),
+            syftbox_config: None,
+            version: None,
+            binary_paths: None,
+        };
+        config.save(bv_home.join("config.yaml")).unwrap();
+
+        let syft_dir = temp.path().join("syft_data");
+        fs::create_dir_all(&syft_dir).unwrap();
+        set_test_syftbox_data_dir(&syft_dir);
+
+        let project_dir = temp.path().join("project");
+        fs::create_dir_all(project_dir.join("assets")).unwrap();
+        fs::write(project_dir.join("workflow.nf"), b"process MAIN {}").unwrap();
+        fs::write(project_dir.join("assets/data.csv"), b"data").unwrap();
+        write_project_yaml(&project_dir.join("project.yaml"), None);
+
+        // Ensure datasites base exists for SyftBoxApp
+        fs::create_dir_all(
+            syft_dir
+                .join("datasites")
+                .join(config_email)
+                .join("app_data")
+                .join("biovault"),
+        )
+        .unwrap();
+
+        (project_dir, syft_dir, bv_home)
+    }
+
+    fn list_submissions(syft_dir: &Path, config_email: &str) -> Vec<PathBuf> {
+        let submissions_dir = syft_dir
+            .join("datasites")
+            .join(config_email)
+            .join("shared")
+            .join("biovault")
+            .join("submissions");
+        if !submissions_dir.exists() {
+            return vec![];
+        }
+        std::fs::read_dir(&submissions_dir)
+            .unwrap()
+            .filter_map(|entry| entry.ok().map(|e| e.path()))
+            .collect()
+    }
 
     #[test]
     fn hash_file_computes_blake3() {
@@ -716,5 +798,275 @@ mod tests {
     fn test_hash_file_nonexistent() {
         let result = hash_file(Path::new("/nonexistent/file.txt"));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn update_permissions_adds_new_recipient_without_duplicates() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("syft.pub.yaml");
+        let original = SyftPermissions::new_for_datasite("original@example.com");
+        original.save(&path.to_path_buf()).unwrap();
+
+        update_permissions_for_new_recipient(&path, "colleague@example.com").unwrap();
+
+        let updated: SyftPermissions =
+            serde_yaml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+
+        // Every rule should grant read access to both recipients
+        for rule in &updated.rules {
+            assert!(rule
+                .access
+                .read
+                .contains(&"original@example.com".to_string()));
+            assert!(rule
+                .access
+                .read
+                .contains(&"colleague@example.com".to_string()));
+        }
+
+        // Results rule should also grant write access
+        let results_rule = updated
+            .rules
+            .iter()
+            .find(|r| r.pattern == "results/**/*")
+            .expect("results rule present");
+        assert!(results_rule
+            .access
+            .write
+            .contains(&"colleague@example.com".to_string()));
+
+        // Running again should not duplicate entries
+        update_permissions_for_new_recipient(&path, "colleague@example.com").unwrap();
+        let deduped: SyftPermissions =
+            serde_yaml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let reads: Vec<_> = deduped
+            .rules
+            .iter()
+            .flat_map(|r| r.access.read.iter())
+            .collect();
+        assert_eq!(
+            reads
+                .iter()
+                .filter(|v| v.as_str() == "colleague@example.com")
+                .count(),
+            deduped.rules.len()
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn send_project_message_writes_db_and_rpc_request() {
+        let tmp = TempDir::new().unwrap();
+        let bv_home = tmp.path().join(".biovault");
+        fs::create_dir_all(&bv_home).unwrap();
+        set_test_biovault_home(&bv_home);
+
+        let syft_dir = tmp.path().join("syft_data");
+        fs::create_dir_all(&syft_dir).unwrap();
+        set_test_syftbox_data_dir(&syft_dir);
+
+        let config = Config {
+            email: "me@example.com".into(),
+            syftbox_config: None,
+            version: None,
+            binary_paths: None,
+        };
+
+        let datasite_path = syft_dir.join("datasites").join(&config.email); // SyftBoxApp::new lazily creates this, but ensure base exists
+        fs::create_dir_all(&datasite_path).unwrap();
+
+        let submission_folder = "demo-20240101-deadbeef";
+        let submission_path = datasite_path
+            .join("shared")
+            .join("biovault")
+            .join("submissions")
+            .join(submission_folder);
+        fs::create_dir_all(&submission_path).unwrap();
+
+        let mut hashes = HashMap::new();
+        hashes.insert("workflow.nf".to_string(), "abc123".to_string());
+        let project = ProjectYaml {
+            name: "Demo Project".into(),
+            author: config.email.clone(),
+            datasites: Some(vec![config.email.clone()]),
+            participants: Some(vec!["participant1".into()]),
+            workflow: "workflow.nf".into(),
+            template: None,
+            assets: Some(vec!["assets/data.csv".into()]),
+            b3_hashes: Some(hashes),
+        };
+
+        send_project_message(
+            &config,
+            &project,
+            &config.email,
+            &submission_path,
+            submission_folder,
+            "deadbeefcafebabe",
+            "2024-01-01",
+            true,
+            true,
+        )
+        .unwrap();
+
+        let db_path = get_message_db_path(&config).unwrap();
+        let db = MessageDb::new(&db_path).unwrap();
+        let messages = db.list_messages(None).unwrap();
+        assert_eq!(messages.len(), 1);
+        let msg = &messages[0];
+        assert_eq!(msg.to, config.email);
+        assert!(matches!(msg.message_type, MessageType::Project { .. }));
+
+        let metadata = msg.metadata.as_ref().expect("metadata present");
+        let project_location = metadata
+            .get("project_location")
+            .and_then(|v| v.as_str())
+            .unwrap();
+        assert!(project_location.ends_with(submission_folder));
+        assert!(project_location.starts_with(&format!("syft://{}", config.email)));
+
+        // Ensure RPC request file written for the recipient
+        let rpc_dir = syft_dir
+            .join("datasites")
+            .join(&config.email)
+            .join("app_data")
+            .join("biovault")
+            .join("rpc")
+            .join("message");
+        let rpc_entries: Vec<_> = std::fs::read_dir(&rpc_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .collect();
+        assert!(!rpc_entries.is_empty());
+
+        clear_test_syftbox_data_dir();
+        clear_test_biovault_home();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn submit_updates_existing_submission_for_new_recipient() {
+        let temp = TempDir::new().unwrap();
+        let config_email = "me@example.com";
+        let (project_dir, syft_dir, _bv_home) = setup_submit_env(&temp, config_email);
+
+        submit(
+            project_dir.to_string_lossy().to_string(),
+            "friend@example.com".into(),
+            true,
+            false,
+        )
+        .await
+        .unwrap();
+
+        let before_dirs = list_submissions(&syft_dir, config_email);
+        assert_eq!(before_dirs.len(), 1);
+        let submission_path = before_dirs[0].clone();
+
+        submit(
+            project_dir.to_string_lossy().to_string(),
+            "colleague@example.com".into(),
+            true,
+            false,
+        )
+        .await
+        .unwrap();
+
+        let after_dirs = list_submissions(&syft_dir, config_email);
+        assert_eq!(after_dirs.len(), 1);
+        assert_eq!(after_dirs[0], submission_path);
+
+        let permissions: SyftPermissions = serde_yaml::from_str(
+            &fs::read_to_string(submission_path.join("syft.pub.yaml")).unwrap(),
+        )
+        .unwrap();
+        for rule in &permissions.rules {
+            assert!(rule
+                .access
+                .read
+                .contains(&"colleague@example.com".to_string()));
+        }
+
+        let project = ProjectYaml::from_file(&submission_path.join("project.yaml")).unwrap();
+        let datasites = project.datasites.unwrap();
+        assert_eq!(datasites, vec!["colleague@example.com".to_string()]);
+
+        let db_path = get_message_db_path(&Config {
+            email: config_email.into(),
+            syftbox_config: None,
+            version: None,
+            binary_paths: None,
+        })
+        .unwrap();
+        let db = MessageDb::new(&db_path).unwrap();
+        assert_eq!(db.list_messages(None).unwrap().len(), 2);
+
+        clear_test_syftbox_data_dir();
+        clear_test_biovault_home();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn submit_creates_new_version_when_forced_after_changes() {
+        let temp = TempDir::new().unwrap();
+        let config_email = "force@example.com";
+        let (project_dir, syft_dir, _bv_home) = setup_submit_env(&temp, config_email);
+
+        submit(
+            project_dir.to_string_lossy().to_string(),
+            "partner@example.com".into(),
+            true,
+            false,
+        )
+        .await
+        .unwrap();
+
+        let initial_dirs = list_submissions(&syft_dir, config_email);
+        assert_eq!(initial_dirs.len(), 1);
+
+        // Change workflow to alter project hash
+        tokio::time::sleep(Duration::from_millis(5)).await; // ensure timestamp difference if needed
+        fs::write(
+            project_dir.join("workflow.nf"),
+            b"process MAIN { echo 'changed' }",
+        )
+        .unwrap();
+        write_project_yaml(&project_dir.join("project.yaml"), None);
+
+        submit(
+            project_dir.to_string_lossy().to_string(),
+            "partner@example.com".into(),
+            true,
+            false,
+        )
+        .await
+        .unwrap();
+
+        // Changed content produces a new submission folder automatically
+        let after_no_force = list_submissions(&syft_dir, config_email);
+        assert!(after_no_force.len() >= 2);
+
+        let latest_submission = after_no_force
+            .iter()
+            .max_by_key(|p| p.metadata().ok().and_then(|m| m.modified().ok()))
+            .cloned()
+            .unwrap_or_else(|| after_no_force.last().unwrap().clone());
+        let latest_name = latest_submission.file_name().unwrap().to_string_lossy();
+        assert!(latest_name.contains('-'));
+
+        submit(
+            project_dir.to_string_lossy().to_string(),
+            "partner@example.com".into(),
+            true,
+            true,
+        )
+        .await
+        .unwrap();
+
+        let final_dirs = list_submissions(&syft_dir, config_email);
+        assert_eq!(final_dirs.len(), after_no_force.len());
+
+        clear_test_syftbox_data_dir();
+        clear_test_biovault_home();
     }
 }

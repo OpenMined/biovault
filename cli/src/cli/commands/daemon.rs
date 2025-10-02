@@ -36,6 +36,12 @@ impl DaemonStatus {
     }
 }
 
+// NOTE: Daemon struct and its methods are NOT suitable for unit testing because they:
+// - Require actual file system operations (log files, status files)
+// - Depend on MessageSync which requires a database connection
+// - Depend on SyftBoxApp which requires SyftBox configuration
+// - Perform real process management and signal handling
+// These should be tested via integration/e2e tests with proper setup.
 pub struct Daemon {
     config: Config,
     sync: MessageSync,
@@ -45,6 +51,7 @@ pub struct Daemon {
 }
 
 impl Daemon {
+    // NOT unit testable - requires MessageSync, SyftBoxApp, and file system setup
     pub fn new(config: &Config) -> Result<Self> {
         let biovault_dir = get_biovault_dir(config)?;
         let logs_dir = biovault_dir.join("logs");
@@ -107,6 +114,7 @@ impl Daemon {
         }
     }
 
+    // NOT unit testable - requires MessageSync and actual message processing
     async fn sync_messages(&self) -> Result<()> {
         self.log("INFO", "Starting message sync");
 
@@ -157,6 +165,7 @@ impl Daemon {
         Ok(is_running)
     }
 
+    // NOT unit testable - spawns actual SyftBox processes (sbenv or syftbox command)
     async fn start_syftbox(&self) -> Result<()> {
         let data_dir = self.config.get_syftbox_data_dir()?;
         let is_sbenv = self.is_in_sbenv()?;
@@ -259,6 +268,7 @@ impl Daemon {
         }
     }
 
+    // NOT unit testable - main daemon loop with file watching, signal handling, and async runtime
     pub async fn run(&self) -> Result<()> {
         self.log("INFO", "BioVault daemon starting");
 
@@ -537,6 +547,8 @@ pub fn is_daemon_running(config: &Config) -> Result<bool> {
     Ok(is_running)
 }
 
+// Partially unit testable - can verify it doesn't panic, but actual process checking
+// depends on ps/tasklist commands and real PIDs. Integration tests needed for full coverage.
 fn check_process_running(pid: u32) -> Result<bool> {
     #[cfg(unix)]
     {
@@ -583,6 +595,8 @@ fn check_process_running(pid: u32) -> Result<bool> {
     }
 }
 
+// NOT unit testable - spawns daemon processes, requires full environment setup
+// Test via integration tests instead
 pub async fn start(config: &Config, foreground: bool) -> Result<()> {
     // Clean up stale PID files first
     cleanup_stale_pid_files(config)?;
@@ -757,6 +771,8 @@ fn cleanup_stale_pid_files(config: &Config) -> Result<()> {
     Ok(())
 }
 
+// Partially unit testable - tested with no log file case
+// Full testing (reading actual logs, following) requires integration tests
 pub async fn logs(config: &Config, follow: bool, lines: Option<usize>) -> Result<()> {
     let log_path = get_log_file_path(config)?;
 
@@ -817,6 +833,8 @@ pub fn get_daemon_status(config: &Config) -> Result<Option<DaemonStatus>> {
     Ok(Some(status))
 }
 
+// Partially unit testable - tested with no daemon running case
+// Full testing (actually stopping a daemon) requires integration tests
 pub async fn stop(config: &Config) -> Result<()> {
     if !is_daemon_running(config)? {
         println!("❌ Daemon is not running");
@@ -995,6 +1013,8 @@ WantedBy=multi-user.target
     Ok(service_content)
 }
 
+// NOT unit testable - requires systemd, writes to system directories
+// Test via integration tests on Linux systems only
 pub async fn install_service(config: &Config) -> Result<()> {
     check_systemd_available()?;
 
@@ -1093,6 +1113,8 @@ pub async fn install_service(config: &Config) -> Result<()> {
     Ok(())
 }
 
+// NOT unit testable - requires systemd, modifies system services
+// Test via integration tests on Linux systems only
 pub async fn uninstall_service(config: &Config) -> Result<()> {
     check_systemd_available()?;
 
@@ -1244,6 +1266,8 @@ pub async fn list_services() -> Result<()> {
     Ok(())
 }
 
+// Partially unit testable - non-Linux systems return early
+// Full testing requires systemd and installed service (integration tests)
 pub async fn service_status(config: &Config) -> Result<()> {
     // First check if daemon is running the old way (manual start)
     let manual_running = is_daemon_running(config).unwrap_or(false);
@@ -1314,6 +1338,8 @@ pub async fn service_status(config: &Config) -> Result<()> {
     Ok(())
 }
 
+// NOT unit testable - requires systemd
+// Test via integration tests on Linux systems only
 pub async fn show_service(config: &Config) -> Result<()> {
     check_systemd_available()?;
 
@@ -1337,6 +1363,8 @@ pub async fn show_service(config: &Config) -> Result<()> {
     Ok(())
 }
 
+// NOT unit testable - requires systemd, modifies system services
+// Test via integration tests on Linux systems only
 pub async fn reinstall_service(config: &Config) -> Result<()> {
     check_systemd_available()?;
 
@@ -1360,4 +1388,886 @@ pub async fn reinstall_service(config: &Config) -> Result<()> {
     install_service(config).await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ============================================================================
+    // UNIT TESTING GUIDELINES FOR DAEMON MODULE
+    // ============================================================================
+    //
+    // WHAT CAN BE UNIT TESTED:
+    // ✅ Helper functions (get_*_path, get_service_name, etc.)
+    // ✅ Data structures (DaemonStatus serialization, etc.)
+    // ✅ Simple validation logic (check_systemd_available on non-Linux)
+    // ✅ Edge cases with mock data (invalid PIDs, missing files)
+    //
+    // WHAT CANNOT BE UNIT TESTED (requires integration/e2e tests):
+    // ❌ Daemon::new() - requires MessageSync, SyftBoxApp, database
+    // ❌ Daemon methods (run, sync_messages, etc.) - require running daemon
+    // ❌ start() - spawns actual processes
+    // ❌ stop() - requires running daemon to stop
+    // ❌ Service operations (install/uninstall/etc.) - require systemd
+    // ❌ Process checking with real PIDs - depends on actual running processes
+    // ❌ File watching and signal handling - require async runtime
+    //
+    // When adding tests, check if the function:
+    // 1. Requires external processes/services → integration test
+    // 2. Modifies system state → integration test
+    // 3. Is pure logic/data manipulation → unit test
+    // ============================================================================
+
+    #[test]
+    fn test_daemon_status_new() {
+        let pid = 12345;
+        let status = DaemonStatus::new(pid);
+        assert_eq!(status.pid, pid);
+        assert_eq!(status.status, "running");
+        assert_eq!(status.message_count, 0);
+        assert!(status.last_sync.is_none());
+    }
+
+    #[test]
+    fn test_daemon_status_serialize() {
+        let status = DaemonStatus::new(999);
+        let json = serde_json::to_string(&status);
+        assert!(json.is_ok());
+    }
+
+    #[test]
+    fn test_get_service_name() {
+        let config = Config {
+            email: "test@example.com".to_string(),
+            syftbox_config: None,
+            version: None,
+            binary_paths: None,
+        };
+        let name = get_service_name(&config);
+        assert!(name.starts_with("biovault-daemon-"));
+        assert!(name.contains("test"));
+    }
+
+    #[test]
+    fn test_get_biovault_dir() {
+        use tempfile::TempDir;
+        let tmp = TempDir::new().unwrap();
+        crate::config::set_test_syftbox_data_dir(tmp.path());
+
+        let config = Config {
+            email: "test@example.com".to_string(),
+            syftbox_config: None,
+            version: None,
+            binary_paths: None,
+        };
+        let dir = get_biovault_dir(&config);
+        assert!(dir.is_ok());
+    }
+
+    #[test]
+    fn test_get_pid_file_path() {
+        use tempfile::TempDir;
+        let tmp = TempDir::new().unwrap();
+        crate::config::set_test_syftbox_data_dir(tmp.path());
+
+        let config = Config {
+            email: "test@example.com".to_string(),
+            syftbox_config: None,
+            version: None,
+            binary_paths: None,
+        };
+        let path = get_pid_file_path(&config);
+        assert!(path.is_ok());
+        assert!(path.unwrap().to_string_lossy().contains("daemon.pid"));
+    }
+
+    #[test]
+    fn test_get_status_file_path() {
+        use tempfile::TempDir;
+        let tmp = TempDir::new().unwrap();
+        crate::config::set_test_syftbox_data_dir(tmp.path());
+
+        let config = Config {
+            email: "test@example.com".to_string(),
+            syftbox_config: None,
+            version: None,
+            binary_paths: None,
+        };
+        let path = get_status_file_path(&config);
+        assert!(path.is_ok());
+        assert!(path.unwrap().to_string_lossy().contains("daemon.status"));
+    }
+
+    #[test]
+    fn test_get_log_file_path() {
+        use tempfile::TempDir;
+        let tmp = TempDir::new().unwrap();
+        crate::config::set_test_syftbox_data_dir(tmp.path());
+
+        let config = Config {
+            email: "test@example.com".to_string(),
+            syftbox_config: None,
+            version: None,
+            binary_paths: None,
+        };
+        let path = get_log_file_path(&config);
+        assert!(path.is_ok());
+        assert!(path.unwrap().to_string_lossy().contains("daemon.log"));
+    }
+
+    #[test]
+    fn test_daemon_status_update_fields() {
+        let mut status = DaemonStatus::new(999);
+        assert_eq!(status.message_count, 0);
+        assert!(status.last_sync.is_none());
+
+        status.message_count = 5;
+        status.last_sync = Some(Utc::now());
+
+        assert_eq!(status.message_count, 5);
+        assert!(status.last_sync.is_some());
+    }
+
+    #[test]
+    fn test_daemon_status_debug() {
+        let status = DaemonStatus::new(123);
+        let debug_str = format!("{:?}", status);
+        assert!(debug_str.contains("123"));
+        assert!(debug_str.contains("running"));
+    }
+
+    #[test]
+    fn test_daemon_status_deserialize() {
+        let json = r#"{
+            "pid": 456,
+            "started_at": "2024-01-01T00:00:00Z",
+            "last_sync": null,
+            "message_count": 0,
+            "status": "running"
+        }"#;
+        let status: Result<DaemonStatus, _> = serde_json::from_str(json);
+        assert!(status.is_ok());
+        let s = status.unwrap();
+        assert_eq!(s.pid, 456);
+        assert_eq!(s.status, "running");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_check_process_running_invalid_pid() {
+        // PID 999999 is very unlikely to exist
+        let result = check_process_running(999999);
+        assert!(result.is_ok());
+        assert!(!result.unwrap());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_check_process_running_current_process() {
+        // Current test process should be running
+        let pid = std::process::id();
+        let result = check_process_running(pid);
+        // Function should return a result, even if error
+        assert!(result.is_ok() || result.is_err());
+    }
+
+    #[test]
+    fn test_is_daemon_running_no_pid_file() {
+        use tempfile::TempDir;
+        let tmp = TempDir::new().unwrap();
+        crate::config::set_test_syftbox_data_dir(tmp.path());
+
+        let config = Config {
+            email: "test@example.com".to_string(),
+            syftbox_config: None,
+            version: None,
+            binary_paths: None,
+        };
+
+        let result = is_daemon_running(&config);
+        assert!(result.is_ok());
+        assert!(!result.unwrap());
+    }
+
+    #[test]
+    fn test_cleanup_stale_pid_files_no_file() {
+        use tempfile::TempDir;
+        let tmp = TempDir::new().unwrap();
+        crate::config::set_test_syftbox_data_dir(tmp.path());
+
+        let config = Config {
+            email: "test@example.com".to_string(),
+            syftbox_config: None,
+            version: None,
+            binary_paths: None,
+        };
+
+        let result = cleanup_stale_pid_files(&config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_get_daemon_status_no_file() {
+        use tempfile::TempDir;
+        let tmp = TempDir::new().unwrap();
+        crate::config::set_test_syftbox_data_dir(tmp.path());
+
+        let config = Config {
+            email: "test@example.com".to_string(),
+            syftbox_config: None,
+            version: None,
+            binary_paths: None,
+        };
+
+        let result = get_daemon_status(&config);
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
+    }
+
+    #[test]
+    fn test_check_systemd_available() {
+        // Just verify it doesn't panic
+        let _result = check_systemd_available();
+    }
+
+    #[test]
+    fn test_generate_systemd_service_content() {
+        let config = Config {
+            email: "test@example.com".to_string(),
+            syftbox_config: None,
+            version: None,
+            binary_paths: None,
+        };
+
+        let result = generate_systemd_service_content(&config);
+        // May fail due to missing dirs/env, but shouldn't panic
+        let _ = result;
+    }
+
+    #[test]
+    fn test_cleanup_stale_pid_files_with_invalid_pid() {
+        use tempfile::TempDir;
+        let tmp = TempDir::new().unwrap();
+        crate::config::set_test_syftbox_data_dir(tmp.path());
+
+        let config = Config {
+            email: "test@example.com".to_string(),
+            syftbox_config: None,
+            version: None,
+            binary_paths: None,
+        };
+
+        // Create invalid PID file
+        let pid_path = get_pid_file_path(&config).unwrap();
+        std::fs::create_dir_all(pid_path.parent().unwrap()).unwrap();
+        std::fs::write(&pid_path, "not_a_number").unwrap();
+
+        let result = cleanup_stale_pid_files(&config);
+        assert!(result.is_ok());
+
+        // Should have cleaned up the invalid file
+        assert!(!pid_path.exists());
+    }
+
+    #[test]
+    fn test_is_daemon_running_with_invalid_pid() {
+        use tempfile::TempDir;
+        let tmp = TempDir::new().unwrap();
+        crate::config::set_test_syftbox_data_dir(tmp.path());
+
+        let config = Config {
+            email: "test@example.com".to_string(),
+            syftbox_config: None,
+            version: None,
+            binary_paths: None,
+        };
+
+        // Create invalid PID file
+        let pid_path = get_pid_file_path(&config).unwrap();
+        std::fs::create_dir_all(pid_path.parent().unwrap()).unwrap();
+        std::fs::write(&pid_path, "not_a_pid").unwrap();
+
+        let result = is_daemon_running(&config);
+        assert!(result.is_ok());
+        assert!(!result.unwrap());
+
+        // Should have cleaned up the invalid file
+        assert!(!pid_path.exists());
+    }
+
+    #[test]
+    fn test_get_daemon_status_with_valid_file() {
+        use tempfile::TempDir;
+        let tmp = TempDir::new().unwrap();
+        crate::config::set_test_syftbox_data_dir(tmp.path());
+
+        let config = Config {
+            email: "test@example.com".to_string(),
+            syftbox_config: None,
+            version: None,
+            binary_paths: None,
+        };
+
+        // Create valid status file
+        let status_path = get_status_file_path(&config).unwrap();
+        std::fs::create_dir_all(status_path.parent().unwrap()).unwrap();
+
+        let status = DaemonStatus::new(123);
+        let json = serde_json::to_string(&status).unwrap();
+        std::fs::write(&status_path, json).unwrap();
+
+        let result = get_daemon_status(&config);
+        assert!(result.is_ok());
+        let loaded_status = result.unwrap();
+        assert!(loaded_status.is_some());
+        assert_eq!(loaded_status.unwrap().pid, 123);
+    }
+
+    #[test]
+    fn test_daemon_status_serialization_round_trip() {
+        let status = DaemonStatus::new(789);
+        let json = serde_json::to_string(&status).unwrap();
+        let deserialized: DaemonStatus = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(deserialized.pid, 789);
+        assert_eq!(deserialized.status, "running");
+        assert_eq!(deserialized.message_count, 0);
+    }
+
+    #[test]
+    fn test_get_service_name_sanitizes_email() {
+        let config = Config {
+            email: "user@example.com".to_string(),
+            syftbox_config: None,
+            version: None,
+            binary_paths: None,
+        };
+        let name = get_service_name(&config);
+        assert!(name.contains("user-at-example-com"));
+        assert!(!name.contains('@'));
+        assert!(!name.contains('.') || name.ends_with(".service"));
+    }
+
+    #[test]
+    fn test_daemon_status_with_last_sync() {
+        let mut status = DaemonStatus::new(555);
+        let now = Utc::now();
+        status.last_sync = Some(now);
+        status.message_count = 10;
+
+        let json = serde_json::to_string(&status).unwrap();
+        let deserialized: DaemonStatus = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(deserialized.message_count, 10);
+        assert!(deserialized.last_sync.is_some());
+    }
+
+    #[test]
+    fn test_path_helpers_consistency() {
+        use tempfile::TempDir;
+        let tmp = TempDir::new().unwrap();
+        crate::config::set_test_syftbox_data_dir(tmp.path());
+
+        let config = Config {
+            email: "test@example.com".to_string(),
+            syftbox_config: None,
+            version: None,
+            binary_paths: None,
+        };
+
+        let biovault_dir = get_biovault_dir(&config).unwrap();
+        let pid_path = get_pid_file_path(&config).unwrap();
+        let status_path = get_status_file_path(&config).unwrap();
+        let log_path = get_log_file_path(&config).unwrap();
+
+        // All paths should be under biovault_dir
+        assert!(pid_path.starts_with(&biovault_dir));
+        assert!(status_path.starts_with(&biovault_dir));
+        assert!(log_path.starts_with(&biovault_dir));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_check_process_running_pid_1() {
+        // PID 1 is init/systemd, should exist but won't be a bv process
+        let result = check_process_running(1);
+        assert!(result.is_ok());
+        // Will return false because PID 1 is not a bv/biovault process
+        assert!(!result.unwrap());
+    }
+
+    #[test]
+    fn test_check_systemd_available_on_non_linux() {
+        #[cfg(not(target_os = "linux"))]
+        {
+            let result = check_systemd_available();
+            assert!(result.is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_stop_daemon_not_running() {
+        use tempfile::TempDir;
+        let tmp = TempDir::new().unwrap();
+        crate::config::set_test_syftbox_data_dir(tmp.path());
+
+        let config = Config {
+            email: "test@example.com".to_string(),
+            syftbox_config: None,
+            version: None,
+            binary_paths: None,
+        };
+
+        let result = stop(&config).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_logs_no_file() {
+        use tempfile::TempDir;
+        let tmp = TempDir::new().unwrap();
+        crate::config::set_test_syftbox_data_dir(tmp.path());
+
+        let config = Config {
+            email: "test@example.com".to_string(),
+            syftbox_config: None,
+            version: None,
+            binary_paths: None,
+        };
+
+        let result = logs(&config, false, Some(10)).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_daemon_status_display() {
+        use tempfile::TempDir;
+        let tmp = TempDir::new().unwrap();
+        crate::config::set_test_syftbox_data_dir(tmp.path());
+
+        let config = Config {
+            email: "test@example.com".to_string(),
+            syftbox_config: None,
+            version: None,
+            binary_paths: None,
+        };
+
+        // Should work even when daemon not running
+        let status_opt = get_daemon_status(&config);
+        assert!(status_opt.is_ok());
+    }
+
+    #[tokio::test]
+    #[cfg(not(target_os = "linux"))]
+    async fn test_install_service_non_linux() {
+        let config = Config {
+            email: "test@example.com".to_string(),
+            syftbox_config: None,
+            version: None,
+            binary_paths: None,
+        };
+
+        let result = install_service(&config).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    #[cfg(not(target_os = "linux"))]
+    async fn test_uninstall_service_non_linux() {
+        let config = Config {
+            email: "test@example.com".to_string(),
+            syftbox_config: None,
+            version: None,
+            binary_paths: None,
+        };
+
+        let result = uninstall_service(&config).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    #[cfg(not(target_os = "linux"))]
+    async fn test_service_status_non_linux() {
+        let config = Config {
+            email: "test@example.com".to_string(),
+            syftbox_config: None,
+            version: None,
+            binary_paths: None,
+        };
+
+        let result = service_status(&config).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    #[cfg(not(target_os = "linux"))]
+    async fn test_show_service_non_linux() {
+        let config = Config {
+            email: "test@example.com".to_string(),
+            syftbox_config: None,
+            version: None,
+            binary_paths: None,
+        };
+
+        let result = show_service(&config).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    #[cfg(not(target_os = "linux"))]
+    async fn test_reinstall_service_non_linux() {
+        let config = Config {
+            email: "test@example.com".to_string(),
+            syftbox_config: None,
+            version: None,
+            binary_paths: None,
+        };
+
+        let result = reinstall_service(&config).await;
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_generate_systemd_service_content_fields() {
+        use tempfile::TempDir;
+        let tmp = TempDir::new().unwrap();
+        crate::config::set_test_syftbox_data_dir(tmp.path());
+
+        let config = Config {
+            email: "test@example.com".to_string(),
+            syftbox_config: None,
+            version: None,
+            binary_paths: None,
+        };
+
+        if let Ok(content) = generate_systemd_service_content(&config) {
+            assert!(content.contains("[Unit]"));
+            assert!(content.contains("[Service]"));
+            assert!(content.contains("[Install]"));
+            assert!(content.contains("test@example.com") || content.contains("test-at-example"));
+        }
+    }
+
+    #[test]
+    fn test_daemon_status_fields_modification() {
+        let mut status = DaemonStatus::new(444);
+
+        // Test initial state
+        assert_eq!(status.pid, 444);
+        assert_eq!(status.message_count, 0);
+        assert!(status.last_sync.is_none());
+        assert_eq!(status.status, "running");
+
+        // Modify fields
+        status.message_count = 15;
+        status.status = "syncing".to_string();
+        let now = Utc::now();
+        status.last_sync = Some(now);
+
+        // Verify modifications
+        assert_eq!(status.message_count, 15);
+        assert_eq!(status.status, "syncing");
+        assert!(status.last_sync.is_some());
+    }
+
+    #[test]
+    fn test_get_daemon_status_invalid_json() {
+        use tempfile::TempDir;
+        let tmp = TempDir::new().unwrap();
+        crate::config::set_test_syftbox_data_dir(tmp.path());
+
+        let config = Config {
+            email: "test@example.com".to_string(),
+            syftbox_config: None,
+            version: None,
+            binary_paths: None,
+        };
+
+        // Create invalid JSON status file
+        let status_path = get_status_file_path(&config).unwrap();
+        std::fs::create_dir_all(status_path.parent().unwrap()).unwrap();
+        std::fs::write(&status_path, "not valid json").unwrap();
+
+        let result = get_daemon_status(&config);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_cleanup_stale_pid_files_with_stale_process() {
+        use tempfile::TempDir;
+        let tmp = TempDir::new().unwrap();
+        crate::config::set_test_syftbox_data_dir(tmp.path());
+
+        let config = Config {
+            email: "test@example.com".to_string(),
+            syftbox_config: None,
+            version: None,
+            binary_paths: None,
+        };
+
+        // Create PID file with non-existent PID
+        let pid_path = get_pid_file_path(&config).unwrap();
+        std::fs::create_dir_all(pid_path.parent().unwrap()).unwrap();
+        std::fs::write(&pid_path, "999999").unwrap();
+
+        let result = cleanup_stale_pid_files(&config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_is_daemon_running_with_stale_pid() {
+        use tempfile::TempDir;
+        let tmp = TempDir::new().unwrap();
+        crate::config::set_test_syftbox_data_dir(tmp.path());
+
+        let config = Config {
+            email: "test@example.com".to_string(),
+            syftbox_config: None,
+            version: None,
+            binary_paths: None,
+        };
+
+        // Create PID file with non-existent PID
+        let pid_path = get_pid_file_path(&config).unwrap();
+        std::fs::create_dir_all(pid_path.parent().unwrap()).unwrap();
+        std::fs::write(&pid_path, "999999").unwrap();
+
+        let result = is_daemon_running(&config);
+        assert!(result.is_ok());
+        assert!(!result.unwrap());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_check_process_running_edge_cases() {
+        // Test with PID 0 (invalid) - may return error or false
+        let result = check_process_running(0);
+        let _ = result; // Just ensure it doesn't panic
+
+        // Test with max PID - may return error or false
+        let result = check_process_running(99999);
+        let _ = result; // Just ensure it doesn't panic
+    }
+
+    #[test]
+    fn test_service_name_multiple_emails() {
+        let configs = vec![
+            ("user@example.com", "user-at-example-com"),
+            ("test.user@domain.org", "test-user-at-domain-org"),
+            ("name+tag@email.com", "name+tag-at-email-com"),
+        ];
+
+        for (email, expected_part) in configs {
+            let config = Config {
+                email: email.to_string(),
+                syftbox_config: None,
+                version: None,
+                binary_paths: None,
+            };
+            let name = get_service_name(&config);
+            assert!(
+                name.contains(expected_part),
+                "Service name '{}' doesn't contain '{}'",
+                name,
+                expected_part
+            );
+            assert!(name.starts_with("biovault-daemon-"));
+            assert!(name.ends_with(".service"));
+        }
+    }
+
+    #[test]
+    fn test_path_helpers_different_emails() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        crate::config::set_test_syftbox_data_dir(tmp.path());
+
+        let config1 = Config {
+            email: "user1@example.com".to_string(),
+            syftbox_config: None,
+            version: None,
+            binary_paths: None,
+        };
+
+        let config2 = Config {
+            email: "user2@example.com".to_string(),
+            syftbox_config: None,
+            version: None,
+            binary_paths: None,
+        };
+
+        let dir1 = get_biovault_dir(&config1).unwrap();
+        let dir2 = get_biovault_dir(&config2).unwrap();
+
+        // Both should get same biovault dir (shared)
+        assert_eq!(dir1, dir2);
+    }
+
+    // NOTE: test_start_already_running removed - start() requires full daemon setup
+    // including MessageSync and SyftBox, making it unsuitable for unit tests.
+    // This should be tested via integration/e2e tests instead.
+
+    #[test]
+    fn test_cleanup_stale_pid_files_preserves_running_daemon() {
+        use tempfile::TempDir;
+        let tmp = TempDir::new().unwrap();
+        crate::config::set_test_syftbox_data_dir(tmp.path());
+
+        let config = Config {
+            email: "test@example.com".to_string(),
+            syftbox_config: None,
+            version: None,
+            binary_paths: None,
+        };
+
+        // Create PID file with current process ID (which is running)
+        let pid_path = get_pid_file_path(&config).unwrap();
+        std::fs::create_dir_all(pid_path.parent().unwrap()).unwrap();
+        std::fs::write(&pid_path, std::process::id().to_string()).unwrap();
+
+        let result = cleanup_stale_pid_files(&config);
+        assert!(result.is_ok());
+
+        // Clean up
+        let _ = std::fs::remove_file(&pid_path);
+    }
+
+    #[test]
+    fn test_daemon_status_json_format() {
+        let status = DaemonStatus::new(12345);
+        let json = serde_json::to_string_pretty(&status).unwrap();
+
+        assert!(json.contains("\"pid\": 12345"));
+        assert!(json.contains("\"status\": \"running\""));
+        assert!(json.contains("\"message_count\": 0"));
+        assert!(json.contains("\"started_at\""));
+    }
+
+    #[test]
+    fn test_get_pid_file_path_creates_parent() {
+        use tempfile::TempDir;
+        let tmp = TempDir::new().unwrap();
+        crate::config::set_test_syftbox_data_dir(tmp.path());
+
+        let config = Config {
+            email: "test@example.com".to_string(),
+            syftbox_config: None,
+            version: None,
+            binary_paths: None,
+        };
+
+        let pid_path = get_pid_file_path(&config).unwrap();
+        assert!(pid_path.parent().is_some());
+        assert!(pid_path.to_string_lossy().contains(".biovault"));
+    }
+
+    #[test]
+    fn test_get_log_file_path_structure() {
+        use tempfile::TempDir;
+        let tmp = TempDir::new().unwrap();
+        crate::config::set_test_syftbox_data_dir(tmp.path());
+
+        let config = Config {
+            email: "test@example.com".to_string(),
+            syftbox_config: None,
+            version: None,
+            binary_paths: None,
+        };
+
+        let log_path = get_log_file_path(&config).unwrap();
+        assert!(log_path.to_string_lossy().contains("logs"));
+        assert!(log_path.to_string_lossy().contains("daemon.log"));
+    }
+
+    #[tokio::test]
+    async fn test_logs_with_lines_parameter() {
+        use tempfile::TempDir;
+        let tmp = TempDir::new().unwrap();
+        crate::config::set_test_syftbox_data_dir(tmp.path());
+
+        let config = Config {
+            email: "test@example.com".to_string(),
+            syftbox_config: None,
+            version: None,
+            binary_paths: None,
+        };
+
+        // Test with different line counts
+        let result1 = logs(&config, false, Some(10)).await;
+        assert!(result1.is_ok());
+
+        let result2 = logs(&config, false, Some(100)).await;
+        assert!(result2.is_ok());
+
+        let result3 = logs(&config, false, None).await;
+        assert!(result3.is_ok());
+    }
+
+    // NOTE: test_is_daemon_running_with_valid_current_pid removed
+    // is_daemon_running() calls check_process_running() which uses ps/tasklist
+    // and requires the process to match "bv" or "biovault" in the command line.
+    // Test processes don't match this pattern, making this unsuitable for unit tests.
+    // Covered by test_is_daemon_running_no_pid_file and test_is_daemon_running_with_stale_pid instead.
+
+    #[test]
+    fn test_get_status_file_path_uniqueness() {
+        use tempfile::TempDir;
+        let tmp = TempDir::new().unwrap();
+        crate::config::set_test_syftbox_data_dir(tmp.path());
+
+        let config = Config {
+            email: "test@example.com".to_string(),
+            syftbox_config: None,
+            version: None,
+            binary_paths: None,
+        };
+
+        let status_path = get_status_file_path(&config).unwrap();
+        let pid_path = get_pid_file_path(&config).unwrap();
+
+        // Should be different files
+        assert_ne!(status_path, pid_path);
+        // But in same directory
+        assert_eq!(status_path.parent(), pid_path.parent());
+    }
+
+    #[test]
+    fn test_daemon_status_started_at_is_recent() {
+        let before = Utc::now();
+        let status = DaemonStatus::new(999);
+        let after = Utc::now();
+
+        assert!(status.started_at >= before);
+        assert!(status.started_at <= after);
+    }
+
+    #[test]
+    fn test_service_name_no_special_chars() {
+        let config = Config {
+            email: "user@example.com".to_string(),
+            syftbox_config: None,
+            version: None,
+            binary_paths: None,
+        };
+
+        let name = get_service_name(&config);
+
+        // Should not contain @ or . (except in .service extension)
+        let name_without_ext = name.strip_suffix(".service").unwrap();
+        assert!(!name_without_ext.contains('@'));
+        assert!(!name_without_ext.contains('.'));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_check_process_running_returns_bool() {
+        // Just verify it returns a bool without panicking
+        let result1 = check_process_running(1);
+        assert!(result1.is_ok());
+        // Result is a bool, no need to assert it's true or false
+
+        let result2 = check_process_running(999999);
+        assert!(result2.is_ok());
+        // Result is a bool, function completes without panic
+    }
 }

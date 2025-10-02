@@ -81,6 +81,39 @@ mod tests_fast_helpers {
         assert!(path.ends_with("messages.db"));
         crate::config::clear_test_biovault_home();
     }
+
+    #[test]
+    fn test_expand_env_vars_in_text_with_syftbox() {
+        std::env::set_var("SYFTBOX_DATA_DIR", "/test/data");
+        let result = expand_env_vars_in_text("Path: $SYFTBOX_DATA_DIR/file").unwrap();
+        assert_eq!(result, "Path: /test/data/file");
+        std::env::remove_var("SYFTBOX_DATA_DIR");
+    }
+
+    #[test]
+    fn test_expand_env_vars_in_text_no_env() {
+        std::env::remove_var("SYFTBOX_DATA_DIR");
+        let result = expand_env_vars_in_text("Plain text").unwrap();
+        assert_eq!(result, "Plain text");
+    }
+
+    #[test]
+    fn test_cleanup_locks_no_stale_locks() {
+        let tmp = TempDir::new().unwrap();
+        crate::config::set_test_biovault_home(tmp.path().join(".bv"));
+        let cfg = Config {
+            email: "test@example.com".into(),
+            syftbox_config: None,
+            version: None,
+            binary_paths: None,
+        };
+        // Create db first
+        let _ = get_message_db_path(&cfg).unwrap();
+        // Should not panic
+        let result = cleanup_locks(&cfg, false);
+        assert!(result.is_ok());
+        crate::config::clear_test_biovault_home();
+    }
 }
 
 /// Initialize the message system
@@ -1546,6 +1579,113 @@ mod tests {
         // With empty DB
         super::list_messages(&cfg, false, false, false)?;
         super::list_messages(&cfg, true, false, false)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_view_thread_empty() -> Result<()> {
+        let tmp = TempDir::new()?;
+        crate::config::set_test_syftbox_data_dir(tmp.path());
+        crate::config::set_test_biovault_home(tmp.path().join(".bv"));
+        let cfg = create_test_config();
+
+        // View non-existent thread should not error
+        super::view_thread(&cfg, "nonexistent-thread")?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_sync_messages() -> Result<()> {
+        let tmp = TempDir::new()?;
+        crate::config::set_test_syftbox_data_dir(tmp.path());
+        crate::config::set_test_biovault_home(tmp.path().join(".bv"));
+        let cfg = create_test_config();
+
+        // Should not error even without messages
+        super::sync_messages(&cfg)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_resolve_syft_url_to_path() -> Result<()> {
+        let tmp = TempDir::new()?;
+        crate::config::set_test_syftbox_data_dir(tmp.path());
+        let cfg = create_test_config();
+
+        let url = "syft://user@example.com/path/to/file";
+        let path = super::resolve_syft_url_to_path(&cfg, url)?;
+
+        assert!(path.to_string_lossy().contains("datasites"));
+        assert!(path.to_string_lossy().contains("user@example.com"));
+        assert!(path.to_string_lossy().contains("path/to/file"));
+        Ok(())
+    }
+
+    #[test]
+    fn test_get_message_db_path() -> Result<()> {
+        let tmp = TempDir::new()?;
+        crate::config::set_test_biovault_home(tmp.path());
+        let cfg = create_test_config();
+
+        let path = get_message_db_path(&cfg)?;
+        assert!(path.to_string_lossy().contains("messages.db"));
+        assert!(path.parent().unwrap().exists());
+        Ok(())
+    }
+
+    #[test]
+    fn test_cleanup_locks() -> Result<()> {
+        let tmp = TempDir::new()?;
+        crate::config::set_test_biovault_home(tmp.path());
+        let cfg = create_test_config();
+
+        let result = cleanup_locks(&cfg, false);
+        assert!(result.is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn test_expand_env_vars_in_text_multiple() -> Result<()> {
+        std::env::set_var("SYFTBOX_DATA_DIR", "/data");
+        let text = "$SYFTBOX_DATA_DIR/a and $SYFTBOX_DATA_DIR/b";
+        let result = expand_env_vars_in_text(text)?;
+        assert_eq!(result, "/data/a and /data/b");
+        std::env::remove_var("SYFTBOX_DATA_DIR");
+        Ok(())
+    }
+
+    #[test]
+    fn test_receiver_private_submissions_path() -> Result<()> {
+        let tmp = TempDir::new()?;
+        crate::config::set_test_syftbox_data_dir(tmp.path());
+        let cfg = create_test_config();
+
+        let path = receiver_private_submissions_path(&cfg)?;
+        assert!(path.to_string_lossy().contains("private"));
+        assert!(path.to_string_lossy().contains("submissions"));
+        Ok(())
+    }
+
+    #[test]
+    fn test_copy_dir_recursive_empty() -> Result<()> {
+        let tmp = TempDir::new()?;
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir(&src)?;
+
+        copy_dir_recursive(&src, &dst)?;
+        assert!(dst.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn test_normalize_participant_source_for_real_url() -> Result<()> {
+        let tmp = TempDir::new()?;
+        crate::config::set_test_biovault_home(tmp.path());
+
+        let url = "syft://user@example.com/file#id";
+        let result = normalize_participant_source_for_real(url)?;
+        assert_eq!(result, url);
         Ok(())
     }
 }

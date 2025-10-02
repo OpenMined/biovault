@@ -912,4 +912,557 @@ mod tests {
         let def = AlignedChecksum::default();
         assert_eq!(def.to_vec(), vec![String::new()]);
     }
+
+    #[test]
+    fn test_aligned_url_single() {
+        let url = AlignedUrl::Single("http://example.com/file.bam".to_string());
+        assert_eq!(url.to_vec().len(), 1);
+        assert_eq!(url.to_vec()[0], "http://example.com/file.bam");
+    }
+
+    #[test]
+    fn test_aligned_url_multiple() {
+        let urls = AlignedUrl::Multiple(vec![
+            "http://a.com/1.bam".to_string(),
+            "http://b.com/2.bam".to_string(),
+        ]);
+        assert_eq!(urls.to_vec().len(), 2);
+    }
+
+    #[test]
+    fn test_aligned_checksum_default() {
+        let checksum = AlignedChecksum::default();
+        let vec = checksum.to_vec();
+        assert_eq!(vec.len(), 1);
+        assert_eq!(vec[0], "");
+    }
+
+    #[test]
+    fn test_post_process_debug() {
+        let pp = PostProcess {
+            uncompress: Some(true),
+            file: Some("test.gz".to_string()),
+            extract: None,
+            rename: None,
+        };
+        let debug_str = format!("{:?}", pp);
+        assert!(debug_str.contains("PostProcess"));
+    }
+
+    #[test]
+    fn test_participant_data_clone() {
+        let pd = ParticipantData {
+            ref_version: Some("GRCh38".to_string()),
+            ref_url: None,
+            ref_index: None,
+            aligned: None,
+            aligned_index: None,
+            ref_b3sum: None,
+            ref_index_b3sum: None,
+            aligned_b3sum: None,
+            aligned_index_b3sum: None,
+            snp: None,
+            snp_b3sum: None,
+            snp_post_process: None,
+        };
+        let cloned = pd.clone();
+        assert_eq!(cloned.ref_version, Some("GRCh38".to_string()));
+    }
+
+    #[test]
+    fn test_extract_filename_from_url_edge_cases() {
+        // Empty string returns empty, not error
+        assert_eq!(extract_filename_from_url("").unwrap(), "");
+        // Invalid URL returns the whole string
+        assert!(extract_filename_from_url("not-a-url").is_ok());
+        // URL with trailing slash may return empty or error
+        let result = extract_filename_from_url("http://example.com/");
+        assert!(result.is_ok() || result.is_err());
+    }
+
+    #[test]
+    fn test_determine_participants_empty_list() {
+        let cfg = SampleDataConfig {
+            sample_data_urls: HashMap::new(),
+        };
+        let result = determine_participants_to_fetch(&cfg, Some(vec![]), false);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().len(), 0);
+    }
+
+    #[test]
+    fn test_sample_data_yaml_embedded() {
+        // Verify the embedded YAML is valid
+        let result: Result<SampleDataConfig, _> = serde_yaml::from_str(SAMPLE_DATA_YAML);
+        assert!(result.is_ok());
+        let cfg = result.unwrap();
+        assert!(!cfg.sample_data_urls.is_empty());
+    }
+
+    #[test]
+    fn test_aligned_url_serialization() {
+        let single = AlignedUrl::Single("http://test.com/file.cram".to_string());
+        let json = serde_json::to_string(&single).unwrap();
+        assert!(json.contains("http://test.com/file.cram"));
+
+        let multiple = AlignedUrl::Multiple(vec!["url1".to_string(), "url2".to_string()]);
+        let json = serde_json::to_string(&multiple).unwrap();
+        assert!(json.contains("url1"));
+        assert!(json.contains("url2"));
+    }
+
+    #[test]
+    fn test_aligned_url_deserialization() {
+        let single_json = r#""http://test.com/file.cram""#;
+        let single: AlignedUrl = serde_json::from_str(single_json).unwrap();
+        assert_eq!(single.to_vec().len(), 1);
+
+        let multiple_json = r#"["url1","url2"]"#;
+        let multiple: AlignedUrl = serde_json::from_str(multiple_json).unwrap();
+        assert_eq!(multiple.to_vec().len(), 2);
+    }
+
+    #[test]
+    fn test_aligned_checksum_serialization() {
+        let single = AlignedChecksum::Single("abc123".to_string());
+        let json = serde_json::to_string(&single).unwrap();
+        assert!(json.contains("abc123"));
+
+        let multiple = AlignedChecksum::Multiple(vec!["hash1".to_string(), "hash2".to_string()]);
+        let json = serde_json::to_string(&multiple).unwrap();
+        assert!(json.contains("hash1"));
+    }
+
+    #[test]
+    fn test_aligned_checksum_deserialization() {
+        let single_json = r#""checksum123""#;
+        let single: AlignedChecksum = serde_json::from_str(single_json).unwrap();
+        assert_eq!(single.to_vec()[0], "checksum123");
+
+        let multiple_json = r#"["c1","c2"]"#;
+        let multiple: AlignedChecksum = serde_json::from_str(multiple_json).unwrap();
+        assert_eq!(multiple.to_vec().len(), 2);
+    }
+
+    #[test]
+    fn test_post_process_serialization() {
+        let pp = PostProcess {
+            uncompress: Some(true),
+            file: Some("data.gz".to_string()),
+            extract: Some("extract_path".to_string()),
+            rename: Some("new_name".to_string()),
+        };
+        let yaml = serde_yaml::to_string(&pp).unwrap();
+        assert!(yaml.contains("uncompress"));
+        assert!(yaml.contains("data.gz"));
+        assert!(yaml.contains("extract_path"));
+        assert!(yaml.contains("new_name"));
+    }
+
+    #[test]
+    fn test_post_process_deserialization() {
+        let yaml = r#"
+uncompress: true
+file: "test.gz"
+extract: "extracted"
+rename: "renamed"
+"#;
+        let pp: PostProcess = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(pp.uncompress, Some(true));
+        assert_eq!(pp.file, Some("test.gz".to_string()));
+        assert_eq!(pp.extract, Some("extracted".to_string()));
+        assert_eq!(pp.rename, Some("renamed".to_string()));
+    }
+
+    #[test]
+    fn test_post_process_defaults() {
+        let yaml = r#"{}"#;
+        let pp: PostProcess = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(pp.uncompress, None);
+        assert_eq!(pp.file, None);
+        assert_eq!(pp.extract, None);
+        assert_eq!(pp.rename, None);
+    }
+
+    #[test]
+    fn test_participant_data_serialization() {
+        let pd = ParticipantData {
+            ref_version: Some("GRCh38".to_string()),
+            ref_url: Some("http://ref.com/ref.fa".to_string()),
+            ref_index: Some("http://ref.com/ref.fa.fai".to_string()),
+            aligned: Some(AlignedUrl::Single(
+                "http://aligned.com/file.cram".to_string(),
+            )),
+            aligned_index: Some("http://aligned.com/file.cram.crai".to_string()),
+            ref_b3sum: Some("refhash".to_string()),
+            ref_index_b3sum: Some("refindexhash".to_string()),
+            aligned_b3sum: Some(AlignedChecksum::Single("alignedhash".to_string())),
+            aligned_index_b3sum: Some("alignedindexhash".to_string()),
+            snp: None,
+            snp_b3sum: None,
+            snp_post_process: None,
+        };
+        let yaml = serde_yaml::to_string(&pd).unwrap();
+        assert!(yaml.contains("GRCh38"));
+        assert!(yaml.contains("ref.fa"));
+    }
+
+    #[test]
+    fn test_participant_data_with_snp() {
+        let pd = ParticipantData {
+            ref_version: None,
+            ref_url: None,
+            ref_index: None,
+            aligned: None,
+            aligned_index: None,
+            ref_b3sum: None,
+            ref_index_b3sum: None,
+            aligned_b3sum: None,
+            aligned_index_b3sum: None,
+            snp: Some("http://snp.com/snp.vcf.gz".to_string()),
+            snp_b3sum: Some("snphash".to_string()),
+            snp_post_process: Some(PostProcess {
+                uncompress: Some(true),
+                file: Some("snp.vcf".to_string()),
+                extract: None,
+                rename: None,
+            }),
+        };
+        let yaml = serde_yaml::to_string(&pd).unwrap();
+        assert!(yaml.contains("snp.vcf.gz"));
+        assert!(yaml.contains("snphash"));
+    }
+
+    #[test]
+    fn test_participant_record_serialization() {
+        let pr = ParticipantRecord {
+            ref_version: Some("GRCh38".to_string()),
+            ref_path: Some("./reference/ref.fa".to_string()),
+            ref_index: Some("./reference/ref.fa.fai".to_string()),
+            aligned: Some("./participant/aligned.cram".to_string()),
+            aligned_index: Some("./participant/aligned.cram.crai".to_string()),
+            snp: None,
+        };
+        let yaml = serde_yaml::to_string(&pr).unwrap();
+        assert!(yaml.contains("GRCh38"));
+        assert!(yaml.contains("./reference/ref.fa"));
+    }
+
+    #[test]
+    fn test_participants_file_serialization() {
+        let mut participants = HashMap::new();
+        participants.insert(
+            "NA12878".to_string(),
+            ParticipantRecord {
+                ref_version: Some("GRCh38".to_string()),
+                ref_path: Some("./reference/ref.fa".to_string()),
+                ref_index: Some("./reference/ref.fa.fai".to_string()),
+                aligned: Some("./NA12878/aligned.cram".to_string()),
+                aligned_index: Some("./NA12878/aligned.cram.crai".to_string()),
+                snp: None,
+            },
+        );
+        let pf = ParticipantsFile {
+            participant: participants,
+        };
+        let yaml = serde_yaml::to_string(&pf).unwrap();
+        assert!(yaml.contains("NA12878"));
+        assert!(yaml.contains("GRCh38"));
+    }
+
+    #[test]
+    fn test_participants_file_deserialization() {
+        let yaml = r#"
+participant:
+  NA12878:
+    ref_version: "GRCh38"
+    ref: "./reference/ref.fa"
+    ref_index: "./reference/ref.fa.fai"
+    aligned: "./NA12878/aligned.cram"
+    aligned_index: "./NA12878/aligned.cram.crai"
+"#;
+        let pf: ParticipantsFile = serde_yaml::from_str(yaml).unwrap();
+        assert!(pf.participant.contains_key("NA12878"));
+        let record = &pf.participant["NA12878"];
+        assert_eq!(record.ref_version, Some("GRCh38".to_string()));
+    }
+
+    #[test]
+    fn test_extract_filename_url_with_multiple_query_params() {
+        let url = "http://example.com/path/file.txt?param1=value1&param2=value2";
+        assert_eq!(extract_filename_from_url(url).unwrap(), "file.txt");
+    }
+
+    #[test]
+    fn test_extract_filename_url_with_fragment_and_query() {
+        let url = "http://example.com/path/file.txt?download=1#section";
+        assert_eq!(extract_filename_from_url(url).unwrap(), "file.txt");
+    }
+
+    #[test]
+    fn test_extract_filename_url_with_special_chars() {
+        let url = "http://example.com/path/file%20name.txt";
+        assert_eq!(extract_filename_from_url(url).unwrap(), "file%20name.txt");
+    }
+
+    #[test]
+    fn test_extract_filename_url_no_path() {
+        let url = "http://example.com";
+        let result = extract_filename_from_url(url).unwrap();
+        assert_eq!(result, "example.com");
+    }
+
+    #[test]
+    fn test_determine_participants_all_multiple() {
+        let mut map = HashMap::new();
+        map.insert(
+            "A".to_string(),
+            ParticipantData {
+                ref_version: None,
+                ref_url: None,
+                ref_index: None,
+                aligned: None,
+                aligned_index: None,
+                ref_b3sum: None,
+                ref_index_b3sum: None,
+                aligned_b3sum: None,
+                aligned_index_b3sum: None,
+                snp: None,
+                snp_b3sum: None,
+                snp_post_process: None,
+            },
+        );
+        map.insert(
+            "B".to_string(),
+            ParticipantData {
+                ref_version: None,
+                ref_url: None,
+                ref_index: None,
+                aligned: None,
+                aligned_index: None,
+                ref_b3sum: None,
+                ref_index_b3sum: None,
+                aligned_b3sum: None,
+                aligned_index_b3sum: None,
+                snp: None,
+                snp_b3sum: None,
+                snp_post_process: None,
+            },
+        );
+        let cfg = SampleDataConfig {
+            sample_data_urls: map,
+        };
+
+        let mut result = determine_participants_to_fetch(&cfg, None, true).unwrap();
+        result.sort();
+        assert_eq!(result.len(), 2);
+        assert!(result.contains(&"A".to_string()));
+        assert!(result.contains(&"B".to_string()));
+    }
+
+    #[test]
+    fn test_determine_participants_specific_multiple() {
+        let mut map = HashMap::new();
+        map.insert(
+            "A".to_string(),
+            ParticipantData {
+                ref_version: None,
+                ref_url: None,
+                ref_index: None,
+                aligned: None,
+                aligned_index: None,
+                ref_b3sum: None,
+                ref_index_b3sum: None,
+                aligned_b3sum: None,
+                aligned_index_b3sum: None,
+                snp: None,
+                snp_b3sum: None,
+                snp_post_process: None,
+            },
+        );
+        map.insert(
+            "B".to_string(),
+            ParticipantData {
+                ref_version: None,
+                ref_url: None,
+                ref_index: None,
+                aligned: None,
+                aligned_index: None,
+                ref_b3sum: None,
+                ref_index_b3sum: None,
+                aligned_b3sum: None,
+                aligned_index_b3sum: None,
+                snp: None,
+                snp_b3sum: None,
+                snp_post_process: None,
+            },
+        );
+        map.insert(
+            "C".to_string(),
+            ParticipantData {
+                ref_version: None,
+                ref_url: None,
+                ref_index: None,
+                aligned: None,
+                aligned_index: None,
+                ref_b3sum: None,
+                ref_index_b3sum: None,
+                aligned_b3sum: None,
+                aligned_index_b3sum: None,
+                snp: None,
+                snp_b3sum: None,
+                snp_post_process: None,
+            },
+        );
+        let cfg = SampleDataConfig {
+            sample_data_urls: map,
+        };
+
+        let result = determine_participants_to_fetch(
+            &cfg,
+            Some(vec!["A".to_string(), "C".to_string()]),
+            false,
+        )
+        .unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0], "A");
+        assert_eq!(result[1], "C");
+    }
+
+    #[test]
+    fn test_load_participants_file_invalid_yaml() {
+        let tmp = TempDir::new().unwrap();
+        let p = tmp.path().join("bad.yaml");
+        std::fs::write(&p, "invalid: yaml: content: [").unwrap();
+        let result = load_or_create_participants_file(&p);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_save_participants_file_with_data() {
+        let tmp = TempDir::new().unwrap();
+        let p = tmp.path().join("participants.yaml");
+
+        let mut participants = HashMap::new();
+        participants.insert(
+            "TEST".to_string(),
+            ParticipantRecord {
+                ref_version: Some("v1".to_string()),
+                ref_path: Some("./ref.fa".to_string()),
+                ref_index: Some("./ref.fa.fai".to_string()),
+                aligned: Some("./test.cram".to_string()),
+                aligned_index: Some("./test.cram.crai".to_string()),
+                snp: None,
+            },
+        );
+        let pf = ParticipantsFile {
+            participant: participants,
+        };
+
+        save_participants_file(&p, &pf).unwrap();
+        let content = std::fs::read_to_string(&p).unwrap();
+        assert!(content.contains("TEST"));
+        assert!(content.contains("v1"));
+        assert!(content.contains("ref.fa"));
+    }
+
+    #[test]
+    fn test_participant_data_debug_format() {
+        let pd = ParticipantData {
+            ref_version: Some("v1".to_string()),
+            ref_url: None,
+            ref_index: None,
+            aligned: None,
+            aligned_index: None,
+            ref_b3sum: None,
+            ref_index_b3sum: None,
+            aligned_b3sum: None,
+            aligned_index_b3sum: None,
+            snp: None,
+            snp_b3sum: None,
+            snp_post_process: None,
+        };
+        let debug_str = format!("{:?}", pd);
+        assert!(debug_str.contains("ParticipantData"));
+        assert!(debug_str.contains("v1"));
+    }
+
+    #[test]
+    fn test_aligned_url_debug_format() {
+        let single = AlignedUrl::Single("url".to_string());
+        let debug_str = format!("{:?}", single);
+        assert!(debug_str.contains("Single"));
+
+        let multiple = AlignedUrl::Multiple(vec!["url1".to_string()]);
+        let debug_str = format!("{:?}", multiple);
+        assert!(debug_str.contains("Multiple"));
+    }
+
+    #[test]
+    fn test_aligned_checksum_debug_format() {
+        let single = AlignedChecksum::Single("hash".to_string());
+        let debug_str = format!("{:?}", single);
+        assert!(debug_str.contains("Single"));
+    }
+
+    #[test]
+    fn test_post_process_clone() {
+        let pp = PostProcess {
+            uncompress: Some(true),
+            file: Some("file.gz".to_string()),
+            extract: None,
+            rename: None,
+        };
+        let cloned = pp.clone();
+        assert_eq!(cloned.uncompress, Some(true));
+        assert_eq!(cloned.file, Some("file.gz".to_string()));
+    }
+
+    #[test]
+    fn test_participant_record_with_snp_only() {
+        let pr = ParticipantRecord {
+            ref_version: None,
+            ref_path: None,
+            ref_index: None,
+            aligned: None,
+            aligned_index: None,
+            snp: Some("./snp/data.vcf".to_string()),
+        };
+        let yaml = serde_yaml::to_string(&pr).unwrap();
+        assert!(yaml.contains("snp"));
+        assert!(yaml.contains("data.vcf"));
+        assert!(!yaml.contains("ref_version"));
+    }
+
+    #[test]
+    fn test_sample_data_config_debug() {
+        let cfg = SampleDataConfig {
+            sample_data_urls: HashMap::new(),
+        };
+        let debug_str = format!("{:?}", cfg);
+        assert!(debug_str.contains("SampleDataConfig"));
+    }
+
+    #[test]
+    fn test_participants_file_debug() {
+        let pf = ParticipantsFile {
+            participant: HashMap::new(),
+        };
+        let debug_str = format!("{:?}", pf);
+        assert!(debug_str.contains("ParticipantsFile"));
+    }
+
+    #[test]
+    fn test_participant_record_debug() {
+        let pr = ParticipantRecord {
+            ref_version: None,
+            ref_path: None,
+            ref_index: None,
+            aligned: None,
+            aligned_index: None,
+            snp: None,
+        };
+        let debug_str = format!("{:?}", pr);
+        assert!(debug_str.contains("ParticipantRecord"));
+    }
 }

@@ -244,3 +244,102 @@ fn extract_fields(
         None
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    #[test]
+    fn filter_files_respects_glob_patterns() {
+        let base = TempDir::new().unwrap();
+        let file_a = base.path().join("sample_A.txt");
+        let file_b = base.path().join("control.csv");
+        fs::write(&file_a, "data").unwrap();
+        fs::write(&file_b, "data").unwrap();
+
+        let inputs = vec![file_a.clone(), file_b.clone()];
+        let filtered = filter_files(&inputs, "sample_*.txt").unwrap();
+
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0], file_a);
+
+        let all = filter_files(&inputs, "*").unwrap();
+        assert_eq!(all.len(), 2);
+    }
+
+    #[test]
+    fn create_extraction_regex_builds_named_groups() {
+        let regex = create_extraction_regex("participant_{participant_id}_{date}.txt").unwrap();
+        let caps = regex.captures("participant_1234_20240101.txt").unwrap();
+        assert_eq!(caps.name("participant_id").unwrap().as_str(), "1234");
+        assert_eq!(caps.name("date").unwrap().as_str(), "20240101");
+    }
+
+    #[test]
+    fn extract_fields_returns_named_and_other_values() {
+        let regex =
+            create_extraction_regex("participant_{participant_id}_{date}_{batch_id}.txt").unwrap();
+        let fields = extract_fields(
+            "participant_9876_20231201_batch42.txt",
+            &regex,
+            "participant_{participant_id}_{date}_{batch_id}.txt",
+        )
+        .expect("expected captures");
+
+        assert_eq!(fields.participant_id.as_deref(), Some("9876"));
+        assert_eq!(fields.date.as_deref(), Some("20231201"));
+        assert_eq!(
+            fields.other_fields.get("batch_id"),
+            Some(&"batch42".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn create_generates_csv_without_extract_pattern() {
+        let input = TempDir::new().unwrap();
+        let output = input.path().join("sheet.csv");
+
+        let file_a = input.path().join("alpha.txt");
+        let file_b = input.path().join("beta.csv");
+        fs::write(&file_a, "A").unwrap();
+        fs::write(&file_b, "B").unwrap();
+
+        create(
+            input.path().to_string_lossy().to_string(),
+            output.to_string_lossy().to_string(),
+            Some("*.txt".to_string()),
+            None,
+            false,
+        )
+        .await
+        .expect("csv creation succeeds");
+
+        let csv = fs::read_to_string(&output).unwrap();
+        assert!(csv.contains("participant_id,genotype_file_path"));
+        assert!(csv.contains("alpha"));
+        assert!(!csv.contains("beta"));
+    }
+
+    #[tokio::test]
+    async fn create_errors_when_pattern_does_not_match_and_ignore_off() {
+        let input = TempDir::new().unwrap();
+        let output = input.path().join("sheet.csv");
+
+        let file = input.path().join("sample_foo.txt");
+        fs::write(&file, "data").unwrap();
+
+        let result = create(
+            input.path().to_string_lossy().to_string(),
+            output.to_string_lossy().to_string(),
+            Some("*.txt".to_string()),
+            Some("sample_{participant_id}_{date}.txt".to_string()),
+            false,
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(!output.exists());
+    }
+}
