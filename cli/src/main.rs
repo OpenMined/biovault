@@ -23,6 +23,7 @@ fn validate_example_name(s: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
 
     #[test]
     fn validate_example_name_accepts_known_and_rejects_unknown() {
@@ -34,6 +35,148 @@ mod tests {
         // Unknown example returns Err with helpful message
         let err = validate_example_name("__definitely_not_real__").unwrap_err();
         assert!(err.contains("Unknown example"));
+    }
+
+    #[test]
+    fn clap_parses_init_command_with_flags() {
+        let cli = Cli::parse_from(["bv", "init", "--quiet", "user@example.com", "--verbose"]);
+        assert!(cli.verbose);
+        match cli.command {
+            Commands::Init { email, quiet } => {
+                assert_eq!(email.as_deref(), Some("user@example.com"));
+                assert!(quiet);
+            }
+            _ => panic!("unexpected command variant"),
+        }
+    }
+
+    #[test]
+    fn clap_parses_run_command_defaults() {
+        let cli = Cli::parse_from([
+            "bv",
+            "run",
+            "project-dir",
+            "participant.yaml",
+            "--dry-run",
+            "--results-dir",
+            "out",
+        ]);
+        match cli.command {
+            Commands::Run {
+                project_folder,
+                participant_source,
+                test,
+                download,
+                dry_run,
+                with_docker,
+                work_dir,
+                resume,
+                template,
+                results_dir,
+            } => {
+                assert_eq!(project_folder, "project-dir");
+                assert_eq!(participant_source, "participant.yaml");
+                assert!(!test);
+                assert!(!download);
+                assert!(dry_run);
+                assert!(with_docker); // default true
+                assert!(work_dir.is_none());
+                assert!(!resume);
+                assert!(template.is_none());
+                assert_eq!(results_dir.as_deref(), Some("out"));
+            }
+            _ => panic!("unexpected command variant"),
+        }
+    }
+
+    #[test]
+    fn clap_parses_sample_data_list_subcommand() {
+        let cli = Cli::parse_from(["bv", "sample-data", "list"]);
+        match cli.command {
+            Commands::SampleData { command } => match command {
+                SampleDataCommands::List => {}
+                _ => panic!("expected List variant"),
+            },
+            _ => panic!("unexpected command variant"),
+        }
+    }
+
+    #[test]
+    fn clap_parses_submit_command_with_flags() {
+        let cli = Cli::parse_from([
+            "bv",
+            "submit",
+            "./project",
+            "friend@example.com",
+            "--non-interactive",
+            "--force",
+        ]);
+        match cli.command {
+            Commands::Submit {
+                project_path,
+                destination,
+                non_interactive,
+                force,
+            } => {
+                assert_eq!(project_path, "./project");
+                assert_eq!(destination, "friend@example.com");
+                assert!(non_interactive);
+                assert!(force);
+            }
+            _ => panic!("unexpected command variant"),
+        }
+    }
+
+    #[test]
+    fn clap_parses_inbox_filters() {
+        let cli = Cli::parse_from([
+            "bv",
+            "inbox",
+            "--plain",
+            "--sent",
+            "--message-type",
+            "project",
+            "--from",
+            "alice@example.com",
+            "--search",
+            "urgent",
+        ]);
+        match cli.command {
+            Commands::Inbox {
+                interactive,
+                plain,
+                sent,
+                all,
+                unread,
+                projects,
+                message_type,
+                from,
+                search,
+            } => {
+                assert!(!interactive);
+                assert!(plain);
+                assert!(sent);
+                assert!(!all);
+                assert!(!unread);
+                assert!(!projects);
+                assert_eq!(message_type.as_deref(), Some("project"));
+                assert_eq!(from.as_deref(), Some("alice@example.com"));
+                assert_eq!(search.as_deref(), Some("urgent"));
+            }
+            _ => panic!("unexpected command variant"),
+        }
+    }
+
+    #[test]
+    fn clap_parses_project_examples_subcommand() {
+        let cli = Cli::parse_from(["bv", "project", "examples"]);
+        match cli.command {
+            Commands::Project { command } => match command {
+                ProjectCommands::Examples => {}
+                _ => panic!("expected Examples variant"),
+            },
+            _ => panic!("unexpected command variant"),
+        }
     }
 }
 

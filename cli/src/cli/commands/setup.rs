@@ -5,6 +5,12 @@ use std::env;
 use std::io::{self, Write};
 use std::process::{Command, Stdio};
 
+fn skip_install_commands() -> bool {
+    env::var("BIOVAULT_SKIP_INSTALLS")
+        .map(|v| v != "0")
+        .unwrap_or(false)
+}
+
 #[derive(Debug)]
 enum SystemType {
     GoogleColab,
@@ -118,6 +124,11 @@ fn is_google_colab() -> bool {
 }
 
 async fn setup_google_colab() -> Result<()> {
+    if skip_install_commands() {
+        println!("(test mode) Skipping Google Colab setup commands");
+        return Ok(());
+    }
+
     println!("\nSetting up Google Colab environment...\n");
 
     // Load the deps.yaml file to get environment-specific commands
@@ -246,6 +257,11 @@ async fn setup_google_colab() -> Result<()> {
 }
 
 async fn setup_macos() -> Result<()> {
+    if skip_install_commands() {
+        println!("(test mode) Skipping macOS setup commands");
+        return Ok(());
+    }
+
     use super::check::DependencyConfig;
     use std::process::Command;
 
@@ -549,6 +565,11 @@ fn parse_java_version(output: &str) -> Option<u32> {
 }
 
 async fn setup_ubuntu() -> Result<()> {
+    if skip_install_commands() {
+        println!("(test mode) Skipping Ubuntu/Debian setup commands");
+        return Ok(());
+    }
+
     use super::check::DependencyConfig;
     use std::process::Command;
 
@@ -708,6 +729,11 @@ async fn setup_ubuntu() -> Result<()> {
 }
 
 async fn setup_arch() -> Result<()> {
+    if skip_install_commands() {
+        println!("(test mode) Skipping Arch Linux setup commands");
+        return Ok(());
+    }
+
     use super::check::DependencyConfig;
     use std::process::Command;
 
@@ -859,6 +885,11 @@ async fn setup_arch() -> Result<()> {
 }
 
 async fn setup_windows() -> Result<()> {
+    if skip_install_commands() {
+        println!("(test mode) Skipping Windows setup commands");
+        return Ok(());
+    }
+
     println!("\nSetting up Windows environment...\n");
 
     // Check for WinGet availability
@@ -1226,6 +1257,27 @@ fn find_brew_command() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::env;
+
+    struct SkipInstallGuard(Option<String>);
+
+    impl SkipInstallGuard {
+        fn new() -> Self {
+            let previous = env::var("BIOVAULT_SKIP_INSTALLS").ok();
+            env::set_var("BIOVAULT_SKIP_INSTALLS", "1");
+            Self(previous)
+        }
+    }
+
+    impl Drop for SkipInstallGuard {
+        fn drop(&mut self) {
+            if let Some(ref value) = self.0 {
+                env::set_var("BIOVAULT_SKIP_INSTALLS", value);
+            } else {
+                env::remove_var("BIOVAULT_SKIP_INSTALLS");
+            }
+        }
+    }
 
     #[test]
     fn java_parse_various_formats() {
@@ -1307,12 +1359,14 @@ mod tests {
     #[tokio::test]
     #[cfg(target_os = "macos")]
     async fn setup_ubuntu_returns_ok_when_apt_missing() {
+        let _guard = SkipInstallGuard::new();
         super::setup_ubuntu().await.unwrap();
     }
 
     #[tokio::test]
     #[cfg(target_os = "macos")]
     async fn setup_arch_returns_ok_when_pacman_missing() {
+        let _guard = SkipInstallGuard::new();
         super::setup_arch().await.unwrap();
     }
 
@@ -1329,11 +1383,13 @@ mod tests {
     #[tokio::test]
     #[cfg_attr(not(feature = "slow-tests"), ignore = "slow env-setup path")]
     async fn setup_google_colab_runs_without_panic() {
+        let _guard = SkipInstallGuard::new();
         super::setup_google_colab().await.unwrap();
     }
 
     #[tokio::test]
     async fn setup_macos_returns_ok_without_brew() {
+        let _guard = SkipInstallGuard::new();
         // Only run when brew is not available; otherwise skip to avoid invoking installs
         let brew_exists = std::process::Command::new("sh")
             .arg("-c")
@@ -1353,6 +1409,7 @@ mod tests {
         ignore = "runs installer commands; e2e-only"
     )]
     async fn setup_windows_returns_ok_when_tools_missing() {
+        let _guard = SkipInstallGuard::new();
         super::setup_windows().await.unwrap();
     }
 
@@ -1360,6 +1417,7 @@ mod tests {
     #[serial_test::serial]
     #[cfg_attr(not(feature = "slow-tests"), ignore = "slow env-setup path")]
     async fn setup_execute_colab_branch() {
+        let _guard = SkipInstallGuard::new();
         std::env::set_var("COLAB_RELEASE_TAG", "1");
         super::execute().await.unwrap();
         std::env::remove_var("COLAB_RELEASE_TAG");
