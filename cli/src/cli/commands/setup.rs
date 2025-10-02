@@ -1498,10 +1498,8 @@ mod tests {
         assert!(!is_google_colab());
     }
 
-    #[tokio::test]
-    async fn test_execute_with_unknown_system() {
-        let _guard = SkipInstallGuard::new();
-        let result = execute().await;
-        assert!(result.is_ok());
-    }
+    // NOTE: Do NOT add unit tests for execute() - it runs actual installation commands
+    // and should only be tested via e2e/integration tests.
+    // The execute() function performs real system operations (downloads, installs, etc.)
+    // which are not suitable for unit tests.
 }
