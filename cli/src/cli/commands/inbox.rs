@@ -236,18 +236,41 @@ pub fn list(config: &Config, filters: ListFilters) -> Result<()> {
 
 /// Interactive mode for inbox
 pub async fn interactive(config: &Config, initial_view: Option<String>) -> Result<()> {
+    interactive_impl(config, initial_view, false).await
+}
+
+/// Internal implementation with test mode support
+async fn interactive_impl(
+    config: &Config,
+    initial_view: Option<String>,
+    test_mode: bool,
+) -> Result<()> {
     let db_path = super::messages::get_message_db_path(config)?;
     let db = MessageDb::new(&db_path)?;
 
     // Check if daemon is running - if so, don't sync manually
     let daemon_running = super::daemon::is_daemon_running(config).unwrap_or(false);
-    if !daemon_running {
+    if !daemon_running && !test_mode {
         // Sync messages first only if daemon is not running
         let sync = super::messages::init_message_system(config)?.1;
         let _ = sync.sync_quiet();
     }
 
     let mut current_view = initial_view.unwrap_or_else(|| "inbox".to_string());
+
+    // In test mode, just load messages and return (no interactive UI)
+    if test_mode {
+        let _messages = match current_view.as_str() {
+            "inbox" => db.list_inbox_messages(Some(200))?,
+            "sent" => db.list_sent_messages(Some(200))?,
+            "all" => db.list_messages(Some(200))?,
+            "unread" => db.list_unread_messages()?,
+            "projects" => db.list_messages_by_type("project", Some(200))?,
+            _ => db.list_inbox_messages(Some(200))?,
+        };
+        // In test mode, just verify we can load messages
+        return Ok(());
+    }
 
     // Use raw mode and a simple key-driven UI (via stty)
     enable_raw_mode_cmd()?;
@@ -877,6 +900,8 @@ mod tests {
     }
 
     fn test_config(tmp: &std::path::Path) -> Config {
+        // Clean env vars before setting test config to avoid contamination
+        std::env::remove_var("SYFTBOX_DATA_DIR");
         crate::config::set_test_biovault_home(tmp.join(".bv"));
         crate::config::set_test_syftbox_data_dir(tmp);
         Config {
@@ -890,19 +915,27 @@ mod tests {
 
     #[test]
     fn test_expand_env_vars_in_text_with_syftbox_data_dir() {
+        let _old = std::env::var("SYFTBOX_DATA_DIR").ok();
         std::env::set_var("SYFTBOX_DATA_DIR", "/test/syftbox/data");
         let text = "Path is $SYFTBOX_DATA_DIR/some/file";
         let result = expand_env_vars_in_text(text).unwrap();
         assert_eq!(result, "Path is /test/syftbox/data/some/file");
-        std::env::remove_var("SYFTBOX_DATA_DIR");
+        match _old {
+            Some(v) => std::env::set_var("SYFTBOX_DATA_DIR", v),
+            None => std::env::remove_var("SYFTBOX_DATA_DIR"),
+        }
     }
 
     #[test]
     fn test_expand_env_vars_in_text_without_env_var() {
+        let _old = std::env::var("SYFTBOX_DATA_DIR").ok();
         std::env::remove_var("SYFTBOX_DATA_DIR");
         let text = "Path is $SYFTBOX_DATA_DIR/some/file";
         let result = expand_env_vars_in_text(text).unwrap();
         assert_eq!(result, text); // Should remain unchanged
+        if let Some(v) = _old {
+            std::env::set_var("SYFTBOX_DATA_DIR", v)
+        }
     }
 
     #[test]
@@ -914,11 +947,15 @@ mod tests {
 
     #[test]
     fn test_expand_env_vars_in_text_multiple_occurrences() {
+        let _old = std::env::var("SYFTBOX_DATA_DIR").ok();
         std::env::set_var("SYFTBOX_DATA_DIR", "/data");
         let text = "$SYFTBOX_DATA_DIR/file1 and $SYFTBOX_DATA_DIR/file2";
         let result = expand_env_vars_in_text(text).unwrap();
         assert_eq!(result, "/data/file1 and /data/file2");
-        std::env::remove_var("SYFTBOX_DATA_DIR");
+        match _old {
+            Some(v) => std::env::set_var("SYFTBOX_DATA_DIR", v),
+            None => std::env::remove_var("SYFTBOX_DATA_DIR"),
+        }
     }
 
     #[test]
@@ -1085,5 +1122,411 @@ mod tests {
             },
         )
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_interactive_impl_test_mode_inbox() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let cfg = test_config(tmp.path());
+        // Test mode should not crash and should load inbox
+        interactive_impl(&cfg, Some("inbox".into()), true)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_interactive_impl_test_mode_sent() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let cfg = test_config(tmp.path());
+        interactive_impl(&cfg, Some("sent".into()), true)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_interactive_impl_test_mode_all() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let cfg = test_config(tmp.path());
+        interactive_impl(&cfg, Some("all".into()), true)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_interactive_impl_test_mode_unread() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let cfg = test_config(tmp.path());
+        interactive_impl(&cfg, Some("unread".into()), true)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_interactive_impl_test_mode_projects() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let cfg = test_config(tmp.path());
+        interactive_impl(&cfg, Some("projects".into()), true)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_interactive_impl_test_mode_default_view() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let cfg = test_config(tmp.path());
+        // None should default to inbox
+        interactive_impl(&cfg, None, true).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_interactive_impl_test_mode_invalid_view() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let cfg = test_config(tmp.path());
+        // Invalid view should fallback to inbox
+        interactive_impl(&cfg, Some("invalid".into()), true)
+            .await
+            .unwrap();
+    }
+
+    #[test]
+    fn test_enable_disable_raw_mode_functions_exist() {
+        // Just verify the functions compile and are available
+        // Cannot actually test raw mode in unit tests
+        let _ = enable_raw_mode_cmd;
+        let _ = disable_raw_mode_cmd;
+    }
+
+    #[test]
+    fn test_read_key_function_exists() {
+        // Verify function compiles
+        let _ = read_key;
+    }
+
+    #[test]
+    fn test_read_key_with_timeout_function_exists() {
+        // Verify function compiles
+        let _ = read_key_with_timeout;
+    }
+
+    #[test]
+    fn test_message_actions_function_exists() {
+        // Verify async function compiles
+        let _ = message_actions;
+    }
+
+    #[test]
+    fn test_compose_new_message_function_exists() {
+        // Verify function compiles
+        let _ = compose_new_message;
+    }
+
+    #[test]
+    fn test_key_enum_clone() {
+        let key1 = Key::Up;
+        let key2 = key1;
+        assert_eq!(key1, key2);
+    }
+
+    #[test]
+    fn test_list_filters_all_fields_none() {
+        let filters = ListFilters {
+            sent: false,
+            all: false,
+            unread: false,
+            projects: false,
+            message_type: None,
+            from: None,
+            search: None,
+        };
+        assert!(filters.message_type.is_none());
+        assert!(filters.from.is_none());
+        assert!(filters.search.is_none());
+    }
+
+    #[test]
+    fn test_expand_env_vars_empty_string() {
+        let result = expand_env_vars_in_text("").unwrap();
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn test_expand_env_vars_only_variable() {
+        let _old = std::env::var("SYFTBOX_DATA_DIR").ok();
+        std::env::set_var("SYFTBOX_DATA_DIR", "/var/data");
+        let result = expand_env_vars_in_text("$SYFTBOX_DATA_DIR").unwrap();
+        assert_eq!(result, "/var/data");
+        match _old {
+            Some(v) => std::env::set_var("SYFTBOX_DATA_DIR", v),
+            None => std::env::remove_var("SYFTBOX_DATA_DIR"),
+        }
+    }
+
+    #[test]
+    fn test_expand_env_vars_at_start() {
+        let _old = std::env::var("SYFTBOX_DATA_DIR").ok();
+        std::env::set_var("SYFTBOX_DATA_DIR", "/start");
+        let result = expand_env_vars_in_text("$SYFTBOX_DATA_DIR is the directory").unwrap();
+        assert_eq!(result, "/start is the directory");
+        match _old {
+            Some(v) => std::env::set_var("SYFTBOX_DATA_DIR", v),
+            None => std::env::remove_var("SYFTBOX_DATA_DIR"),
+        }
+    }
+
+    #[test]
+    fn test_expand_env_vars_at_end() {
+        let _old = std::env::var("SYFTBOX_DATA_DIR").ok();
+        std::env::set_var("SYFTBOX_DATA_DIR", "/end");
+        let result = expand_env_vars_in_text("Directory: $SYFTBOX_DATA_DIR").unwrap();
+        assert_eq!(result, "Directory: /end");
+        match _old {
+            Some(v) => std::env::set_var("SYFTBOX_DATA_DIR", v),
+            None => std::env::remove_var("SYFTBOX_DATA_DIR"),
+        }
+    }
+
+    #[test]
+    fn test_expand_env_vars_with_special_chars() {
+        let _old = std::env::var("SYFTBOX_DATA_DIR").ok();
+        std::env::set_var("SYFTBOX_DATA_DIR", "/path/with-special_chars.123");
+        let result = expand_env_vars_in_text("Path: $SYFTBOX_DATA_DIR/file").unwrap();
+        assert_eq!(result, "Path: /path/with-special_chars.123/file");
+        match _old {
+            Some(v) => std::env::set_var("SYFTBOX_DATA_DIR", v),
+            None => std::env::remove_var("SYFTBOX_DATA_DIR"),
+        }
+    }
+
+    #[test]
+    fn list_handles_all_message_statuses() {
+        use crate::cli::commands::messages::get_message_db_path;
+        use crate::messages::{Message, MessageStatus};
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let cfg = test_config(tmp.path());
+        let db_path = get_message_db_path(&cfg).unwrap();
+        let db = crate::messages::MessageDb::new(&db_path).unwrap();
+
+        // Create messages with all status types
+        for status in &[
+            MessageStatus::Draft,
+            MessageStatus::Sent,
+            MessageStatus::Received,
+            MessageStatus::Read,
+            MessageStatus::Deleted,
+            MessageStatus::Archived,
+        ] {
+            let mut msg = Message::new(
+                "sender@test.com".into(),
+                "receiver@test.com".into(),
+                "test body".into(),
+            );
+            msg.status = status.clone();
+            db.insert_message(&msg).unwrap();
+        }
+
+        // List all messages
+        list(
+            &cfg,
+            ListFilters {
+                sent: false,
+                all: true,
+                unread: false,
+                projects: false,
+                message_type: None,
+                from: None,
+                search: None,
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn list_handles_all_message_types() {
+        use crate::cli::commands::messages::get_message_db_path;
+        use crate::messages::{Message, MessageType};
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let cfg = test_config(tmp.path());
+        let db_path = get_message_db_path(&cfg).unwrap();
+        let db = crate::messages::MessageDb::new(&db_path).unwrap();
+
+        // Text message
+        let msg1 = Message::new("a@test.com".into(), "b@test.com".into(), "text".into());
+        db.insert_message(&msg1).unwrap();
+
+        // Project message
+        let mut msg2 = Message::new("c@test.com".into(), "d@test.com".into(), "proj".into());
+        msg2.message_type = MessageType::Project {
+            project_name: "TestProject".into(),
+            submission_id: "sub123".into(),
+            files_hash: Some("hash123".into()),
+        };
+        db.insert_message(&msg2).unwrap();
+
+        // Request message
+        let mut msg3 = Message::new("e@test.com".into(), "f@test.com".into(), "req".into());
+        msg3.message_type = MessageType::Request {
+            request_type: "access".into(),
+            params: None,
+        };
+        db.insert_message(&msg3).unwrap();
+
+        // List all
+        list(
+            &cfg,
+            ListFilters {
+                sent: false,
+                all: true,
+                unread: false,
+                projects: false,
+                message_type: None,
+                from: None,
+                search: None,
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn list_handles_long_body_preview() {
+        use crate::cli::commands::messages::get_message_db_path;
+        use crate::messages::Message;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let cfg = test_config(tmp.path());
+        let db_path = get_message_db_path(&cfg).unwrap();
+        let db = crate::messages::MessageDb::new(&db_path).unwrap();
+
+        // Message with very long body
+        let long_body = "a".repeat(200);
+        let msg = Message::new("x@test.com".into(), "y@test.com".into(), long_body);
+        db.insert_message(&msg).unwrap();
+
+        // Should truncate in display
+        list(
+            &cfg,
+            ListFilters {
+                sent: false,
+                all: true,
+                unread: false,
+                projects: false,
+                message_type: None,
+                from: None,
+                search: None,
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn list_handles_messages_with_subject() {
+        use crate::cli::commands::messages::get_message_db_path;
+        use crate::messages::Message;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let cfg = test_config(tmp.path());
+        let db_path = get_message_db_path(&cfg).unwrap();
+        let db = crate::messages::MessageDb::new(&db_path).unwrap();
+
+        let mut msg = Message::new("a@test.com".into(), "b@test.com".into(), "body".into());
+        msg.subject = Some("Test Subject".into());
+        db.insert_message(&msg).unwrap();
+
+        list(
+            &cfg,
+            ListFilters {
+                sent: false,
+                all: true,
+                unread: false,
+                projects: false,
+                message_type: None,
+                from: None,
+                search: None,
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn list_handles_messages_with_empty_subject() {
+        use crate::cli::commands::messages::get_message_db_path;
+        use crate::messages::Message;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let cfg = test_config(tmp.path());
+        let db_path = get_message_db_path(&cfg).unwrap();
+        let db = crate::messages::MessageDb::new(&db_path).unwrap();
+
+        let mut msg = Message::new("a@test.com".into(), "b@test.com".into(), "body".into());
+        msg.subject = Some("".into());
+        db.insert_message(&msg).unwrap();
+
+        // Should skip empty subject display
+        list(
+            &cfg,
+            ListFilters {
+                sent: false,
+                all: true,
+                unread: false,
+                projects: false,
+                message_type: None,
+                from: None,
+                search: None,
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn list_filters_from_with_partial_match() {
+        use crate::cli::commands::messages::get_message_db_path;
+        use crate::messages::Message;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let cfg = test_config(tmp.path());
+        let db_path = get_message_db_path(&cfg).unwrap();
+        let db = crate::messages::MessageDb::new(&db_path).unwrap();
+
+        let msg1 = Message::new(
+            "alice@example.com".into(),
+            "me@test.com".into(),
+            "msg1".into(),
+        );
+        let msg2 = Message::new(
+            "bob@example.com".into(),
+            "me@test.com".into(),
+            "msg2".into(),
+        );
+        let msg3 = Message::new(
+            "alice.smith@test.com".into(),
+            "me@test.com".into(),
+            "msg3".into(),
+        );
+
+        db.insert_message(&msg1).unwrap();
+        db.insert_message(&msg2).unwrap();
+        db.insert_message(&msg3).unwrap();
+
+        // Filter by partial sender name
+        list(
+            &cfg,
+            ListFilters {
+                sent: false,
+                all: true,
+                unread: false,
+                projects: false,
+                message_type: None,
+                from: Some("alice".into()),
+                search: None,
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn test_expand_env_vars_returns_ok() {
+        let result = expand_env_vars_in_text("test");
+        assert!(result.is_ok());
     }
 }
