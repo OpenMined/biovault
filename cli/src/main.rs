@@ -214,10 +214,16 @@ enum Commands {
     },
 
     #[command(about = "Show system information")]
-    Info,
+    Info {
+        #[arg(long, help = "Output as JSON")]
+        json: bool,
+    },
 
     #[command(about = "Check for required dependencies")]
-    Check,
+    Check {
+        #[arg(long, help = "Output as JSON")]
+        json: bool,
+    },
 
     #[command(about = "Setup environment for known systems (e.g., Google Colab)")]
     Setup,
@@ -285,6 +291,9 @@ enum Commands {
     Config {
         #[command(subcommand)]
         command: Option<ConfigCommands>,
+
+        #[arg(long, help = "Output as JSON")]
+        json: bool,
     },
 
     #[command(about = "FASTQ file operations")]
@@ -378,6 +387,12 @@ enum Commands {
     HardReset {
         #[arg(long, help = "Skip confirmation prompts (use with caution)")]
         ignore_warning: bool,
+    },
+
+    #[command(about = "Launch BioVault Desktop GUI")]
+    Desktop {
+        #[arg(long, help = "Path to BioVault config directory")]
+        config: Option<String>,
     },
 }
 
@@ -778,11 +793,11 @@ async fn async_main() -> Result<()> {
         Commands::Init { email, quiet } => {
             commands::init::execute(email.as_deref(), quiet).await?;
         }
-        Commands::Info => {
-            commands::info::execute().await?;
+        Commands::Info { json } => {
+            commands::info::execute(json).await?;
         }
-        Commands::Check => {
-            commands::check::execute().await?;
+        Commands::Check { json } => {
+            commands::check::execute(json).await?;
         }
         Commands::Setup => {
             commands::setup::execute().await?;
@@ -885,7 +900,7 @@ async fn async_main() -> Result<()> {
                 commands::biobank::unpublish(participant_id, all).await?;
             }
         },
-        Commands::Config { command } => {
+        Commands::Config { command, json } => {
             if let Some(cmd) = command {
                 match cmd {
                     ConfigCommands::Email { email } => {
@@ -896,7 +911,7 @@ async fn async_main() -> Result<()> {
                     }
                 }
             } else {
-                commands::config_cmd::show().await?;
+                commands::config_cmd::show(json).await?;
             }
         }
         Commands::Fastq { command } => match command {
@@ -1092,6 +1107,79 @@ async fn async_main() -> Result<()> {
         }
         Commands::HardReset { ignore_warning } => {
             commands::hard_reset::execute(ignore_warning).await?;
+        }
+        Commands::Desktop { config } => {
+            let biovault_home = if let Some(cfg) = config {
+                cfg
+            } else if let Ok(env_home) = std::env::var("BIOVAULT_HOME") {
+                env_home
+            } else {
+                biovault::config::get_biovault_home()?
+                    .to_string_lossy()
+                    .to_string()
+            };
+
+            #[cfg(target_os = "macos")]
+            {
+                let app_path = std::path::Path::new("/Applications/BioVault Desktop.app");
+                if !app_path.exists() {
+                    eprintln!("Error: BioVault Desktop is not installed.");
+                    eprintln!("\nPlease install BioVault Desktop from:");
+                    eprintln!("https://github.com/OpenMined/biovault-desktop");
+                    eprintln!("\nOr download the latest release:");
+                    eprintln!("https://github.com/OpenMined/biovault-desktop/releases/latest");
+                    std::process::exit(1);
+                }
+
+                match std::process::Command::new("open")
+                    .arg("-n")
+                    .arg("/Applications/BioVault Desktop.app")
+                    .arg("--args")
+                    .arg("--biovault-config")
+                    .arg(&biovault_home)
+                    .spawn()
+                {
+                    Ok(_) => println!("Launching BioVault Desktop with config: {}", biovault_home),
+                    Err(e) => {
+                        eprintln!("Error launching BioVault Desktop: {}", e);
+                        eprintln!("\nPlease ensure BioVault Desktop is installed from:");
+                        eprintln!("https://github.com/OpenMined/biovault-desktop");
+                        std::process::exit(1);
+                    }
+                }
+            }
+
+            #[cfg(not(target_os = "macos"))]
+            {
+                match which::which("bv-desktop").or_else(|_| which::which("biovault-desktop")) {
+                    Ok(desktop_bin) => {
+                        match std::process::Command::new(desktop_bin)
+                            .arg("--biovault-config")
+                            .arg(&biovault_home)
+                            .spawn()
+                        {
+                            Ok(_) => println!(
+                                "Launching BioVault Desktop with config: {}",
+                                biovault_home
+                            ),
+                            Err(e) => {
+                                eprintln!("Error launching BioVault Desktop: {}", e);
+                                eprintln!("\nPlease ensure BioVault Desktop is installed from:");
+                                eprintln!("https://github.com/OpenMined/biovault-desktop");
+                                std::process::exit(1);
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        eprintln!("Error: BioVault Desktop is not installed or not in PATH.");
+                        eprintln!("\nPlease install BioVault Desktop from:");
+                        eprintln!("https://github.com/OpenMined/biovault-desktop");
+                        eprintln!("\nOr download the latest release:");
+                        eprintln!("https://github.com/OpenMined/biovault-desktop/releases/latest");
+                        std::process::exit(1);
+                    }
+                }
+            }
         }
     }
 

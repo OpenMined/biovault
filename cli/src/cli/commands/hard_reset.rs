@@ -142,6 +142,7 @@ pub async fn execute(ignore_warning: bool) -> Result<()> {
                     .unwrap_or_else(|_| "unknown@email.com".to_string()),
                 syftbox_config: None,
                 version: None,
+                binary_paths: None,
             }
         }
     };

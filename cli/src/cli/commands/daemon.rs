@@ -382,19 +382,16 @@ impl Daemon {
                     let now = Utc::now();
 
                     // Check for file system events (checked every second for fast response)
-                    let rx_clone = Arc::clone(&rx);
-                    let has_event = tokio::task::spawn_blocking(move || {
-                        if let Ok(rx) = rx_clone.lock() {
-                            // Drain all pending events
-                            let mut found_event = false;
-                            while rx.try_recv().is_ok() {
-                                found_event = true;
-                            }
-                            found_event
-                        } else {
-                            false
+                    let has_event = if let Ok(rx) = rx.lock() {
+                        // Drain all pending events
+                        let mut found_event = false;
+                        while rx.try_recv().is_ok() {
+                            found_event = true;
                         }
-                    }).await.unwrap_or(false);
+                        found_event
+                    } else {
+                        false
+                    };
 
                     if has_event {
                         self.log("DEBUG", "File system event detected");
@@ -977,6 +974,7 @@ StandardError=journal
 SyslogIdentifier=biovault-{safe_email}
 Environment="HOME={home_dir}"
 Environment="PATH=/usr/local/bin:/usr/bin:/bin:{home_dir}/.local/bin:{home_dir}/.cargo/bin"
+Environment="RUST_BACKTRACE=1"
 
 # Security settings
 PrivateTmp=true

@@ -20,6 +20,18 @@ pub struct Config {
     pub syftbox_config: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub binary_paths: Option<BinaryPaths>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BinaryPaths {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub java: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub docker: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nextflow: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -281,6 +293,8 @@ mod tests {
             email: "user@example.com".into(),
             syftbox_config: None,
             version: Some("1.0.0".into()),
+
+            binary_paths: None,
         };
         cfg.save(&path).unwrap();
         let loaded = Config::from_file(&path).unwrap();
@@ -304,6 +318,8 @@ mod tests {
             email: "user@example.com".into(),
             syftbox_config: Some(syft_cfg_path.to_string_lossy().to_string()),
             version: None,
+
+            binary_paths: None,
         };
 
         let dir = cfg.get_syftbox_data_dir().unwrap();

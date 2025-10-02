@@ -1,3 +1,4 @@
+use crate::config::Config;
 use crate::Result;
 use anyhow::anyhow;
 use serde::{Deserialize, Serialize};
@@ -34,25 +35,48 @@ pub struct EnvironmentConfig {
     pub skip_reason: Option<String>,
 }
 
-pub async fn execute() -> Result<()> {
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DependencyCheckResult {
+    pub dependencies: Vec<DependencyResult>,
+    pub all_satisfied: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DependencyResult {
+    pub name: String,
+    pub found: bool,
+    pub path: Option<String>,
+    pub version: Option<String>,
+    pub running: Option<bool>,
+    pub skipped: bool,
+    pub skip_reason: Option<String>,
+}
+
+pub async fn execute(json: bool) -> Result<()> {
     // Load the deps.yaml file embedded in the binary
     let deps_yaml = include_str!("../../deps.yaml");
     let config: DependencyConfig = serde_yaml::from_str(deps_yaml)?;
 
-    println!("BioVault Dependency Check");
-    println!("=========================\n");
+    if !json {
+        println!("BioVault Dependency Check");
+        println!("=========================\n");
+    }
 
     // Detect if we're in Google Colab
     let is_colab = is_google_colab();
-    if is_colab {
+    if is_colab && !json {
         println!("ℹ️  Google Colab environment detected\n");
     }
 
     // Check if we're in CI mode (non-interactive)
     let is_ci = env::var("CI").is_ok() || env::var("GITHUB_ACTIONS").is_ok();
 
+    // Load BioVault config to check for custom binary paths
+    let bv_config = Config::load().ok();
+
     let mut all_found = true;
     let mut all_running = true;
+    let mut results: Vec<DependencyResult> = Vec::new();
 
     for dep in &config.dependencies {
         // Check if this dependency should be skipped in Colab
@@ -60,74 +84,136 @@ pub async fn execute() -> Result<()> {
             if let Some(environments) = &dep.environments {
                 if let Some(colab_config) = environments.get("google_colab") {
                     if colab_config.skip {
-                        println!("Checking {}... ⏭️  SKIPPED", dep.name);
-                        println!(
-                            "  Reason: {}",
-                            colab_config
-                                .skip_reason
-                                .as_ref()
-                                .unwrap_or(&"Not available in Colab".to_string())
-                        );
-                        println!();
+                        if !json {
+                            println!("Checking {}... ⏭️  SKIPPED", dep.name);
+                            println!(
+                                "  Reason: {}",
+                                colab_config
+                                    .skip_reason
+                                    .as_ref()
+                                    .unwrap_or(&"Not available in Colab".to_string())
+                            );
+                            println!();
+                        }
+                        results.push(DependencyResult {
+                            name: dep.name.clone(),
+                            found: false,
+                            path: None,
+                            version: None,
+                            running: None,
+                            skipped: true,
+                            skip_reason: colab_config.skip_reason.clone(),
+                        });
                         continue;
                     }
                 }
             }
         }
 
-        print!("Checking {}... ", dep.name);
+        if !json {
+            print!("Checking {}... ", dep.name);
+        }
 
-        // Check if the binary exists in PATH
-        let exists = which::which(&dep.name).is_ok();
+        // Check for custom binary path in config
+        let custom_path = bv_config
+            .as_ref()
+            .and_then(|cfg| cfg.binary_paths.as_ref())
+            .and_then(|bp| match dep.name.as_str() {
+                "java" => bp.java.clone(),
+                "docker" => bp.docker.clone(),
+                "nextflow" => bp.nextflow.clone(),
+                _ => None,
+            });
+
+        // Check if the binary exists in PATH or use custom path
+        let binary_path = if let Some(custom) = custom_path {
+            if std::path::Path::new(&custom).exists() {
+                Some(custom)
+            } else {
+                None
+            }
+        } else {
+            which::which(&dep.name)
+                .ok()
+                .map(|p| p.display().to_string())
+        };
 
         // Special handling for Java on macOS
         let mut java_brew_path: Option<String> = None;
-        if !exists && dep.name == "java" && std::env::consts::OS == "macos" {
+        if binary_path.is_none() && dep.name == "java" && std::env::consts::OS == "macos" {
             // Check if Java is installed via Homebrew but not in PATH
             java_brew_path = check_java_in_brew_not_in_path();
         }
 
-        if !exists && java_brew_path.is_none() {
+        if binary_path.is_none() && java_brew_path.is_none() {
             all_found = false;
-            println!("❌ NOT FOUND");
-            println!("  Description: {}", dep.description);
-            println!("  Installation instructions:");
-            for line in dep.install_instructions.lines() {
-                if !line.trim().is_empty() {
-                    println!("    {}", line);
+            if !json {
+                println!("❌ NOT FOUND");
+                println!("  Description: {}", dep.description);
+                println!("  Installation instructions:");
+                for line in dep.install_instructions.lines() {
+                    if !line.trim().is_empty() {
+                        println!("    {}", line);
+                    }
                 }
+                println!();
             }
-            println!();
+            results.push(DependencyResult {
+                name: dep.name.clone(),
+                found: false,
+                path: None,
+                version: None,
+                running: None,
+                skipped: false,
+                skip_reason: None,
+            });
         } else if let Some(brew_path) = java_brew_path {
             // Java is installed via brew but not in PATH
-            println!("⚠️  Found (not in PATH)");
-            println!("  Java is installed via Homebrew at: {}", brew_path);
-            println!("  But it's not available in your PATH.");
-            println!("  To fix this, add the following to your shell config:");
-            let shell = env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
-            let shell_config = if shell.contains("zsh") {
-                "~/.zshrc"
-            } else if shell.contains("bash") {
-                "~/.bash_profile"
-            } else {
-                "your shell config file"
-            };
-            println!(
-                "    echo 'export PATH=\"{}:$PATH\"' >> {}",
-                brew_path, shell_config
-            );
-            println!("    source {}", shell_config);
-            if !is_ci {
-                println!("  Or run 'bv setup' to configure this automatically.");
+            if !json {
+                println!("⚠️  Found (not in PATH)");
+                println!("  Java is installed via Homebrew at: {}", brew_path);
+                println!("  But it's not available in your PATH.");
+                println!("  To fix this, add the following to your shell config:");
+                let shell = env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+                let shell_config = if shell.contains("zsh") {
+                    "~/.zshrc"
+                } else if shell.contains("bash") {
+                    "~/.bash_profile"
+                } else {
+                    "your shell config file"
+                };
+                println!(
+                    "    echo 'export PATH=\"{}:$PATH\"' >> {}",
+                    brew_path, shell_config
+                );
+                println!("    source {}", shell_config);
+                if !is_ci {
+                    println!("  Or run 'bv setup' to configure this automatically.");
+                }
+                println!();
             }
-            println!();
-        } else {
-            // Check version requirement if specified
-            if let Some(min_version) = dep.min_version {
-                let version_ok = check_version(&dep.name, min_version);
-                if !version_ok {
-                    all_found = false;
-                    println!("❌ Version too old (requires {} or higher)", min_version);
+            results.push(DependencyResult {
+                name: dep.name.clone(),
+                found: true,
+                path: Some(format!("{}/java", brew_path)),
+                version: None,
+                running: None,
+                skipped: false,
+                skip_reason: None,
+            });
+        } else if let Some(path) = binary_path {
+            // Binary found - check version
+            let (version_ok, version_str) = if let Some(min_version) = dep.min_version {
+                check_version_with_info(&dep.name, min_version)
+            } else {
+                (true, get_version_string(&dep.name))
+            };
+
+            if !version_ok {
+                all_found = false;
+                if !json {
+                    let min_ver = dep.min_version.unwrap_or(0);
+                    println!("❌ Version too old (requires {} or higher)", min_ver);
                     println!("  Description: {}", dep.description);
                     println!("  Installation instructions:");
                     for line in dep.install_instructions.lines() {
@@ -136,46 +222,98 @@ pub async fn execute() -> Result<()> {
                         }
                     }
                     println!();
-                } else {
-                    print!("✓ Found");
                 }
+                results.push(DependencyResult {
+                    name: dep.name.clone(),
+                    found: true,
+                    path: Some(path),
+                    version: version_str,
+                    running: None,
+                    skipped: false,
+                    skip_reason: None,
+                });
             } else {
-                print!("✓ Found");
-            }
+                // Check if it needs to be running
+                let is_running = if dep.check_running {
+                    Some(check_if_running(&dep.name))
+                } else {
+                    None
+                };
 
-            // Check if it needs to be running and if it is
-            if dep.check_running {
-                let is_running = check_if_running(&dep.name);
-                if is_running {
-                    println!(" (running)");
-                } else {
-                    all_running = false;
-                    println!(" (NOT RUNNING)");
-                    println!(
-                        "  To start {}, run: {}",
-                        dep.name,
-                        get_start_command(&dep.name)
-                    );
+                if let Some(running) = is_running {
+                    if !running {
+                        all_running = false;
+                    }
                 }
-            } else {
-                println!();
+
+                if !json {
+                    if let Some(ref ver) = version_str {
+                        print!("✓ Found (version {})", ver);
+                    } else {
+                        print!("✓ Found");
+                    }
+
+                    if let Some(running) = is_running {
+                        if running {
+                            println!(" (running)");
+                        } else {
+                            println!(" (NOT RUNNING)");
+                            println!(
+                                "  To start {}, run: {}",
+                                dep.name,
+                                get_start_command(&dep.name)
+                            );
+                        }
+                    } else {
+                        println!();
+                    }
+
+                    println!("  Path: {}", path);
+                }
+
+                results.push(DependencyResult {
+                    name: dep.name.clone(),
+                    found: true,
+                    path: Some(path),
+                    version: version_str,
+                    running: is_running,
+                    skipped: false,
+                    skip_reason: None,
+                });
             }
         }
     }
 
-    println!("\n=========================");
-    if all_found && all_running {
-        println!("✓ All dependencies satisfied!");
-        Ok(())
-    } else if !all_found {
-        println!(
-            "⚠️  Some dependencies are missing. Please install them using the instructions above."
-        );
-        Err(anyhow!("Dependencies missing").into())
+    if json {
+        let result = DependencyCheckResult {
+            dependencies: results,
+            all_satisfied: all_found && all_running,
+        };
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        if all_found && all_running {
+            Ok(())
+        } else if !all_found {
+            Err(anyhow!("Dependencies missing").into())
+        } else {
+            Err(anyhow!("Services not running").into())
+        }
     } else {
-        // !all_running
-        println!("⚠️  Some services are not running. Please start them using the commands above.");
-        Err(anyhow!("Services not running").into())
+        println!("\n=========================");
+        if all_found && all_running {
+            println!("✓ All dependencies satisfied!");
+            Ok(())
+        } else if !all_found {
+            println!(
+                "⚠️  Some dependencies are missing. Please install them using the instructions above."
+            );
+            Err(anyhow!("Dependencies missing").into())
+        } else {
+            // !all_running
+            println!(
+                "⚠️  Some services are not running. Please start them using the commands above."
+            );
+            Err(anyhow!("Services not running").into())
+        }
     }
 }
 
@@ -211,6 +349,7 @@ fn get_start_command(service: &str) -> String {
     }
 }
 
+#[allow(dead_code)]
 fn check_version(tool: &str, min_version: u32) -> bool {
     match tool {
         "java" => check_java_version(min_version),
@@ -218,6 +357,7 @@ fn check_version(tool: &str, min_version: u32) -> bool {
     }
 }
 
+#[allow(dead_code)]
 fn check_java_version(min_version: u32) -> bool {
     // Try to execute java -version
     let output = Command::new("java").arg("-version").output();
@@ -279,6 +419,73 @@ fn parse_java_version(output: &str) -> Option<u32> {
     }
 
     None
+}
+
+fn check_version_with_info(tool: &str, min_version: u32) -> (bool, Option<String>) {
+    match tool {
+        "java" => check_java_version_with_info(min_version),
+        _ => (true, get_version_string(tool)),
+    }
+}
+
+fn get_version_string(tool: &str) -> Option<String> {
+    match tool {
+        "docker" => get_docker_version(),
+        "syftbox" => get_syftbox_version(),
+        "nextflow" => get_nextflow_version(),
+        _ => None,
+    }
+}
+
+fn get_docker_version() -> Option<String> {
+    let output = Command::new("docker").arg("--version").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let version_str = String::from_utf8_lossy(&output.stdout);
+    version_str
+        .split_whitespace()
+        .nth(2)
+        .map(|v| v.trim_end_matches(',').to_string())
+}
+
+fn get_syftbox_version() -> Option<String> {
+    let output = Command::new("syftbox").arg("--version").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let version_str = String::from_utf8_lossy(&output.stdout);
+    version_str.split_whitespace().nth(2).map(|v| v.to_string())
+}
+
+fn get_nextflow_version() -> Option<String> {
+    let output = Command::new("nextflow").arg("-version").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let version_str = String::from_utf8_lossy(&output.stdout);
+    for line in version_str.lines() {
+        if line.trim().starts_with("version ") {
+            return line.split_whitespace().nth(1).map(|v| v.to_string());
+        }
+    }
+    None
+}
+
+fn check_java_version_with_info(min_version: u32) -> (bool, Option<String>) {
+    let output = Command::new("java").arg("-version").output();
+
+    match output {
+        Ok(output) => {
+            let version_str = String::from_utf8_lossy(&output.stderr);
+            if let Some(version) = parse_java_version(&version_str) {
+                (version >= min_version, Some(version.to_string()))
+            } else {
+                (false, None)
+            }
+        }
+        Err(_) => (false, None),
+    }
 }
 
 fn is_google_colab() -> bool {
@@ -482,7 +689,7 @@ mod tests {
         std::env::set_var("PATH", "");
 
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let res = rt.block_on(execute());
+        let res = rt.block_on(execute(false));
         assert!(res.is_err());
 
         // Restore PATH
@@ -527,7 +734,7 @@ mod tests {
 
         // Run
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let res = rt.block_on(execute());
+        let res = rt.block_on(execute(false));
         assert!(res.is_ok());
 
         // Restore PATH
@@ -565,7 +772,7 @@ mod tests {
 
         // Run: should return Err because a service is not running
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let res = rt.block_on(execute());
+        let res = rt.block_on(execute(false));
         assert!(res.is_err());
 
         std::env::set_var("PATH", old_path);
