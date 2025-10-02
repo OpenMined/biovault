@@ -889,6 +889,60 @@ mod tests {
     }
 
     #[test]
+    fn test_expand_env_vars_in_text_with_syftbox_data_dir() {
+        std::env::set_var("SYFTBOX_DATA_DIR", "/test/syftbox/data");
+        let text = "Path is $SYFTBOX_DATA_DIR/some/file";
+        let result = expand_env_vars_in_text(text).unwrap();
+        assert_eq!(result, "Path is /test/syftbox/data/some/file");
+        std::env::remove_var("SYFTBOX_DATA_DIR");
+    }
+
+    #[test]
+    fn test_expand_env_vars_in_text_without_env_var() {
+        std::env::remove_var("SYFTBOX_DATA_DIR");
+        let text = "Path is $SYFTBOX_DATA_DIR/some/file";
+        let result = expand_env_vars_in_text(text).unwrap();
+        assert_eq!(result, text); // Should remain unchanged
+    }
+
+    #[test]
+    fn test_expand_env_vars_in_text_no_variables() {
+        let text = "Plain text without variables";
+        let result = expand_env_vars_in_text(text).unwrap();
+        assert_eq!(result, "Plain text without variables");
+    }
+
+    #[test]
+    fn test_expand_env_vars_in_text_multiple_occurrences() {
+        std::env::set_var("SYFTBOX_DATA_DIR", "/data");
+        let text = "$SYFTBOX_DATA_DIR/file1 and $SYFTBOX_DATA_DIR/file2";
+        let result = expand_env_vars_in_text(text).unwrap();
+        assert_eq!(result, "/data/file1 and /data/file2");
+        std::env::remove_var("SYFTBOX_DATA_DIR");
+    }
+
+    #[test]
+    fn test_list_filters_builder() {
+        let filters = ListFilters {
+            sent: true,
+            all: false,
+            unread: true,
+            projects: false,
+            message_type: Some("project".to_string()),
+            from: Some("alice".to_string()),
+            search: Some("test".to_string()),
+        };
+
+        assert!(filters.sent);
+        assert!(!filters.all);
+        assert!(filters.unread);
+        assert!(!filters.projects);
+        assert_eq!(filters.message_type, Some("project".to_string()));
+        assert_eq!(filters.from, Some("alice".to_string()));
+        assert_eq!(filters.search, Some("test".to_string()));
+    }
+
+    #[test]
     fn list_handles_empty_db() {
         let tmp = tempfile::TempDir::new().unwrap();
         let cfg = test_config(tmp.path());

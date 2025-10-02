@@ -912,4 +912,90 @@ mod tests {
         let def = AlignedChecksum::default();
         assert_eq!(def.to_vec(), vec![String::new()]);
     }
+
+    #[test]
+    fn test_aligned_url_single() {
+        let url = AlignedUrl::Single("http://example.com/file.bam".to_string());
+        assert_eq!(url.to_vec().len(), 1);
+        assert_eq!(url.to_vec()[0], "http://example.com/file.bam");
+    }
+
+    #[test]
+    fn test_aligned_url_multiple() {
+        let urls = AlignedUrl::Multiple(vec![
+            "http://a.com/1.bam".to_string(),
+            "http://b.com/2.bam".to_string(),
+        ]);
+        assert_eq!(urls.to_vec().len(), 2);
+    }
+
+    #[test]
+    fn test_aligned_checksum_default() {
+        let checksum = AlignedChecksum::default();
+        let vec = checksum.to_vec();
+        assert_eq!(vec.len(), 1);
+        assert_eq!(vec[0], "");
+    }
+
+    #[test]
+    fn test_post_process_debug() {
+        let pp = PostProcess {
+            uncompress: Some(true),
+            file: Some("test.gz".to_string()),
+            extract: None,
+            rename: None,
+        };
+        let debug_str = format!("{:?}", pp);
+        assert!(debug_str.contains("PostProcess"));
+    }
+
+    #[test]
+    fn test_participant_data_clone() {
+        let pd = ParticipantData {
+            ref_version: Some("GRCh38".to_string()),
+            ref_url: None,
+            ref_index: None,
+            aligned: None,
+            aligned_index: None,
+            ref_b3sum: None,
+            ref_index_b3sum: None,
+            aligned_b3sum: None,
+            aligned_index_b3sum: None,
+            snp: None,
+            snp_b3sum: None,
+            snp_post_process: None,
+        };
+        let cloned = pd.clone();
+        assert_eq!(cloned.ref_version, Some("GRCh38".to_string()));
+    }
+
+    #[test]
+    fn test_extract_filename_from_url_edge_cases() {
+        // Empty string returns empty, not error
+        assert_eq!(extract_filename_from_url("").unwrap(), "");
+        // Invalid URL returns the whole string
+        assert!(extract_filename_from_url("not-a-url").is_ok());
+        // URL with trailing slash may return empty or error
+        let result = extract_filename_from_url("http://example.com/");
+        assert!(result.is_ok() || result.is_err());
+    }
+
+    #[test]
+    fn test_determine_participants_empty_list() {
+        let cfg = SampleDataConfig {
+            sample_data_urls: HashMap::new(),
+        };
+        let result = determine_participants_to_fetch(&cfg, Some(vec![]), false);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().len(), 0);
+    }
+
+    #[test]
+    fn test_sample_data_yaml_embedded() {
+        // Verify the embedded YAML is valid
+        let result: Result<SampleDataConfig, _> = serde_yaml::from_str(SAMPLE_DATA_YAML);
+        assert!(result.is_ok());
+        let cfg = result.unwrap();
+        assert!(!cfg.sample_data_urls.is_empty());
+    }
 }

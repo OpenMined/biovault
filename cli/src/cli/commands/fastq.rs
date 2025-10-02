@@ -1473,4 +1473,100 @@ mod tests {
         let err = combine_fastq_files(&files, &tmp.path().join("out.fastq"));
         assert!(err.is_err());
     }
+
+    #[test]
+    fn test_check_seqkit_available() {
+        // Just verify function doesn't panic
+        let _result = check_seqkit_available();
+    }
+
+    #[test]
+    fn test_format_size_zero() {
+        assert_eq!(format_size(0), "0 B");
+    }
+
+    #[test]
+    fn test_format_size_bytes() {
+        assert_eq!(format_size(500), "500 B");
+        assert_eq!(format_size(1023), "1023 B");
+    }
+
+    #[test]
+    fn test_format_size_kilobytes() {
+        assert_eq!(format_size(1024), "1.00 KB");
+        assert_eq!(format_size(2048), "2.00 KB");
+    }
+
+    #[test]
+    fn test_format_size_megabytes() {
+        assert_eq!(format_size(1024 * 1024), "1.00 MB");
+        assert_eq!(format_size(5 * 1024 * 1024), "5.00 MB");
+    }
+
+    #[test]
+    fn test_format_size_gigabytes() {
+        assert_eq!(format_size(1024 * 1024 * 1024), "1.00 GB");
+    }
+
+    #[test]
+    fn test_check_size_duplicates_no_dupes() {
+        let f1 = FastqFile {
+            path: PathBuf::from("a.fastq"),
+            size: 100,
+            compression: CompressionType::None,
+            sequence_number: None,
+            base_name: "a".into(),
+        };
+        let f2 = FastqFile {
+            path: PathBuf::from("b.fastq"),
+            size: 200,
+            compression: CompressionType::None,
+            sequence_number: None,
+            base_name: "b".into(),
+        };
+        let files = vec![f1, f2];
+        let dupes = check_size_duplicates(&files);
+        assert!(dupes.is_empty());
+    }
+
+    #[test]
+    fn test_check_size_duplicates_with_dupes() {
+        let f1 = FastqFile {
+            path: PathBuf::from("a.fastq"),
+            size: 100,
+            compression: CompressionType::None,
+            sequence_number: None,
+            base_name: "a".into(),
+        };
+        let f2 = FastqFile {
+            path: PathBuf::from("b.fastq"),
+            size: 100,
+            compression: CompressionType::None,
+            sequence_number: None,
+            base_name: "b".into(),
+        };
+        let files = vec![f1, f2];
+        let dupes = check_size_duplicates(&files);
+        assert_eq!(dupes.len(), 1);
+        assert_eq!(dupes.get(&100).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_check_content_duplicates_no_dupes() {
+        let mut hashes = BTreeMap::new();
+        hashes.insert(PathBuf::from("a.fastq"), "hash1".to_string());
+        hashes.insert(PathBuf::from("b.fastq"), "hash2".to_string());
+        let dupes = check_content_duplicates(&hashes);
+        assert!(dupes.is_empty());
+    }
+
+    #[test]
+    fn test_check_content_duplicates_with_dupes() {
+        let mut hashes = BTreeMap::new();
+        hashes.insert(PathBuf::from("a.fastq"), "samehash".to_string());
+        hashes.insert(PathBuf::from("b.fastq"), "samehash".to_string());
+        let dupes = check_content_duplicates(&hashes);
+        assert_eq!(dupes.len(), 1);
+        assert_eq!(dupes.get("samehash").unwrap().len(), 2);
+    }
 }

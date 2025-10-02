@@ -1361,3 +1361,50 @@ pub async fn reinstall_service(config: &Config) -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_daemon_status_new() {
+        let pid = 12345;
+        let status = DaemonStatus::new(pid);
+        assert_eq!(status.pid, pid);
+        assert_eq!(status.status, "running");
+        assert_eq!(status.message_count, 0);
+        assert!(status.last_sync.is_none());
+    }
+
+    #[test]
+    fn test_daemon_status_serialize() {
+        let status = DaemonStatus::new(999);
+        let json = serde_json::to_string(&status);
+        assert!(json.is_ok());
+    }
+
+    #[test]
+    fn test_get_service_name() {
+        let config = Config {
+            email: "test@example.com".to_string(),
+            syftbox_config: None,
+            version: None,
+            binary_paths: None,
+        };
+        let name = get_service_name(&config);
+        assert!(name.starts_with("biovault-daemon-"));
+        assert!(name.contains("test"));
+    }
+
+    #[test]
+    fn test_get_biovault_dir() {
+        let config = Config {
+            email: "test@example.com".to_string(),
+            syftbox_config: None,
+            version: None,
+            binary_paths: None,
+        };
+        let dir = get_biovault_dir(&config);
+        assert!(dir.is_ok());
+    }
+}

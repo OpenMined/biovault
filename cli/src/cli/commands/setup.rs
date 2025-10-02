@@ -1439,4 +1439,69 @@ mod tests {
     fn print_windows_manual_instructions_runs() {
         super::print_windows_manual_instructions();
     }
+
+    #[test]
+    fn test_system_type_debug() {
+        let s = format!("{:?}", SystemType::MacOs);
+        assert_eq!(s, "MacOs");
+        let s2 = format!("{:?}", SystemType::GoogleColab);
+        assert_eq!(s2, "GoogleColab");
+    }
+
+    #[test]
+    fn test_detect_system_on_windows() {
+        if cfg!(target_os = "windows") {
+            match detect_system() {
+                SystemType::Windows => {}
+                _ => panic!("Expected Windows on windows platform"),
+            }
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_skip_install_commands_not_set() {
+        std::env::remove_var("BIOVAULT_SKIP_INSTALLS");
+        // Just verify it returns a bool without panicking
+        let _result = skip_install_commands();
+        // Function completes without panic - test passes
+    }
+
+    #[test]
+    fn test_parse_java_version_edge_cases() {
+        assert_eq!(parse_java_version(""), None);
+        assert_eq!(parse_java_version("no version here"), None);
+        // Just test that it doesn't panic on weird input
+        let _ = parse_java_version("version 999");
+    }
+
+    #[test]
+    fn test_map_winget_pkg_to_choco_all_mappings() {
+        // Only Microsoft.OpenJDK is mapped
+        assert_eq!(map_winget_pkg_to_choco("Microsoft.OpenJDK"), "openjdk");
+        assert_eq!(map_winget_pkg_to_choco("microsoft.openjdk"), "openjdk");
+        // Others return empty
+        assert_eq!(map_winget_pkg_to_choco("Git.Git"), "");
+        assert_eq!(map_winget_pkg_to_choco("RandomPackage"), "");
+    }
+
+    #[test]
+    fn test_is_google_colab_without_env() {
+        std::env::remove_var("COLAB_RELEASE_TAG");
+        let keys: Vec<String> = std::env::vars()
+            .filter(|(k, _)| k.starts_with("COLAB_"))
+            .map(|(k, _)| k)
+            .collect();
+        for k in keys {
+            std::env::remove_var(&k);
+        }
+        assert!(!is_google_colab());
+    }
+
+    #[tokio::test]
+    async fn test_execute_with_unknown_system() {
+        let _guard = SkipInstallGuard::new();
+        let result = execute().await;
+        assert!(result.is_ok());
+    }
 }

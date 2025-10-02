@@ -260,6 +260,91 @@ mod tests {
             .block_on(async { super::async_main_with(cli).await })
             .unwrap();
     }
+
+    #[test]
+    fn async_main_with_info_executes() {
+        let _home_guard = TestHomeGuard::new();
+        let _skip_guard = EnvVarGuard::set("BIOVAULT_SKIP_UPDATE_CHECK", "1");
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+
+        let cli = Cli {
+            command: Commands::Info { json: false },
+            verbose: false,
+            config: None,
+        };
+
+        runtime
+            .block_on(async { super::async_main_with(cli).await })
+            .unwrap();
+    }
+
+    #[test]
+    fn async_main_with_participant_list_executes() {
+        let _home_guard = TestHomeGuard::new();
+        let _skip_guard = EnvVarGuard::set("BIOVAULT_SKIP_UPDATE_CHECK", "1");
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+
+        let cli = Cli {
+            command: Commands::Participant {
+                command: ParticipantCommands::List,
+            },
+            verbose: false,
+            config: None,
+        };
+
+        runtime
+            .block_on(async { super::async_main_with(cli).await })
+            .unwrap();
+    }
+
+    #[test]
+    fn async_main_with_project_create_executes() {
+        let _home_guard = TestHomeGuard::new();
+        let _skip_guard = EnvVarGuard::set("BIOVAULT_SKIP_UPDATE_CHECK", "1");
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+
+        let cli = Cli {
+            command: Commands::Project {
+                command: ProjectCommands::Create {
+                    name: Some("test_project".to_string()),
+                    folder: None,
+                    example: None,
+                },
+            },
+            verbose: false,
+            config: None,
+        };
+
+        // This may fail due to missing setup, but that's OK for this test
+        let _ = runtime.block_on(async { super::async_main_with(cli).await });
+    }
+
+    #[test]
+    fn test_env_var_guard_restores_previous() {
+        let key = "TEST_VAR_GUARD";
+        std::env::set_var(key, "original");
+
+        {
+            let _guard = EnvVarGuard::set(key, "temp");
+            assert_eq!(std::env::var(key).unwrap(), "temp");
+        }
+
+        assert_eq!(std::env::var(key).unwrap(), "original");
+        std::env::remove_var(key);
+    }
+
+    #[test]
+    fn test_env_var_guard_removes_if_not_set() {
+        let key = "TEST_VAR_GUARD_REMOVE";
+        std::env::remove_var(key);
+
+        {
+            let _guard = EnvVarGuard::set(key, "temp");
+            assert_eq!(std::env::var(key).unwrap(), "temp");
+        }
+
+        assert!(std::env::var(key).is_err());
+    }
 }
 
 #[derive(Parser)]

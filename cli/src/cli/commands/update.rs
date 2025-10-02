@@ -399,4 +399,26 @@ mod tests {
         check_and_notify_random().await.unwrap();
         std::env::remove_var("BIOVAULT_SKIP_UPDATE_CHECK");
     }
+
+    #[test]
+    fn test_skip_update_checks_env_set() {
+        std::env::set_var("BIOVAULT_SKIP_UPDATE_CHECK", "1");
+        assert!(skip_update_checks());
+        std::env::remove_var("BIOVAULT_SKIP_UPDATE_CHECK");
+    }
+
+    #[test]
+    fn test_skip_update_checks_env_not_set() {
+        std::env::remove_var("BIOVAULT_SKIP_UPDATE_CHECK");
+        assert!(!skip_update_checks());
+    }
+
+    #[test]
+    fn test_install_method_enum_variants() {
+        let cargo = InstallMethod::Cargo;
+        let binary = InstallMethod::Binary;
+
+        assert!(matches!(cargo, InstallMethod::Cargo));
+        assert!(matches!(binary, InstallMethod::Binary));
+    }
 }
