@@ -10,7 +10,7 @@ workflow USER {
       results_dir
     main:
       // (GRCh38_position, GRCh37_position)
-      def rs12913832 = ['chr15:28120472-28120472', 'chr15:28365618-28365618']
+      def rs12913832 = ['15:28120472-28120472', '15:28365618-28365618']
       def base_pos = pickPos(ref_version, rs12913832)
 
       // detect region string using samtools/FAI
