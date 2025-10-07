@@ -15,7 +15,7 @@ workflow USER {
       //   GRCh38: chr16:89919709
       //   GRCh37: chr16:89986117
       // (use 1-bp range like your eye example)
-      def rs1805007 = ['chr16:89919709-89919709', 'chr16:89986117-89986117']
+      def rs1805007 = ['16:89919709-89919709', '16:89986117-89986117']
       def base_pos = pickPos(ref_version, rs1805007)
 
       def call_region_ch = call_region(
