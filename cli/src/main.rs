@@ -636,6 +636,48 @@ enum ProjectCommands {
 
     #[command(about = "List available example templates")]
     Examples,
+
+    #[command(about = "Import a project from URL or register a local project")]
+    Import {
+        #[arg(help = "URL to project.yaml or local directory path")]
+        source: String,
+
+        #[arg(long, help = "Override project name")]
+        name: Option<String>,
+
+        #[arg(long, help = "Overwrite existing project")]
+        overwrite: bool,
+
+        #[arg(long, help = "Output format (json|table)", default_value = "table")]
+        format: String,
+    },
+
+    #[command(about = "List all registered projects")]
+    List {
+        #[arg(long, help = "Output format (json|table)", default_value = "table")]
+        format: String,
+    },
+
+    #[command(about = "Show detailed information about a project")]
+    Show {
+        #[arg(help = "Project name or ID")]
+        identifier: String,
+
+        #[arg(long, help = "Output format (json|table)", default_value = "table")]
+        format: String,
+    },
+
+    #[command(about = "Delete a project")]
+    Delete {
+        #[arg(help = "Project name or ID")]
+        identifier: String,
+
+        #[arg(long, help = "Keep project files, only remove from database")]
+        keep_files: bool,
+
+        #[arg(long, help = "Output format (json|table)", default_value = "table")]
+        format: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1128,6 +1170,31 @@ async fn async_main_with(cli: Cli) -> Result<()> {
             }
             ProjectCommands::Examples => {
                 commands::project::list_examples()?;
+            }
+            ProjectCommands::Import {
+                source,
+                name,
+                overwrite,
+                format,
+            } => {
+                let fmt = if format == "table" { None } else { Some(format) };
+                commands::project_management::import(source, name, overwrite, fmt).await?;
+            }
+            ProjectCommands::List { format } => {
+                let fmt = if format == "table" { None } else { Some(format) };
+                commands::project_management::list(fmt)?;
+            }
+            ProjectCommands::Show { identifier, format } => {
+                let fmt = if format == "table" { None } else { Some(format) };
+                commands::project_management::show(identifier, fmt)?;
+            }
+            ProjectCommands::Delete {
+                identifier,
+                keep_files,
+                format,
+            } => {
+                let fmt = if format == "table" { None } else { Some(format) };
+                commands::project_management::delete(identifier, keep_files, fmt)?;
             }
         },
         Commands::Run {

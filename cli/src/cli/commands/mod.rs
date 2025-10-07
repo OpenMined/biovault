@@ -12,6 +12,7 @@ pub mod messages;
 pub mod participant;
 pub mod participants;
 pub mod project;
+pub mod project_management;
 pub mod run;
 pub mod sample_data;
 pub mod samplesheet;
