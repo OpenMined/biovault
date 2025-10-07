@@ -469,6 +469,12 @@ enum Commands {
         command: FastqCommands,
     },
 
+    #[command(about = "Manage files and file catalogs")]
+    Files {
+        #[command(subcommand)]
+        command: FilesCommands,
+    },
+
     #[command(about = "Submit a project to another biobank via SyftBox")]
     Submit {
         #[arg(help = "Path to project directory (use '.' for current directory)")]
@@ -758,6 +764,97 @@ enum FastqCommands {
             help = "Stats output format (tsv, yaml, json)"
         )]
         stats_format: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum FilesCommands {
+    #[command(about = "Scan directory for files by type")]
+    Scan {
+        #[arg(help = "Directory path to scan")]
+        path: String,
+
+        #[arg(long, help = "File extension filter (e.g., .vcf, .cram)")]
+        ext: Option<String>,
+
+        #[arg(long, help = "Scan subdirectories recursively", default_value = "true")]
+        recursive: bool,
+
+        #[arg(long, help = "Output format (json|table)", default_value = "table")]
+        format: String,
+    },
+
+    #[command(about = "Import files into database catalog")]
+    Import {
+        #[arg(help = "File path or directory to import")]
+        path: String,
+
+        #[arg(long, help = "File extension filter (e.g., .vcf, .cram)")]
+        ext: Option<String>,
+
+        #[arg(
+            long,
+            help = "Import subdirectories recursively",
+            default_value = "true"
+        )]
+        recursive: bool,
+
+        #[arg(
+            long,
+            help = "Pattern to extract participant IDs (e.g., 'case_{id}_*')"
+        )]
+        pattern: Option<String>,
+
+        #[arg(long, help = "Dry run - show what would be imported without importing")]
+        dry_run: bool,
+
+        #[arg(long, help = "Skip interactive confirmation prompt")]
+        non_interactive: bool,
+
+        #[arg(long, help = "Output format (json|table)", default_value = "table")]
+        format: String,
+    },
+
+    #[command(about = "List cataloged files with filtering")]
+    List {
+        #[arg(long, help = "Filter by file extension")]
+        ext: Option<String>,
+
+        #[arg(long, help = "Filter by participant ID")]
+        participant: Option<String>,
+
+        #[arg(long, help = "Show only files without participant assignment")]
+        unassigned: bool,
+
+        #[arg(long, help = "Maximum number of results")]
+        limit: Option<usize>,
+
+        #[arg(long, help = "Output format (json|table)", default_value = "table")]
+        format: String,
+    },
+
+    #[command(about = "Show detailed file information")]
+    Info {
+        #[arg(help = "File ID or path")]
+        file: String,
+
+        #[arg(long, help = "Output format (json|table)", default_value = "table")]
+        format: String,
+    },
+
+    #[command(about = "Suggest participant ID patterns from filenames")]
+    SuggestPatterns {
+        #[arg(help = "Directory path to analyze")]
+        path: String,
+
+        #[arg(long, help = "File extension filter (e.g., .vcf, .cram)")]
+        ext: Option<String>,
+
+        #[arg(long, help = "Scan subdirectories recursively", default_value = "true")]
+        recursive: bool,
+
+        #[arg(long, help = "Output format (json|table)", default_value = "table")]
+        format: String,
     },
 }
 
@@ -1095,6 +1192,56 @@ async fn async_main_with(cli: Cli) -> Result<()> {
                     Some(stats_format),
                 )
                 .await?;
+            }
+        },
+        Commands::Files { command } => match command {
+            FilesCommands::Scan {
+                path,
+                ext,
+                recursive,
+                format,
+            } => {
+                commands::files::scan(path, ext, recursive, format).await?;
+            }
+            FilesCommands::Import {
+                path,
+                ext,
+                recursive,
+                pattern,
+                dry_run,
+                non_interactive,
+                format,
+            } => {
+                commands::files::import(
+                    path,
+                    ext,
+                    recursive,
+                    pattern,
+                    dry_run,
+                    non_interactive,
+                    format,
+                )
+                .await?;
+            }
+            FilesCommands::List {
+                ext,
+                participant,
+                unassigned,
+                limit,
+                format,
+            } => {
+                commands::files::list(ext, participant, unassigned, limit, format).await?;
+            }
+            FilesCommands::Info { file, format } => {
+                commands::files::info(file, format).await?;
+            }
+            FilesCommands::SuggestPatterns {
+                path,
+                ext,
+                recursive,
+                format,
+            } => {
+                commands::files::suggest_patterns(path, ext, recursive, format).await?;
             }
         },
         Commands::Submit {
