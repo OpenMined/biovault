@@ -9,6 +9,13 @@ use tracing::{debug, info};
 const CRATES_IO_API_URL: &str = "https://crates.io/api/v1/crates/biovault";
 const GITHUB_API_URL: &str = "https://api.github.com/repos/openmined/biovault/releases/latest";
 
+fn skip_update_checks() -> bool {
+    match env::var("BIOVAULT_SKIP_UPDATE_CHECK") {
+        Ok(value) => value != "0",
+        Err(_) => false,
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct CratesApiResponse {
     #[serde(rename = "crate")]
@@ -106,6 +113,11 @@ pub async fn check_for_updates() -> Result<Option<Version>> {
 }
 
 pub async fn check_and_notify_random() -> Result<()> {
+    if skip_update_checks() {
+        debug!("Skipping update notification check due to BIOVAULT_SKIP_UPDATE_CHECK env var");
+        return Ok(());
+    }
+
     use rand::Rng;
     let mut rng = rand::thread_rng();
 
@@ -365,5 +377,48 @@ mod tests {
                 assert!(!is_cargo, "Path {} should be detected as Binary", path);
             }
         }
+    }
+
+    #[test]
+    fn skip_update_checks_env_handling() {
+        std::env::remove_var("BIOVAULT_SKIP_UPDATE_CHECK");
+        assert!(!skip_update_checks());
+
+        std::env::set_var("BIOVAULT_SKIP_UPDATE_CHECK", "1");
+        assert!(skip_update_checks());
+
+        std::env::set_var("BIOVAULT_SKIP_UPDATE_CHECK", "0");
+        assert!(!skip_update_checks());
+
+        std::env::remove_var("BIOVAULT_SKIP_UPDATE_CHECK");
+    }
+
+    #[tokio::test]
+    async fn check_and_notify_random_respects_skip_env() {
+        std::env::set_var("BIOVAULT_SKIP_UPDATE_CHECK", "1");
+        check_and_notify_random().await.unwrap();
+        std::env::remove_var("BIOVAULT_SKIP_UPDATE_CHECK");
+    }
+
+    #[test]
+    fn test_skip_update_checks_env_set() {
+        std::env::set_var("BIOVAULT_SKIP_UPDATE_CHECK", "1");
+        assert!(skip_update_checks());
+        std::env::remove_var("BIOVAULT_SKIP_UPDATE_CHECK");
+    }
+
+    #[test]
+    fn test_skip_update_checks_env_not_set() {
+        std::env::remove_var("BIOVAULT_SKIP_UPDATE_CHECK");
+        assert!(!skip_update_checks());
+    }
+
+    #[test]
+    fn test_install_method_enum_variants() {
+        let cargo = InstallMethod::Cargo;
+        let binary = InstallMethod::Binary;
+
+        assert!(matches!(cargo, InstallMethod::Cargo));
+        assert!(matches!(binary, InstallMethod::Binary));
     }
 }

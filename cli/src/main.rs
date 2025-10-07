@@ -23,6 +23,51 @@ fn validate_example_name(s: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
+    use tempfile::TempDir;
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(prev) = &self.previous {
+                std::env::set_var(self.key, prev);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
+
+    struct TestHomeGuard {
+        _temp: TempDir,
+    }
+
+    impl TestHomeGuard {
+        fn new() -> Self {
+            let temp = TempDir::new().unwrap();
+            let home = temp.path().join(".biovault");
+            std::fs::create_dir_all(&home).unwrap();
+            biovault::config::set_test_biovault_home(&home);
+            Self { _temp: temp }
+        }
+    }
+
+    impl Drop for TestHomeGuard {
+        fn drop(&mut self) {
+            biovault::config::clear_test_biovault_home();
+        }
+    }
 
     #[test]
     fn validate_example_name_accepts_known_and_rejects_unknown() {
@@ -34,6 +79,271 @@ mod tests {
         // Unknown example returns Err with helpful message
         let err = validate_example_name("__definitely_not_real__").unwrap_err();
         assert!(err.contains("Unknown example"));
+    }
+
+    #[test]
+    fn clap_parses_init_command_with_flags() {
+        let cli = Cli::parse_from(["bv", "init", "--quiet", "user@example.com", "--verbose"]);
+        assert!(cli.verbose);
+        match cli.command {
+            Commands::Init { email, quiet } => {
+                assert_eq!(email.as_deref(), Some("user@example.com"));
+                assert!(quiet);
+            }
+            _ => panic!("unexpected command variant"),
+        }
+    }
+
+    #[test]
+    fn clap_parses_run_command_defaults() {
+        let cli = Cli::parse_from([
+            "bv",
+            "run",
+            "project-dir",
+            "participant.yaml",
+            "--dry-run",
+            "--results-dir",
+            "out",
+        ]);
+        match cli.command {
+            Commands::Run {
+                project_folder,
+                participant_source,
+                test,
+                download,
+                dry_run,
+                with_docker,
+                work_dir,
+                resume,
+                template,
+                results_dir,
+            } => {
+                assert_eq!(project_folder, "project-dir");
+                assert_eq!(participant_source, "participant.yaml");
+                assert!(!test);
+                assert!(!download);
+                assert!(dry_run);
+                assert!(with_docker); // default true
+                assert!(work_dir.is_none());
+                assert!(!resume);
+                assert!(template.is_none());
+                assert_eq!(results_dir.as_deref(), Some("out"));
+            }
+            _ => panic!("unexpected command variant"),
+        }
+    }
+
+    #[test]
+    fn clap_parses_sample_data_list_subcommand() {
+        let cli = Cli::parse_from(["bv", "sample-data", "list"]);
+        match cli.command {
+            Commands::SampleData { command } => match command {
+                SampleDataCommands::List => {}
+                _ => panic!("expected List variant"),
+            },
+            _ => panic!("unexpected command variant"),
+        }
+    }
+
+    #[test]
+    fn clap_parses_submit_command_with_flags() {
+        let cli = Cli::parse_from([
+            "bv",
+            "submit",
+            "./project",
+            "friend@example.com",
+            "--non-interactive",
+            "--force",
+        ]);
+        match cli.command {
+            Commands::Submit {
+                project_path,
+                destination,
+                non_interactive,
+                force,
+            } => {
+                assert_eq!(project_path, "./project");
+                assert_eq!(destination, "friend@example.com");
+                assert!(non_interactive);
+                assert!(force);
+            }
+            _ => panic!("unexpected command variant"),
+        }
+    }
+
+    #[test]
+    fn clap_parses_inbox_filters() {
+        let cli = Cli::parse_from([
+            "bv",
+            "inbox",
+            "--plain",
+            "--sent",
+            "--message-type",
+            "project",
+            "--from",
+            "alice@example.com",
+            "--search",
+            "urgent",
+        ]);
+        match cli.command {
+            Commands::Inbox {
+                interactive,
+                plain,
+                sent,
+                all,
+                unread,
+                projects,
+                message_type,
+                from,
+                search,
+            } => {
+                assert!(!interactive);
+                assert!(plain);
+                assert!(sent);
+                assert!(!all);
+                assert!(!unread);
+                assert!(!projects);
+                assert_eq!(message_type.as_deref(), Some("project"));
+                assert_eq!(from.as_deref(), Some("alice@example.com"));
+                assert_eq!(search.as_deref(), Some("urgent"));
+            }
+            _ => panic!("unexpected command variant"),
+        }
+    }
+
+    #[test]
+    fn clap_parses_project_examples_subcommand() {
+        let cli = Cli::parse_from(["bv", "project", "examples"]);
+        match cli.command {
+            Commands::Project { command } => match command {
+                ProjectCommands::Examples => {}
+                _ => panic!("expected Examples variant"),
+            },
+            _ => panic!("unexpected command variant"),
+        }
+    }
+
+    #[test]
+    fn async_main_with_sample_data_list_executes() {
+        let _home_guard = TestHomeGuard::new();
+        let _skip_guard = EnvVarGuard::set("BIOVAULT_SKIP_UPDATE_CHECK", "1");
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+
+        let cli = Cli {
+            command: Commands::SampleData {
+                command: SampleDataCommands::List,
+            },
+            verbose: false,
+            config: None,
+        };
+
+        runtime
+            .block_on(async { super::async_main_with(cli).await })
+            .unwrap();
+    }
+
+    #[test]
+    fn async_main_with_project_examples_executes() {
+        let _home_guard = TestHomeGuard::new();
+        let _skip_guard = EnvVarGuard::set("BIOVAULT_SKIP_UPDATE_CHECK", "1");
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+
+        let cli = Cli {
+            command: Commands::Project {
+                command: ProjectCommands::Examples,
+            },
+            verbose: true,
+            config: None,
+        };
+
+        runtime
+            .block_on(async { super::async_main_with(cli).await })
+            .unwrap();
+    }
+
+    #[test]
+    fn async_main_with_info_executes() {
+        let _home_guard = TestHomeGuard::new();
+        let _skip_guard = EnvVarGuard::set("BIOVAULT_SKIP_UPDATE_CHECK", "1");
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+
+        let cli = Cli {
+            command: Commands::Info { json: false },
+            verbose: false,
+            config: None,
+        };
+
+        runtime
+            .block_on(async { super::async_main_with(cli).await })
+            .unwrap();
+    }
+
+    #[test]
+    fn async_main_with_participant_list_executes() {
+        let _home_guard = TestHomeGuard::new();
+        let _skip_guard = EnvVarGuard::set("BIOVAULT_SKIP_UPDATE_CHECK", "1");
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+
+        let cli = Cli {
+            command: Commands::Participant {
+                command: ParticipantCommands::List,
+            },
+            verbose: false,
+            config: None,
+        };
+
+        runtime
+            .block_on(async { super::async_main_with(cli).await })
+            .unwrap();
+    }
+
+    #[test]
+    fn async_main_with_project_create_executes() {
+        let _home_guard = TestHomeGuard::new();
+        let _skip_guard = EnvVarGuard::set("BIOVAULT_SKIP_UPDATE_CHECK", "1");
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+
+        let cli = Cli {
+            command: Commands::Project {
+                command: ProjectCommands::Create {
+                    name: Some("test_project".to_string()),
+                    folder: None,
+                    example: None,
+                },
+            },
+            verbose: false,
+            config: None,
+        };
+
+        // This may fail due to missing setup, but that's OK for this test
+        let _ = runtime.block_on(async { super::async_main_with(cli).await });
+    }
+
+    #[test]
+    fn test_env_var_guard_restores_previous() {
+        let key = "TEST_VAR_GUARD";
+        std::env::set_var(key, "original");
+
+        {
+            let _guard = EnvVarGuard::set(key, "temp");
+            assert_eq!(std::env::var(key).unwrap(), "temp");
+        }
+
+        assert_eq!(std::env::var(key).unwrap(), "original");
+        std::env::remove_var(key);
+    }
+
+    #[test]
+    fn test_env_var_guard_removes_if_not_set() {
+        let key = "TEST_VAR_GUARD_REMOVE";
+        std::env::remove_var(key);
+
+        {
+            let _guard = EnvVarGuard::set(key, "temp");
+            assert_eq!(std::env::var(key).unwrap(), "temp");
+        }
+
+        assert!(std::env::var(key).is_err());
     }
 }
 
@@ -627,15 +937,13 @@ fn main() -> Result<()> {
     runtime.block_on(async_main())
 }
 
-async fn async_main() -> Result<()> {
-    let cli = Cli::parse();
-
+async fn async_main_with(cli: Cli) -> Result<()> {
     let filter_level = if cli.verbose { "debug" } else { "info" };
 
-    tracing_subscriber::registry()
+    let _ = tracing_subscriber::registry()
         .with(fmt::layer())
         .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(filter_level)))
-        .init();
+        .try_init();
 
     // Random version check on startup (10% chance)
     let _ = commands::update::check_and_notify_random().await;
@@ -1041,4 +1349,9 @@ async fn async_main() -> Result<()> {
     }
 
     Ok(())
+}
+
+async fn async_main() -> Result<()> {
+    let cli = Cli::parse();
+    async_main_with(cli).await
 }

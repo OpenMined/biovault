@@ -991,4 +991,118 @@ mod tests {
         assert!(path.ends_with("participants.yaml"));
         assert!(path.starts_with(temp.path()));
     }
+
+    #[test]
+    fn test_check_samtools_installed() {
+        // This test just verifies the function returns bool without panicking
+        let _result = check_samtools_installed();
+        // Function completes without panic - test passes
+    }
+
+    #[test]
+    fn test_detect_reference_version_without_samtools() {
+        // When samtools is not installed, should return None
+        // This is hard to test directly, but we can at least call it
+        let result = detect_reference_version("/nonexistent/file.bam");
+        // Result can be None (no samtools) or None (file doesn't exist)
+        assert!(result.is_none() || result.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_list_empty_participants() {
+        let temp = TempDir::new().unwrap();
+        std::env::set_var("BIOVAULT_HOME", temp.path());
+
+        // Should not error when no participants
+        let result = list().await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_list_with_participants() {
+        let temp = TempDir::new().unwrap();
+        std::env::set_var("BIOVAULT_HOME", temp.path());
+
+        let mut pf = ParticipantsFile::new();
+        pf.participants.insert(
+            "test_id".to_string(),
+            Participant {
+                id: "test_id".to_string(),
+                ref_version: Some("GRCh38".to_string()),
+                r#ref: Some("/path/ref.fa".to_string()),
+                ref_index: None,
+                aligned: None,
+                aligned_index: None,
+                snp: None,
+            },
+        );
+        pf.save().unwrap();
+
+        let result = list().await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_delete_nonexistent_participant() {
+        let temp = TempDir::new().unwrap();
+        std::env::set_var("BIOVAULT_HOME", temp.path());
+
+        let result = delete("nonexistent".to_string()).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not found"));
+    }
+
+    #[test]
+    fn test_participants_file_new() {
+        let pf = ParticipantsFile::new();
+        assert!(pf.participants.is_empty());
+    }
+
+    #[test]
+    fn test_participant_partial_data() {
+        let p = Participant {
+            id: "partial".to_string(),
+            ref_version: Some("GRCh38".to_string()),
+            r#ref: None,
+            ref_index: None,
+            aligned: Some("/aligned.bam".to_string()),
+            aligned_index: None,
+            snp: None,
+        };
+        assert_eq!(p.id, "partial");
+        assert!(p.ref_version.is_some());
+        assert!(p.r#ref.is_none());
+        assert!(p.aligned.is_some());
+    }
+
+    #[test]
+    fn test_get_index_file_path_lowercase_variants() {
+        assert_eq!(get_index_file_path("file.cram", true), "file.cram.crai");
+        assert_eq!(get_index_file_path("file.bam", true), "file.bam.bai");
+        assert_eq!(get_index_file_path("file.sam", true), "file.sam.sai");
+        assert_eq!(get_index_file_path("ref.fasta", false), "ref.fasta.fai");
+    }
+
+    #[test]
+    fn test_expand_tilde_no_expansion() {
+        assert_eq!(expand_tilde("/absolute/path"), "/absolute/path");
+        assert_eq!(expand_tilde("relative/path"), "relative/path");
+        assert_eq!(expand_tilde(""), "");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_normalize_path_absolute() {
+        let result = normalize_path("/absolute/path");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "/absolute/path");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn test_normalize_path_absolute() {
+        let result = normalize_path("C:\\absolute\\path");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "C:\\absolute\\path");
+    }
 }

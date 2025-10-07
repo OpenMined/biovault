@@ -219,6 +219,8 @@ mod tests {
     async fn test_execute_with_email_arg() {
         let temp_dir = TempDir::new().unwrap();
         crate::config::set_test_biovault_home(temp_dir.path().join(".biovault"));
+        let data_dir = temp_dir.path().join("syftbox");
+        crate::config::set_test_syftbox_data_dir(&data_dir);
 
         // Initialize with email argument
         let result = execute(Some("test@example.com"), false).await;
@@ -228,6 +230,7 @@ mod tests {
         let config = Config::load().unwrap();
         assert_eq!(config.email, "test@example.com");
 
+        crate::config::clear_test_syftbox_data_dir();
         crate::config::clear_test_biovault_home();
     }
 
@@ -235,6 +238,8 @@ mod tests {
     async fn test_execute_with_syftbox_email_env() {
         let temp_dir = TempDir::new().unwrap();
         crate::config::set_test_biovault_home(temp_dir.path().join(".biovault"));
+        let data_dir = temp_dir.path().join("syftbox");
+        crate::config::set_test_syftbox_data_dir(&data_dir);
 
         // Set SYFTBOX_EMAIL env var
         env::set_var("SYFTBOX_EMAIL", "syftbox@example.com");
@@ -245,6 +250,7 @@ mod tests {
 
         // Clean up env var
         env::remove_var("SYFTBOX_EMAIL");
+        crate::config::clear_test_syftbox_data_dir();
         crate::config::clear_test_biovault_home();
 
         // The result depends on whether we're in TTY or not
@@ -257,6 +263,8 @@ mod tests {
     async fn test_execute_overwrite_existing_config() {
         let temp_dir = TempDir::new().unwrap();
         crate::config::set_test_biovault_home(temp_dir.path().join(".biovault"));
+        let data_dir = temp_dir.path().join("syftbox");
+        crate::config::set_test_syftbox_data_dir(&data_dir);
 
         // Create initial config
         let initial_config = Config {
@@ -274,6 +282,7 @@ mod tests {
         // We'll just test that the function doesn't panic
         let _ = execute(Some("new@example.com"), true).await;
 
+        crate::config::clear_test_syftbox_data_dir();
         crate::config::clear_test_biovault_home();
     }
 
@@ -282,6 +291,8 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let biovault_path = temp_dir.path().join(".biovault");
         crate::config::set_test_biovault_home(biovault_path.clone());
+        let data_dir = temp_dir.path().join("syftbox");
+        crate::config::set_test_syftbox_data_dir(&data_dir);
 
         // Directory shouldn't exist initially
         assert!(!biovault_path.exists());
@@ -293,6 +304,7 @@ mod tests {
         // Directory should now exist
         assert!(biovault_path.exists());
 
+        crate::config::clear_test_syftbox_data_dir();
         crate::config::clear_test_biovault_home();
     }
 

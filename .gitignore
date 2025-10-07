@@ -226,3 +226,5 @@ test-clients-local/
 
 .syftbox_binary_path
 .DS_Store
+cli/nextflow
+cli/test_project/*

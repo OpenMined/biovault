@@ -381,6 +381,62 @@ mod tests {
         m.save(&path).unwrap();
     }
 
+    #[test]
+    fn test_download_options_default() {
+        let opts = DownloadOptions::default();
+        assert_eq!(
+            opts.checksum_policy.policy_type,
+            ChecksumPolicyType::Optional
+        );
+        assert!(opts.checksum_policy.expected_hash.is_none());
+        assert!(opts.cache_strategy.check_remote);
+        assert!(opts.show_progress);
+    }
+
+    #[test]
+    fn test_download_options_clone() {
+        let opts1 = DownloadOptions {
+            checksum_policy: ChecksumPolicy {
+                policy_type: ChecksumPolicyType::Required,
+                expected_hash: Some("hash123".to_string()),
+            },
+            cache_strategy: CacheStrategy {
+                check_remote: false,
+            },
+            show_progress: false,
+        };
+        let opts2 = opts1.clone();
+        assert_eq!(
+            opts2.checksum_policy.policy_type,
+            ChecksumPolicyType::Required
+        );
+        assert_eq!(
+            opts2.checksum_policy.expected_hash,
+            Some("hash123".to_string())
+        );
+        assert!(!opts2.cache_strategy.check_remote);
+        assert!(!opts2.show_progress);
+    }
+
+    #[test]
+    fn test_download_cache_new_with_custom_dir() {
+        let tmp = TempDir::new().unwrap();
+        let cache_dir = tmp.path().join("custom_cache");
+        let dc = DownloadCache::new(Some(cache_dir.clone())).unwrap();
+        assert_eq!(dc.cache_dir, cache_dir);
+        assert!(cache_dir.exists());
+    }
+
+    #[test]
+    fn test_download_cache_manifest_path() {
+        let tmp = TempDir::new().unwrap();
+        let cache_dir = tmp.path().join("cache/subdir");
+        let dc = DownloadCache::new(Some(cache_dir.clone())).unwrap();
+        // Manifest path should be set correctly
+        assert!(dc.manifest_path.to_string_lossy().contains("manifest.yaml"));
+        assert_eq!(dc.cache_dir, cache_dir);
+    }
+
     #[tokio::test]
     async fn cache_hit_by_expected_hash_links_file() {
         let tmp = TempDir::new().unwrap();

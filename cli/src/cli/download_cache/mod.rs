@@ -18,7 +18,7 @@ pub struct ChecksumPolicy {
     pub expected_hash: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ChecksumPolicyType {
     Required,  // Must have expected_hash and it must match

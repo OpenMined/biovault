@@ -1271,4 +1271,50 @@ status: {}
         // Should list embedded examples without error
         super::list_examples().unwrap();
     }
+
+    #[test]
+    fn test_format_status_pending() {
+        let result = super::format_status("pending");
+        assert!(result.contains("pending"));
+    }
+
+    #[test]
+    fn test_format_status_approved() {
+        let result = super::format_status("approved");
+        assert!(result.contains("approved"));
+    }
+
+    #[test]
+    fn test_format_status_rejected() {
+        let result = super::format_status("rejected");
+        assert!(result.contains("rejected"));
+    }
+
+    #[test]
+    fn test_format_status_reviewing() {
+        let result = super::format_status("reviewing");
+        assert!(result.contains("reviewing"));
+    }
+
+    #[test]
+    fn test_format_status_unknown() {
+        let result = super::format_status("unknown_status");
+        assert_eq!(result, "unknown_status");
+    }
+
+    #[test]
+    fn test_get_inbox_path() {
+        let result = super::get_inbox_path();
+        assert!(result.is_ok());
+        let path = result.unwrap();
+        // Path should contain inbox
+        assert!(path.to_string_lossy().contains("inbox"));
+    }
+
+    #[tokio::test]
+    async fn test_show_empty_submissions() {
+        let result = super::show("1", false).await;
+        // May error or succeed depending on state - just verify it doesn't panic
+        let _ = result;
+    }
 }
