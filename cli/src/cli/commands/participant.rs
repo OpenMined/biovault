@@ -1091,10 +1091,18 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial]
+    #[cfg(unix)]
     fn test_normalize_path_absolute() {
         let result = normalize_path("/absolute/path");
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "/absolute/path");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn test_normalize_path_absolute() {
+        let result = normalize_path("C:\\absolute\\path");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "C:\\absolute\\path");
     }
 }
