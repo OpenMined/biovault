@@ -448,6 +448,12 @@ enum Commands {
         command: ParticipantCommands,
     },
 
+    #[command(about = "Manage participants in database catalog")]
+    Participants {
+        #[command(subcommand)]
+        command: ParticipantsCommands,
+    },
+
     #[command(about = "Manage biobank data publishing")]
     Biobank {
         #[command(subcommand)]
@@ -697,6 +703,24 @@ enum ParticipantCommands {
 }
 
 #[derive(Subcommand)]
+enum ParticipantsCommands {
+    #[command(about = "List all participants in the catalog")]
+    List {
+        #[arg(long, help = "Output format (json|table)", default_value = "table")]
+        format: String,
+    },
+
+    #[command(about = "Delete a participant and unlink all files")]
+    Delete {
+        #[arg(help = "Participant database ID")]
+        id: i64,
+
+        #[arg(long, help = "Output format (json|table)", default_value = "table")]
+        format: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum BiobankCommands {
     #[command(about = "List biobanks in SyftBox")]
     List,
@@ -852,6 +876,36 @@ enum FilesCommands {
 
         #[arg(long, help = "Scan subdirectories recursively", default_value = "true")]
         recursive: bool,
+
+        #[arg(long, help = "Output format (json|table)", default_value = "table")]
+        format: String,
+    },
+
+    #[command(about = "Delete a file record from the catalog")]
+    Delete {
+        #[arg(help = "File ID to delete")]
+        id: i64,
+
+        #[arg(long, help = "Output format (json|table)", default_value = "table")]
+        format: String,
+    },
+
+    #[command(about = "Link a file to a participant")]
+    Link {
+        #[arg(help = "File ID to link")]
+        file_id: i64,
+
+        #[arg(long, help = "Participant ID to link to")]
+        participant: String,
+
+        #[arg(long, help = "Output format (json|table)", default_value = "table")]
+        format: String,
+    },
+
+    #[command(about = "Remove participant assignment from a file")]
+    Unlink {
+        #[arg(help = "File ID to unlink")]
+        file_id: i64,
 
         #[arg(long, help = "Output format (json|table)", default_value = "table")]
         format: String,
@@ -1144,6 +1198,14 @@ async fn async_main_with(cli: Cli) -> Result<()> {
                 commands::participant::validate(id).await?;
             }
         },
+        Commands::Participants { command } => match command {
+            ParticipantsCommands::List { format } => {
+                commands::participants::list(format).await?;
+            }
+            ParticipantsCommands::Delete { id, format } => {
+                commands::participants::delete(id, format).await?;
+            }
+        },
         Commands::Biobank { command } => match command {
             BiobankCommands::List => {
                 commands::biobank::list(None).await?;
@@ -1242,6 +1304,19 @@ async fn async_main_with(cli: Cli) -> Result<()> {
                 format,
             } => {
                 commands::files::suggest_patterns(path, ext, recursive, format).await?;
+            }
+            FilesCommands::Delete { id, format } => {
+                commands::files::delete(id, format).await?;
+            }
+            FilesCommands::Link {
+                file_id,
+                participant,
+                format,
+            } => {
+                commands::files::link(file_id, participant, format).await?;
+            }
+            FilesCommands::Unlink { file_id, format } => {
+                commands::files::unlink(file_id, format).await?;
             }
         },
         Commands::Submit {

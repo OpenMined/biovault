@@ -10,6 +10,7 @@ pub mod info;
 pub mod init;
 pub mod messages;
 pub mod participant;
+pub mod participants;
 pub mod project;
 pub mod run;
 pub mod sample_data;

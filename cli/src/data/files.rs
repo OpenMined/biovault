@@ -575,6 +575,109 @@ pub fn extract_id_from_pattern(filename: &str, pattern: &str) -> Option<String> 
     captures.get(1).map(|m| m.as_str().to_string())
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ParticipantRecord {
+    pub id: i64,
+    pub participant_id: String,
+    pub created_at: String,
+    pub file_count: i64,
+}
+
+/// List all participants with file counts
+pub fn list_participants(db: &BioVaultDb) -> Result<Vec<ParticipantRecord>> {
+    let mut stmt = db.conn.prepare(
+        "SELECT p.id, p.participant_id, p.created_at, COUNT(f.id) as file_count
+         FROM participants p
+         LEFT JOIN files f ON f.participant_id = p.id
+         GROUP BY p.id, p.participant_id, p.created_at
+         ORDER BY p.created_at DESC",
+    )?;
+
+    let participants = stmt
+        .query_map([], |row| {
+            Ok(ParticipantRecord {
+                id: row.get(0)?,
+                participant_id: row.get(1)?,
+                created_at: row.get(2)?,
+                file_count: row.get(3)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(participants)
+}
+
+/// Delete a participant and unlink all associated files
+pub fn delete_participant(db: &BioVaultDb, id: i64) -> Result<()> {
+    // First unlink all files (set participant_id to NULL)
+    db.conn.execute(
+        "UPDATE files SET participant_id = NULL WHERE participant_id = ?1",
+        params![id],
+    )?;
+
+    // Then delete the participant
+    let rows = db
+        .conn
+        .execute("DELETE FROM participants WHERE id = ?1", params![id])?;
+
+    if rows == 0 {
+        anyhow::bail!("Participant with id {} not found", id);
+    }
+
+    Ok(())
+}
+
+/// Delete a file record from the catalog
+pub fn delete_file(db: &BioVaultDb, file_id: i64) -> Result<()> {
+    let rows = db
+        .conn
+        .execute("DELETE FROM files WHERE id = ?1", params![file_id])?;
+
+    if rows == 0 {
+        anyhow::bail!("File with id {} not found", file_id);
+    }
+
+    Ok(())
+}
+
+/// Link a file to a participant
+pub fn link_file_to_participant(
+    db: &BioVaultDb,
+    file_id: i64,
+    participant_id: &str,
+) -> Result<FileRecord> {
+    // Get or create participant
+    let db_participant_id = get_or_create_participant(db, participant_id)?;
+
+    // Update file
+    let rows = db.conn.execute(
+        "UPDATE files SET participant_id = ?1, updated_at = CURRENT_TIMESTAMP WHERE id = ?2",
+        params![db_participant_id, file_id],
+    )?;
+
+    if rows == 0 {
+        anyhow::bail!("File with id {} not found", file_id);
+    }
+
+    // Return updated file record
+    get_file_by_id(db, file_id)?.ok_or_else(|| anyhow::anyhow!("File not found after update"))
+}
+
+/// Unlink a file from its participant
+pub fn unlink_file(db: &BioVaultDb, file_id: i64) -> Result<FileRecord> {
+    let rows = db.conn.execute(
+        "UPDATE files SET participant_id = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?1",
+        params![file_id],
+    )?;
+
+    if rows == 0 {
+        anyhow::bail!("File with id {} not found", file_id);
+    }
+
+    // Return updated file record
+    get_file_by_id(db, file_id)?.ok_or_else(|| anyhow::anyhow!("File not found after update"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

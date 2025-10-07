@@ -391,3 +391,91 @@ pub async fn suggest_patterns(
 
     Ok(())
 }
+
+pub async fn delete(id: i64, format: String) -> Result<()> {
+    let db = BioVaultDb::new()?;
+
+    // Get file info before deletion for display
+    let file_record = data::get_file_by_id(&db, id)?;
+
+    let file = match file_record {
+        Some(f) => f,
+        None => {
+            if format == "json" {
+                let response = CliResponse::new(serde_json::json!({
+                    "error": format!("File with id {} not found", id)
+                }));
+                println!("{}", response.to_json()?);
+            } else {
+                println!("{}", format!("File not found: {}", id).red());
+            }
+            return Ok(());
+        }
+    };
+
+    if format != "json" {
+        println!("Deleting file record: {}", file.file_path);
+        if let Some(participant) = &file.participant_name {
+            println!("  Participant: {}", participant.cyan());
+        }
+    }
+
+    data::delete_file(&db, id)?;
+
+    if format == "json" {
+        #[derive(serde::Serialize)]
+        struct DeleteResponse {
+            deleted_id: i64,
+            file_path: String,
+        }
+
+        let response = CliResponse::new(DeleteResponse {
+            deleted_id: id,
+            file_path: file.file_path,
+        });
+        println!("{}", response.to_json()?);
+    } else {
+        println!("{}", format!("✓ Deleted file record {}", id).green().bold());
+    }
+
+    Ok(())
+}
+
+pub async fn link(file_id: i64, participant: String, format: String) -> Result<()> {
+    let db = BioVaultDb::new()?;
+
+    let updated_file = data::link_file_to_participant(&db, file_id, &participant)?;
+
+    if format == "json" {
+        let response = CliResponse::new(&updated_file);
+        println!("{}", response.to_json()?);
+    } else {
+        println!(
+            "{}",
+            format!("✓ Linked file {} to participant {}", file_id, participant)
+                .green()
+                .bold()
+        );
+        println!("  File: {}", updated_file.file_path);
+        println!("  Participant: {}", participant.cyan());
+    }
+
+    Ok(())
+}
+
+pub async fn unlink(file_id: i64, format: String) -> Result<()> {
+    let db = BioVaultDb::new()?;
+
+    let updated_file = data::unlink_file(&db, file_id)?;
+
+    if format == "json" {
+        let response = CliResponse::new(&updated_file);
+        println!("{}", response.to_json()?);
+    } else {
+        println!("{}", format!("✓ Unlinked file {}", file_id).green().bold());
+        println!("  File: {}", updated_file.file_path);
+        println!("  Participant: {}", "-".dimmed());
+    }
+
+    Ok(())
+}
