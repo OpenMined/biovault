@@ -1,14 +1,35 @@
 use crate::config::{get_biovault_home, is_syftbox_env, Config};
 use crate::Result;
-use dialoguer::{theme::ColorfulTheme, Confirm, Input};
+use dialoguer::{theme::ColorfulTheme, Confirm, Input, Select};
 use std::env;
 use std::fs;
 use std::io::IsTerminal;
+use std::path::PathBuf;
 use tracing::info;
 
 pub async fn execute(email: Option<&str>, quiet: bool) -> Result<()> {
-    // Get the BioVault home directory (respects env vars)
-    let biovault_dir = get_biovault_home()?;
+    // Check if config already exists before prompting for location
+    let default_biovault_dir = get_biovault_home()?;
+    let config_file = default_biovault_dir.join("config.yaml");
+    let is_existing_installation = config_file.exists();
+
+    // Get the BioVault home directory (respects env vars and prompts for new installs)
+    let biovault_dir = if is_existing_installation {
+        // Use existing location
+        default_biovault_dir
+    } else if env::var("BIOVAULT_HOME").is_ok() {
+        // Explicitly set via env var
+        default_biovault_dir
+    } else if env::var("SYFTBOX_DATA_DIR").is_ok() {
+        // In SyftBox virtualenv, use that location
+        default_biovault_dir
+    } else if !quiet && std::io::stdin().is_terminal() {
+        // New installation - prompt for location
+        prompt_for_location()?
+    } else {
+        // Non-interactive or quiet mode - use default
+        default_biovault_dir
+    };
 
     // Determine email with priority:
     // 1. CLI argument (if provided)
@@ -205,9 +226,85 @@ pub async fn execute(email: Option<&str>, quiet: bool) -> Result<()> {
                 );
             }
         }
+
+        // Create projects and runs directories
+        let projects_dir = biovault_dir.join("projects");
+        if !projects_dir.exists() {
+            fs::create_dir_all(&projects_dir)?;
+            info!("Created projects directory: {:?}", projects_dir);
+            println!("✓ Created projects directory: {}", projects_dir.display());
+        }
+
+        let runs_dir = biovault_dir.join("runs");
+        if !runs_dir.exists() {
+            fs::create_dir_all(&runs_dir)?;
+            info!("Created runs directory: {:?}", runs_dir);
+            println!("✓ Created runs directory: {}", runs_dir.display());
+        }
+
+        // Create data/cache directory
+        let cache_dir = biovault_dir.join("data").join("cache");
+        if !cache_dir.exists() {
+            fs::create_dir_all(&cache_dir)?;
+            info!("Created cache directory: {:?}", cache_dir);
+            println!("✓ Created cache directory: {}", cache_dir.display());
+        }
     }
 
     Ok(())
+}
+
+/// Prompt user for BioVault installation location
+fn prompt_for_location() -> Result<PathBuf> {
+    println!("\n📁 Where would you like to store BioVault data?\n");
+
+    let home_dir =
+        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
+    let desktop_dir = dirs::desktop_dir().unwrap_or_else(|| home_dir.join("Desktop"));
+
+    let choices = vec![
+        format!(
+            "Desktop/BioVault (recommended for desktop use) [{}]",
+            desktop_dir.join("BioVault").display()
+        ),
+        format!(
+            "Hidden in home directory (for CLI/server use) [{}]",
+            home_dir.join(".biovault").display()
+        ),
+        "Custom location".to_string(),
+    ];
+
+    let selection = Select::with_theme(&ColorfulTheme::default())
+        .with_prompt("Choose installation location")
+        .items(&choices)
+        .default(0)
+        .interact()
+        .map_err(|e| anyhow::anyhow!("Selection error: {}", e))?;
+
+    let biovault_dir = match selection {
+        0 => desktop_dir.join("BioVault"),
+        1 => home_dir.join(".biovault"),
+        2 => {
+            let custom_path: String = Input::with_theme(&ColorfulTheme::default())
+                .with_prompt("Enter custom path")
+                .interact_text()
+                .map_err(|e| anyhow::anyhow!("Input error: {}", e))?;
+
+            // Expand ~ to home directory
+            if let Some(path) = custom_path.strip_prefix("~/") {
+                home_dir.join(path)
+            } else if custom_path == "~" {
+                home_dir.clone()
+            } else {
+                PathBuf::from(custom_path)
+            }
+        }
+        _ => desktop_dir.join("BioVault"),
+    };
+
+    println!("\n✓ Selected location: {}\n", biovault_dir.display());
+
+    Ok(biovault_dir)
 }
 
 #[cfg(test)]
@@ -222,8 +319,8 @@ mod tests {
         let data_dir = temp_dir.path().join("syftbox");
         crate::config::set_test_syftbox_data_dir(&data_dir);
 
-        // Initialize with email argument
-        let result = execute(Some("test@example.com"), false).await;
+        // Initialize with email argument (quiet=true for non-interactive test)
+        let result = execute(Some("test@example.com"), true).await;
         assert!(result.is_ok());
 
         // Verify config was created
@@ -297,8 +394,8 @@ mod tests {
         // Directory shouldn't exist initially
         assert!(!biovault_path.exists());
 
-        // Execute init
-        let result = execute(Some("test@example.com"), false).await;
+        // Execute init (quiet=true for non-interactive test)
+        let result = execute(Some("test@example.com"), true).await;
         assert!(result.is_ok());
 
         // Directory should now exist

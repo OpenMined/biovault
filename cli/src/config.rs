@@ -165,7 +165,8 @@ pub fn get_config() -> anyhow::Result<Config> {
 /// 3. BIOVAULT_HOME env var
 /// 4. SYFTBOX_DATA_DIR/.biovault (if in virtualenv)
 /// 5. Walk up from cwd looking for .biovault/config.yaml (for sbenv)
-/// 6. ~/.biovault (default)
+/// 6. ~/.biovault/config.yaml (legacy - if exists, use it)
+/// 7. ~/Desktop/BioVault (new default for desktop users)
 pub fn get_biovault_home() -> anyhow::Result<PathBuf> {
     // Thread-local test override first
     if let Some(home) = TEST_BIOVAULT_HOME.with(|h| h.borrow().clone()) {
@@ -204,10 +205,21 @@ pub fn get_biovault_home() -> anyhow::Result<PathBuf> {
         }
     }
 
-    // Default to home directory
+    // Check for legacy ~/.biovault location (backward compatibility)
     let home_dir =
         dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
-    Ok(home_dir.join(".biovault"))
+    let legacy_biovault = home_dir.join(".biovault");
+    if legacy_biovault.join("config.yaml").exists() {
+        return Ok(legacy_biovault);
+    }
+
+    // Default to Desktop/BioVault (user-friendly, visible location)
+    if let Some(desktop_dir) = dirs::desktop_dir() {
+        Ok(desktop_dir.join("BioVault"))
+    } else {
+        // Fallback if desktop_dir() fails (shouldn't happen on modern systems)
+        Ok(home_dir.join(".biovault"))
+    }
 }
 
 /// Get the shared cache directory

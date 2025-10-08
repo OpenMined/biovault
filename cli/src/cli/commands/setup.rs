@@ -1282,6 +1282,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn skip_install_commands_env_behavior() {
         env::remove_var("BIOVAULT_SKIP_INSTALLS");
         assert!(!super::skip_install_commands());
@@ -1330,12 +1331,23 @@ mod tests {
     #[serial_test::serial]
     #[cfg_attr(target_os = "windows", ignore = "Colab detection is Linux-specific")]
     fn detect_system_prefers_colab_env() {
+        // Clear any existing COLAB_* variables first
+        let keys: Vec<String> = std::env::vars()
+            .filter(|(k, _)| k.starts_with("COLAB_"))
+            .map(|(k, _)| k)
+            .collect();
+        for k in &keys {
+            std::env::remove_var(k);
+        }
+
         // Force Colab-like environment
         std::env::set_var("COLAB_RELEASE_TAG", "1");
         match detect_system() {
             SystemType::GoogleColab => {}
             other => panic!("expected GoogleColab, got {:?}", other),
         }
+
+        // Clean up
         std::env::remove_var("COLAB_RELEASE_TAG");
     }
 
@@ -1456,6 +1468,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn test_detect_system_on_windows() {
         if cfg!(target_os = "windows") {
             match detect_system() {

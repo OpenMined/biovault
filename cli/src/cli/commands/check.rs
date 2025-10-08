@@ -648,6 +648,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn test_google_colab_detection() {
         // Save current env state
         let was_set = env::var("COLAB_RELEASE_TAG").is_ok();
@@ -668,6 +669,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn test_google_colab_detection_prefix() {
         // Test detection with other COLAB_ prefixed vars
         let was_set = env::var("COLAB_TEST_VAR").is_ok();

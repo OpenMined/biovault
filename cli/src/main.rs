@@ -448,6 +448,12 @@ enum Commands {
         command: ParticipantCommands,
     },
 
+    #[command(about = "Manage participants in database catalog")]
+    Participants {
+        #[command(subcommand)]
+        command: ParticipantsCommands,
+    },
+
     #[command(about = "Manage biobank data publishing")]
     Biobank {
         #[command(subcommand)]
@@ -467,6 +473,12 @@ enum Commands {
     Fastq {
         #[command(subcommand)]
         command: FastqCommands,
+    },
+
+    #[command(about = "Manage files and file catalogs")]
+    Files {
+        #[command(subcommand)]
+        command: FilesCommands,
     },
 
     #[command(about = "Submit a project to another biobank via SyftBox")]
@@ -624,6 +636,48 @@ enum ProjectCommands {
 
     #[command(about = "List available example templates")]
     Examples,
+
+    #[command(about = "Import a project from URL or register a local project")]
+    Import {
+        #[arg(help = "URL to project.yaml or local directory path")]
+        source: String,
+
+        #[arg(long, help = "Override project name")]
+        name: Option<String>,
+
+        #[arg(long, help = "Overwrite existing project")]
+        overwrite: bool,
+
+        #[arg(long, help = "Output format (json|table)", default_value = "table")]
+        format: String,
+    },
+
+    #[command(about = "List all registered projects")]
+    List {
+        #[arg(long, help = "Output format (json|table)", default_value = "table")]
+        format: String,
+    },
+
+    #[command(about = "Show detailed information about a project")]
+    Show {
+        #[arg(help = "Project name or ID")]
+        identifier: String,
+
+        #[arg(long, help = "Output format (json|table)", default_value = "table")]
+        format: String,
+    },
+
+    #[command(about = "Delete a project")]
+    Delete {
+        #[arg(help = "Project name or ID")]
+        identifier: String,
+
+        #[arg(long, help = "Keep project files, only remove from database")]
+        keep_files: bool,
+
+        #[arg(long, help = "Output format (json|table)", default_value = "table")]
+        format: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -687,6 +741,36 @@ enum ParticipantCommands {
     Validate {
         #[arg(help = "Participant ID to validate (validates all if not specified)")]
         id: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum ParticipantsCommands {
+    #[command(about = "List all participants in the catalog")]
+    List {
+        #[arg(long, help = "Output format (json|table)", default_value = "table")]
+        format: String,
+    },
+
+    #[command(about = "Delete a participant and unlink all files")]
+    Delete {
+        #[arg(help = "Participant database ID")]
+        id: i64,
+
+        #[arg(long, help = "Output format (json|table)", default_value = "table")]
+        format: String,
+    },
+
+    #[command(about = "Delete multiple participants and remove their files")]
+    DeleteBulk {
+        #[arg(
+            help = "Participant database IDs to delete (comma-separated)",
+            value_delimiter = ','
+        )]
+        ids: Vec<i64>,
+
+        #[arg(long, help = "Output format (json|table)", default_value = "table")]
+        format: String,
     },
 }
 
@@ -758,6 +842,244 @@ enum FastqCommands {
             help = "Stats output format (tsv, yaml, json)"
         )]
         stats_format: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum FilesCommands {
+    #[command(about = "Scan directory for files by type")]
+    Scan {
+        #[arg(help = "Directory path to scan")]
+        path: String,
+
+        #[arg(long, help = "File extension filter (e.g., .vcf, .cram)")]
+        ext: Option<String>,
+
+        #[arg(long, help = "Scan subdirectories recursively", default_value = "true")]
+        recursive: bool,
+
+        #[arg(long, help = "Output format (json|table)", default_value = "table")]
+        format: String,
+    },
+
+    #[command(about = "Import files into database catalog")]
+    Import {
+        #[arg(help = "File path or directory to import")]
+        path: String,
+
+        #[arg(long, help = "File extension filter (e.g., .vcf, .cram)")]
+        ext: Option<String>,
+
+        #[arg(
+            long,
+            help = "Import subdirectories recursively",
+            default_value = "true"
+        )]
+        recursive: bool,
+
+        #[arg(
+            long,
+            help = "Pattern to extract participant IDs (e.g., 'case_{id}_*')"
+        )]
+        pattern: Option<String>,
+
+        #[arg(long, help = "Dry run - show what would be imported without importing")]
+        dry_run: bool,
+
+        #[arg(long, help = "Skip interactive confirmation prompt")]
+        non_interactive: bool,
+
+        #[arg(long, help = "Output format (json|table)", default_value = "table")]
+        format: String,
+    },
+
+    #[command(about = "List cataloged files with filtering")]
+    List {
+        #[arg(long, help = "Filter by file extension")]
+        ext: Option<String>,
+
+        #[arg(long, help = "Filter by participant ID")]
+        participant: Option<String>,
+
+        #[arg(long, help = "Show only files without participant assignment")]
+        unassigned: bool,
+
+        #[arg(long, help = "Maximum number of results")]
+        limit: Option<usize>,
+
+        #[arg(long, help = "Output format (json|table)", default_value = "table")]
+        format: String,
+    },
+
+    #[command(about = "Show detailed file information")]
+    Info {
+        #[arg(help = "File ID or path")]
+        file: String,
+
+        #[arg(long, help = "Output format (json|table)", default_value = "table")]
+        format: String,
+    },
+
+    #[command(about = "Suggest participant ID patterns from filenames")]
+    SuggestPatterns {
+        #[arg(help = "Directory path to analyze")]
+        path: String,
+
+        #[arg(long, help = "File extension filter (e.g., .vcf, .cram)")]
+        ext: Option<String>,
+
+        #[arg(long, help = "Scan subdirectories recursively", default_value = "true")]
+        recursive: bool,
+
+        #[arg(long, help = "Output format (json|table)", default_value = "table")]
+        format: String,
+    },
+
+    #[command(about = "Delete a file record from the catalog")]
+    Delete {
+        #[arg(help = "File ID to delete")]
+        id: i64,
+
+        #[arg(long, help = "Output format (json|table)", default_value = "table")]
+        format: String,
+    },
+
+    #[command(about = "Delete multiple file records from the catalog")]
+    DeleteBulk {
+        #[arg(help = "File IDs to delete (comma-separated)", value_delimiter = ',')]
+        ids: Vec<i64>,
+
+        #[arg(long, help = "Output format (json|table)", default_value = "table")]
+        format: String,
+    },
+
+    #[command(about = "Detect file types and extract genotype metadata (fast - header only)")]
+    Detect {
+        #[arg(help = "File paths to analyze", num_args = 1..)]
+        files: Vec<String>,
+
+        #[arg(long, help = "Output format (json|table)", default_value = "table")]
+        format: String,
+    },
+
+    #[command(
+        about = "Analyze genotype files for row count, chromosomes, and sex (slow - reads entire file)"
+    )]
+    Analyze {
+        #[arg(help = "File paths to analyze", num_args = 1..)]
+        files: Vec<String>,
+
+        #[arg(long, help = "Output format (json|table)", default_value = "table")]
+        format: String,
+    },
+
+    #[command(about = "Link a file to a participant")]
+    Link {
+        #[arg(help = "File ID to link")]
+        file_id: i64,
+
+        #[arg(long, help = "Participant ID to link to")]
+        participant: String,
+
+        #[arg(long, help = "Output format (json|table)", default_value = "table")]
+        format: String,
+    },
+
+    #[command(about = "Bulk link files to participants via JSON")]
+    LinkBulk {
+        #[arg(help = "JSON object mapping file paths to participant IDs")]
+        json: String,
+
+        #[arg(long, help = "Output format (json|table)", default_value = "table")]
+        format: String,
+    },
+
+    #[command(about = "Remove participant assignment from a file")]
+    Unlink {
+        #[arg(help = "File ID to unlink")]
+        file_id: i64,
+
+        #[arg(long, help = "Output format (json|table)", default_value = "table")]
+        format: String,
+    },
+
+    #[command(about = "Calculate BLAKE3 hashes for files")]
+    Hash {
+        #[arg(help = "File paths to hash", num_args = 1..)]
+        files: Vec<String>,
+
+        #[arg(long, help = "Output format (json|table)", default_value = "table")]
+        format: String,
+    },
+
+    #[command(about = "Export files to CSV with participant IDs")]
+    ExportCsv {
+        #[arg(help = "Directory path to scan")]
+        path: String,
+
+        #[arg(long, help = "File extension filter (e.g., .vcf, .txt)")]
+        ext: Option<String>,
+
+        #[arg(long, help = "Scan subdirectories recursively", default_value = "true")]
+        recursive: bool,
+
+        #[arg(long, help = "Pattern to extract participant IDs (e.g., '{parent}')")]
+        pattern: Option<String>,
+
+        #[arg(short = 'o', long, help = "Output CSV file path")]
+        output: String,
+    },
+
+    #[command(about = "Detect file types in CSV and update metadata columns")]
+    DetectCsv {
+        #[arg(help = "Input CSV file path")]
+        input_csv: String,
+
+        #[arg(short = 'o', long, help = "Output CSV file path")]
+        output: String,
+    },
+
+    #[command(about = "Analyze genotype files in CSV for row counts and sex")]
+    AnalyzeCsv {
+        #[arg(help = "Input CSV file path")]
+        input_csv: String,
+
+        #[arg(short = 'o', long, help = "Output CSV file path")]
+        output: String,
+    },
+
+    #[command(about = "Import files from CSV with complete metadata")]
+    ImportCsv {
+        #[arg(help = "Path to CSV file containing file metadata")]
+        csv_path: String,
+
+        #[arg(long, help = "Output format (json|table)", default_value = "table")]
+        format: String,
+    },
+
+    #[command(about = "Process pending files in the queue (hash and detect metadata)")]
+    ProcessQueue {
+        #[arg(
+            long,
+            help = "Maximum number of files to process",
+            default_value = "100"
+        )]
+        limit: usize,
+
+        #[arg(long, help = "Daemon mode - continuously process queue")]
+        daemon: bool,
+
+        #[arg(long, help = "Output format (json|table)", default_value = "table")]
+        format: String,
+    },
+
+    #[command(about = "Fast import - add files to queue for background processing")]
+    ImportPending {
+        #[arg(help = "Path to CSV file containing file metadata")]
+        csv_path: String,
+
+        #[arg(long, help = "Output format (json|table)", default_value = "table")]
+        format: String,
     },
 }
 
@@ -978,6 +1300,47 @@ async fn async_main_with(cli: Cli) -> Result<()> {
             ProjectCommands::Examples => {
                 commands::project::list_examples()?;
             }
+            ProjectCommands::Import {
+                source,
+                name,
+                overwrite,
+                format,
+            } => {
+                let fmt = if format == "table" {
+                    None
+                } else {
+                    Some(format)
+                };
+                commands::project_management::import(source, name, overwrite, fmt).await?;
+            }
+            ProjectCommands::List { format } => {
+                let fmt = if format == "table" {
+                    None
+                } else {
+                    Some(format)
+                };
+                commands::project_management::list(fmt)?;
+            }
+            ProjectCommands::Show { identifier, format } => {
+                let fmt = if format == "table" {
+                    None
+                } else {
+                    Some(format)
+                };
+                commands::project_management::show(identifier, fmt)?;
+            }
+            ProjectCommands::Delete {
+                identifier,
+                keep_files,
+                format,
+            } => {
+                let fmt = if format == "table" {
+                    None
+                } else {
+                    Some(format)
+                };
+                commands::project_management::delete(identifier, keep_files, fmt)?;
+            }
         },
         Commands::Run {
             project_folder,
@@ -1047,6 +1410,17 @@ async fn async_main_with(cli: Cli) -> Result<()> {
                 commands::participant::validate(id).await?;
             }
         },
+        Commands::Participants { command } => match command {
+            ParticipantsCommands::List { format } => {
+                commands::participants::list(format).await?;
+            }
+            ParticipantsCommands::Delete { id, format } => {
+                commands::participants::delete(id, format).await?;
+            }
+            ParticipantsCommands::DeleteBulk { ids, format } => {
+                commands::participants::delete_bulk(ids, format).await?;
+            }
+        },
         Commands::Biobank { command } => match command {
             BiobankCommands::List => {
                 commands::biobank::list(None).await?;
@@ -1095,6 +1469,112 @@ async fn async_main_with(cli: Cli) -> Result<()> {
                     Some(stats_format),
                 )
                 .await?;
+            }
+        },
+        Commands::Files { command } => match command {
+            FilesCommands::Scan {
+                path,
+                ext,
+                recursive,
+                format,
+            } => {
+                commands::files::scan(path, ext, recursive, format).await?;
+            }
+            FilesCommands::Import {
+                path,
+                ext,
+                recursive,
+                pattern,
+                dry_run,
+                non_interactive,
+                format,
+            } => {
+                commands::files::import(
+                    path,
+                    ext,
+                    recursive,
+                    pattern,
+                    dry_run,
+                    non_interactive,
+                    format,
+                )
+                .await?;
+            }
+            FilesCommands::List {
+                ext,
+                participant,
+                unassigned,
+                limit,
+                format,
+            } => {
+                commands::files::list(ext, participant, unassigned, limit, format).await?;
+            }
+            FilesCommands::Info { file, format } => {
+                commands::files::info(file, format).await?;
+            }
+            FilesCommands::SuggestPatterns {
+                path,
+                ext,
+                recursive,
+                format,
+            } => {
+                commands::files::suggest_patterns(path, ext, recursive, format).await?;
+            }
+            FilesCommands::Delete { id, format } => {
+                commands::files::delete(id, format).await?;
+            }
+            FilesCommands::DeleteBulk { ids, format } => {
+                commands::files::delete_bulk(ids, format).await?;
+            }
+            FilesCommands::Detect { files, format } => {
+                commands::files::detect(files, format).await?;
+            }
+            FilesCommands::Analyze { files, format } => {
+                commands::files::analyze(files, format).await?;
+            }
+            FilesCommands::Link {
+                file_id,
+                participant,
+                format,
+            } => {
+                commands::files::link(file_id, participant, format).await?;
+            }
+            FilesCommands::LinkBulk { json, format } => {
+                commands::files::link_bulk(json, format).await?;
+            }
+            FilesCommands::Unlink { file_id, format } => {
+                commands::files::unlink(file_id, format).await?;
+            }
+            FilesCommands::Hash { files, format } => {
+                commands::files::hash(files, format).await?;
+            }
+            FilesCommands::ExportCsv {
+                path,
+                ext,
+                recursive,
+                pattern,
+                output,
+            } => {
+                commands::files::export_csv(path, ext, recursive, pattern, output).await?;
+            }
+            FilesCommands::DetectCsv { input_csv, output } => {
+                commands::files::detect_csv(input_csv, output).await?;
+            }
+            FilesCommands::AnalyzeCsv { input_csv, output } => {
+                commands::files::analyze_csv(input_csv, output).await?;
+            }
+            FilesCommands::ImportCsv { csv_path, format } => {
+                commands::files::import_csv(csv_path, format).await?;
+            }
+            FilesCommands::ProcessQueue {
+                limit,
+                daemon,
+                format,
+            } => {
+                commands::files::process_queue(limit, daemon, format).await?;
+            }
+            FilesCommands::ImportPending { csv_path, format } => {
+                commands::files::import_pending(csv_path, format).await?;
             }
         },
         Commands::Submit {
