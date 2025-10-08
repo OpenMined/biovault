@@ -64,23 +64,25 @@ pub async fn execute() -> Result<()> {
 }
 
 fn detect_system() -> SystemType {
-    // Check for Google Colab environment variables
+    let target_os = std::env::consts::OS;
+
+    // Short-circuit for Windows before inspecting other environment hints
+    if target_os == "windows" {
+        return SystemType::Windows;
+    }
+
+    // Check for Google Colab environment variables (Colab runs on Linux)
     if is_google_colab() {
         return SystemType::GoogleColab;
     }
 
     // Detect macOS
-    if std::env::consts::OS == "macos" {
+    if target_os == "macos" {
         return SystemType::MacOs;
     }
 
-    // Detect Windows
-    if std::env::consts::OS == "windows" {
-        return SystemType::Windows;
-    }
-
     // Detect Linux distributions
-    if std::env::consts::OS == "linux" {
+    if target_os == "linux" {
         // Check for apt (Ubuntu/Debian)
         let has_apt = std::process::Command::new("sh")
             .arg("-c")
