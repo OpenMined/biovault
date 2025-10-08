@@ -36,6 +36,9 @@ impl BioVaultDb {
         let schema = include_str!("../schema.sql");
         conn.execute_batch(schema)?;
 
+        // Run migrations for existing databases
+        Self::run_migrations(conn)?;
+
         // Check/update schema version
         let current_version = get_schema_version(conn)?;
         if current_version.is_none() {
@@ -44,6 +47,184 @@ impl BioVaultDb {
                 ["2.0.0"],
             )?;
             info!("Initialized schema version 2.0.0");
+        }
+
+        Ok(())
+    }
+
+    /// Run migrations for existing databases
+    fn run_migrations(conn: &Connection) -> Result<()> {
+        // Check if data_type column exists in files table
+        let column_exists: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('files') WHERE name='data_type'",
+                [],
+                |row| row.get(0),
+            )
+            .map(|count: i32| count > 0)
+            .unwrap_or(false);
+
+        if !column_exists {
+            info!("Adding data_type column to files table");
+            conn.execute(
+                "ALTER TABLE files ADD COLUMN data_type TEXT DEFAULT 'Unknown'",
+                [],
+            )?;
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_files_data_type ON files(data_type)",
+                [],
+            )?;
+            info!("Migration complete: added data_type column and index");
+        }
+
+        // Add inferred_sex to participants if it doesn't exist
+        let sex_exists = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('participants') WHERE name='inferred_sex'",
+                [],
+                |row| row.get(0),
+            )
+            .map(|count: i32| count > 0)
+            .unwrap_or(false);
+
+        if !sex_exists {
+            info!("Adding inferred_sex column to participants table");
+            conn.execute("ALTER TABLE participants ADD COLUMN inferred_sex TEXT", [])?;
+            info!("Migration complete: added inferred_sex to participants");
+        }
+
+        // Add status column to files if it doesn't exist
+        let status_exists = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('files') WHERE name='status'",
+                [],
+                |row| row.get(0),
+            )
+            .map(|count: i32| count > 0)
+            .unwrap_or(false);
+
+        if !status_exists {
+            info!("Adding status column to files table");
+            conn.execute(
+                "ALTER TABLE files ADD COLUMN status TEXT DEFAULT 'complete'",
+                [],
+            )?;
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_files_status ON files(status)",
+                [],
+            )?;
+            info!("Migration complete: added status column and index");
+        }
+
+        // Add processing_error column to files if it doesn't exist
+        let error_exists = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('files') WHERE name='processing_error'",
+                [],
+                |row| row.get(0),
+            )
+            .map(|count: i32| count > 0)
+            .unwrap_or(false);
+
+        if !error_exists {
+            info!("Adding processing_error column to files table");
+            conn.execute("ALTER TABLE files ADD COLUMN processing_error TEXT", [])?;
+            info!("Migration complete: added processing_error column");
+        }
+
+        // Add queue_added_at column to files if it doesn't exist
+        let queue_added_exists = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('files') WHERE name='queue_added_at'",
+                [],
+                |row| row.get(0),
+            )
+            .map(|count: i32| count > 0)
+            .unwrap_or(false);
+
+        if !queue_added_exists {
+            info!("Adding queue_added_at column to files table");
+            conn.execute("ALTER TABLE files ADD COLUMN queue_added_at DATETIME", [])?;
+            info!("Migration complete: added queue_added_at column");
+        }
+
+        // Remove source column from files if it exists (moved to genotype_metadata)
+        let source_exists = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('files') WHERE name='source'",
+                [],
+                |row| row.get(0),
+            )
+            .map(|count: i32| count > 0)
+            .unwrap_or(false);
+
+        if source_exists {
+            info!("Migrating source column from files to genotype_metadata");
+            // First copy data to genotype_metadata
+            conn.execute(
+                "INSERT OR IGNORE INTO genotype_metadata (file_id, source, grch_version)
+                 SELECT id, source, grch_version FROM files WHERE data_type = 'Genotype'",
+                [],
+            )?;
+            // Then drop the column (requires SQLite 3.35.0+)
+            conn.execute("ALTER TABLE files DROP COLUMN source", [])?;
+            info!("Migration complete: moved source to genotype_metadata");
+        }
+
+        // Remove grch_version column from files if it exists (moved to genotype_metadata)
+        let grch_exists = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('files') WHERE name='grch_version'",
+                [],
+                |row| row.get(0),
+            )
+            .map(|count: i32| count > 0)
+            .unwrap_or(false);
+
+        if grch_exists {
+            info!("Removing grch_version column from files");
+            conn.execute("ALTER TABLE files DROP COLUMN grch_version", [])?;
+            info!("Migration complete: removed grch_version from files");
+        }
+
+        // Create genotype_metadata table if it doesn't exist
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS genotype_metadata (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                file_id INTEGER UNIQUE NOT NULL,
+                source TEXT,
+                grch_version TEXT,
+                row_count INTEGER,
+                chromosome_count INTEGER,
+                inferred_sex TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (file_id) REFERENCES files(id) ON DELETE CASCADE
+            )",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_genotype_file_id ON genotype_metadata(file_id)",
+            [],
+        )?;
+
+        // Add inferred_sex column to genotype_metadata if it doesn't exist
+        let inferred_sex_exists = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('genotype_metadata') WHERE name='inferred_sex'",
+                [],
+                |row| row.get(0),
+            )
+            .map(|count: i32| count > 0)
+            .unwrap_or(false);
+
+        if !inferred_sex_exists {
+            info!("Adding inferred_sex column to genotype_metadata table");
+            conn.execute(
+                "ALTER TABLE genotype_metadata ADD COLUMN inferred_sex TEXT",
+                [],
+            )?;
+            info!("Migration complete: added inferred_sex column");
         }
 
         Ok(())

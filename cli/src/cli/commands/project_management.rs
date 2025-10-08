@@ -62,7 +62,8 @@ async fn import_from_url(
                 "Project '{}' already exists (id: {}). Use --overwrite to replace.",
                 project_name,
                 existing.id
-            ).into());
+            )
+            .into());
         }
     }
 
@@ -79,7 +80,8 @@ async fn import_from_url(
             return Err(anyhow::anyhow!(
                 "Project directory already exists: {}",
                 project_dir.display()
-            ).into());
+            )
+            .into());
         }
     }
 
@@ -182,7 +184,10 @@ async fn import_from_url(
         let response = crate::data::CliResponse::new(project);
         println!("{}", serde_json::to_string_pretty(&response)?);
     } else {
-        println!("\n✅ Project '{}' imported successfully!", project_name.green());
+        println!(
+            "\n✅ Project '{}' imported successfully!",
+            project_name.green()
+        );
         println!("   Location: {}", project_dir.display());
     }
 
@@ -211,7 +216,8 @@ fn import_from_local(
         return Err(anyhow::anyhow!(
             "No project.yaml found in directory: {}",
             project_path.display()
-        ).into());
+        )
+        .into());
     }
 
     if format.as_deref() != Some("json") {
@@ -231,7 +237,8 @@ fn import_from_local(
                 "Project '{}' already exists (id: {}). Use --overwrite to replace.",
                 project_name,
                 existing.id
-            ).into());
+            )
+            .into());
         }
     }
 
@@ -270,7 +277,10 @@ fn import_from_local(
         let response = crate::data::CliResponse::new(project);
         println!("{}", serde_json::to_string_pretty(&response)?);
     } else {
-        println!("\n✅ Project '{}' registered successfully!", project_name.green());
+        println!(
+            "\n✅ Project '{}' registered successfully!",
+            project_name.green()
+        );
         println!("   Location: {}", project_path.display());
         println!("\n💡 This project is referenced in-place.");
         println!("   Any changes you make will be reflected when you run it.");
@@ -385,7 +395,10 @@ pub fn delete(identifier: String, keep_files: bool, format: Option<String>) -> R
         return Ok(());
     }
 
-    println!("✅ Deleted project '{}' from database", project.name.green());
+    println!(
+        "✅ Deleted project '{}' from database",
+        project.name.green()
+    );
 
     // Delete files if requested
     if !keep_files {
@@ -408,11 +421,9 @@ async fn download_file(url: &str) -> Result<Vec<u8>> {
         .map_err(|e| anyhow::anyhow!("Failed to download {}: {}", url, e))?;
 
     if !response.status().is_success() {
-        return Err(anyhow::anyhow!(
-            "Failed to download {}: HTTP {}",
-            url,
-            response.status()
-        ).into());
+        return Err(
+            anyhow::anyhow!("Failed to download {}: HTTP {}", url, response.status()).into(),
+        );
     }
 
     let bytes = response
@@ -492,8 +503,14 @@ assets: []
         // Create some test projects
         let project_path = tmp.path().join("project1");
         fs::create_dir_all(&project_path).unwrap();
-        db.register_project("project1", "author@example.com", "workflow.nf", "default", &project_path)
-            .unwrap();
+        db.register_project(
+            "project1",
+            "author@example.com",
+            "workflow.nf",
+            "default",
+            &project_path,
+        )
+        .unwrap();
 
         // List should work
         let result = list(None);
@@ -505,6 +522,6 @@ assets: []
     #[test]
     fn test_truncate() {
         assert_eq!(truncate("short", 10), "short");
-        assert_eq!(truncate("verylongstring", 10), "verylo...");
+        assert_eq!(truncate("verylongstring", 10), "verylon...");
     }
 }

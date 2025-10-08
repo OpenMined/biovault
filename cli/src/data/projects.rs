@@ -225,7 +225,13 @@ mod tests {
         fs::create_dir_all(&project_path).unwrap();
 
         let id = db
-            .register_project("test", "author@example.com", "workflow.nf", "default", &project_path)
+            .register_project(
+                "test",
+                "author@example.com",
+                "workflow.nf",
+                "default",
+                &project_path,
+            )
             .unwrap();
         assert!(id > 0);
 
@@ -243,8 +249,14 @@ mod tests {
         let project_path = tmp.path().join("test-project");
         fs::create_dir_all(&project_path).unwrap();
 
-        db.register_project("test", "author@example.com", "workflow.nf", "default", &project_path)
-            .unwrap();
+        db.register_project(
+            "test",
+            "author@example.com",
+            "workflow.nf",
+            "default",
+            &project_path,
+        )
+        .unwrap();
 
         let project = db.get_project("test").unwrap();
         assert!(project.is_some());
@@ -260,7 +272,13 @@ mod tests {
         fs::create_dir_all(&project_path).unwrap();
 
         let id = db
-            .register_project("test", "author@example.com", "workflow.nf", "default", &project_path)
+            .register_project(
+                "test",
+                "author@example.com",
+                "workflow.nf",
+                "default",
+                &project_path,
+            )
             .unwrap();
 
         let project = db.get_project(&id.to_string()).unwrap();
@@ -276,8 +294,14 @@ mod tests {
         let project_path = tmp.path().join("test-project");
         fs::create_dir_all(&project_path).unwrap();
 
-        db.register_project("test", "author@example.com", "workflow.nf", "default", &project_path)
-            .unwrap();
+        db.register_project(
+            "test",
+            "author@example.com",
+            "workflow.nf",
+            "default",
+            &project_path,
+        )
+        .unwrap();
 
         let result = db.register_project(
             "test",
@@ -317,8 +341,14 @@ mod tests {
         let project_path = tmp.path().join("test-project");
         fs::create_dir_all(&project_path).unwrap();
 
-        db.register_project("test", "author@example.com", "workflow.nf", "default", &project_path)
-            .unwrap();
+        db.register_project(
+            "test",
+            "author@example.com",
+            "workflow.nf",
+            "default",
+            &project_path,
+        )
+        .unwrap();
 
         let deleted = db.delete_project("test").unwrap();
         assert_eq!(deleted.name, "test");

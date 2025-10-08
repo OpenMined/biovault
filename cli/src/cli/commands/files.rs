@@ -93,7 +93,8 @@ pub async fn import(
                     .and_then(|n| n.to_str())
                     .unwrap_or(&file_info.path);
 
-                if let Some(id) = data::extract_id_from_pattern(filename, pat) {
+                // Pass full path for pattern matching (needed for {parent} and path-based patterns)
+                if let Some(id) = data::extract_id_from_pattern(&file_info.path, pat) {
                     println!(
                         "  {} → participant: {}",
                         filename.dimmed(),
@@ -441,6 +442,69 @@ pub async fn delete(id: i64, format: String) -> Result<()> {
     Ok(())
 }
 
+pub async fn delete_bulk(ids: Vec<i64>, format: String) -> Result<()> {
+    if ids.is_empty() {
+        if format == "json" {
+            let response = CliResponse::new(serde_json::json!({
+                "deleted": 0,
+                "errors": []
+            }));
+            println!("{}", response.to_json()?);
+        }
+        return Ok(());
+    }
+
+    let db = BioVaultDb::new()?;
+
+    if format != "json" {
+        println!(
+            "{}",
+            format!("Deleting {} file records...", ids.len()).bold()
+        );
+    }
+
+    let mut deleted = 0;
+    let mut errors = Vec::new();
+
+    for id in &ids {
+        match data::delete_file(&db, *id) {
+            Ok(_) => {
+                deleted += 1;
+                if format != "json" {
+                    println!("  {} Deleted file ID {}", "✓".green(), id);
+                }
+            }
+            Err(e) => {
+                errors.push(format!("Failed to delete file {}: {}", id, e));
+                if format != "json" {
+                    println!("  {} Failed to delete file ID {}: {}", "✗".red(), id, e);
+                }
+            }
+        }
+    }
+
+    if format == "json" {
+        let response = CliResponse::new(serde_json::json!({
+            "deleted": deleted,
+            "errors": errors
+        }));
+        println!("{}", response.to_json()?);
+    } else {
+        println!();
+        println!(
+            "{}",
+            format!("✓ Deleted {} of {} file records", deleted, ids.len())
+                .green()
+                .bold()
+        );
+        if !errors.is_empty() {
+            println!("{}", format!("✗ {} errors", errors.len()).red());
+        }
+    }
+
+    Ok(())
+}
+
 pub async fn link(file_id: i64, participant: String, format: String) -> Result<()> {
     let db = BioVaultDb::new()?;
 
@@ -463,6 +527,87 @@ pub async fn link(file_id: i64, participant: String, format: String) -> Result<(
     Ok(())
 }
 
+pub async fn link_bulk(file_participant_json: String, format: String) -> Result<()> {
+    use std::collections::HashMap;
+
+    // Parse JSON input: {"file_path": "participant_id", ...}
+    let file_participant_map: HashMap<String, String> =
+        serde_json::from_str(&file_participant_json)
+            .map_err(|e| anyhow::anyhow!("Failed to parse JSON: {}", e))?;
+
+    let db = BioVaultDb::new()?;
+    let updated = data::link_files_bulk(&db, &file_participant_map)?;
+
+    if format == "json" {
+        let result = serde_json::json!({
+            "success": true,
+            "updated": updated
+        });
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    } else {
+        println!(
+            "{}",
+            format!("✓ Linked {} files to participants", updated)
+                .green()
+                .bold()
+        );
+    }
+
+    Ok(())
+}
+
+pub async fn detect(files: Vec<String>, format: String) -> Result<()> {
+    use std::collections::HashMap;
+
+    let mut results = HashMap::new();
+
+    for file_path in &files {
+        match data::detect_genotype_metadata(file_path) {
+            Ok(metadata) => {
+                results.insert(file_path.clone(), metadata);
+            }
+            Err(e) => {
+                eprintln!("Warning: Failed to detect {}: {}", file_path, e);
+            }
+        }
+    }
+
+    if format == "json" {
+        let response = serde_json::json!({
+            "success": true,
+            "detections": results
+        });
+        println!("{}", serde_json::to_string_pretty(&response)?);
+    } else {
+        println!("{}", "File Type Detection Results:".bold());
+        println!();
+
+        for (file_path, metadata) in &results {
+            println!("  {}", file_path.cyan());
+            println!("    Data Type: {}", metadata.data_type);
+            if let Some(source) = &metadata.source {
+                println!("    Source: {}", source);
+            }
+            if let Some(version) = &metadata.grch_version {
+                println!("    GRCh Version: {}", version);
+            }
+            println!();
+        }
+
+        let genotype_count = results
+            .values()
+            .filter(|m| m.data_type == "Genotype")
+            .count();
+        println!(
+            "  Detected {} genotype files out of {} total",
+            genotype_count,
+            results.len()
+        );
+    }
+
+    Ok(())
+}
+
 pub async fn unlink(file_id: i64, format: String) -> Result<()> {
     let db = BioVaultDb::new()?;
 
@@ -476,6 +621,751 @@ pub async fn unlink(file_id: i64, format: String) -> Result<()> {
         println!("  File: {}", updated_file.file_path);
         println!("  Participant: {}", "-".dimmed());
     }
+
+    Ok(())
+}
+
+pub async fn analyze(files: Vec<String>, format: String) -> Result<()> {
+    use std::collections::HashMap;
+
+    let mut results = HashMap::new();
+
+    for file_path in &files {
+        match data::analyze_genotype_file(file_path) {
+            Ok(metadata) => {
+                results.insert(file_path.clone(), metadata);
+            }
+            Err(e) => {
+                eprintln!("Warning: Failed to analyze {}: {}", file_path, e);
+            }
+        }
+    }
+
+    if format == "json" {
+        let response = serde_json::json!({
+            "success": true,
+            "analysis": results
+        });
+        println!("{}", serde_json::to_string_pretty(&response)?);
+    } else {
+        println!("{}", "File Analysis Results:".bold());
+        println!();
+
+        for (file_path, metadata) in &results {
+            println!("{}", file_path.cyan());
+            if let Some(rows) = metadata.row_count {
+                println!("  Rows: {}", rows.to_string().green());
+            }
+            if let Some(chroms) = metadata.chromosome_count {
+                println!("  Chromosomes: {}", chroms.to_string().green());
+            }
+            if let Some(sex) = &metadata.inferred_sex {
+                println!("  Inferred Sex: {}", sex.yellow());
+            }
+            println!();
+        }
+
+        println!(
+            "Analyzed {} files",
+            results.len().to_string().green().bold()
+        );
+    }
+
+    Ok(())
+}
+
+pub async fn hash(files: Vec<String>, format: String) -> Result<()> {
+    use crate::cli::download_cache::calculate_blake3;
+    use std::collections::HashMap;
+    use std::path::Path;
+
+    let mut results = HashMap::new();
+
+    for file_path in &files {
+        let path = Path::new(file_path);
+
+        if !path.exists() {
+            eprintln!("Warning: File not found: {}", file_path);
+            continue;
+        }
+
+        match calculate_blake3(path) {
+            Ok(hash) => {
+                results.insert(file_path.clone(), hash);
+            }
+            Err(e) => {
+                eprintln!("Warning: Failed to hash {}: {}", file_path, e);
+            }
+        }
+    }
+
+    if format == "json" {
+        let response = serde_json::json!({
+            "success": true,
+            "hashes": results
+        });
+        println!("{}", serde_json::to_string_pretty(&response)?);
+    } else {
+        println!("{}", "File Hashes (BLAKE3):".bold());
+        println!();
+
+        for (file_path, hash) in &results {
+            println!("{}", file_path.cyan());
+            println!("  {}", hash);
+            println!();
+        }
+
+        println!("Hashed {} files", results.len().to_string().green().bold());
+    }
+
+    Ok(())
+}
+
+pub async fn export_csv(
+    path: String,
+    extension: Option<String>,
+    recursive: bool,
+    pattern: Option<String>,
+    output: String,
+) -> Result<()> {
+    use std::fs::File;
+    use std::io::Write;
+
+    // Scan for files
+    let scan_result = data::scan(&path, extension.as_deref(), recursive)?;
+
+    if scan_result.files.is_empty() {
+        println!("{}", "No files found to export.".yellow());
+        return Ok(());
+    }
+
+    println!(
+        "{}",
+        format!("📊 Found {} files", scan_result.total_files).bold()
+    );
+
+    // Create CSV file
+    let mut csv_file = File::create(&output)?;
+
+    // Write header
+    writeln!(
+        csv_file,
+        "file_path,participant_id,data_type,source,grch_version,row_count,chromosome_count,inferred_sex"
+    )?;
+
+    // Write rows
+    let mut count = 0;
+    for file_info in scan_result.files {
+        // Extract participant ID if pattern provided
+        let participant_id = if let Some(pat) = &pattern {
+            data::extract_id_from_pattern(&file_info.path, pat).unwrap_or_default()
+        } else {
+            String::new()
+        };
+
+        writeln!(csv_file, "{},{},,,,,,,", file_info.path, participant_id)?;
+        count += 1;
+    }
+
+    println!();
+    println!(
+        "{}",
+        format!("✓ Exported {} files to {}", count, output)
+            .green()
+            .bold()
+    );
+
+    Ok(())
+}
+
+pub async fn detect_csv(input_csv: String, output: String) -> Result<()> {
+    use csv::{ReaderBuilder, WriterBuilder};
+    use std::fs::File;
+    use std::io::Write;
+
+    println!(
+        "{}",
+        format!("🔍 Detecting file types from {}", input_csv).bold()
+    );
+
+    // Read input CSV
+    let file = File::open(&input_csv)?;
+    let mut rdr = ReaderBuilder::new().from_reader(file);
+
+    let mut rows: Vec<std::collections::HashMap<String, String>> = Vec::new();
+    for result in rdr.deserialize() {
+        let row: std::collections::HashMap<String, String> = result?;
+        rows.push(row);
+    }
+
+    if rows.is_empty() {
+        println!("{}", "No files found in CSV.".yellow());
+        return Ok(());
+    }
+
+    let total_files = rows.len();
+    println!("{}", format!("📋 Processing {} files", total_files).bold());
+
+    // Detect each file
+    for (i, row) in rows.iter_mut().enumerate() {
+        if let Some(file_path) = row.get("file_path") {
+            print!("\r🔍 Detecting... {}/{}", i + 1, total_files);
+            std::io::stdout().flush()?;
+
+            match data::detect_genotype_metadata(file_path) {
+                Ok(metadata) => {
+                    row.insert("data_type".to_string(), metadata.data_type);
+                    // Always insert source and grch_version, even if empty
+                    row.insert("source".to_string(), metadata.source.unwrap_or_default());
+                    row.insert(
+                        "grch_version".to_string(),
+                        metadata.grch_version.unwrap_or_default(),
+                    );
+                }
+                Err(e) => {
+                    eprintln!("\nWarning: Failed to detect {}: {}", file_path, e);
+                    // Set defaults on error
+                    row.insert("data_type".to_string(), "Unknown".to_string());
+                    row.insert("source".to_string(), String::new());
+                    row.insert("grch_version".to_string(), String::new());
+                }
+            }
+        }
+    }
+    println!();
+
+    // Write output CSV
+    let out_file = File::create(&output)?;
+    let mut wtr = WriterBuilder::new().from_writer(out_file);
+
+    // Write header
+    wtr.write_record([
+        "file_path",
+        "participant_id",
+        "data_type",
+        "source",
+        "grch_version",
+        "row_count",
+        "chromosome_count",
+        "inferred_sex",
+    ])?;
+
+    // Write rows
+    for row in &rows {
+        wtr.write_record([
+            row.get("file_path").unwrap_or(&String::new()),
+            row.get("participant_id").unwrap_or(&String::new()),
+            row.get("data_type").unwrap_or(&String::new()),
+            row.get("source").unwrap_or(&String::new()),
+            row.get("grch_version").unwrap_or(&String::new()),
+            row.get("row_count").unwrap_or(&String::new()),
+            row.get("chromosome_count").unwrap_or(&String::new()),
+            row.get("inferred_sex").unwrap_or(&String::new()),
+        ])?;
+    }
+
+    wtr.flush()?;
+
+    println!(
+        "{}",
+        format!("✓ Updated CSV written to {}", output)
+            .green()
+            .bold()
+    );
+
+    Ok(())
+}
+
+pub async fn analyze_csv(input_csv: String, output: String) -> Result<()> {
+    use csv::{ReaderBuilder, WriterBuilder};
+    use std::fs::File;
+    use std::io::Write;
+
+    println!(
+        "{}",
+        format!("🧬 Analyzing files from {}", input_csv).bold()
+    );
+
+    // Read input CSV
+    let file = File::open(&input_csv)?;
+    let mut rdr = ReaderBuilder::new().from_reader(file);
+
+    let mut rows: Vec<std::collections::HashMap<String, String>> = Vec::new();
+    for result in rdr.deserialize() {
+        let row: std::collections::HashMap<String, String> = result?;
+        rows.push(row);
+    }
+
+    if rows.is_empty() {
+        println!("{}", "No files found in CSV.".yellow());
+        return Ok(());
+    }
+
+    let total_files = rows.len();
+    println!(
+        "{}",
+        format!(
+            "📋 Processing {} files (this may take a while...)",
+            total_files
+        )
+        .bold()
+    );
+
+    // Analyze each file
+    for (i, row) in rows.iter_mut().enumerate() {
+        if let Some(file_path) = row.get("file_path") {
+            print!("\r🧬 Analyzing... {}/{}", i + 1, total_files);
+            std::io::stdout().flush()?;
+
+            match data::analyze_genotype_file(file_path) {
+                Ok(metadata) => {
+                    // Always insert these fields, even if empty
+                    row.insert(
+                        "row_count".to_string(),
+                        metadata
+                            .row_count
+                            .map(|c| c.to_string())
+                            .unwrap_or_default(),
+                    );
+                    row.insert(
+                        "chromosome_count".to_string(),
+                        metadata
+                            .chromosome_count
+                            .map(|c| c.to_string())
+                            .unwrap_or_default(),
+                    );
+                    row.insert(
+                        "inferred_sex".to_string(),
+                        metadata.inferred_sex.unwrap_or_default(),
+                    );
+                }
+                Err(e) => {
+                    eprintln!("\nWarning: Failed to analyze {}: {}", file_path, e);
+                    // Set defaults on error
+                    row.insert("row_count".to_string(), String::new());
+                    row.insert("chromosome_count".to_string(), String::new());
+                    row.insert("inferred_sex".to_string(), String::new());
+                }
+            }
+        }
+    }
+    println!();
+
+    // Write output CSV
+    let out_file = File::create(&output)?;
+    let mut wtr = WriterBuilder::new().from_writer(out_file);
+
+    // Write header
+    wtr.write_record([
+        "file_path",
+        "participant_id",
+        "data_type",
+        "source",
+        "grch_version",
+        "row_count",
+        "chromosome_count",
+        "inferred_sex",
+    ])?;
+
+    // Write rows
+    for row in &rows {
+        wtr.write_record([
+            row.get("file_path").unwrap_or(&String::new()),
+            row.get("participant_id").unwrap_or(&String::new()),
+            row.get("data_type").unwrap_or(&String::new()),
+            row.get("source").unwrap_or(&String::new()),
+            row.get("grch_version").unwrap_or(&String::new()),
+            row.get("row_count").unwrap_or(&String::new()),
+            row.get("chromosome_count").unwrap_or(&String::new()),
+            row.get("inferred_sex").unwrap_or(&String::new()),
+        ])?;
+    }
+
+    wtr.flush()?;
+
+    println!(
+        "{}",
+        format!("✓ Updated CSV written to {}", output)
+            .green()
+            .bold()
+    );
+
+    Ok(())
+}
+
+pub async fn import_csv(csv_path: String, format: String) -> Result<()> {
+    use csv::ReaderBuilder;
+    use serde::Deserialize;
+    use std::fs::File;
+
+    #[derive(Debug, Deserialize)]
+    struct CsvRow {
+        file_path: String,
+        #[serde(default)]
+        participant_id: Option<String>,
+        #[serde(default)]
+        data_type: Option<String>,
+        #[serde(default)]
+        source: Option<String>,
+        #[serde(default)]
+        grch_version: Option<String>,
+        #[serde(default)]
+        row_count: Option<i64>,
+        #[serde(default)]
+        chromosome_count: Option<i64>,
+        #[serde(default)]
+        inferred_sex: Option<String>,
+    }
+
+    // Read CSV file
+    let file = File::open(&csv_path)?;
+    let mut rdr = ReaderBuilder::new().has_headers(true).from_reader(file);
+
+    let mut rows: Vec<CsvRow> = Vec::new();
+    for result in rdr.deserialize() {
+        let row: CsvRow = result?;
+        rows.push(row);
+    }
+
+    if rows.is_empty() {
+        println!("{}", "No files found in CSV.".yellow());
+        return Ok(());
+    }
+
+    if format != "json" {
+        println!("{}", format!("📋 CSV Import Preview: {}", csv_path).bold());
+        println!(
+            "  Files to import: {}",
+            rows.len().to_string().cyan().bold()
+        );
+        println!();
+    }
+
+    // Perform the actual import
+    let db = BioVaultDb::new()?;
+    let result = data::import_from_csv(
+        &db,
+        rows.iter()
+            .map(|r| data::CsvFileImport {
+                file_path: r.file_path.clone(),
+                participant_id: r
+                    .participant_id
+                    .as_ref()
+                    .filter(|s| !s.trim().is_empty())
+                    .cloned(),
+                data_type: r
+                    .data_type
+                    .as_ref()
+                    .filter(|s| !s.trim().is_empty())
+                    .cloned(),
+                source: r.source.as_ref().filter(|s| !s.trim().is_empty()).cloned(),
+                grch_version: r
+                    .grch_version
+                    .as_ref()
+                    .filter(|s| !s.trim().is_empty())
+                    .cloned(),
+                row_count: r.row_count,
+                chromosome_count: r.chromosome_count,
+                inferred_sex: r
+                    .inferred_sex
+                    .as_ref()
+                    .filter(|s| !s.trim().is_empty())
+                    .cloned(),
+            })
+            .collect(),
+    )?;
+
+    if format == "json" {
+        let response = CliResponse::new(&result);
+        println!("{}", response.to_json()?);
+    } else {
+        println!();
+        if result.imported > 0 {
+            println!(
+                "{}",
+                format!("✓ Imported {} files", result.imported)
+                    .green()
+                    .bold()
+            );
+        }
+        if result.skipped > 0 {
+            println!("⊘ Skipped {} files (already imported)", result.skipped);
+        }
+        if !result.errors.is_empty() {
+            println!("{}", format!("✗ {} errors:", result.errors.len()).red());
+            for error in &result.errors {
+                println!("  {}", error.red());
+            }
+        }
+    }
+
+    Ok(())
+}
+
+pub async fn import_pending(csv_path: String, format: String) -> Result<()> {
+    use csv::ReaderBuilder;
+    use serde::Deserialize;
+    use std::fs::File;
+
+    #[derive(Debug, Deserialize)]
+    struct CsvRow {
+        file_path: String,
+        #[serde(default)]
+        participant_id: Option<String>,
+        #[serde(default)]
+        data_type: Option<String>,
+        #[serde(default)]
+        source: Option<String>,
+        #[serde(default)]
+        grch_version: Option<String>,
+    }
+
+    // Read CSV file
+    let file = File::open(&csv_path)?;
+    let mut rdr = ReaderBuilder::new().has_headers(true).from_reader(file);
+
+    let mut rows: Vec<CsvRow> = Vec::new();
+    for result in rdr.deserialize() {
+        let row: CsvRow = result?;
+        rows.push(row);
+    }
+
+    if rows.is_empty() {
+        println!("{}", "No files found in CSV.".yellow());
+        return Ok(());
+    }
+
+    if format != "json" {
+        println!("{}", format!("📋 Fast Import: {}", csv_path).bold());
+        println!(
+            "  Files to add to queue: {}",
+            rows.len().to_string().cyan().bold()
+        );
+        println!();
+    }
+
+    // Perform the fast import (no hashing, just add as pending)
+    let db = BioVaultDb::new()?;
+    let result = data::import_files_as_pending(
+        &db,
+        rows.iter()
+            .map(|r| data::CsvFileImport {
+                file_path: r.file_path.clone(),
+                participant_id: r
+                    .participant_id
+                    .as_ref()
+                    .filter(|s| !s.trim().is_empty())
+                    .cloned(),
+                data_type: r
+                    .data_type
+                    .as_ref()
+                    .filter(|s| !s.trim().is_empty())
+                    .cloned(),
+                source: r.source.as_ref().filter(|s| !s.trim().is_empty()).cloned(),
+                grch_version: r
+                    .grch_version
+                    .as_ref()
+                    .filter(|s| !s.trim().is_empty())
+                    .cloned(),
+                row_count: None,
+                chromosome_count: None,
+                inferred_sex: None,
+            })
+            .collect(),
+    )?;
+
+    if format == "json" {
+        let response = CliResponse::new(&result);
+        println!("{}", response.to_json()?);
+    } else {
+        println!();
+        if result.imported > 0 {
+            println!(
+                "{}",
+                format!("✓ Added {} files to queue", result.imported)
+                    .green()
+                    .bold()
+            );
+        }
+        if result.skipped > 0 {
+            println!("⊘ Skipped {} files (already imported)", result.skipped);
+        }
+        if !result.errors.is_empty() {
+            println!("{}", format!("✗ {} errors:", result.errors.len()).red());
+            for error in &result.errors {
+                println!("  {}", error.red());
+            }
+        }
+        println!();
+        println!(
+            "{}",
+            "💡 Run 'bv files process-queue' to process the queue".yellow()
+        );
+    }
+
+    Ok(())
+}
+
+pub async fn process_queue(limit: usize, daemon: bool, format: String) -> Result<()> {
+    use std::time::Duration;
+    use tokio::time::sleep;
+
+    let db = BioVaultDb::new()?;
+
+    if daemon {
+        if format != "json" {
+            println!("{}", "🔄 Starting queue processor daemon...".bold().cyan());
+            println!("Press Ctrl+C to stop\n");
+        }
+
+        loop {
+            let processed = process_batch(&db, limit, &format).await?;
+
+            if processed == 0 && format != "json" {
+                // No files to process, wait before checking again
+                print!(".");
+                std::io::Write::flush(&mut std::io::stdout())?;
+                sleep(Duration::from_secs(5)).await;
+            }
+        }
+    } else {
+        // One-time processing
+        process_batch(&db, limit, &format).await?;
+    }
+
+    Ok(())
+}
+
+async fn process_batch(db: &BioVaultDb, limit: usize, format: &str) -> Result<usize> {
+    // Get pending files from database
+    let pending_files = data::get_pending_files(db, limit)?;
+
+    if pending_files.is_empty() {
+        if format != "json" {
+            println!("{}", "No pending files in queue.".yellow());
+        }
+        return Ok(0);
+    }
+
+    if format != "json" {
+        println!(
+            "{}",
+            format!("📦 Processing {} pending files...", pending_files.len()).bold()
+        );
+        println!();
+    }
+
+    let mut processed = 0;
+    let mut errors = 0;
+
+    for (index, file) in pending_files.iter().enumerate() {
+        if format != "json" {
+            println!(
+                "  [{}/{}] {}",
+                index + 1,
+                pending_files.len(),
+                file.file_path
+            );
+        }
+
+        // Mark as processing
+        data::update_file_status(db, file.id, "processing", None)?;
+
+        // Process the file: hash + detect metadata
+        match process_single_file(db, file).await {
+            Ok(_) => {
+                data::update_file_status(db, file.id, "complete", None)?;
+                processed += 1;
+                if format != "json" {
+                    println!("    {}", "✓ Complete".green());
+                }
+            }
+            Err(e) => {
+                let error_msg = format!("{}", e);
+                data::update_file_status(db, file.id, "error", Some(&error_msg))?;
+                errors += 1;
+                if format != "json" {
+                    println!("    {}", format!("✗ Error: {}", error_msg).red());
+                }
+            }
+        }
+    }
+
+    if format == "json" {
+        use serde_json::json;
+        let result = json!({
+            "processed": processed,
+            "errors": errors,
+            "total": pending_files.len()
+        });
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    } else {
+        println!();
+        println!(
+            "{}",
+            format!("✓ Processed {} files", processed).green().bold()
+        );
+        if errors > 0 {
+            println!("{}", format!("✗ {} errors", errors).red());
+        }
+    }
+
+    Ok(processed)
+}
+
+async fn process_single_file(db: &BioVaultDb, file: &data::PendingFile) -> Result<()> {
+    // 1. Hash the file
+    let hash = data::hash_file(&file.file_path)?;
+
+    // 2. Detect genotype metadata if not already set
+    let mut metadata = if file.data_type.as_deref() == Some("Unknown") || file.data_type.is_none() {
+        data::detect_genotype_metadata(&file.file_path).ok()
+    } else if file.data_type.as_deref() == Some("Genotype") {
+        // Already detected as Genotype, load existing metadata if available
+        match data::get_genotype_metadata(db, file.id) {
+            Ok(Some(existing)) => Some(existing),
+            _ => {
+                // No existing metadata, create placeholder
+                Some(data::GenotypeMetadata {
+                    data_type: "Genotype".to_string(),
+                    source: None,
+                    grch_version: None,
+                    row_count: None,
+                    chromosome_count: None,
+                    inferred_sex: None,
+                })
+            }
+        }
+    } else {
+        None
+    };
+
+    // 3. If this is a Genotype file, analyze it for row counts, chromosomes, sex
+    if let Some(ref mut meta) = metadata {
+        if meta.data_type == "Genotype" {
+            match data::analyze_genotype_file(&file.file_path) {
+                Ok(analysis) => {
+                    // Merge analysis data into metadata (preserve existing source/grch if not in analysis)
+                    if meta.row_count.is_none() {
+                        meta.row_count = analysis.row_count;
+                    }
+                    if meta.chromosome_count.is_none() {
+                        meta.chromosome_count = analysis.chromosome_count;
+                    }
+                    if meta.inferred_sex.is_none() {
+                        meta.inferred_sex = analysis.inferred_sex.clone();
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Warning: Failed to analyze {}: {}", file.file_path, e);
+                    // Continue with basic metadata
+                }
+            }
+        }
+    }
+
+    // 4. Update the file in database
+    data::update_file_from_queue(db, file.id, &hash, metadata.as_ref())?;
 
     Ok(())
 }

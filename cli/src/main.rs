@@ -932,6 +932,35 @@ enum FilesCommands {
         format: String,
     },
 
+    #[command(about = "Delete multiple file records from the catalog")]
+    DeleteBulk {
+        #[arg(help = "File IDs to delete (comma-separated)", value_delimiter = ',')]
+        ids: Vec<i64>,
+
+        #[arg(long, help = "Output format (json|table)", default_value = "table")]
+        format: String,
+    },
+
+    #[command(about = "Detect file types and extract genotype metadata (fast - header only)")]
+    Detect {
+        #[arg(help = "File paths to analyze", num_args = 1..)]
+        files: Vec<String>,
+
+        #[arg(long, help = "Output format (json|table)", default_value = "table")]
+        format: String,
+    },
+
+    #[command(
+        about = "Analyze genotype files for row count, chromosomes, and sex (slow - reads entire file)"
+    )]
+    Analyze {
+        #[arg(help = "File paths to analyze", num_args = 1..)]
+        files: Vec<String>,
+
+        #[arg(long, help = "Output format (json|table)", default_value = "table")]
+        format: String,
+    },
+
     #[command(about = "Link a file to a participant")]
     Link {
         #[arg(help = "File ID to link")]
@@ -944,10 +973,98 @@ enum FilesCommands {
         format: String,
     },
 
+    #[command(about = "Bulk link files to participants via JSON")]
+    LinkBulk {
+        #[arg(help = "JSON object mapping file paths to participant IDs")]
+        json: String,
+
+        #[arg(long, help = "Output format (json|table)", default_value = "table")]
+        format: String,
+    },
+
     #[command(about = "Remove participant assignment from a file")]
     Unlink {
         #[arg(help = "File ID to unlink")]
         file_id: i64,
+
+        #[arg(long, help = "Output format (json|table)", default_value = "table")]
+        format: String,
+    },
+
+    #[command(about = "Calculate BLAKE3 hashes for files")]
+    Hash {
+        #[arg(help = "File paths to hash", num_args = 1..)]
+        files: Vec<String>,
+
+        #[arg(long, help = "Output format (json|table)", default_value = "table")]
+        format: String,
+    },
+
+    #[command(about = "Export files to CSV with participant IDs")]
+    ExportCsv {
+        #[arg(help = "Directory path to scan")]
+        path: String,
+
+        #[arg(long, help = "File extension filter (e.g., .vcf, .txt)")]
+        ext: Option<String>,
+
+        #[arg(long, help = "Scan subdirectories recursively", default_value = "true")]
+        recursive: bool,
+
+        #[arg(long, help = "Pattern to extract participant IDs (e.g., '{parent}')")]
+        pattern: Option<String>,
+
+        #[arg(short = 'o', long, help = "Output CSV file path")]
+        output: String,
+    },
+
+    #[command(about = "Detect file types in CSV and update metadata columns")]
+    DetectCsv {
+        #[arg(help = "Input CSV file path")]
+        input_csv: String,
+
+        #[arg(short = 'o', long, help = "Output CSV file path")]
+        output: String,
+    },
+
+    #[command(about = "Analyze genotype files in CSV for row counts and sex")]
+    AnalyzeCsv {
+        #[arg(help = "Input CSV file path")]
+        input_csv: String,
+
+        #[arg(short = 'o', long, help = "Output CSV file path")]
+        output: String,
+    },
+
+    #[command(about = "Import files from CSV with complete metadata")]
+    ImportCsv {
+        #[arg(help = "Path to CSV file containing file metadata")]
+        csv_path: String,
+
+        #[arg(long, help = "Output format (json|table)", default_value = "table")]
+        format: String,
+    },
+
+    #[command(about = "Process pending files in the queue (hash and detect metadata)")]
+    ProcessQueue {
+        #[arg(
+            long,
+            help = "Maximum number of files to process",
+            default_value = "100"
+        )]
+        limit: usize,
+
+        #[arg(long, help = "Daemon mode - continuously process queue")]
+        daemon: bool,
+
+        #[arg(long, help = "Output format (json|table)", default_value = "table")]
+        format: String,
+    },
+
+    #[command(about = "Fast import - add files to queue for background processing")]
+    ImportPending {
+        #[arg(help = "Path to CSV file containing file metadata")]
+        csv_path: String,
 
         #[arg(long, help = "Output format (json|table)", default_value = "table")]
         format: String,
@@ -1177,15 +1294,27 @@ async fn async_main_with(cli: Cli) -> Result<()> {
                 overwrite,
                 format,
             } => {
-                let fmt = if format == "table" { None } else { Some(format) };
+                let fmt = if format == "table" {
+                    None
+                } else {
+                    Some(format)
+                };
                 commands::project_management::import(source, name, overwrite, fmt).await?;
             }
             ProjectCommands::List { format } => {
-                let fmt = if format == "table" { None } else { Some(format) };
+                let fmt = if format == "table" {
+                    None
+                } else {
+                    Some(format)
+                };
                 commands::project_management::list(fmt)?;
             }
             ProjectCommands::Show { identifier, format } => {
-                let fmt = if format == "table" { None } else { Some(format) };
+                let fmt = if format == "table" {
+                    None
+                } else {
+                    Some(format)
+                };
                 commands::project_management::show(identifier, fmt)?;
             }
             ProjectCommands::Delete {
@@ -1193,7 +1322,11 @@ async fn async_main_with(cli: Cli) -> Result<()> {
                 keep_files,
                 format,
             } => {
-                let fmt = if format == "table" { None } else { Some(format) };
+                let fmt = if format == "table" {
+                    None
+                } else {
+                    Some(format)
+                };
                 commands::project_management::delete(identifier, keep_files, fmt)?;
             }
         },
@@ -1375,6 +1508,15 @@ async fn async_main_with(cli: Cli) -> Result<()> {
             FilesCommands::Delete { id, format } => {
                 commands::files::delete(id, format).await?;
             }
+            FilesCommands::DeleteBulk { ids, format } => {
+                commands::files::delete_bulk(ids, format).await?;
+            }
+            FilesCommands::Detect { files, format } => {
+                commands::files::detect(files, format).await?;
+            }
+            FilesCommands::Analyze { files, format } => {
+                commands::files::analyze(files, format).await?;
+            }
             FilesCommands::Link {
                 file_id,
                 participant,
@@ -1382,8 +1524,42 @@ async fn async_main_with(cli: Cli) -> Result<()> {
             } => {
                 commands::files::link(file_id, participant, format).await?;
             }
+            FilesCommands::LinkBulk { json, format } => {
+                commands::files::link_bulk(json, format).await?;
+            }
             FilesCommands::Unlink { file_id, format } => {
                 commands::files::unlink(file_id, format).await?;
+            }
+            FilesCommands::Hash { files, format } => {
+                commands::files::hash(files, format).await?;
+            }
+            FilesCommands::ExportCsv {
+                path,
+                ext,
+                recursive,
+                pattern,
+                output,
+            } => {
+                commands::files::export_csv(path, ext, recursive, pattern, output).await?;
+            }
+            FilesCommands::DetectCsv { input_csv, output } => {
+                commands::files::detect_csv(input_csv, output).await?;
+            }
+            FilesCommands::AnalyzeCsv { input_csv, output } => {
+                commands::files::analyze_csv(input_csv, output).await?;
+            }
+            FilesCommands::ImportCsv { csv_path, format } => {
+                commands::files::import_csv(csv_path, format).await?;
+            }
+            FilesCommands::ProcessQueue {
+                limit,
+                daemon,
+                format,
+            } => {
+                commands::files::process_queue(limit, daemon, format).await?;
+            }
+            FilesCommands::ImportPending { csv_path, format } => {
+                commands::files::import_pending(csv_path, format).await?;
             }
         },
         Commands::Submit {

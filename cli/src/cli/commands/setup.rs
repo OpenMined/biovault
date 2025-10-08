@@ -1461,6 +1461,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn test_detect_system_on_windows() {
         if cfg!(target_os = "windows") {
             match detect_system() {

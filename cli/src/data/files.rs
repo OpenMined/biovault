@@ -1,16 +1,19 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use chrono::{DateTime, Utc};
 use regex::Regex;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
-use super::BioVaultDb;
+#[cfg(test)]
+use sha2::{Digest, Sha256};
+#[cfg(test)]
+use std::io::Read;
+
+use super::{BioVaultDb, GenotypeMetadata};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ExtensionInfo {
@@ -42,6 +45,14 @@ pub struct FileRecord {
     pub file_hash: String,
     pub file_type: Option<String>,
     pub file_size: Option<u64>,
+    pub data_type: Option<String>,
+    pub source: Option<String>,
+    pub grch_version: Option<String>,
+    pub row_count: Option<i64>,
+    pub chromosome_count: Option<i64>,
+    pub inferred_sex: Option<String>,
+    pub status: Option<String>,
+    pub processing_error: Option<String>,
     pub participant_id: Option<String>,
     pub participant_name: Option<String>,
     pub created_at: String,
@@ -54,6 +65,18 @@ pub struct ImportResult {
     pub skipped: usize,
     pub errors: Vec<String>,
     pub files: Vec<FileRecord>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CsvFileImport {
+    pub file_path: String,
+    pub participant_id: Option<String>,
+    pub data_type: Option<String>,
+    pub source: Option<String>,
+    pub grch_version: Option<String>,
+    pub row_count: Option<i64>,
+    pub chromosome_count: Option<i64>,
+    pub inferred_sex: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -184,15 +207,8 @@ pub fn import(
     for file_info in scan_result.files {
         // Extract participant ID if pattern is provided
         let participant_id = if let Some(pat) = pattern {
-            let filename = Path::new(&file_info.path)
-                .file_name()
-                .and_then(|n| n.to_str());
-
-            if let Some(fname) = filename {
-                extract_id_from_pattern(fname, pat)
-            } else {
-                None
-            }
+            // Pass full path to extract_id_from_pattern (needed for {parent} and other path-based patterns)
+            extract_id_from_pattern(&file_info.path, pat)
         } else {
             None
         };
@@ -227,16 +243,186 @@ pub fn import(
     })
 }
 
+/// Import files from CSV with all metadata
+pub fn import_from_csv(db: &BioVaultDb, csv_imports: Vec<CsvFileImport>) -> Result<ImportResult> {
+    let mut imported = 0;
+    let mut skipped = 0;
+    let mut errors = Vec::new();
+    let mut imported_file_ids = Vec::new();
+
+    for csv_row in csv_imports {
+        match import_file_with_metadata(db, &csv_row) {
+            Ok(Some(file_id)) => {
+                imported += 1;
+                imported_file_ids.push(file_id);
+            }
+            Ok(None) => {
+                skipped += 1;
+            }
+            Err(e) => {
+                errors.push(format!("{}: {}", csv_row.file_path, e));
+            }
+        }
+    }
+
+    // Fetch imported file records
+    let mut files = Vec::new();
+    for file_id in imported_file_ids {
+        if let Ok(Some(record)) = get_file_by_id(db, file_id) {
+            files.push(record);
+        }
+    }
+
+    Ok(ImportResult {
+        imported,
+        skipped,
+        errors,
+        files,
+    })
+}
+
+/// Import single file with full metadata from CSV
+fn import_file_with_metadata(db: &BioVaultDb, csv_row: &CsvFileImport) -> Result<Option<i64>> {
+    use crate::cli::download_cache::calculate_blake3;
+    use std::path::Path;
+
+    let file_path = &csv_row.file_path;
+
+    // Calculate file hash using BLAKE3
+    let path = Path::new(file_path);
+    if !path.exists() {
+        anyhow::bail!("File not found: {}", file_path);
+    }
+
+    let metadata = std::fs::metadata(path)?;
+    let file_size = metadata.len();
+
+    let file_hash = calculate_blake3(path).unwrap_or_else(|e| {
+        eprintln!("Warning: Failed to hash {}: {}", file_path, e);
+        format!("error_{}", file_size)
+    });
+
+    // Extract file type (extension)
+    let file_type = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| format!(".{}", e));
+
+    // Get or create participant if ID provided
+    let db_participant_id: Option<i64> = if let Some(pid) = &csv_row.participant_id {
+        Some(get_or_create_participant(db, pid)?)
+    } else {
+        None
+    };
+
+    // Check if file already exists
+    let existing: Option<(String, i64)> = db
+        .conn
+        .query_row(
+            "SELECT file_hash, id FROM files WHERE file_path = ?1",
+            params![file_path],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .ok();
+
+    let file_id = if let Some((existing_hash, existing_id)) = existing {
+        if existing_hash == file_hash {
+            // File already imported - update metadata
+            db.conn.execute(
+                "UPDATE files SET participant_id = ?1, data_type = ?2, source = ?3, grch_version = ?4, updated_at = CURRENT_TIMESTAMP WHERE id = ?5",
+                params![
+                    db_participant_id,
+                    csv_row.data_type,
+                    csv_row.source,
+                    csv_row.grch_version,
+                    existing_id
+                ],
+            )?;
+            existing_id
+        } else {
+            // File exists but hash changed - update everything
+            db.conn.execute(
+                "UPDATE files SET file_hash = ?1, file_size = ?2, participant_id = ?3, data_type = ?4, source = ?5, grch_version = ?6, updated_at = CURRENT_TIMESTAMP WHERE id = ?7",
+                params![
+                    file_hash,
+                    file_size as i64,
+                    db_participant_id,
+                    csv_row.data_type,
+                    csv_row.source,
+                    csv_row.grch_version,
+                    existing_id
+                ],
+            )?;
+            existing_id
+        }
+    } else {
+        // Insert new file
+        db.conn.execute(
+            "INSERT INTO files (participant_id, file_path, file_hash, file_type, file_size, data_type, source, grch_version) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                db_participant_id,
+                file_path,
+                file_hash,
+                file_type,
+                file_size as i64,
+                csv_row.data_type,
+                csv_row.source,
+                csv_row.grch_version
+            ],
+        )?;
+        db.conn.last_insert_rowid()
+    };
+
+    // Save genotype metadata if provided and data_type is Genotype
+    if csv_row.data_type.as_deref() == Some("Genotype")
+        && (csv_row.row_count.is_some() || csv_row.chromosome_count.is_some())
+    {
+        // Delete existing metadata if any
+        db.conn.execute(
+            "DELETE FROM genotype_metadata WHERE file_id = ?1",
+            params![file_id],
+        )?;
+
+        // Insert new metadata
+        db.conn.execute(
+                "INSERT INTO genotype_metadata (file_id, source, grch_version, row_count, chromosome_count) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    file_id,
+                    csv_row.source,
+                    csv_row.grch_version,
+                    csv_row.row_count,
+                    csv_row.chromosome_count
+                ],
+            )?;
+    }
+
+    // Update participant inferred_sex if provided
+    if let (Some(pid), Some(sex)) = (db_participant_id, &csv_row.inferred_sex) {
+        db.conn.execute(
+            "UPDATE participants SET inferred_sex = ?1 WHERE id = ?2",
+            params![sex, pid],
+        )?;
+    }
+
+    Ok(Some(file_id))
+}
+
 /// Import single file into database with optional participant assignment
 fn import_file_with_participant(
     db: &BioVaultDb,
     file_info: &FileInfo,
     participant_id: Option<&str>,
 ) -> Result<Option<i64>> {
+    use crate::cli::download_cache::calculate_blake3;
+    use std::path::Path;
+
     let file_path = &file_info.path;
 
-    // Calculate file hash
-    let file_hash = calculate_file_hash(file_path)?;
+    // Calculate file hash using BLAKE3
+    let file_hash = calculate_blake3(Path::new(file_path)).unwrap_or_else(|e| {
+        eprintln!("Warning: Failed to hash {}: {}", file_path, e);
+        format!("error_{}", file_info.size)
+    });
 
     // Extract file type (extension)
     let file_type = Path::new(file_path)
@@ -312,32 +498,17 @@ fn get_or_create_participant(db: &BioVaultDb, participant_id: &str) -> Result<i6
     }
 }
 
-/// Calculate SHA256 hash of file
-fn calculate_file_hash(path: &str) -> Result<String> {
-    let mut file =
-        fs::File::open(path).with_context(|| format!("Failed to open file: {}", path))?;
-
-    let mut hasher = Sha256::new();
-    let mut buffer = [0; 8192];
-
-    loop {
-        let bytes_read = file.read(&mut buffer)?;
-        if bytes_read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..bytes_read]);
-    }
-
-    Ok(format!("{:x}", hasher.finalize()))
-}
-
 /// Get file by ID
 pub fn get_file_by_id(db: &BioVaultDb, file_id: i64) -> Result<Option<FileRecord>> {
     let result = db.conn.query_row(
         "SELECT f.id, f.file_path, f.file_hash, f.file_type, f.file_size,
+                f.data_type, g.source, g.grch_version,
+                g.row_count, g.chromosome_count, g.inferred_sex,
+                f.status, f.processing_error,
                 p.participant_id, p.participant_id, f.created_at, f.updated_at
          FROM files f
          LEFT JOIN participants p ON f.participant_id = p.id
+         LEFT JOIN genotype_metadata g ON f.id = g.file_id
          WHERE f.id = ?1",
         params![file_id],
         |row| {
@@ -347,10 +518,18 @@ pub fn get_file_by_id(db: &BioVaultDb, file_id: i64) -> Result<Option<FileRecord
                 file_hash: row.get(2)?,
                 file_type: row.get(3)?,
                 file_size: row.get::<_, Option<i64>>(4)?.map(|s| s as u64),
-                participant_id: row.get(5)?,
-                participant_name: row.get(6)?,
-                created_at: row.get(7)?,
-                updated_at: row.get(8)?,
+                data_type: row.get(5)?,
+                source: row.get(6)?,
+                grch_version: row.get(7)?,
+                row_count: row.get(8)?,
+                chromosome_count: row.get(9)?,
+                inferred_sex: row.get(10)?,
+                status: row.get(11)?,
+                processing_error: row.get(12)?,
+                participant_id: row.get(13)?,
+                participant_name: row.get(14)?,
+                created_at: row.get(15)?,
+                updated_at: row.get(16)?,
             })
         },
     );
@@ -372,9 +551,13 @@ pub fn list_files(
 ) -> Result<Vec<FileRecord>> {
     let mut query = String::from(
         "SELECT f.id, f.file_path, f.file_hash, f.file_type, f.file_size,
+                f.data_type, g.source, g.grch_version,
+                g.row_count, g.chromosome_count, g.inferred_sex,
+                f.status, f.processing_error,
                 p.participant_id, p.participant_id, f.created_at, f.updated_at
          FROM files f
          LEFT JOIN participants p ON f.participant_id = p.id
+         LEFT JOIN genotype_metadata g ON f.id = g.file_id
          WHERE 1=1",
     );
 
@@ -410,10 +593,18 @@ pub fn list_files(
             file_hash: row.get(2)?,
             file_type: row.get(3)?,
             file_size: row.get::<_, Option<i64>>(4)?.map(|s| s as u64),
-            participant_id: row.get(5)?,
-            participant_name: row.get(6)?,
-            created_at: row.get(7)?,
-            updated_at: row.get(8)?,
+            data_type: row.get(5)?,
+            source: row.get(6)?,
+            grch_version: row.get(7)?,
+            row_count: row.get(8)?,
+            chromosome_count: row.get(9)?,
+            inferred_sex: row.get(10)?,
+            status: row.get(11)?,
+            processing_error: row.get(12)?,
+            participant_id: row.get(13)?,
+            participant_name: row.get(14)?,
+            created_at: row.get(15)?,
+            updated_at: row.get(16)?,
         })
     })?;
 
@@ -553,25 +744,167 @@ pub fn suggest_patterns(
         });
     }
 
+    // Pattern 5: Directory name as ID
+    // Check if files are organized in subdirectories where directory name is the ID
+    let first_file_path = scan_result.files.first().map(|f| Path::new(&f.path));
+    if let Some(first_path) = first_file_path {
+        if let Some(parent) = first_path.parent() {
+            if let Some(dir_name) = parent.file_name().and_then(|n| n.to_str()) {
+                // Check if directory name looks like an ID (contains numbers or is alphanumeric)
+                let re_dir_id = Regex::new(r"^\d+$|^[a-zA-Z0-9_-]+$").unwrap();
+                if re_dir_id.is_match(dir_name) && dir_name.len() >= 3 {
+                    let mut sample_extractions = Vec::new();
+                    let mut seen_dirs = std::collections::HashSet::new();
+
+                    for file_scan in scan_result.files.iter().take(10) {
+                        if let Some(file_parent) = Path::new(&file_scan.path).parent() {
+                            if let Some(parent_name) =
+                                file_parent.file_name().and_then(|n| n.to_str())
+                            {
+                                if seen_dirs.insert(parent_name.to_string()) {
+                                    sample_extractions.push((
+                                        format!("{}/...", parent_name),
+                                        parent_name.to_string(),
+                                    ));
+                                }
+                                if sample_extractions.len() >= 3 {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    if !sample_extractions.is_empty() {
+                        suggestions.push(PatternSuggestion {
+                            pattern: "{parent}".to_string(),
+                            description: "Directory name as participant ID".to_string(),
+                            example: format!("{}/...", dir_name),
+                            sample_extractions,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
     Ok(SuggestPatternsResult {
         suggestions,
         sample_files: filenames.into_iter().take(5).collect(),
     })
 }
 
-/// Extract participant ID from filename using pattern (public for CLI use)
-pub fn extract_id_from_pattern(filename: &str, pattern: &str) -> Option<String> {
+/// Extract participant ID from filepath using glob-style pattern
+///
+/// Pattern Syntax:
+/// - `{id}` - Marks the capture group - this is what gets extracted as the participant ID
+/// - `*` - Matches any characters (non-greedy, doesn't cross `/` boundaries)
+/// - `**` - Matches any characters including `/` (for multi-level paths)
+/// - `?` - Matches single character
+/// - Literal text matches exactly
+///
+/// Special Shortcuts (for convenience):
+/// - `{parent}` - Shortcut for extracting parent directory name
+/// - `{filename}` - Shortcut for extracting filename without extension
+/// - `{basename}` - Shortcut for extracting filename with extension
+///
+/// Examples:
+/// - `{id}/*` → `/data/PT001/scan.txt` extracts `PT001` (parent directory)
+/// - `hu{id}/*` → `/data/hu627574/file.txt` extracts `627574` (after "hu" in parent)
+/// - `{id}_*.txt` → `123456_data.txt` extracts `123456` (before underscore)
+/// - `case_{id}_*` → `case_789_report.pdf` extracts `789` (between delimiters)
+/// - `*/{id}/*.txt` → `/path/PT001/scan.txt` extracts `PT001` (middle directory)
+/// - `participant_{id}.{sample_id}.*` → `participant_PT001.S001.csv` extracts `PT001` (first capture)
+///
+/// The `{id}` token can be used multiple times, but only the first occurrence will be captured.
+pub fn extract_id_from_pattern(filepath: &str, pattern: &str) -> Option<String> {
+    let path = Path::new(filepath);
+
+    // Handle special shortcut patterns
+    match pattern {
+        "{parent}" | "{dirname}" | "{dir}" | "{id}/*" => {
+            return path
+                .parent()
+                .and_then(|p| p.file_name())
+                .and_then(|n| n.to_str())
+                .map(|s| s.to_string());
+        }
+        "{filename}" => {
+            return path
+                .file_stem()
+                .and_then(|n| n.to_str())
+                .map(|s| s.to_string());
+        }
+        "{basename}" => {
+            return path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|s| s.to_string());
+        }
+        _ => {}
+    }
+
+    // Pattern must contain {id} to capture
     if !pattern.contains("{id}") {
         return None;
     }
 
-    let regex_pattern = pattern
-        .replace(".", "\\.")
-        .replace("*", ".*")
-        .replace("{id}", r"(\d+)");
+    // Build regex from glob-style pattern
+    // Determine if pattern should match against full path or just filename
+    let match_target = if pattern.contains('/') {
+        // Pattern has path separators, match against full path
+        filepath
+    } else {
+        // Pattern is filename-only, match against just the filename
+        path.file_name()?.to_str()?
+    };
 
+    // Convert pattern to regex
+    let mut regex_pattern = String::new();
+    let mut chars = pattern.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        match ch {
+            '*' => {
+                // Check for ** (multi-level wildcard)
+                if chars.peek() == Some(&'*') {
+                    chars.next(); // consume second *
+                    regex_pattern.push_str(".*"); // Match anything including /
+                } else {
+                    // Single * doesn't cross directory boundaries
+                    regex_pattern.push_str("[^/]*");
+                }
+            }
+            '?' => regex_pattern.push('.'), // Single character wildcard
+            '.' | '+' | '^' | '$' | '(' | ')' | '[' | ']' | '\\' | '|' => {
+                // Escape regex special characters
+                regex_pattern.push('\\');
+                regex_pattern.push(ch);
+            }
+            '{' => {
+                // Check for {id} token
+                let rest: String = chars.clone().collect();
+                if rest.starts_with("id}") {
+                    // Consume "id}"
+                    chars.next(); // i
+                    chars.next(); // d
+                    chars.next(); // }
+                                  // Insert capture group for ID (alphanumeric, underscore, hyphen)
+                    regex_pattern.push_str(r"([a-zA-Z0-9_-]+)");
+                } else {
+                    // Unknown token, treat as literal
+                    regex_pattern.push(ch);
+                }
+            }
+            _ => regex_pattern.push(ch),
+        }
+    }
+
+    // Anchor the pattern to match the full string
+    let regex_pattern = format!("^{}$", regex_pattern);
+
+    // Try to match and extract ID
     let re = Regex::new(&regex_pattern).ok()?;
-    let captures = re.captures(filename)?;
+    let captures = re.captures(match_target)?;
     captures.get(1).map(|m| m.as_str().to_string())
 }
 
@@ -627,6 +960,31 @@ pub fn delete_participant(db: &BioVaultDb, id: i64) -> Result<()> {
     Ok(())
 }
 
+/// Delete multiple participants and unlink all associated files
+pub fn delete_participants_bulk(db: &BioVaultDb, ids: &[i64]) -> Result<usize> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+
+    let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+
+    // First unlink all files for these participants
+    let unlink_query = format!(
+        "UPDATE files SET participant_id = NULL WHERE participant_id IN ({})",
+        placeholders
+    );
+    db.conn
+        .execute(&unlink_query, rusqlite::params_from_iter(ids.iter()))?;
+
+    // Then delete the participants
+    let delete_query = format!("DELETE FROM participants WHERE id IN ({})", placeholders);
+    let rows = db
+        .conn
+        .execute(&delete_query, rusqlite::params_from_iter(ids.iter()))?;
+
+    Ok(rows)
+}
+
 /// Delete a file record from the catalog
 pub fn delete_file(db: &BioVaultDb, file_id: i64) -> Result<()> {
     let rows = db
@@ -638,6 +996,21 @@ pub fn delete_file(db: &BioVaultDb, file_id: i64) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Delete multiple file records from the catalog
+pub fn delete_files_bulk(db: &BioVaultDb, ids: &[i64]) -> Result<usize> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+
+    let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+    let delete_query = format!("DELETE FROM files WHERE id IN ({})", placeholders);
+    let rows = db
+        .conn
+        .execute(&delete_query, rusqlite::params_from_iter(ids.iter()))?;
+
+    Ok(rows)
 }
 
 /// Link a file to a participant
@@ -663,6 +1036,54 @@ pub fn link_file_to_participant(
     get_file_by_id(db, file_id)?.ok_or_else(|| anyhow::anyhow!("File not found after update"))
 }
 
+/// Bulk link multiple files to participants
+/// Accepts a HashMap of file_path -> participant_id
+pub fn link_files_bulk(
+    db: &BioVaultDb,
+    file_participant_map: &std::collections::HashMap<String, String>,
+) -> Result<usize> {
+    if file_participant_map.is_empty() {
+        return Ok(0);
+    }
+
+    let mut updated = 0;
+
+    // Start transaction for better performance
+    let tx = db.conn.unchecked_transaction()?;
+
+    for (file_path, participant_id) in file_participant_map {
+        // Get or create participant
+        let db_participant_id = {
+            match tx.query_row(
+                "SELECT id FROM participants WHERE participant_id = ?1",
+                params![participant_id],
+                |row| row.get(0),
+            ) {
+                Ok(id) => id,
+                Err(rusqlite::Error::QueryReturnedNoRows) => {
+                    tx.execute(
+                        "INSERT INTO participants (participant_id) VALUES (?1)",
+                        params![participant_id],
+                    )?;
+                    tx.last_insert_rowid()
+                }
+                Err(e) => return Err(e.into()),
+            }
+        };
+
+        // Update file by path
+        let rows = tx.execute(
+            "UPDATE files SET participant_id = ?1, updated_at = CURRENT_TIMESTAMP WHERE file_path = ?2",
+            params![db_participant_id, file_path],
+        )?;
+
+        updated += rows;
+    }
+
+    tx.commit()?;
+    Ok(updated)
+}
+
 /// Unlink a file from its participant
 pub fn unlink_file(db: &BioVaultDb, file_id: i64) -> Result<FileRecord> {
     let rows = db.conn.execute(
@@ -678,9 +1099,273 @@ pub fn unlink_file(db: &BioVaultDb, file_id: i64) -> Result<FileRecord> {
     get_file_by_id(db, file_id)?.ok_or_else(|| anyhow::anyhow!("File not found after update"))
 }
 
+// File hashing
+
+pub fn hash_file(path: &str) -> Result<String> {
+    let content = fs::read(path)?;
+    Ok(blake3::hash(&content).to_hex().to_string())
+}
+
+// Fast import - add files to queue for background processing
+
+pub fn import_files_as_pending(db: &BioVaultDb, files: Vec<CsvFileImport>) -> Result<ImportResult> {
+    let conn = db.connection();
+    let mut imported = 0;
+    let mut skipped = 0;
+    let mut errors = Vec::new();
+
+    for file_info in files {
+        // Check if file already exists
+        let existing: Option<i64> = conn
+            .query_row(
+                "SELECT id FROM files WHERE file_path = ?1",
+                [&file_info.file_path],
+                |row| row.get(0),
+            )
+            .ok();
+
+        if existing.is_some() {
+            skipped += 1;
+            continue;
+        }
+
+        // Get or create participant
+        let participant_id = if let Some(pid) = &file_info.participant_id {
+            match get_or_create_participant(db, pid) {
+                Ok(id) => Some(id),
+                Err(e) => {
+                    errors.push(format!("Failed to create participant {}: {}", pid, e));
+                    continue;
+                }
+            }
+        } else {
+            None
+        };
+
+        // Get file size
+        let file_size = match std::fs::metadata(&file_info.file_path) {
+            Ok(meta) => Some(meta.len() as i64),
+            Err(_) => None,
+        };
+
+        // Insert file with status='pending' and placeholder hash
+        let result = conn.execute(
+            "INSERT INTO files (participant_id, file_path, file_hash, file_type, file_size, data_type, status, queue_added_at, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'pending', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+            rusqlite::params![
+                participant_id,
+                &file_info.file_path,
+                "pending", // Placeholder hash until processed
+                None::<String>, // file_type
+                file_size,
+                file_info.data_type.as_deref().unwrap_or("Unknown"),
+            ],
+        );
+
+        match result {
+            Ok(_) => {
+                // If this is a genotype file with metadata, create genotype_metadata row
+                let data_type = file_info.data_type.as_deref().unwrap_or("Unknown");
+                if data_type == "Genotype"
+                    && (file_info.source.is_some() || file_info.grch_version.is_some())
+                {
+                    let file_id = conn.last_insert_rowid();
+                    let meta_result = conn.execute(
+                        "INSERT INTO genotype_metadata (file_id, source, grch_version, created_at, updated_at)
+                         VALUES (?1, ?2, ?3, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+                        rusqlite::params![
+                            file_id,
+                            file_info.source.as_deref(),
+                            file_info.grch_version.as_deref(),
+                        ],
+                    );
+                    if let Err(e) = meta_result {
+                        errors.push(format!(
+                            "Failed to create metadata for {}: {}",
+                            file_info.file_path, e
+                        ));
+                    }
+                }
+                imported += 1;
+            }
+            Err(e) => errors.push(format!("Failed to import {}: {}", file_info.file_path, e)),
+        }
+    }
+
+    Ok(ImportResult {
+        imported,
+        skipped,
+        errors,
+        files: Vec::new(), // Files are in pending state, not yet fully imported
+    })
+}
+
+// Queue processing support
+
+#[derive(Debug, Clone)]
+pub struct PendingFile {
+    pub id: i64,
+    pub file_path: String,
+    pub data_type: Option<String>,
+    pub participant_id: Option<i64>,
+}
+
+pub fn get_pending_files(db: &BioVaultDb, limit: usize) -> Result<Vec<PendingFile>> {
+    let conn = db.connection();
+
+    let mut stmt = conn.prepare(
+        "SELECT id, file_path, data_type, participant_id
+         FROM files
+         WHERE status = 'pending'
+         ORDER BY queue_added_at ASC
+         LIMIT ?1",
+    )?;
+
+    let files = stmt
+        .query_map([limit], |row| {
+            Ok(PendingFile {
+                id: row.get(0)?,
+                file_path: row.get(1)?,
+                data_type: row.get(2)?,
+                participant_id: row.get(3)?,
+            })
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+
+    Ok(files)
+}
+
+pub fn update_file_status(
+    db: &BioVaultDb,
+    file_id: i64,
+    status: &str,
+    error: Option<&str>,
+) -> Result<()> {
+    let conn = db.connection();
+
+    conn.execute(
+        "UPDATE files
+         SET status = ?1,
+             processing_error = ?2,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = ?3",
+        rusqlite::params![status, error, file_id],
+    )?;
+
+    Ok(())
+}
+
+pub fn get_genotype_metadata(db: &BioVaultDb, file_id: i64) -> Result<Option<GenotypeMetadata>> {
+    let conn = db.connection();
+
+    let result = conn.query_row(
+        "SELECT source, grch_version, row_count, chromosome_count, inferred_sex
+         FROM genotype_metadata
+         WHERE file_id = ?1",
+        params![file_id],
+        |row| {
+            Ok(GenotypeMetadata {
+                data_type: "Genotype".to_string(),
+                source: row.get(0)?,
+                grch_version: row.get(1)?,
+                row_count: row.get(2)?,
+                chromosome_count: row.get(3)?,
+                inferred_sex: row.get(4)?,
+            })
+        },
+    );
+
+    match result {
+        Ok(meta) => Ok(Some(meta)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+pub fn update_file_from_queue(
+    db: &BioVaultDb,
+    file_id: i64,
+    hash: &str,
+    metadata: Option<&GenotypeMetadata>,
+) -> Result<()> {
+    let conn = db.connection();
+
+    // Update file hash and data type
+    if let Some(meta) = metadata {
+        conn.execute(
+            "UPDATE files
+             SET file_hash = ?1,
+                 data_type = ?2,
+                 status = 'complete',
+                 updated_at = CURRENT_TIMESTAMP
+             WHERE id = ?3",
+            rusqlite::params![hash, meta.data_type, file_id],
+        )?;
+
+        // Insert or update genotype metadata if this is a genotype file
+        if meta.data_type == "Genotype" {
+            conn.execute(
+                "INSERT OR REPLACE INTO genotype_metadata
+                 (file_id, source, grch_version, row_count, chromosome_count, inferred_sex, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+                rusqlite::params![
+                    file_id,
+                    meta.source,
+                    meta.grch_version,
+                    meta.row_count,
+                    meta.chromosome_count,
+                    meta.inferred_sex,
+                ],
+            )?;
+
+            // Update participant's inferred sex if we have it
+            if let Some(ref sex) = meta.inferred_sex {
+                conn.execute(
+                    "UPDATE participants
+                     SET inferred_sex = ?1
+                     WHERE id = (SELECT participant_id FROM files WHERE id = ?2)
+                       AND participant_id IS NOT NULL",
+                    rusqlite::params![sex, file_id],
+                )?;
+            }
+        }
+    } else {
+        // Just update the hash and mark as complete
+        conn.execute(
+            "UPDATE files
+             SET file_hash = ?1,
+                 status = 'complete',
+                 updated_at = CURRENT_TIMESTAMP
+             WHERE id = ?2",
+            rusqlite::params![hash, file_id],
+        )?;
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+/// Calculate SHA256 hash of file (test-only)
+fn calculate_file_hash(path: &str) -> Result<String> {
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0; 8192];
+
+    loop {
+        let bytes_read = file.read(&mut buffer)?;
+        if bytes_read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..bytes_read]);
+    }
+
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use tempfile::TempDir;
 
     #[test]
@@ -714,5 +1399,54 @@ mod tests {
         // Scan only .txt files
         let result = scan(temp.path().to_str().unwrap(), Some(".txt"), false).unwrap();
         assert_eq!(result.total_files, 2);
+    }
+
+    #[test]
+    fn test_extract_id_from_pattern_parent() {
+        // Test {parent} token - extract parent directory name
+        let file_path = "/data/genotype_files/huE922FC/AncestryDNA.txt";
+        let id = extract_id_from_pattern(file_path, "{parent}").unwrap();
+        assert_eq!(id, "huE922FC");
+
+        // Test {dirname} alias
+        let id = extract_id_from_pattern(file_path, "{dirname}").unwrap();
+        assert_eq!(id, "huE922FC");
+
+        // Test {dir} alias
+        let id = extract_id_from_pattern(file_path, "{dir}").unwrap();
+        assert_eq!(id, "huE922FC");
+    }
+
+    #[test]
+    fn test_extract_id_from_pattern_filename() {
+        // Test {filename} token - filename without extension
+        let file_path = "/data/genotype_files/huE922FC/AncestryDNA.txt";
+        let id = extract_id_from_pattern(file_path, "{filename}").unwrap();
+        assert_eq!(id, "AncestryDNA");
+
+        // Test {basename} token - filename with extension
+        let id = extract_id_from_pattern(file_path, "{basename}").unwrap();
+        assert_eq!(id, "AncestryDNA.txt");
+    }
+
+    #[test]
+    fn test_extract_id_from_pattern_legacy() {
+        // Test legacy {id}/* pattern
+        let file_path = "/data/genotype_files/huE922FC/AncestryDNA.txt";
+        let id = extract_id_from_pattern(file_path, "{id}/*").unwrap();
+        assert_eq!(id, "huE922FC");
+    }
+
+    #[test]
+    fn test_extract_id_from_pattern_filename_pattern() {
+        // Test {id} in filename pattern
+        let file_path = "/data/files/123456_sample.txt";
+        let id = extract_id_from_pattern(file_path, "{id}_*").unwrap();
+        assert_eq!(id, "123456");
+
+        // Test alphanumeric IDs
+        let file_path = "/data/files/ABC123_sample.txt";
+        let id = extract_id_from_pattern(file_path, "{id}_*").unwrap();
+        assert_eq!(id, "ABC123");
     }
 }

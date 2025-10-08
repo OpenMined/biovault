@@ -17,10 +17,10 @@ pub async fn execute(email: Option<&str>, quiet: bool) -> Result<()> {
     let biovault_dir = if is_existing_installation {
         // Use existing location
         default_biovault_dir
-    } else if let Ok(_) = env::var("BIOVAULT_HOME") {
+    } else if env::var("BIOVAULT_HOME").is_ok() {
         // Explicitly set via env var
         default_biovault_dir
-    } else if let Ok(_) = env::var("SYFTBOX_DATA_DIR") {
+    } else if env::var("SYFTBOX_DATA_DIR").is_ok() {
         // In SyftBox virtualenv, use that location
         default_biovault_dir
     } else if !quiet && std::io::stdin().is_terminal() {
@@ -291,8 +291,8 @@ fn prompt_for_location() -> Result<PathBuf> {
                 .map_err(|e| anyhow::anyhow!("Input error: {}", e))?;
 
             // Expand ~ to home directory
-            if custom_path.starts_with("~/") {
-                home_dir.join(&custom_path[2..])
+            if let Some(path) = custom_path.strip_prefix("~/") {
+                home_dir.join(path)
             } else if custom_path == "~" {
                 home_dir.clone()
             } else {
@@ -319,8 +319,8 @@ mod tests {
         let data_dir = temp_dir.path().join("syftbox");
         crate::config::set_test_syftbox_data_dir(&data_dir);
 
-        // Initialize with email argument
-        let result = execute(Some("test@example.com"), false).await;
+        // Initialize with email argument (quiet=true for non-interactive test)
+        let result = execute(Some("test@example.com"), true).await;
         assert!(result.is_ok());
 
         // Verify config was created
@@ -394,8 +394,8 @@ mod tests {
         // Directory shouldn't exist initially
         assert!(!biovault_path.exists());
 
-        // Execute init
-        let result = execute(Some("test@example.com"), false).await;
+        // Execute init (quiet=true for non-interactive test)
+        let result = execute(Some("test@example.com"), true).await;
         assert!(result.is_ok());
 
         // Directory should now exist
