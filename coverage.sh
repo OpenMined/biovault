@@ -100,9 +100,11 @@ echo "==> Exporting LCOV (from existing coverage data)"
 cargo llvm-cov report --lcov --output-path "$LCOV_OUT"
 
 echo "==> Coverage summary (sorted by coverage %)"
-cargo llvm-cov report --summary-only | head -n 3
-cargo llvm-cov report --summary-only | tail -n +4 | grep -v "^TOTAL" | sort -t'%' -k3 -n
-cargo llvm-cov report --summary-only | grep "^TOTAL"
+# Capture the summary once to avoid broken pipe errors when truncating output.
+SUMMARY_OUTPUT=$(cargo llvm-cov report --summary-only)
+printf '%s\n' "$SUMMARY_OUTPUT" | head -n 3
+printf '%s\n' "$SUMMARY_OUTPUT" | tail -n +4 | grep -v "^TOTAL" | sort -t'%' -k3 -n
+printf '%s\n' "$SUMMARY_OUTPUT" | grep "^TOTAL"
 
 # Best-effort path to HTML report (cargo-llvm-cov default)
 HTML_DIR="target/llvm-cov/html"

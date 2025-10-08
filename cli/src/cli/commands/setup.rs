@@ -64,23 +64,25 @@ pub async fn execute() -> Result<()> {
 }
 
 fn detect_system() -> SystemType {
-    // Check for Google Colab environment variables
+    let target_os = std::env::consts::OS;
+
+    // Short-circuit for Windows before inspecting other environment hints
+    if target_os == "windows" {
+        return SystemType::Windows;
+    }
+
+    // Check for Google Colab environment variables (Colab runs on Linux)
     if is_google_colab() {
         return SystemType::GoogleColab;
     }
 
     // Detect macOS
-    if std::env::consts::OS == "macos" {
+    if target_os == "macos" {
         return SystemType::MacOs;
     }
 
-    // Detect Windows
-    if std::env::consts::OS == "windows" {
-        return SystemType::Windows;
-    }
-
     // Detect Linux distributions
-    if std::env::consts::OS == "linux" {
+    if target_os == "linux" {
         // Check for apt (Ubuntu/Debian)
         let has_apt = std::process::Command::new("sh")
             .arg("-c")
@@ -1326,6 +1328,7 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
+    #[cfg_attr(target_os = "windows", ignore = "Colab detection is Linux-specific")]
     fn detect_system_prefers_colab_env() {
         // Force Colab-like environment
         std::env::set_var("COLAB_RELEASE_TAG", "1");
@@ -1428,6 +1431,10 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial]
+    #[cfg_attr(
+        target_os = "windows",
+        ignore = "Colab execution path installs Linux tools"
+    )]
     async fn setup_execute_colab_branch() {
         let _guard = SkipInstallGuard::new();
         std::env::set_var("COLAB_RELEASE_TAG", "1");
