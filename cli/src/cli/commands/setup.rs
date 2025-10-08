@@ -1328,6 +1328,7 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
+    #[cfg_attr(target_os = "windows", ignore = "Colab detection is Linux-specific")]
     fn detect_system_prefers_colab_env() {
         // Force Colab-like environment
         std::env::set_var("COLAB_RELEASE_TAG", "1");
@@ -1430,6 +1431,7 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial]
+    #[cfg_attr(target_os = "windows", ignore = "Colab execution path installs Linux tools")]
     async fn setup_execute_colab_branch() {
         let _guard = SkipInstallGuard::new();
         std::env::set_var("COLAB_RELEASE_TAG", "1");
