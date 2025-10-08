@@ -760,6 +760,18 @@ enum ParticipantsCommands {
         #[arg(long, help = "Output format (json|table)", default_value = "table")]
         format: String,
     },
+
+    #[command(about = "Delete multiple participants and remove their files")]
+    DeleteBulk {
+        #[arg(
+            help = "Participant database IDs to delete (comma-separated)",
+            value_delimiter = ','
+        )]
+        ids: Vec<i64>,
+
+        #[arg(long, help = "Output format (json|table)", default_value = "table")]
+        format: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1404,6 +1416,9 @@ async fn async_main_with(cli: Cli) -> Result<()> {
             }
             ParticipantsCommands::Delete { id, format } => {
                 commands::participants::delete(id, format).await?;
+            }
+            ParticipantsCommands::DeleteBulk { ids, format } => {
+                commands::participants::delete_bulk(ids, format).await?;
             }
         },
         Commands::Biobank { command } => match command {

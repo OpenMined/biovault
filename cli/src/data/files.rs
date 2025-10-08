@@ -940,15 +940,12 @@ pub fn list_participants(db: &BioVaultDb) -> Result<Vec<ParticipantRecord>> {
     Ok(participants)
 }
 
-/// Delete a participant and unlink all associated files
-pub fn delete_participant(db: &BioVaultDb, id: i64) -> Result<()> {
-    // First unlink all files (set participant_id to NULL)
-    db.conn.execute(
-        "UPDATE files SET participant_id = NULL WHERE participant_id = ?1",
-        params![id],
-    )?;
+/// Delete a participant and remove all associated files
+pub fn delete_participant(db: &BioVaultDb, id: i64) -> Result<usize> {
+    let files_deleted = db
+        .conn
+        .execute("DELETE FROM files WHERE participant_id = ?1", params![id])?;
 
-    // Then delete the participant
     let rows = db
         .conn
         .execute("DELETE FROM participants WHERE id = ?1", params![id])?;
@@ -957,10 +954,10 @@ pub fn delete_participant(db: &BioVaultDb, id: i64) -> Result<()> {
         anyhow::bail!("Participant with id {} not found", id);
     }
 
-    Ok(())
+    Ok(files_deleted)
 }
 
-/// Delete multiple participants and unlink all associated files
+/// Delete multiple participants and remove all associated files
 pub fn delete_participants_bulk(db: &BioVaultDb, ids: &[i64]) -> Result<usize> {
     if ids.is_empty() {
         return Ok(0);
@@ -968,19 +965,19 @@ pub fn delete_participants_bulk(db: &BioVaultDb, ids: &[i64]) -> Result<usize> {
 
     let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
 
-    // First unlink all files for these participants
-    let unlink_query = format!(
-        "UPDATE files SET participant_id = NULL WHERE participant_id IN ({})",
+    let delete_files_query = format!(
+        "DELETE FROM files WHERE participant_id IN ({})",
         placeholders
     );
     db.conn
-        .execute(&unlink_query, rusqlite::params_from_iter(ids.iter()))?;
+        .execute(&delete_files_query, rusqlite::params_from_iter(ids.iter()))?;
 
-    // Then delete the participants
-    let delete_query = format!("DELETE FROM participants WHERE id IN ({})", placeholders);
-    let rows = db
-        .conn
-        .execute(&delete_query, rusqlite::params_from_iter(ids.iter()))?;
+    let delete_participants_query =
+        format!("DELETE FROM participants WHERE id IN ({})", placeholders);
+    let rows = db.conn.execute(
+        &delete_participants_query,
+        rusqlite::params_from_iter(ids.iter()),
+    )?;
 
     Ok(rows)
 }
