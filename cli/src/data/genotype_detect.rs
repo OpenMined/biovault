@@ -5,6 +5,20 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 
+// Male-specific Y chromosome markers (confirmed in 100% of males, 0% of females)
+const MALE_Y_MARKERS: &[&str] = &[
+    "rs11575897",
+    "rs2534636",
+    "i3000043",
+    "i3000045",
+    "i4000162",
+    "rs13303871",
+    "rs35284970",
+    "rs3895",
+    "i4000120",
+    "i4000121",
+];
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GenotypeMetadata {
     pub data_type: String,
@@ -100,13 +114,19 @@ pub fn analyze_genotype_file(file_path: &str) -> Result<GenotypeMetadata> {
         return Ok(GenotypeMetadata::default());
     }
 
-    // Count total rows and chromosomes by reading the entire file
-    let (row_count, chromosome_count, inferred_sex) = count_rows_and_chromosomes(file_path)?;
+    // First detect source from header (need this for sex inference)
+    let metadata = detect_genotype_metadata(file_path)?;
+    let source = metadata.source.clone();
 
+    // Count total rows and chromosomes by reading the entire file
+    let (row_count, chromosome_count, inferred_sex) =
+        count_rows_and_chromosomes(file_path, source.as_deref())?;
+
+    // Return combined metadata (detected + analyzed)
     Ok(GenotypeMetadata {
-        data_type: "Unknown".to_string(),
-        source: None,
-        grch_version: None,
+        data_type: metadata.data_type,
+        source: metadata.source,
+        grch_version: metadata.grch_version,
         row_count: Some(row_count as i64),
         chromosome_count: Some(chromosome_count as i64),
         inferred_sex: Some(inferred_sex),
@@ -114,12 +134,18 @@ pub fn analyze_genotype_file(file_path: &str) -> Result<GenotypeMetadata> {
 }
 
 /// Count data rows and unique chromosomes in a genotype file
-fn count_rows_and_chromosomes(file_path: &str) -> Result<(usize, usize, String)> {
+fn count_rows_and_chromosomes(
+    file_path: &str,
+    source: Option<&str>,
+) -> Result<(usize, usize, String)> {
     let file = File::open(file_path)?;
     let reader = BufReader::new(file);
 
     let mut row_count = 0;
     let mut chromosomes = HashSet::new();
+    let mut male_markers_called = 0;
+
+    let is_23andme = source.map(|s| s.contains("23andMe")).unwrap_or(false);
 
     for line_result in reader.lines() {
         let line = line_result?;
@@ -134,22 +160,45 @@ fn count_rows_and_chromosomes(file_path: &str) -> Result<(usize, usize, String)>
 
         // Extract chromosome (column 2 in TSV format)
         let parts: Vec<&str> = line.split('\t').collect();
-        if parts.len() >= 2 {
+        if parts.len() >= 4 {
+            let rsid = parts[0].trim();
             let chr = parts[1].trim();
+            let genotype = parts[3].trim();
+
             chromosomes.insert(chr.to_string());
+
+            // For 23andMe files, check male-specific Y markers
+            if is_23andme && (chr == "Y" || chr == "24") && MALE_Y_MARKERS.contains(&rsid) {
+                // Check if genotype is called (not missing)
+                if !genotype.is_empty() && genotype != "--" && genotype != "00" {
+                    male_markers_called += 1;
+                }
+            }
         }
     }
 
-    // Infer sex from chromosome presence
-    let has_x = chromosomes.contains("X") || chromosomes.contains("23");
-    let has_y = chromosomes.contains("Y") || chromosomes.contains("24");
-
-    let inferred_sex = if has_y {
-        "Male".to_string()
-    } else if has_x && !has_y {
-        "Female".to_string()
+    // Infer sex based on source
+    let inferred_sex = if is_23andme {
+        // 23andMe: Use male-specific Y marker logic
+        if male_markers_called >= 5 {
+            "Male".to_string()
+        } else if chromosomes.contains("X") || chromosomes.contains("23") {
+            "Female".to_string()
+        } else {
+            "Unknown".to_string()
+        }
     } else {
-        "Unknown".to_string()
+        // Other sources: Use simple Y chromosome presence
+        let has_x = chromosomes.contains("X") || chromosomes.contains("23");
+        let has_y = chromosomes.contains("Y") || chromosomes.contains("24");
+
+        if has_y {
+            "Male".to_string()
+        } else if has_x && !has_y {
+            "Female".to_string()
+        } else {
+            "Unknown".to_string()
+        }
     };
 
     Ok((row_count, chromosomes.len(), inferred_sex))
