@@ -148,7 +148,8 @@ impl BioVaultDb {
             info!("Migration complete: added queue_added_at column");
         }
 
-        // Remove source column from files if it exists (moved to genotype_metadata)
+        // Drop source and grch_version columns from files table if they exist
+        // (these should only be in genotype_metadata table)
         let source_exists = conn
             .query_row(
                 "SELECT COUNT(*) FROM pragma_table_info('files') WHERE name='source'",
@@ -158,20 +159,6 @@ impl BioVaultDb {
             .map(|count: i32| count > 0)
             .unwrap_or(false);
 
-        if source_exists {
-            info!("Migrating source column from files to genotype_metadata");
-            // First copy data to genotype_metadata
-            conn.execute(
-                "INSERT OR IGNORE INTO genotype_metadata (file_id, source, grch_version)
-                 SELECT id, source, grch_version FROM files WHERE data_type = 'Genotype'",
-                [],
-            )?;
-            // Then drop the column (requires SQLite 3.35.0+)
-            conn.execute("ALTER TABLE files DROP COLUMN source", [])?;
-            info!("Migration complete: moved source to genotype_metadata");
-        }
-
-        // Remove grch_version column from files if it exists (moved to genotype_metadata)
         let grch_exists = conn
             .query_row(
                 "SELECT COUNT(*) FROM pragma_table_info('files') WHERE name='grch_version'",
@@ -181,10 +168,74 @@ impl BioVaultDb {
             .map(|count: i32| count > 0)
             .unwrap_or(false);
 
-        if grch_exists {
-            info!("Removing grch_version column from files");
-            conn.execute("ALTER TABLE files DROP COLUMN grch_version", [])?;
-            info!("Migration complete: removed grch_version from files");
+        if source_exists || grch_exists {
+            info!("Dropping source and grch_version columns from files table");
+
+            // SQLite doesn't support DROP COLUMN directly, need to recreate table
+            conn.execute("BEGIN TRANSACTION", [])?;
+
+            // Create new table without source/grch_version
+            conn.execute(
+                "CREATE TABLE files_new (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    participant_id INTEGER,
+                    file_path TEXT UNIQUE NOT NULL,
+                    file_hash TEXT NOT NULL,
+                    file_type TEXT,
+                    file_size INTEGER,
+                    metadata TEXT,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    data_type TEXT DEFAULT 'Unknown',
+                    status TEXT DEFAULT 'complete',
+                    processing_error TEXT,
+                    queue_added_at DATETIME,
+                    FOREIGN KEY (participant_id) REFERENCES participants(id) ON DELETE SET NULL
+                )",
+                [],
+            )?;
+
+            // Copy data
+            conn.execute(
+                "INSERT INTO files_new (id, participant_id, file_path, file_hash, file_type, file_size,
+                    metadata, created_at, updated_at, data_type, status, processing_error, queue_added_at)
+                SELECT id, participant_id, file_path, file_hash, file_type, file_size,
+                    metadata, created_at, updated_at, data_type, status, processing_error, queue_added_at
+                FROM files",
+                [],
+            )?;
+
+            // Drop old table
+            conn.execute("DROP TABLE files", [])?;
+
+            // Rename new table
+            conn.execute("ALTER TABLE files_new RENAME TO files", [])?;
+
+            // Recreate indexes
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_files_participant_id ON files(participant_id)",
+                [],
+            )?;
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_files_file_type ON files(file_type)",
+                [],
+            )?;
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_files_hash ON files(file_hash)",
+                [],
+            )?;
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_files_data_type ON files(data_type)",
+                [],
+            )?;
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_files_status ON files(status)",
+                [],
+            )?;
+
+            conn.execute("COMMIT", [])?;
+
+            info!("Migration complete: removed source and grch_version columns from files table");
         }
 
         // Create genotype_metadata table if it doesn't exist

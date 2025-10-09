@@ -244,14 +244,18 @@ pub fn import(
 }
 
 /// Import files from CSV with all metadata
-pub fn import_from_csv(db: &BioVaultDb, csv_imports: Vec<CsvFileImport>) -> Result<ImportResult> {
+pub fn import_from_csv(
+    db: &BioVaultDb,
+    csv_imports: Vec<CsvFileImport>,
+    run_analysis: bool,
+) -> Result<ImportResult> {
     let mut imported = 0;
     let mut skipped = 0;
     let mut errors = Vec::new();
     let mut imported_file_ids = Vec::new();
 
     for csv_row in csv_imports {
-        match import_file_with_metadata(db, &csv_row) {
+        match import_file_with_metadata(db, &csv_row, run_analysis) {
             Ok(Some(file_id)) => {
                 imported += 1;
                 imported_file_ids.push(file_id);
@@ -282,7 +286,11 @@ pub fn import_from_csv(db: &BioVaultDb, csv_imports: Vec<CsvFileImport>) -> Resu
 }
 
 /// Import single file with full metadata from CSV
-fn import_file_with_metadata(db: &BioVaultDb, csv_row: &CsvFileImport) -> Result<Option<i64>> {
+fn import_file_with_metadata(
+    db: &BioVaultDb,
+    csv_row: &CsvFileImport,
+    run_analysis: bool,
+) -> Result<Option<i64>> {
     use crate::cli::download_cache::calculate_blake3;
     use std::path::Path;
 
@@ -358,51 +366,82 @@ fn import_file_with_metadata(db: &BioVaultDb, csv_row: &CsvFileImport) -> Result
     } else {
         // Insert new file
         db.conn.execute(
-            "INSERT INTO files (participant_id, file_path, file_hash, file_type, file_size, data_type, source, grch_version) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![
-                db_participant_id,
-                file_path,
-                file_hash,
-                file_type,
-                file_size as i64,
-                csv_row.data_type,
-                csv_row.source,
-                csv_row.grch_version
-            ],
-        )?;
+        "INSERT INTO files (participant_id, file_path, file_hash, file_type, file_size, data_type, source, grch_version) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            db_participant_id,
+            file_path,
+            file_hash,
+            file_type,
+            file_size as i64,
+            csv_row.data_type,
+            csv_row.source,
+            csv_row.grch_version
+        ],
+    )?;
         db.conn.last_insert_rowid()
     };
 
-    // Save genotype metadata if provided and data_type is Genotype
-    if csv_row.data_type.as_deref() == Some("Genotype")
-        && (csv_row.row_count.is_some() || csv_row.chromosome_count.is_some())
-    {
-        // Delete existing metadata if any
-        db.conn.execute(
-            "DELETE FROM genotype_metadata WHERE file_id = ?1",
-            params![file_id],
-        )?;
+    // Build metadata snapshot from CSV values
+    let mut metadata = GenotypeMetadata {
+        data_type: csv_row
+            .data_type
+            .clone()
+            .unwrap_or_else(|| "Unknown".to_string()),
+        source: csv_row.source.clone(),
+        grch_version: csv_row.grch_version.clone(),
+        row_count: csv_row.row_count,
+        chromosome_count: csv_row.chromosome_count,
+        inferred_sex: csv_row.inferred_sex.clone(),
+    };
 
-        // Insert new metadata
-        db.conn.execute(
-                "INSERT INTO genotype_metadata (file_id, source, grch_version, row_count, chromosome_count) VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![
-                    file_id,
-                    csv_row.source,
-                    csv_row.grch_version,
-                    csv_row.row_count,
-                    csv_row.chromosome_count
-                ],
-            )?;
+    // Detect genotype metadata when not provided or still unknown
+    if run_analysis {
+        match crate::data::detect_genotype_metadata(file_path) {
+            Ok(detected) => {
+                if metadata.data_type == "Unknown" {
+                    metadata.data_type = detected.data_type;
+                }
+                if metadata.source.is_none() {
+                    metadata.source = detected.source;
+                }
+                if metadata.grch_version.is_none() {
+                    metadata.grch_version = detected.grch_version;
+                }
+            }
+            Err(e) => {
+                eprintln!(
+                    "Warning: Failed to detect metadata for {}: {}",
+                    file_path, e
+                );
+            }
+        }
+
+        if metadata.data_type == "Genotype"
+            && (metadata.row_count.is_none()
+                || metadata.chromosome_count.is_none()
+                || metadata.inferred_sex.is_none())
+        {
+            match crate::data::analyze_genotype_file(file_path) {
+                Ok(analysis) => {
+                    if metadata.row_count.is_none() {
+                        metadata.row_count = analysis.row_count;
+                    }
+                    if metadata.chromosome_count.is_none() {
+                        metadata.chromosome_count = analysis.chromosome_count;
+                    }
+                    if metadata.inferred_sex.is_none() {
+                        metadata.inferred_sex = analysis.inferred_sex;
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Warning: Failed to analyze {}: {}", file_path, e);
+                }
+            }
+        }
     }
 
-    // Update participant inferred_sex if provided
-    if let (Some(pid), Some(sex)) = (db_participant_id, &csv_row.inferred_sex) {
-        db.conn.execute(
-            "UPDATE participants SET inferred_sex = ?1 WHERE id = ?2",
-            params![sex, pid],
-        )?;
-    }
+    // Persist metadata using shared queue update helper so genotype_metadata stays in sync
+    update_file_from_queue(db, file_id, &file_hash, Some(&metadata))?;
 
     Ok(Some(file_id))
 }
