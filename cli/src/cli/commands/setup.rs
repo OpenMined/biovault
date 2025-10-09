@@ -1092,8 +1092,9 @@ fn print_windows_manual_instructions() {
     println!(
         "Docker: Download Docker Desktop from https://www.docker.com/products/docker-desktop/"
     );
-    println!("Nextflow: Download from https://www.nextflow.io/ or use PowerShell script");
+    println!("Nextflow: Use WSL or Docker - no native Windows support");
     println!("SyftBox: Download from https://github.com/OpenMined/syftbox/releases/latest");
+    println!("UV: Run 'winget install --id=astral-sh.uv -e' or use PowerShell installer from https://docs.astral.sh/uv/");
 }
 
 // Map common WinGet package IDs to Chocolatey package names for fallback
@@ -1102,6 +1103,9 @@ fn map_winget_pkg_to_choco(pkg: &str) -> &'static str {
         // Java/OpenJDK
         // WinGet: Microsoft.OpenJDK => Chocolatey: openjdk (generic)
         "microsoft.openjdk" => "openjdk",
+        // UV - Python package installer
+        // WinGet: astral-sh.uv => Chocolatey doesn't have UV yet, so we return empty
+        "astral-sh.uv" => "",
         // Add other mappings here as needed
         _ => "",
     }
@@ -1284,16 +1288,40 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn skip_install_commands_env_behavior() {
-        env::remove_var("BIOVAULT_SKIP_INSTALLS");
-        assert!(!super::skip_install_commands());
+        // Save original state to restore later
+        let original = env::var("BIOVAULT_SKIP_INSTALLS").ok();
 
+        // Test 1: When not set, should return false
+        env::remove_var("BIOVAULT_SKIP_INSTALLS");
+        assert!(
+            !super::skip_install_commands(),
+            "Expected false when env var not set"
+        );
+
+        // Test 2: When set to "1", should return true
         env::set_var("BIOVAULT_SKIP_INSTALLS", "1");
-        assert!(super::skip_install_commands());
+        assert!(
+            super::skip_install_commands(),
+            "Expected true when env var set to '1'"
+        );
 
+        // Test 3: When set to "0", should return false
         env::set_var("BIOVAULT_SKIP_INSTALLS", "0");
-        assert!(!super::skip_install_commands());
+        let result = super::skip_install_commands();
+        let actual_value =
+            env::var("BIOVAULT_SKIP_INSTALLS").unwrap_or_else(|_| "NOT_SET".to_string());
+        assert!(
+            !result,
+            "Expected false when env var set to '0', but got true. Actual env value: '{}'",
+            actual_value
+        );
 
-        env::remove_var("BIOVAULT_SKIP_INSTALLS");
+        // Restore original state
+        if let Some(val) = original {
+            env::set_var("BIOVAULT_SKIP_INSTALLS", val);
+        } else {
+            env::remove_var("BIOVAULT_SKIP_INSTALLS");
+        }
     }
 
     #[test]
