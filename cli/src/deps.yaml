@@ -159,5 +159,5 @@ dependencies:
         verify_command: uv --version
       windows:
         install_commands:
-          - powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+          - winget install --id=astral-sh.uv -e --silent --accept-package-agreements --accept-source-agreements
         verify_command: uv --version

@@ -1092,9 +1092,9 @@ fn print_windows_manual_instructions() {
     println!(
         "Docker: Download Docker Desktop from https://www.docker.com/products/docker-desktop/"
     );
-    println!("Nextflow: Download from https://www.nextflow.io/ or use PowerShell script");
+    println!("Nextflow: Use WSL or Docker - no native Windows support");
     println!("SyftBox: Download from https://github.com/OpenMined/syftbox/releases/latest");
-    println!("UV: Run 'powershell -c \"irm https://astral.sh/uv/install.ps1 | iex\"'");
+    println!("UV: Run 'winget install --id=astral-sh.uv -e' or use PowerShell installer from https://docs.astral.sh/uv/");
 }
 
 // Map common WinGet package IDs to Chocolatey package names for fallback
@@ -1103,6 +1103,9 @@ fn map_winget_pkg_to_choco(pkg: &str) -> &'static str {
         // Java/OpenJDK
         // WinGet: Microsoft.OpenJDK => Chocolatey: openjdk (generic)
         "microsoft.openjdk" => "openjdk",
+        // UV - Python package installer
+        // WinGet: astral-sh.uv => Chocolatey doesn't have UV yet, so we return empty
+        "astral-sh.uv" => "",
         // Add other mappings here as needed
         _ => "",
     }
