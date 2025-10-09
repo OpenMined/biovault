@@ -96,10 +96,8 @@ dependencies:
           - sudo chmod +x /usr/local/bin/nextflow
         verify_command: nextflow -version
       windows:
-        install_commands:
-          - powershell -Command "Invoke-WebRequest -Uri 'https://github.com/nextflow-io/nextflow/releases/latest/download/nextflow' -OutFile '$env:USERPROFILE\nextflow.exe'"
-          - powershell -Command "[Environment]::SetEnvironmentVariable('PATH', `\"$env:USERPROFILE;$env:PATH`\", 'Process')"
-        verify_command: nextflow -version
+        skip: true
+        skip_reason: "Nextflow doesn't have a Windows CLI installer. Please use WSL or Docker to run Nextflow on Windows"
   
   - name: syftbox
     check_running: false
@@ -161,5 +159,5 @@ dependencies:
         verify_command: uv --version
       windows:
         install_commands:
-          - powershell -ExecutionPolicy Bypass -c "irm https://astral.sh/uv/install.ps1 | iex"
+          - powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
         verify_command: uv --version
