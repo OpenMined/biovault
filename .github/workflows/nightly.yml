@@ -4,10 +4,6 @@ on:
   schedule:
     # Run at 2 AM UTC every day
     - cron: '0 2 * * *'
-  # TEMPORARY: Enable Windows and Colab tests on PRs to verify UV installation
-  pull_request:
-    branches:
-      - main
   # Allow manual trigger for testing with per-platform toggles
   workflow_dispatch:
     inputs:
@@ -35,8 +31,7 @@ on:
 jobs:
   colab-test:
     name: Setup Test - Colab
-    # TEMPORARY: Also run on PRs to main to verify UV installation
-    if: ${{ github.event_name == 'schedule' || github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.run_colab_test) }}
+    if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.run_colab_test) }}
     runs-on: ubuntu-latest
 
     steps:
@@ -187,8 +182,7 @@ jobs:
 
   windows-installation-test:
     name: Setup Test - Windows
-    # TEMPORARY: Also run on PRs to main to verify UV installation
-    if: ${{ github.event_name == 'schedule' || github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.run_windows_test) }}
+    if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.run_windows_test) }}
     runs-on: windows-latest
     steps:
       - name: Checkout code
