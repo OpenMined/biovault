@@ -98,7 +98,7 @@ dependencies:
       windows:
         install_commands:
           - powershell -Command "Invoke-WebRequest -Uri 'https://github.com/nextflow-io/nextflow/releases/latest/download/nextflow' -OutFile '$env:USERPROFILE\nextflow.exe'"
-          - powershell -Command "[Environment]::SetEnvironmentVariable('PATH', \"$env:USERPROFILE;$env:PATH\", 'Process')"
+          - powershell -Command "[Environment]::SetEnvironmentVariable('PATH', `\"$env:USERPROFILE;$env:PATH`\", 'Process')"
         verify_command: nextflow -version
   
   - name: syftbox
@@ -140,8 +140,9 @@ dependencies:
     environments:
       google_colab:
         install_commands:
-          - curl -LsSf https://astral.sh/uv/install.sh | sh
-          - export PATH="$HOME/.cargo/bin:$PATH"
+          # Check if uv is already installed (real Colab has it pre-installed)
+          - which uv || (curl -LsSf https://astral.sh/uv/install.sh | sh && mv $HOME/.cargo/bin/uv /usr/local/bin/uv 2>/dev/null || mv $HOME/.local/bin/uv /usr/local/bin/uv 2>/dev/null || true)
+          - chmod +x /usr/local/bin/uv 2>/dev/null || true
         verify_command: uv --version
       ubuntu:
         install_commands:
@@ -160,5 +161,5 @@ dependencies:
         verify_command: uv --version
       windows:
         install_commands:
-          - powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
+          - powershell -ExecutionPolicy Bypass -c "irm https://astral.sh/uv/install.ps1 | iex"
         verify_command: uv --version

@@ -28,6 +28,12 @@ RUN apt-get update && apt-get install -y \
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 ENV PATH="/root/.cargo/bin:${PATH}"
 
+# Install uv (Python package manager) to match real Colab environment
+# Real Colab has uv 0.9.0 pre-installed at /usr/local/bin/uv
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh && \
+    mv /root/.cargo/bin/uv /usr/local/bin/uv && \
+    chmod +x /usr/local/bin/uv
+
 # Create working directory
 WORKDIR /workspace
 

@@ -1285,16 +1285,27 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn skip_install_commands_env_behavior() {
+        // Save original state to restore later
+        let original = env::var("BIOVAULT_SKIP_INSTALLS").ok();
+
+        // Test 1: When not set, should return false
         env::remove_var("BIOVAULT_SKIP_INSTALLS");
         assert!(!super::skip_install_commands());
 
+        // Test 2: When set to "1", should return true
         env::set_var("BIOVAULT_SKIP_INSTALLS", "1");
         assert!(super::skip_install_commands());
 
+        // Test 3: When set to "0", should return false
         env::set_var("BIOVAULT_SKIP_INSTALLS", "0");
         assert!(!super::skip_install_commands());
 
-        env::remove_var("BIOVAULT_SKIP_INSTALLS");
+        // Restore original state
+        if let Some(val) = original {
+            env::set_var("BIOVAULT_SKIP_INSTALLS", val);
+        } else {
+            env::remove_var("BIOVAULT_SKIP_INSTALLS");
+        }
     }
 
     #[test]
