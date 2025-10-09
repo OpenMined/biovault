@@ -225,7 +225,7 @@ pub async fn execute(json: bool) -> Result<()> {
             results.push(DependencyResult {
                 name: dep.name.clone(),
                 found: true,
-                path: Some(uv_path),
+                path: Some(uv_path.clone()),
                 version: get_uv_version(&uv_path),
                 running: None,
                 skipped: false,
