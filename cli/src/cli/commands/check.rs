@@ -145,7 +145,13 @@ pub async fn execute(json: bool) -> Result<()> {
             java_brew_path = check_java_in_brew_not_in_path();
         }
 
-        if binary_path.is_none() && java_brew_path.is_none() {
+        // Special handling for UV on Windows (WinGet installs but PATH needs refresh)
+        let mut uv_windows_path: Option<String> = None;
+        if binary_path.is_none() && dep.name == "uv" && std::env::consts::OS == "windows" {
+            uv_windows_path = check_uv_in_windows_not_in_path();
+        }
+
+        if binary_path.is_none() && java_brew_path.is_none() && uv_windows_path.is_none() {
             all_found = false;
             if !json {
                 println!("❌ NOT FOUND");
@@ -197,6 +203,30 @@ pub async fn execute(json: bool) -> Result<()> {
                 found: true,
                 path: Some(format!("{}/java", brew_path)),
                 version: None,
+                running: None,
+                skipped: false,
+                skip_reason: None,
+            });
+        } else if let Some(uv_path) = uv_windows_path {
+            // UV is installed on Windows but not in PATH
+            if !json {
+                println!("⚠️  Found (not in PATH)");
+                println!("  UV is installed at: {}", uv_path);
+                println!("  But it's not available in your PATH.");
+                println!("  To make it available:");
+                println!("  Option 1: Open a new Command Prompt or PowerShell window");
+                println!("  Option 2: Manually refresh your PATH:");
+                println!("    PowerShell: $env:Path = [System.Environment]::GetEnvironmentVariable(\"Path\",\"User\")");
+                if !is_ci {
+                    println!("  Option 3: Run 'bv setup' again after restarting your terminal");
+                }
+                println!();
+            }
+            results.push(DependencyResult {
+                name: dep.name.clone(),
+                found: true,
+                path: Some(uv_path),
+                version: get_uv_version(&uv_path),
                 running: None,
                 skipped: false,
                 skip_reason: None,
@@ -551,6 +581,46 @@ fn check_java_in_brew_not_in_path() -> Option<String> {
     } else {
         None
     }
+}
+
+fn check_uv_in_windows_not_in_path() -> Option<String> {
+    // Check common UV installation locations on Windows
+    let possible_locations = [
+        // WinGet typically installs here
+        env::var("LOCALAPPDATA")
+            .ok()
+            .map(|p| format!("{}\\Programs\\uv\\uv.exe", p)),
+        // Alternative WinGet location
+        env::var("LOCALAPPDATA")
+            .ok()
+            .map(|p| format!("{}\\uv\\bin\\uv.exe", p)),
+        // Cargo install location
+        env::var("USERPROFILE")
+            .ok()
+            .map(|p| format!("{}\\.cargo\\bin\\uv.exe", p)),
+        // Direct installer location
+        env::var("USERPROFILE")
+            .ok()
+            .map(|p| format!("{}\\.local\\bin\\uv.exe", p)),
+    ];
+
+    for location in possible_locations.iter().flatten() {
+        if std::path::Path::new(location).exists() {
+            return Some(location.clone());
+        }
+    }
+
+    None
+}
+
+fn get_uv_version(uv_path: &str) -> Option<String> {
+    let output = Command::new(uv_path).arg("--version").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let version_str = String::from_utf8_lossy(&output.stdout);
+    // UV version output format: "uv 0.4.29"
+    version_str.split_whitespace().nth(1).map(|v| v.to_string())
 }
 
 #[cfg(test)]
