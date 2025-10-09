@@ -1184,6 +1184,12 @@ pub fn import_files_as_pending(db: &BioVaultDb, files: Vec<CsvFileImport>) -> Re
             Err(_) => None,
         };
 
+        // Extract file type (extension)
+        let file_type = Path::new(&file_info.file_path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| format!(".{}", e));
+
         // Insert file with status='pending' and placeholder hash
         let result = conn.execute(
             "INSERT INTO files (participant_id, file_path, file_hash, file_type, file_size, data_type, status, queue_added_at, created_at, updated_at)
@@ -1192,7 +1198,7 @@ pub fn import_files_as_pending(db: &BioVaultDb, files: Vec<CsvFileImport>) -> Re
                 participant_id,
                 &file_info.file_path,
                 "pending", // Placeholder hash until processed
-                None::<String>, // file_type
+                file_type,
                 file_size,
                 file_info.data_type.as_deref().unwrap_or("Unknown"),
             ],
