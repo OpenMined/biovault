@@ -594,6 +594,10 @@ fn check_uv_in_windows_not_in_path() -> Option<String> {
         env::var("LOCALAPPDATA")
             .ok()
             .map(|p| format!("{}\\uv\\bin\\uv.exe", p)),
+        // WinGet may also install to ProgramFiles
+        env::var("PROGRAMFILES")
+            .ok()
+            .map(|p| format!("{}\\uv\\uv.exe", p)),
         // Cargo install location
         env::var("USERPROFILE")
             .ok()
@@ -602,6 +606,10 @@ fn check_uv_in_windows_not_in_path() -> Option<String> {
         env::var("USERPROFILE")
             .ok()
             .map(|p| format!("{}\\.local\\bin\\uv.exe", p)),
+        // Another common WinGet location (user-specific)
+        env::var("LOCALAPPDATA")
+            .ok()
+            .map(|p| format!("{}\\Microsoft\\WinGet\\Packages\\astral-sh.uv_Microsoft.Winget.Source_8wekyb3d8bbwe\\uv.exe", p)),
     ];
 
     for location in possible_locations.iter().flatten() {

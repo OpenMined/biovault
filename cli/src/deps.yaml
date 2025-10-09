@@ -160,6 +160,5 @@ dependencies:
       windows:
         install_commands:
           - winget install --id=astral-sh.uv -e --silent --accept-package-agreements --accept-source-agreements
-        # Skip actual UV binary check on Windows - requires PATH refresh after WinGet install
-        # Just report success since WinGet completed
-        verify_command: Write-Host "UV installed (PATH refresh required)"
+        # Check if UV can be found - this will fail initially, triggering installation
+        verify_command: if (Get-Command uv -ErrorAction SilentlyContinue) { exit 0 } elseif (Test-Path "$env:LOCALAPPDATA\Programs\uv\uv.exe") { exit 0 } elseif (Test-Path "$env:LOCALAPPDATA\uv\bin\uv.exe") { exit 0 } elseif (Test-Path "$env:USERPROFILE\.cargo\bin\uv.exe") { exit 0 } else { exit 1 }
