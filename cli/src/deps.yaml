@@ -129,3 +129,36 @@ dependencies:
       windows:
         skip: true
         skip_reason: "SyftBox for Windows requires manual installation from GitHub releases"
+
+  - name: uv
+    check_running: false
+    install_instructions: |
+      Install via curl: curl -LsSf https://astral.sh/uv/install.sh | sh
+      Or via PowerShell: powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
+    description: Fast Python package installer and virtualenv manager
+    website: https://astral.sh/uv
+    environments:
+      google_colab:
+        install_commands:
+          - curl -LsSf https://astral.sh/uv/install.sh | sh
+          - export PATH="$HOME/.cargo/bin:$PATH"
+        verify_command: uv --version
+      ubuntu:
+        install_commands:
+          - curl -LsSf https://astral.sh/uv/install.sh | sh
+          - export PATH="$HOME/.cargo/bin:$PATH"
+        verify_command: uv --version
+      macos:
+        install_commands:
+          - curl -LsSf https://astral.sh/uv/install.sh | sh
+          - export PATH="$HOME/.cargo/bin:$PATH"
+        verify_command: uv --version
+      arch:
+        install_commands:
+          - curl -LsSf https://astral.sh/uv/install.sh | sh
+          - export PATH="$HOME/.cargo/bin:$PATH"
+        verify_command: uv --version
+      windows:
+        install_commands:
+          - powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
+        verify_command: uv --version

@@ -559,6 +559,18 @@ enum Commands {
         command: DaemonCommands,
     },
 
+    #[command(about = "Manage Python versions via UV")]
+    Python {
+        #[command(subcommand)]
+        command: PythonCommands,
+    },
+
+    #[command(about = "Manage Jupyter Lab for projects")]
+    Jupyter {
+        #[command(subcommand)]
+        command: JupyterCommands,
+    },
+
     #[command(
         name = "hard-reset",
         about = "Delete all BioVault data and configuration (DESTRUCTIVE)"
@@ -1197,6 +1209,63 @@ enum MessageCommands {
     },
 }
 
+#[derive(Subcommand)]
+enum PythonCommands {
+    #[command(about = "Install a Python version via UV")]
+    Install {
+        #[arg(help = "Python version (e.g., 3.12, 3.11.6)")]
+        version: String,
+    },
+
+    #[command(about = "List available or installed Python versions")]
+    List {
+        #[arg(long, help = "Show only installed versions")]
+        installed: bool,
+    },
+
+    #[command(about = "Show default Python version")]
+    Show,
+
+    #[command(about = "Uninstall a UV-managed Python version")]
+    Uninstall {
+        #[arg(help = "Python version to uninstall")]
+        version: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum JupyterCommands {
+    #[command(about = "Start Jupyter Lab for a project")]
+    Start {
+        #[arg(help = "Project directory path")]
+        project_path: String,
+
+        #[arg(long, default_value = "3.12", help = "Python version to use")]
+        python: String,
+    },
+
+    #[command(about = "Stop Jupyter Lab")]
+    Stop {
+        #[arg(help = "Project directory path")]
+        project_path: String,
+    },
+
+    #[command(about = "Reset virtualenv and restart Jupyter")]
+    Reset {
+        #[arg(help = "Project directory path")]
+        project_path: String,
+
+        #[arg(long, default_value = "3.12", help = "Python version to use")]
+        python: String,
+    },
+
+    #[command(about = "Show Jupyter status for projects")]
+    Status,
+
+    #[command(about = "List projects with Jupyter virtualenvs")]
+    List,
+}
+
 fn main() -> Result<()> {
     // Set up panic hook to log crashes
     std::panic::set_hook(Box::new(|panic_info| {
@@ -1750,6 +1819,43 @@ async fn async_main_with(cli: Cli) -> Result<()> {
                 }
             }
         }
+        Commands::Python { command } => match command {
+            PythonCommands::Install { version } => {
+                commands::python::install(&version).await?;
+            }
+            PythonCommands::List { installed } => {
+                commands::python::list(installed).await?;
+            }
+            PythonCommands::Show => {
+                commands::python::show().await?;
+            }
+            PythonCommands::Uninstall { version } => {
+                commands::python::uninstall(&version).await?;
+            }
+        },
+        Commands::Jupyter { command } => match command {
+            JupyterCommands::Start {
+                project_path,
+                python,
+            } => {
+                commands::jupyter::start(&project_path, &python).await?;
+            }
+            JupyterCommands::Stop { project_path } => {
+                commands::jupyter::stop(&project_path).await?;
+            }
+            JupyterCommands::Reset {
+                project_path,
+                python,
+            } => {
+                commands::jupyter::reset(&project_path, &python).await?;
+            }
+            JupyterCommands::Status => {
+                commands::jupyter::status().await?;
+            }
+            JupyterCommands::List => {
+                commands::jupyter::list().await?;
+            }
+        },
         Commands::HardReset { ignore_warning } => {
             commands::hard_reset::execute(ignore_warning).await?;
         }

@@ -102,6 +102,22 @@ CREATE TABLE IF NOT EXISTS projects (
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
+-- NEW: Development Environments (virtualenvs for Jupyter, etc.)
+CREATE TABLE IF NOT EXISTS dev_envs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_path TEXT UNIQUE NOT NULL,
+    python_version TEXT NOT NULL,
+    env_type TEXT DEFAULT 'jupyter',
+    jupyter_installed INTEGER DEFAULT 0,
+    jupyter_port INTEGER,
+    jupyter_pid INTEGER,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    last_used_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_dev_envs_project_path ON dev_envs(project_path);
+CREATE INDEX IF NOT EXISTS idx_dev_envs_env_type ON dev_envs(env_type);
+
 -- NEW: Runs (Desktop-only)
 CREATE TABLE IF NOT EXISTS runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
