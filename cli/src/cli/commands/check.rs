@@ -728,6 +728,8 @@ mod tests {
         // nextflow and syftbox stubs
         make_exec("nextflow", "exit 0");
         make_exec("syftbox", "exit 0");
+        // uv stub
+        make_exec("uv", "exit 0");
 
         // Prepend temp dir to PATH
         let old_path = std::env::var("PATH").unwrap_or_default();
@@ -760,10 +762,11 @@ mod tests {
             p
         };
 
-        // Provide java and nextflow and syftbox present
+        // Provide java and nextflow and syftbox and uv present
         make_exec("java", "echo 'openjdk version \"21\"' 1>&2");
         make_exec("nextflow", "exit 0");
         make_exec("syftbox", "exit 0");
+        make_exec("uv", "exit 0");
         // docker exists but 'info' fails
         make_exec("docker", "[ \"$1\" = \"info\" ] && exit 1; exit 0");
 
