@@ -391,20 +391,41 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    struct TestEnv {
+        _tmp: TempDir,
+    }
+
+    impl TestEnv {
+        fn new() -> Self {
+            let tmp = TempDir::new().unwrap();
+            crate::config::set_test_biovault_home(tmp.path());
+            Self { _tmp: tmp }
+        }
+    }
+
+    impl Drop for TestEnv {
+        fn drop(&mut self) {
+            crate::config::clear_test_biovault_home();
+        }
+    }
+
     #[tokio::test]
     async fn test_status_does_not_fail() {
+        let _env = TestEnv::new();
         let result = status().await;
         assert!(result.is_ok());
     }
 
     #[tokio::test]
     async fn test_list_does_not_fail() {
+        let _env = TestEnv::new();
         let result = list().await;
         assert!(result.is_ok());
     }
 
     #[tokio::test]
     async fn test_start_with_nonexistent_dir() {
+        let _env = TestEnv::new();
         let result = start("/nonexistent/path", "3.12").await;
         assert!(result.is_err());
     }
@@ -412,6 +433,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires UV and creates actual virtualenv"]
     async fn test_start_and_reset() {
+        let _env = TestEnv::new();
         let tmp = TempDir::new().unwrap();
         let project_path = tmp.path().to_str().unwrap();
 
