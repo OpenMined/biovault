@@ -380,7 +380,11 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn skip_update_checks_env_handling() {
+        // Save original state
+        let original = std::env::var("BIOVAULT_SKIP_UPDATE_CHECK").ok();
+
         std::env::remove_var("BIOVAULT_SKIP_UPDATE_CHECK");
         assert!(!skip_update_checks());
 
@@ -390,27 +394,53 @@ mod tests {
         std::env::set_var("BIOVAULT_SKIP_UPDATE_CHECK", "0");
         assert!(!skip_update_checks());
 
-        std::env::remove_var("BIOVAULT_SKIP_UPDATE_CHECK");
+        // Restore original state
+        match original {
+            Some(v) => std::env::set_var("BIOVAULT_SKIP_UPDATE_CHECK", v),
+            None => std::env::remove_var("BIOVAULT_SKIP_UPDATE_CHECK"),
+        }
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn check_and_notify_random_respects_skip_env() {
+        let original = std::env::var("BIOVAULT_SKIP_UPDATE_CHECK").ok();
+
         std::env::set_var("BIOVAULT_SKIP_UPDATE_CHECK", "1");
         check_and_notify_random().await.unwrap();
-        std::env::remove_var("BIOVAULT_SKIP_UPDATE_CHECK");
+
+        match original {
+            Some(v) => std::env::set_var("BIOVAULT_SKIP_UPDATE_CHECK", v),
+            None => std::env::remove_var("BIOVAULT_SKIP_UPDATE_CHECK"),
+        }
     }
 
     #[test]
+    #[serial_test::serial]
     fn test_skip_update_checks_env_set() {
+        let original = std::env::var("BIOVAULT_SKIP_UPDATE_CHECK").ok();
+
         std::env::set_var("BIOVAULT_SKIP_UPDATE_CHECK", "1");
         assert!(skip_update_checks());
-        std::env::remove_var("BIOVAULT_SKIP_UPDATE_CHECK");
+
+        match original {
+            Some(v) => std::env::set_var("BIOVAULT_SKIP_UPDATE_CHECK", v),
+            None => std::env::remove_var("BIOVAULT_SKIP_UPDATE_CHECK"),
+        }
     }
 
     #[test]
+    #[serial_test::serial]
     fn test_skip_update_checks_env_not_set() {
+        let original = std::env::var("BIOVAULT_SKIP_UPDATE_CHECK").ok();
+
         std::env::remove_var("BIOVAULT_SKIP_UPDATE_CHECK");
         assert!(!skip_update_checks());
+
+        match original {
+            Some(v) => std::env::set_var("BIOVAULT_SKIP_UPDATE_CHECK", v),
+            None => std::env::remove_var("BIOVAULT_SKIP_UPDATE_CHECK"),
+        }
     }
 
     #[test]
