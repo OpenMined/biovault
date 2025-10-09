@@ -278,6 +278,38 @@ impl BioVaultDb {
             info!("Migration complete: added inferred_sex column");
         }
 
+        // Add jupyter_port column to dev_envs if it doesn't exist
+        let port_exists = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('dev_envs') WHERE name='jupyter_port'",
+                [],
+                |row| row.get(0),
+            )
+            .map(|count: i32| count > 0)
+            .unwrap_or(false);
+
+        if !port_exists {
+            info!("Adding jupyter_port column to dev_envs table");
+            conn.execute("ALTER TABLE dev_envs ADD COLUMN jupyter_port INTEGER", [])?;
+            info!("Migration complete: added jupyter_port column");
+        }
+
+        // Add jupyter_pid column to dev_envs if it doesn't exist
+        let pid_exists = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('dev_envs') WHERE name='jupyter_pid'",
+                [],
+                |row| row.get(0),
+            )
+            .map(|count: i32| count > 0)
+            .unwrap_or(false);
+
+        if !pid_exists {
+            info!("Adding jupyter_pid column to dev_envs table");
+            conn.execute("ALTER TABLE dev_envs ADD COLUMN jupyter_pid INTEGER", [])?;
+            info!("Migration complete: added jupyter_pid column");
+        }
+
         Ok(())
     }
 
