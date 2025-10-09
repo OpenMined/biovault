@@ -1094,6 +1094,7 @@ fn print_windows_manual_instructions() {
     );
     println!("Nextflow: Download from https://www.nextflow.io/ or use PowerShell script");
     println!("SyftBox: Download from https://github.com/OpenMined/syftbox/releases/latest");
+    println!("UV: Run 'powershell -c \"irm https://astral.sh/uv/install.ps1 | iex\"'");
 }
 
 // Map common WinGet package IDs to Chocolatey package names for fallback
