@@ -119,12 +119,14 @@ pub fn analyze_genotype_file(file_path: &str) -> Result<GenotypeMetadata> {
     let source = metadata.source.clone();
 
     // Count total rows and chromosomes by reading the entire file
-    let (row_count, chromosome_count, inferred_sex) = count_rows_and_chromosomes(file_path, source.as_deref())?;
+    let (row_count, chromosome_count, inferred_sex) =
+        count_rows_and_chromosomes(file_path, source.as_deref())?;
 
+    // Return combined metadata (detected + analyzed)
     Ok(GenotypeMetadata {
-        data_type: "Unknown".to_string(),
-        source: None,
-        grch_version: None,
+        data_type: metadata.data_type,
+        source: metadata.source,
+        grch_version: metadata.grch_version,
         row_count: Some(row_count as i64),
         chromosome_count: Some(chromosome_count as i64),
         inferred_sex: Some(inferred_sex),
@@ -132,7 +134,10 @@ pub fn analyze_genotype_file(file_path: &str) -> Result<GenotypeMetadata> {
 }
 
 /// Count data rows and unique chromosomes in a genotype file
-fn count_rows_and_chromosomes(file_path: &str, source: Option<&str>) -> Result<(usize, usize, String)> {
+fn count_rows_and_chromosomes(
+    file_path: &str,
+    source: Option<&str>,
+) -> Result<(usize, usize, String)> {
     let file = File::open(file_path)?;
     let reader = BufReader::new(file);
 
@@ -163,12 +168,10 @@ fn count_rows_and_chromosomes(file_path: &str, source: Option<&str>) -> Result<(
             chromosomes.insert(chr.to_string());
 
             // For 23andMe files, check male-specific Y markers
-            if is_23andme && (chr == "Y" || chr == "24") {
-                if MALE_Y_MARKERS.contains(&rsid) {
-                    // Check if genotype is called (not missing)
-                    if !genotype.is_empty() && genotype != "--" && genotype != "00" {
-                        male_markers_called += 1;
-                    }
+            if is_23andme && (chr == "Y" || chr == "24") && MALE_Y_MARKERS.contains(&rsid) {
+                // Check if genotype is called (not missing)
+                if !genotype.is_empty() && genotype != "--" && genotype != "00" {
+                    male_markers_called += 1;
                 }
             }
         }
