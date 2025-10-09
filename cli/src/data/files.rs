@@ -927,8 +927,24 @@ pub fn extract_id_from_pattern(filepath: &str, pattern: &str) -> Option<String> 
                     chars.next(); // i
                     chars.next(); // d
                     chars.next(); // }
-                                  // Insert capture group for ID (alphanumeric, underscore, hyphen)
-                    regex_pattern.push_str(r"([a-zA-Z0-9_-]+)");
+
+                    // Check what comes after {id} to determine character class
+                    // If followed by underscore or other delimiter, use non-greedy match
+                    let next_char = chars.peek();
+                    if next_char == Some(&'_') || next_char == Some(&'-') || next_char == Some(&'.')
+                    {
+                        // Use non-greedy match (+?) that stops at the first delimiter
+                        // Exclude the delimiter character from the capture group
+                        match next_char {
+                            Some(&'_') => regex_pattern.push_str(r"([a-zA-Z0-9\-]+?)"),
+                            Some(&'-') => regex_pattern.push_str(r"([a-zA-Z0-9_]+?)"),
+                            Some(&'.') => regex_pattern.push_str(r"([a-zA-Z0-9_\-]+?)"),
+                            _ => regex_pattern.push_str(r"([a-zA-Z0-9_\-]+?)"),
+                        }
+                    } else {
+                        // Include underscore (alphanumeric, underscore, hyphen), non-greedy
+                        regex_pattern.push_str(r"([a-zA-Z0-9_\-]+?)");
+                    }
                 } else {
                     // Unknown token, treat as literal
                     regex_pattern.push(ch);
