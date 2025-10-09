@@ -57,6 +57,8 @@ CREATE TABLE IF NOT EXISTS files (
     file_type TEXT,
     file_size INTEGER,
     data_type TEXT DEFAULT 'Unknown',
+    source TEXT,
+    grch_version TEXT,
     metadata TEXT,
     status TEXT DEFAULT 'complete',
     processing_error TEXT,

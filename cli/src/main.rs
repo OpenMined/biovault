@@ -1065,8 +1065,18 @@ enum FilesCommands {
         #[arg(help = "Path to CSV file containing file metadata")]
         csv_path: String,
 
+        #[arg(
+            long,
+            help = "Skip interactive data-quality wizard",
+            default_value = "false"
+        )]
+        non_interactive: bool,
+
         #[arg(long, help = "Output format (json|table)", default_value = "table")]
         format: String,
+
+        #[arg(long, help = "Save skipped rows to a CSV file")]
+        save_skipped: Option<String>,
     },
 
     #[command(about = "Process pending files in the queue (hash and detect metadata)")]
@@ -1632,8 +1642,14 @@ async fn async_main_with(cli: Cli) -> Result<()> {
             FilesCommands::AnalyzeCsv { input_csv, output } => {
                 commands::files::analyze_csv(input_csv, output).await?;
             }
-            FilesCommands::ImportCsv { csv_path, format } => {
-                commands::files::import_csv(csv_path, format).await?;
+            FilesCommands::ImportCsv {
+                csv_path,
+                non_interactive,
+                format,
+                save_skipped,
+            } => {
+                commands::files::import_csv(csv_path, non_interactive, format, save_skipped)
+                    .await?;
             }
             FilesCommands::ProcessQueue {
                 limit,

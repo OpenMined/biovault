@@ -122,9 +122,109 @@ Examples
   # 103704,/absolute/path/test_dir/103704_X_X_GSAv3-DTC_GRCh38-07-01-2025.txt
   ```
 
+## File Import Workflow
+
+The `bv files` commands provide a flexible workflow for importing genomic data files with automatic participant ID extraction and file type detection.
+
+### Complete Import Example
+
+#### 1. Scan directory to see what file types are available
+
+```bash
+bv files scan /path/to/data
+```
+
+Output:
+```
+📊 Scan Results: /path/to/data
+
+Extensions Found:
+  .txt  323 files    6701.8 MB
+  .csv  4 files    32.6 MB
+
+Total: 332 files
+```
+
+#### 2. Suggest patterns for extracting participant IDs from file paths
+
+```bash
+bv files suggest-patterns /path/to/data --ext .txt
+```
+
+Output:
+```
+🔍 Detected Patterns:
+
+1. {parent} - Directory name as participant ID
+   Example: huE922FC/...
+   Sample extractions:
+     huE922FC/... → participant ID: huE922FC
+     huBF0F93/... → participant ID: huBF0F93
+```
+
+#### 3. Preview import with dry-run
+
+```bash
+bv files import /path/to/data --ext .txt --pattern {parent} --dry-run
+```
+
+Output shows sample participant ID extractions without importing.
+
+#### 4. Export file list to CSV with pattern-based participant ID extraction
+
+```bash
+bv files export-csv /path/to/data --ext .txt --pattern {parent} -o genotype-files.csv
+```
+
+Output:
+```
+📊 Found 323 files
+✓ Exported 323 files to genotype-files.csv
+```
+
+#### 5. Detect file types and update CSV
+
+```bash
+bv files detect-csv genotype-files.csv -o genotype-files.csv
+```
+
+Output:
+```
+🔍 Detecting file types from genotype-files.csv
+📋 Processing 323 files
+🔍 Detecting... 323/323
+✓ Updated CSV written to genotype-files.csv
+```
+
+#### 6. Import files using the CSV
+
+```bash
+bv files import-csv genotype-files.csv
+```
+
+Output:
+```
+📋 CSV Import Preview: genotype-files.csv
+  Files to import: 323
+```
+
+### Pattern Examples
+
+- `{parent}` - Use parent directory name as participant ID
+- `{filename}` - Use filename as participant ID
+- Custom patterns can extract from any part of the file path
+
+### Available Commands
+
+- `bv files scan <path>` - Scan directory and show file type statistics
+- `bv files suggest-patterns <path> --ext <extension>` - Analyze files and suggest participant ID extraction patterns
+- `bv files import <path> --ext <ext> --pattern <pattern> [--dry-run]` - Preview or import files with pattern
+- `bv files export-csv <path> --ext <ext> --pattern <pattern> -o <output.csv>` - Export file list with participant IDs to CSV
+- `bv files detect-csv <input.csv> -o <output.csv>` - Detect file types and update CSV
+- `bv files import-csv <file.csv>` - Import files from CSV into BioVault database
+
 ## SyftBox VirtualEnv
 If you need to run multiple syftbox instances checkout `sbenv` which will help you to isolate them on your machine:
 https://github.com/openmined/sbenv
 
 BioVault can auto detect when its in an `sbenv activate` environment and will target that isolated syftbox for all its usage.
-# Trigger CI

@@ -763,7 +763,7 @@ pub async fn export_csv(
             String::new()
         };
 
-        writeln!(csv_file, "{},{},,,,,,,", file_info.path, participant_id)?;
+        writeln!(csv_file, "{},{},,,,,,", file_info.path, participant_id)?;
         count += 1;
     }
 
@@ -993,12 +993,17 @@ pub async fn analyze_csv(input_csv: String, output: String) -> Result<()> {
     Ok(())
 }
 
-pub async fn import_csv(csv_path: String, format: String) -> Result<()> {
+pub async fn import_csv(
+    csv_path: String,
+    non_interactive: bool,
+    format: String,
+    save_skipped: Option<String>,
+) -> Result<()> {
     use csv::ReaderBuilder;
     use serde::Deserialize;
     use std::fs::File;
 
-    #[derive(Debug, Deserialize)]
+    #[derive(Debug, Deserialize, Clone)]
     struct CsvRow {
         file_path: String,
         #[serde(default)]
@@ -1038,12 +1043,254 @@ pub async fn import_csv(csv_path: String, format: String) -> Result<()> {
             "  Files to import: {}",
             rows.len().to_string().cyan().bold()
         );
+
+        use std::collections::BTreeMap;
+        let mut ext_counts: BTreeMap<String, usize> = BTreeMap::new();
+        for row in &rows {
+            let ext = std::path::Path::new(&row.file_path)
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|s| s.to_lowercase())
+                .unwrap_or_else(|| "(none)".to_string());
+            *ext_counts.entry(ext).or_default() += 1;
+        }
+        println!("  File extensions:");
+        for (ext, count) in &ext_counts {
+            println!("    {:>6}: {}", ext, count);
+        }
+
+        let data_type_filled = rows
+            .iter()
+            .filter(|r| {
+                r.data_type
+                    .as_ref()
+                    .map(|s| !s.trim().is_empty())
+                    .unwrap_or(false)
+            })
+            .count();
+        println!("  Rows with data_type: {}/{}", data_type_filled, rows.len());
         println!();
     }
 
-    // Perform the actual import
+    let mut skipped_rows: Vec<CsvRow> = Vec::new();
+
+    if !non_interactive && format != "json" {
+        use dialoguer::Confirm;
+
+        let is_blank_or_unknown = |value: &Option<String>| {
+            value
+                .as_ref()
+                .map(|s| s.trim().is_empty() || s.eq_ignore_ascii_case("unknown"))
+                .unwrap_or(true)
+        };
+
+        let mut skipped_total = 0usize;
+
+        // Check if row is missing any of the four critical fields: participant_id, data_type, source, grch_version
+        let is_incomplete = |row: &CsvRow| -> bool {
+            is_blank_or_unknown(&row.participant_id)
+                || is_blank_or_unknown(&row.data_type)
+                || is_blank_or_unknown(&row.source)
+                || is_blank_or_unknown(&row.grch_version)
+        };
+
+        let incomplete_count = rows.iter().filter(|row| is_incomplete(row)).count();
+
+        // Step 1: If there are incomplete rows, ask if user wants to skip them
+        if incomplete_count > 0 {
+            println!(
+                "{}",
+                format!(
+                    "  ⚠️  {} row(s) are missing metadata (participant_id, data_type, source, or grch_version)",
+                    incomplete_count
+                )
+                .yellow()
+            );
+
+            if Confirm::new()
+                .with_prompt(format!(
+                    "Skip all {} incomplete row(s) and import only complete files?",
+                    incomplete_count
+                ))
+                .default(false)
+                .interact()?
+            {
+                // User wants to skip incomplete files - collect them before filtering
+                let to_skip: Vec<CsvRow> = rows
+                    .iter()
+                    .filter(|row| is_incomplete(row))
+                    .cloned()
+                    .collect();
+                skipped_rows.extend(to_skip);
+                rows.retain(|row| !is_incomplete(row));
+                skipped_total += incomplete_count;
+
+                if rows.is_empty() {
+                    println!("{}", "No rows left to import after filtering.".yellow());
+                    return Ok(());
+                }
+            } else {
+                // User doesn't want to skip - offer to run detect-csv
+                println!();
+                if Confirm::new()
+                    .with_prompt("Run metadata detection (detect-csv) to fill in missing fields?")
+                    .default(true)
+                    .interact()?
+                {
+                    // Run detect-csv equivalent inline
+                    use std::io::Write;
+                    println!("{}", "🔍 Detecting metadata...".bold());
+
+                    let total_rows = rows.len();
+                    for (i, row) in rows.iter_mut().enumerate() {
+                        print!("\r  Processing... {}/{}", i + 1, total_rows);
+                        std::io::stdout().flush()?;
+
+                        match data::detect_genotype_metadata(&row.file_path) {
+                            Ok(metadata) => {
+                                // Only update if currently blank/unknown
+                                if is_blank_or_unknown(&row.data_type) {
+                                    row.data_type = Some(metadata.data_type);
+                                }
+                                if is_blank_or_unknown(&row.source) {
+                                    row.source = metadata.source;
+                                }
+                                if is_blank_or_unknown(&row.grch_version) {
+                                    row.grch_version = metadata.grch_version;
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("\n  Warning: Failed to detect {}: {}", row.file_path, e);
+                            }
+                        }
+                    }
+                    println!();
+                    println!("{}", "  ✓ Detection complete".green());
+                    println!();
+                }
+
+                // Step 2: Check if there are still incomplete rows, and ask category by category
+                // Recount after each skip to avoid double-counting rows with multiple missing fields
+
+                let missing_participant_id = rows
+                    .iter()
+                    .filter(|r| is_blank_or_unknown(&r.participant_id))
+                    .count();
+                if missing_participant_id > 0 {
+                    println!("  {} row(s) missing participant_id", missing_participant_id);
+                    if Confirm::new()
+                        .with_prompt(format!("Skip these {} row(s)?", missing_participant_id))
+                        .default(false)
+                        .interact()?
+                    {
+                        let to_skip: Vec<CsvRow> = rows
+                            .iter()
+                            .filter(|row| is_blank_or_unknown(&row.participant_id))
+                            .cloned()
+                            .collect();
+                        let before = rows.len();
+                        rows.retain(|row| !is_blank_or_unknown(&row.participant_id));
+                        let actually_removed = before - rows.len();
+                        skipped_rows.extend(to_skip);
+                        skipped_total += actually_removed;
+                    }
+                }
+
+                let missing_data_type = rows
+                    .iter()
+                    .filter(|r| is_blank_or_unknown(&r.data_type))
+                    .count();
+                if missing_data_type > 0 {
+                    println!("  {} row(s) missing data_type", missing_data_type);
+                    if Confirm::new()
+                        .with_prompt(format!("Skip these {} row(s)?", missing_data_type))
+                        .default(false)
+                        .interact()?
+                    {
+                        let to_skip: Vec<CsvRow> = rows
+                            .iter()
+                            .filter(|row| is_blank_or_unknown(&row.data_type))
+                            .cloned()
+                            .collect();
+                        let before = rows.len();
+                        rows.retain(|row| !is_blank_or_unknown(&row.data_type));
+                        let actually_removed = before - rows.len();
+                        skipped_rows.extend(to_skip);
+                        skipped_total += actually_removed;
+                    }
+                }
+
+                let missing_source = rows
+                    .iter()
+                    .filter(|r| is_blank_or_unknown(&r.source))
+                    .count();
+                if missing_source > 0 {
+                    println!("  {} row(s) missing source", missing_source);
+                    if Confirm::new()
+                        .with_prompt(format!("Skip these {} row(s)?", missing_source))
+                        .default(false)
+                        .interact()?
+                    {
+                        let to_skip: Vec<CsvRow> = rows
+                            .iter()
+                            .filter(|row| is_blank_or_unknown(&row.source))
+                            .cloned()
+                            .collect();
+                        let before = rows.len();
+                        rows.retain(|row| !is_blank_or_unknown(&row.source));
+                        let actually_removed = before - rows.len();
+                        skipped_rows.extend(to_skip);
+                        skipped_total += actually_removed;
+                    }
+                }
+
+                let missing_grch = rows
+                    .iter()
+                    .filter(|r| is_blank_or_unknown(&r.grch_version))
+                    .count();
+                if missing_grch > 0 {
+                    println!("  {} row(s) missing grch_version", missing_grch);
+                    if Confirm::new()
+                        .with_prompt(format!("Skip these {} row(s)?", missing_grch))
+                        .default(false)
+                        .interact()?
+                    {
+                        let to_skip: Vec<CsvRow> = rows
+                            .iter()
+                            .filter(|row| is_blank_or_unknown(&row.grch_version))
+                            .cloned()
+                            .collect();
+                        let before = rows.len();
+                        rows.retain(|row| !is_blank_or_unknown(&row.grch_version));
+                        let actually_removed = before - rows.len();
+                        skipped_rows.extend(to_skip);
+                        skipped_total += actually_removed;
+                    }
+                }
+
+                if rows.is_empty() {
+                    println!("{}", "No rows left to import after filtering.".yellow());
+                    return Ok(());
+                }
+            }
+        }
+
+        if skipped_total > 0 {
+            println!(
+                "{}",
+                format!(
+                    "  ⏭️  Skipped {} row(s) due to incomplete metadata",
+                    skipped_total
+                )
+                .yellow()
+            );
+            println!();
+        }
+    }
+
+    // Perform the actual import as pending (instant - no hashing or metadata detection)
     let db = BioVaultDb::new()?;
-    let result = data::import_from_csv(
+    let result = data::import_files_as_pending(
         &db,
         rows.iter()
             .map(|r| data::CsvFileImport {
@@ -1083,9 +1330,12 @@ pub async fn import_csv(csv_path: String, format: String) -> Result<()> {
         if result.imported > 0 {
             println!(
                 "{}",
-                format!("✓ Imported {} files", result.imported)
-                    .green()
-                    .bold()
+                format!(
+                    "✓ Added {} files to queue (status: pending)",
+                    result.imported
+                )
+                .green()
+                .bold()
             );
         }
         if result.skipped > 0 {
@@ -1096,6 +1346,76 @@ pub async fn import_csv(csv_path: String, format: String) -> Result<()> {
             for error in &result.errors {
                 println!("  {}", error.red());
             }
+        }
+        println!();
+        println!(
+            "{}",
+            "ℹ️  Files added with status='pending' and queue_added_at timestamp.".dimmed()
+        );
+        println!(
+            "{}",
+            "   Run 'bv files process-queue' to hash files and detect metadata.".dimmed()
+        );
+    }
+
+    // Print and/or save skipped rows
+    if !skipped_rows.is_empty() && format != "json" {
+        println!();
+        println!(
+            "{}",
+            format!("⏭️  {} row(s) were skipped:", skipped_rows.len())
+                .yellow()
+                .bold()
+        );
+        for row in &skipped_rows {
+            println!("  • {}", row.file_path);
+        }
+
+        // Save to CSV if flag provided
+        if let Some(output_path) = save_skipped {
+            use csv::WriterBuilder;
+            use std::fs::File;
+
+            let out_file = File::create(&output_path)?;
+            let mut wtr = WriterBuilder::new().from_writer(out_file);
+
+            // Write header
+            wtr.write_record([
+                "file_path",
+                "participant_id",
+                "data_type",
+                "source",
+                "grch_version",
+                "row_count",
+                "chromosome_count",
+                "inferred_sex",
+            ])?;
+
+            // Write skipped rows
+            for row in &skipped_rows {
+                wtr.write_record([
+                    row.file_path.as_str(),
+                    row.participant_id.as_deref().unwrap_or(""),
+                    row.data_type.as_deref().unwrap_or(""),
+                    row.source.as_deref().unwrap_or(""),
+                    row.grch_version.as_deref().unwrap_or(""),
+                    &row.row_count.map(|c| c.to_string()).unwrap_or_default(),
+                    &row.chromosome_count
+                        .map(|c| c.to_string())
+                        .unwrap_or_default(),
+                    row.inferred_sex.as_deref().unwrap_or(""),
+                ])?;
+            }
+
+            wtr.flush()?;
+
+            println!();
+            println!(
+                "{}",
+                format!("✓ Skipped rows saved to {}", output_path)
+                    .green()
+                    .bold()
+            );
         }
     }
 
