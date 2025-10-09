@@ -914,6 +914,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn test_expand_env_vars_in_text_with_syftbox_data_dir() {
         let _old = std::env::var("SYFTBOX_DATA_DIR").ok();
         std::env::set_var("SYFTBOX_DATA_DIR", "/test/syftbox/data");
@@ -927,14 +928,17 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn test_expand_env_vars_in_text_without_env_var() {
         let _old = std::env::var("SYFTBOX_DATA_DIR").ok();
         std::env::remove_var("SYFTBOX_DATA_DIR");
         let text = "Path is $SYFTBOX_DATA_DIR/some/file";
         let result = expand_env_vars_in_text(text).unwrap();
         assert_eq!(result, text); // Should remain unchanged
-        if let Some(v) = _old {
-            std::env::set_var("SYFTBOX_DATA_DIR", v)
+                                  // Always restore the original value to avoid test pollution
+        match _old {
+            Some(v) => std::env::set_var("SYFTBOX_DATA_DIR", v),
+            None => std::env::remove_var("SYFTBOX_DATA_DIR"),
         }
     }
 
@@ -946,6 +950,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn test_expand_env_vars_in_text_multiple_occurrences() {
         let _old = std::env::var("SYFTBOX_DATA_DIR").ok();
         std::env::set_var("SYFTBOX_DATA_DIR", "/data");
@@ -1250,6 +1255,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn test_expand_env_vars_only_variable() {
         let _old = std::env::var("SYFTBOX_DATA_DIR").ok();
         std::env::set_var("SYFTBOX_DATA_DIR", "/var/data");
@@ -1262,6 +1268,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn test_expand_env_vars_at_start() {
         let _old = std::env::var("SYFTBOX_DATA_DIR").ok();
         std::env::set_var("SYFTBOX_DATA_DIR", "/start");
@@ -1274,6 +1281,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn test_expand_env_vars_at_end() {
         let _old = std::env::var("SYFTBOX_DATA_DIR").ok();
         std::env::set_var("SYFTBOX_DATA_DIR", "/end");
@@ -1286,6 +1294,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn test_expand_env_vars_with_special_chars() {
         let _old = std::env::var("SYFTBOX_DATA_DIR").ok();
         std::env::set_var("SYFTBOX_DATA_DIR", "/path/with-special_chars.123");
