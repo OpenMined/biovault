@@ -32,7 +32,11 @@ ENV PATH="/root/.cargo/bin:${PATH}"
 # Real Colab has uv 0.9.0 pre-installed at /usr/local/bin/uv
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh && \
     mv /root/.cargo/bin/uv /usr/local/bin/uv && \
-    chmod +x /usr/local/bin/uv
+    chmod +x /usr/local/bin/uv && \
+    /usr/local/bin/uv --version
+
+# Ensure /usr/local/bin is in PATH for all processes (matches real Colab)
+ENV PATH="/usr/local/bin:${PATH}"
 
 # Create working directory
 WORKDIR /workspace

@@ -1290,15 +1290,19 @@ mod tests {
 
         // Test 1: When not set, should return false
         env::remove_var("BIOVAULT_SKIP_INSTALLS");
-        assert!(!super::skip_install_commands());
+        assert!(!super::skip_install_commands(), "Expected false when env var not set");
 
         // Test 2: When set to "1", should return true
         env::set_var("BIOVAULT_SKIP_INSTALLS", "1");
-        assert!(super::skip_install_commands());
+        assert!(super::skip_install_commands(), "Expected true when env var set to '1'");
 
         // Test 3: When set to "0", should return false
         env::set_var("BIOVAULT_SKIP_INSTALLS", "0");
-        assert!(!super::skip_install_commands());
+        let result = super::skip_install_commands();
+        let actual_value = env::var("BIOVAULT_SKIP_INSTALLS").unwrap_or_else(|_| "NOT_SET".to_string());
+        assert!(!result,
+            "Expected false when env var set to '0', but got true. Actual env value: '{}'",
+            actual_value);
 
         // Restore original state
         if let Some(val) = original {
