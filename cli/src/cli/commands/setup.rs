@@ -11,6 +11,129 @@ fn skip_install_commands() -> bool {
         .unwrap_or(false)
 }
 
+/// Install a single dependency and return the path to the installed binary (for library use)
+pub async fn install_single_dependency(name: &str) -> Result<Option<String>> {
+    // Load the deps.yaml file to get dependency information
+    let deps_yaml = include_str!("../../deps.yaml");
+    let config: DependencyConfig = serde_yaml::from_str(deps_yaml)?;
+
+    // Find the dependency by name
+    let dep = config
+        .dependencies
+        .iter()
+        .find(|d| d.name == name)
+        .ok_or_else(|| anyhow!("Dependency '{}' not found", name))?;
+
+    // Detect system type
+    let system_type = detect_system();
+    let env_name = match system_type {
+        SystemType::GoogleColab => "google_colab",
+        SystemType::MacOs => "macos",
+        SystemType::Ubuntu => "ubuntu",
+        SystemType::ArchLinux => "arch",
+        SystemType::Windows => "windows",
+        SystemType::Unknown => {
+            return Err(anyhow!(
+                "System type not detected or not supported for automated installation"
+            )
+            .into());
+        }
+    };
+
+    // Get environment-specific configuration
+    let env_config = dep
+        .environments
+        .as_ref()
+        .and_then(|envs| envs.get(env_name))
+        .ok_or_else(|| anyhow!("No installation configuration for {} on this system", name))?;
+
+    if env_config.skip {
+        return Err(anyhow!(
+            "Installation of {} is not supported on this system: {}",
+            name,
+            env_config
+                .skip_reason
+                .as_ref()
+                .unwrap_or(&"Not available".to_string())
+        )
+        .into());
+    }
+
+    let install_commands = env_config
+        .install_commands
+        .as_ref()
+        .ok_or_else(|| anyhow!("No installation commands available for {}", name))?;
+
+    // Special handling for Homebrew on macOS
+    let brew_cmd = if matches!(system_type, SystemType::MacOs) {
+        find_brew_command()
+    } else {
+        None
+    };
+
+    // Execute installation commands
+    for cmd in install_commands {
+        let adjusted_cmd = if matches!(system_type, SystemType::MacOs) && cmd.starts_with("brew ") {
+            if let Some(ref brew) = brew_cmd {
+                cmd.replace("brew ", &format!("{} ", brew))
+            } else {
+                return Err(anyhow!("Homebrew not found. Please install Homebrew first.").into());
+            }
+        } else {
+            cmd.clone()
+        };
+
+        let status = match system_type {
+            SystemType::Windows => {
+                if adjusted_cmd.starts_with("winget") {
+                    Command::new("winget")
+                        .args(adjusted_cmd.split_whitespace().skip(1))
+                        .status()
+                } else {
+                    Command::new("powershell")
+                        .arg("-Command")
+                        .arg(&adjusted_cmd)
+                        .status()
+                }
+            }
+            _ => Command::new("sh").arg("-c").arg(&adjusted_cmd).status(),
+        };
+
+        match status {
+            Ok(s) if s.success() => {
+                // Continue to next command
+            }
+            _ => {
+                return Err(
+                    anyhow!("Failed to execute installation command: {}", adjusted_cmd).into(),
+                );
+            }
+        }
+    }
+
+    // After successful installation, find the installed binary path
+    let installed_path = match name {
+        "java" => {
+            // Special handling for Java on macOS (might be in brew path)
+            if matches!(system_type, SystemType::MacOs) {
+                if let Some(java_path) = check_java_in_brew_not_in_path() {
+                    Some(format!("{}/java", java_path))
+                } else {
+                    which::which("java").ok().map(|p| p.display().to_string())
+                }
+            } else {
+                which::which("java").ok().map(|p| p.display().to_string())
+            }
+        }
+        _ => {
+            // For other tools, try to find them in PATH
+            which::which(name).ok().map(|p| p.display().to_string())
+        }
+    };
+
+    Ok(installed_path)
+}
+
 #[derive(Debug)]
 enum SystemType {
     GoogleColab,
