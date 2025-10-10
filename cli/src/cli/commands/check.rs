@@ -4,6 +4,7 @@ use anyhow::anyhow;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::env;
+use std::path::Path;
 use std::process::Command;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -19,6 +20,8 @@ pub struct Dependency {
     pub min_version: Option<u32>,
     pub install_instructions: String,
     pub description: String,
+    #[serde(default)]
+    pub website: Option<String>,
     #[serde(default)]
     pub environments: Option<HashMap<String, EnvironmentConfig>>,
 }
@@ -50,6 +53,341 @@ pub struct DependencyResult {
     pub running: Option<bool>,
     pub skipped: bool,
     pub skip_reason: Option<String>,
+    pub description: Option<String>,
+    pub website: Option<String>,
+    pub install_instructions: Option<String>,
+}
+
+/// Check a single dependency with optional custom path (for library use)
+pub fn check_single_dependency(
+    name: &str,
+    custom_path: Option<String>,
+) -> Result<DependencyResult> {
+    // Load the deps.yaml file embedded in the binary
+    let deps_yaml = include_str!("../../deps.yaml");
+    let config: DependencyConfig = serde_yaml::from_str(deps_yaml)?;
+
+    // Find the dependency by name
+    let dep = config
+        .dependencies
+        .iter()
+        .find(|d| d.name == name)
+        .ok_or_else(|| anyhow!("Dependency '{}' not found", name))?;
+
+    // Detect if we're in Google Colab
+    let is_colab = is_google_colab();
+
+    // Check if this dependency should be skipped in Colab
+    if is_colab {
+        if let Some(environments) = &dep.environments {
+            if let Some(colab_config) = environments.get("google_colab") {
+                if colab_config.skip {
+                    return Ok(DependencyResult {
+                        name: dep.name.clone(),
+                        found: false,
+                        path: None,
+                        version: None,
+                        running: None,
+                        skipped: true,
+                        skip_reason: colab_config.skip_reason.clone(),
+                        description: Some(dep.description.clone()),
+                        website: dep.website.clone(),
+                        install_instructions: Some(dep.install_instructions.clone()),
+                    });
+                }
+            }
+        }
+    }
+
+    // Check if the binary exists at custom path or in PATH
+    let mut fallback_path: Option<String> = custom_path.clone();
+
+    let direct_path = if let Some(custom) = custom_path.as_ref() {
+        if Path::new(custom).exists() {
+            // Verify this is actually the right tool by checking its version
+            let is_valid = match dep.name.as_str() {
+                "java" => {
+                    Command::new(custom)
+                        .arg("-version")
+                        .output()
+                        .map(|output| {
+                            // Java outputs version to stderr
+                            let version_str = String::from_utf8_lossy(&output.stderr);
+                            version_str.contains("version")
+                                && (version_str.contains("java") || version_str.contains("openjdk"))
+                        })
+                        .unwrap_or(false)
+                }
+                "docker" => Command::new(custom)
+                    .arg("--version")
+                    .output()
+                    .map(|output| {
+                        let version_str = String::from_utf8_lossy(&output.stdout);
+                        version_str.contains("Docker")
+                    })
+                    .unwrap_or(false),
+                "nextflow" => Command::new(custom)
+                    .arg("-version")
+                    .output()
+                    .map(|output| {
+                        let version_str = String::from_utf8_lossy(&output.stdout);
+                        version_str.contains("nextflow") || version_str.contains("version")
+                    })
+                    .unwrap_or(false),
+                "syftbox" => Command::new(custom)
+                    .arg("--version")
+                    .output()
+                    .map(|output| {
+                        let version_str = String::from_utf8_lossy(&output.stdout);
+                        version_str.contains("syftbox") || version_str.contains("version")
+                    })
+                    .unwrap_or(false),
+                _ => true,
+            };
+
+            if is_valid {
+                Some(custom.clone())
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        // Check config for custom path
+        let bv_config = Config::load().ok();
+        if let Some(config_path) = bv_config
+            .as_ref()
+            .and_then(|cfg| cfg.get_binary_path(&dep.name))
+        {
+            fallback_path = Some(config_path.clone());
+            if Path::new(&config_path).exists() {
+                Some(config_path)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    };
+
+    let binary_path = direct_path.or_else(|| {
+        which::which(&dep.name)
+            .ok()
+            .map(|p| p.display().to_string())
+    });
+
+    // Special handling for Java on macOS
+    let mut java_brew_path: Option<String> = None;
+    if binary_path.is_none() && dep.name == "java" && std::env::consts::OS == "macos" {
+        java_brew_path = check_java_in_brew_not_in_path();
+    }
+
+    if binary_path.is_none() && java_brew_path.is_none() {
+        return Ok(DependencyResult {
+            name: dep.name.clone(),
+            found: false,
+            path: fallback_path,
+            version: None,
+            running: None,
+            skipped: false,
+            skip_reason: None,
+            description: Some(dep.description.clone()),
+            website: dep.website.clone(),
+            install_instructions: Some(dep.install_instructions.clone()),
+        });
+    } else if let Some(brew_path) = java_brew_path {
+        return Ok(DependencyResult {
+            name: dep.name.clone(),
+            found: true,
+            path: Some(format!("{}/java", brew_path)),
+            version: None,
+            running: None,
+            skipped: false,
+            skip_reason: None,
+            description: Some(dep.description.clone()),
+            website: dep.website.clone(),
+            install_instructions: Some(dep.install_instructions.clone()),
+        });
+    } else if let Some(path) = binary_path {
+        // Binary found - check version
+        let (version_ok, version_str) = if let Some(min_version) = dep.min_version {
+            check_version_with_info(&dep.name, min_version)
+        } else {
+            (true, get_version_string(&dep.name))
+        };
+
+        // Check if it needs to be running
+        let is_running = if dep.check_running {
+            Some(check_if_running(&dep.name))
+        } else {
+            None
+        };
+
+        return Ok(DependencyResult {
+            name: dep.name.clone(),
+            found: version_ok,
+            path: Some(path),
+            version: version_str,
+            running: is_running,
+            skipped: false,
+            skip_reason: None,
+            description: Some(dep.description.clone()),
+            website: dep.website.clone(),
+            install_instructions: Some(dep.install_instructions.clone()),
+        });
+    }
+
+    // Fallback
+    Ok(DependencyResult {
+        name: dep.name.clone(),
+        found: false,
+        path: None,
+        version: None,
+        running: None,
+        skipped: false,
+        skip_reason: None,
+        description: Some(dep.description.clone()),
+        website: dep.website.clone(),
+        install_instructions: Some(dep.install_instructions.clone()),
+    })
+}
+
+/// Check dependencies and return the result (for library use)
+pub fn check_dependencies_result() -> Result<DependencyCheckResult> {
+    // Load the deps.yaml file embedded in the binary
+    let deps_yaml = include_str!("../../deps.yaml");
+    let config: DependencyConfig = serde_yaml::from_str(deps_yaml)?;
+
+    // Detect if we're in Google Colab
+    let is_colab = is_google_colab();
+
+    // Load BioVault config to check for custom binary paths
+    let bv_config = Config::load().ok();
+
+    let mut all_found = true;
+    let mut all_running = true;
+    let mut results: Vec<DependencyResult> = Vec::new();
+
+    for dep in &config.dependencies {
+        // Check if this dependency should be skipped in Colab
+        if is_colab {
+            if let Some(environments) = &dep.environments {
+                if let Some(colab_config) = environments.get("google_colab") {
+                    if colab_config.skip {
+                        results.push(DependencyResult {
+                            name: dep.name.clone(),
+                            found: false,
+                            path: None,
+                            version: None,
+                            running: None,
+                            skipped: true,
+                            skip_reason: colab_config.skip_reason.clone(),
+                            description: Some(dep.description.clone()),
+                            website: dep.website.clone(),
+                            install_instructions: Some(dep.install_instructions.clone()),
+                        });
+                        continue;
+                    }
+                }
+            }
+        }
+
+        // Check for custom binary path in config
+        let custom_path = bv_config
+            .as_ref()
+            .and_then(|cfg| cfg.get_binary_path(&dep.name));
+
+        // Check if the binary exists in PATH or use custom path
+        let binary_path = if custom_path
+            .as_ref()
+            .map(|p| Path::new(p).exists())
+            .unwrap_or(false)
+        {
+            custom_path.clone()
+        } else {
+            which::which(&dep.name)
+                .ok()
+                .map(|p| p.display().to_string())
+        };
+
+        // Special handling for Java on macOS
+        let mut java_brew_path: Option<String> = None;
+        if binary_path.is_none() && dep.name == "java" && std::env::consts::OS == "macos" {
+            java_brew_path = check_java_in_brew_not_in_path();
+        }
+
+        if binary_path.is_none() && java_brew_path.is_none() {
+            all_found = false;
+            results.push(DependencyResult {
+                name: dep.name.clone(),
+                found: false,
+                path: custom_path.clone(),
+                version: None,
+                running: None,
+                skipped: false,
+                skip_reason: None,
+                description: Some(dep.description.clone()),
+                website: dep.website.clone(),
+                install_instructions: Some(dep.install_instructions.clone()),
+            });
+        } else if let Some(brew_path) = java_brew_path {
+            results.push(DependencyResult {
+                name: dep.name.clone(),
+                found: true,
+                path: Some(format!("{}/java", brew_path)),
+                version: None,
+                running: None,
+                skipped: false,
+                skip_reason: None,
+                description: Some(dep.description.clone()),
+                website: dep.website.clone(),
+                install_instructions: Some(dep.install_instructions.clone()),
+            });
+        } else if let Some(path) = binary_path {
+            // Binary found - check version
+            let (version_ok, version_str) = if let Some(min_version) = dep.min_version {
+                check_version_with_info(&dep.name, min_version)
+            } else {
+                (true, get_version_string(&dep.name))
+            };
+
+            if !version_ok {
+                all_found = false;
+            }
+
+            // Check if it needs to be running
+            let is_running = if dep.check_running {
+                Some(check_if_running(&dep.name))
+            } else {
+                None
+            };
+
+            if let Some(running) = is_running {
+                if !running {
+                    all_running = false;
+                }
+            }
+
+            results.push(DependencyResult {
+                name: dep.name.clone(),
+                found: version_ok,
+                path: Some(path),
+                version: version_str,
+                running: is_running,
+                skipped: false,
+                skip_reason: None,
+                description: Some(dep.description.clone()),
+                website: dep.website.clone(),
+                install_instructions: Some(dep.install_instructions.clone()),
+            });
+        }
+    }
+
+    Ok(DependencyCheckResult {
+        dependencies: results,
+        all_satisfied: all_found && all_running,
+    })
 }
 
 pub async fn execute(json: bool) -> Result<()> {
@@ -103,6 +441,9 @@ pub async fn execute(json: bool) -> Result<()> {
                             running: None,
                             skipped: true,
                             skip_reason: colab_config.skip_reason.clone(),
+                            description: Some(dep.description.clone()),
+                            website: dep.website.clone(),
+                            install_instructions: Some(dep.install_instructions.clone()),
                         });
                         continue;
                     }
@@ -172,6 +513,9 @@ pub async fn execute(json: bool) -> Result<()> {
                 running: None,
                 skipped: false,
                 skip_reason: None,
+                description: Some(dep.description.clone()),
+                website: dep.website.clone(),
+                install_instructions: Some(dep.install_instructions.clone()),
             });
         } else if let Some(brew_path) = java_brew_path {
             // Java is installed via brew but not in PATH
@@ -206,6 +550,9 @@ pub async fn execute(json: bool) -> Result<()> {
                 running: None,
                 skipped: false,
                 skip_reason: None,
+                description: Some(dep.description.clone()),
+                website: dep.website.clone(),
+                install_instructions: Some(dep.install_instructions.clone()),
             });
         } else if let Some(uv_path) = uv_windows_path {
             // UV is installed on Windows but not in PATH
@@ -230,6 +577,9 @@ pub async fn execute(json: bool) -> Result<()> {
                 running: None,
                 skipped: false,
                 skip_reason: None,
+                description: Some(dep.description.clone()),
+                website: dep.website.clone(),
+                install_instructions: Some(dep.install_instructions.clone()),
             });
         } else if let Some(path) = binary_path {
             // Binary found - check version
@@ -261,6 +611,9 @@ pub async fn execute(json: bool) -> Result<()> {
                     running: None,
                     skipped: false,
                     skip_reason: None,
+                    description: Some(dep.description.clone()),
+                    website: dep.website.clone(),
+                    install_instructions: Some(dep.install_instructions.clone()),
                 });
             } else {
                 // Check if it needs to be running
@@ -309,6 +662,9 @@ pub async fn execute(json: bool) -> Result<()> {
                     running: is_running,
                     skipped: false,
                     skip_reason: None,
+                    description: Some(dep.description.clone()),
+                    website: dep.website.clone(),
+                    install_instructions: Some(dep.install_instructions.clone()),
                 });
             }
         }

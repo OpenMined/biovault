@@ -1,5 +1,5 @@
 use crate::config;
-use crate::data::{BioVaultDb, ProjectYaml};
+use crate::data::{BioVaultDb, Project, ProjectYaml};
 use crate::error::Result;
 use anyhow::Context;
 use colored::Colorize;
@@ -14,14 +14,51 @@ pub async fn import(
     format: Option<String>,
 ) -> Result<()> {
     let db = BioVaultDb::new()?;
+    let quiet = format.as_deref() == Some("json");
 
     // Determine if source is a URL or local path
     let is_url = source.starts_with("http://") || source.starts_with("https://");
 
-    if is_url {
-        import_from_url(&db, &source, name, overwrite, format).await
+    let project = if is_url {
+        import_from_url(&db, &source, name.clone(), overwrite, quiet).await?
     } else {
-        import_from_local(&db, &source, name, overwrite, format)
+        import_from_local(&db, &source, name.clone(), overwrite, quiet)?
+    };
+
+    if quiet {
+        let response = crate::data::CliResponse::new(project);
+        println!("{}", serde_json::to_string_pretty(&response)?);
+    } else if is_url {
+        println!(
+            "\n✅ Project '{}' imported successfully!",
+            project.name.green()
+        );
+        println!("   Location: {}", project.project_path);
+    } else {
+        println!(
+            "\n✅ Project '{}' registered successfully!",
+            project.name.green()
+        );
+        println!("   Location: {}", project.project_path);
+        println!("\n💡 This project is referenced in-place.");
+        println!("   Any changes you make will be reflected when you run it.");
+    }
+
+    Ok(())
+}
+
+pub async fn import_project_record(
+    source: String,
+    name: Option<String>,
+    overwrite: bool,
+) -> Result<Project> {
+    let db = BioVaultDb::new()?;
+    let is_url = source.starts_with("http://") || source.starts_with("https://");
+
+    if is_url {
+        import_from_url(&db, &source, name, overwrite, true).await
+    } else {
+        import_from_local(&db, &source, name, overwrite, true)
     }
 }
 
@@ -30,9 +67,9 @@ async fn import_from_url(
     url: &str,
     name_override: Option<String>,
     overwrite: bool,
-    format: Option<String>,
-) -> Result<()> {
-    if format.as_deref() != Some("json") {
+    quiet: bool,
+) -> Result<Project> {
+    if !quiet {
         println!("📥 Importing project from: {}", url.cyan());
     }
 
@@ -41,7 +78,7 @@ async fn import_from_url(
         .replace("github.com", "raw.githubusercontent.com")
         .replace("/blob/", "/");
 
-    if format.as_deref() != Some("json") {
+    if !quiet {
         println!("📄 Downloading project.yaml...");
     }
 
@@ -91,7 +128,7 @@ async fn import_from_url(
     let yaml_path = project_dir.join("project.yaml");
     fs::write(&yaml_path, yaml_str)?;
 
-    if format.as_deref() != Some("json") {
+    if !quiet {
         println!("✓ Saved project.yaml");
     }
 
@@ -103,7 +140,7 @@ async fn import_from_url(
 
     let workflow_url = format!("{}/{}", base_url, project_yaml.workflow);
 
-    if format.as_deref() != Some("json") {
+    if !quiet {
         println!("📄 Downloading {}...", project_yaml.workflow);
     }
 
@@ -111,7 +148,7 @@ async fn import_from_url(
     let workflow_path = project_dir.join(&project_yaml.workflow);
     fs::write(&workflow_path, workflow_content)?;
 
-    if format.as_deref() != Some("json") {
+    if !quiet {
         println!("✓ Saved {}", project_yaml.workflow);
     }
 
@@ -120,7 +157,7 @@ async fn import_from_url(
         let assets_dir = project_dir.join("assets");
         fs::create_dir_all(&assets_dir)?;
 
-        if format.as_deref() != Some("json") {
+        if !quiet {
             println!("📦 Downloading {} assets...", project_yaml.assets.len());
         }
 
@@ -129,7 +166,7 @@ async fn import_from_url(
         for asset in &project_yaml.assets {
             let asset_url = format!("{}/{}", assets_url, asset);
 
-            if format.as_deref() != Some("json") {
+            if !quiet {
                 println!("  - {}", asset);
             }
 
@@ -144,7 +181,7 @@ async fn import_from_url(
             fs::write(&asset_path, asset_content)?;
         }
 
-        if format.as_deref() != Some("json") {
+        if !quiet {
             println!("✓ Downloaded all assets");
         }
     }
@@ -178,20 +215,11 @@ async fn import_from_url(
         )?;
     }
 
-    // Output result
-    if format.as_deref() == Some("json") {
-        let project = db.get_project(&project_name)?.unwrap();
-        let response = crate::data::CliResponse::new(project);
-        println!("{}", serde_json::to_string_pretty(&response)?);
-    } else {
-        println!(
-            "\n✅ Project '{}' imported successfully!",
-            project_name.green()
-        );
-        println!("   Location: {}", project_dir.display());
-    }
+    let project = db
+        .get_project(&project_name)?
+        .ok_or_else(|| anyhow::anyhow!("Project '{}' not found after import", project_name))?;
 
-    Ok(())
+    Ok(project)
 }
 
 fn import_from_local(
@@ -199,8 +227,8 @@ fn import_from_local(
     path: &str,
     name_override: Option<String>,
     overwrite: bool,
-    format: Option<String>,
-) -> Result<()> {
+    quiet: bool,
+) -> Result<Project> {
     let project_path = PathBuf::from(path);
     if !project_path.exists() {
         return Err(anyhow::anyhow!("Path does not exist: {}", path).into());
@@ -220,7 +248,7 @@ fn import_from_local(
         .into());
     }
 
-    if format.as_deref() != Some("json") {
+    if !quiet {
         println!("📁 Registering local project: {}", path.cyan());
     }
 
@@ -271,22 +299,11 @@ fn import_from_local(
         )?;
     }
 
-    // Output result
-    if format.as_deref() == Some("json") {
-        let project = db.get_project(&project_name)?.unwrap();
-        let response = crate::data::CliResponse::new(project);
-        println!("{}", serde_json::to_string_pretty(&response)?);
-    } else {
-        println!(
-            "\n✅ Project '{}' registered successfully!",
-            project_name.green()
-        );
-        println!("   Location: {}", project_path.display());
-        println!("\n💡 This project is referenced in-place.");
-        println!("   Any changes you make will be reflected when you run it.");
-    }
+    let project = db
+        .get_project(&project_name)?
+        .ok_or_else(|| anyhow::anyhow!("Project '{}' not found after import", project_name))?;
 
-    Ok(())
+    Ok(project)
 }
 
 /// List all projects
@@ -478,14 +495,15 @@ assets: []
         fs::write(project_dir.join("workflow.nf"), "// workflow").unwrap();
 
         // Import the project
-        let result = import_from_local(
+        let project = import_from_local(
             &BioVaultDb::new().unwrap(),
             project_dir.to_str().unwrap(),
             None,
             false,
-            None,
-        );
-        assert!(result.is_ok());
+            true,
+        )
+        .expect("local project import should succeed");
+        assert_eq!(project.name, "test-project");
 
         // Verify it's in the database
         let db = BioVaultDb::new().unwrap();

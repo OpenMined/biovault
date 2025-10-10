@@ -271,6 +271,7 @@ pub async fn execute(ignore_warning: bool) -> Result<()> {
     let mut errors = Vec::new();
     let mut successes = 0;
 
+    // Delete all paths
     for path_info in paths {
         if path_info.exists {
             print!("  Deleting {}... ", path_info.description);
@@ -281,8 +282,12 @@ pub async fn execute(ignore_warning: bool) -> Result<()> {
                 }
                 Err(e) => {
                     println!("{}", "✗".red());
-                    error!("Failed to delete {}: {}", path_info.path.display(), e);
-                    errors.push((path_info.description.clone(), e));
+                    let err_msg = format!("{}", e);
+                    error!("Failed to delete {}: {}", path_info.path.display(), err_msg);
+                    errors.push((
+                        path_info.description.clone(),
+                        anyhow::anyhow!("{}", err_msg),
+                    ));
                 }
             }
         }
