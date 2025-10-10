@@ -40,8 +40,9 @@ impl ParticipantsFile {
         if !path.exists() {
             Ok(Self::new())
         } else {
-            let contents = fs::read_to_string(&path)
-                .with_context(|| format!("Failed to read participants file at {:?}", path))?;
+            let contents = fs::read_to_string(&path).with_context(|| {
+                format!("Failed to read participants file at {}", path.display())
+            })?;
             let parsed: Self = serde_yaml::from_str(&contents)
                 .with_context(|| "Failed to parse participants YAML")?;
             Ok(parsed)
@@ -52,12 +53,12 @@ impl ParticipantsFile {
         let path = get_participants_file_path()?;
         let parent = path.parent().ok_or_else(|| anyhow!("Invalid path"))?;
         fs::create_dir_all(parent)
-            .with_context(|| format!("Failed to create directory {:?}", parent))?;
+            .with_context(|| format!("Failed to create directory {}", parent.display()))?;
 
         let yaml = serde_yaml::to_string(self)
             .with_context(|| "Failed to serialize participants to YAML")?;
         fs::write(&path, yaml)
-            .with_context(|| format!("Failed to write participants file at {:?}", path))?;
+            .with_context(|| format!("Failed to write participants file at {}", path.display()))?;
         Ok(())
     }
 }

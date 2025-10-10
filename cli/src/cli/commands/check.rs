@@ -4,6 +4,7 @@ use anyhow::anyhow;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::env;
+use std::path::Path;
 use std::process::Command;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -309,21 +310,15 @@ pub fn check_dependencies_result() -> Result<DependencyCheckResult> {
         // Check for custom binary path in config
         let custom_path = bv_config
             .as_ref()
-            .and_then(|cfg| cfg.binary_paths.as_ref())
-            .and_then(|bp| match dep.name.as_str() {
-                "java" => bp.java.clone(),
-                "docker" => bp.docker.clone(),
-                "nextflow" => bp.nextflow.clone(),
-                _ => None,
-            });
+            .and_then(|cfg| cfg.get_binary_path(&dep.name));
 
         // Check if the binary exists in PATH or use custom path
-        let binary_path = if let Some(custom) = custom_path {
-            if std::path::Path::new(&custom).exists() {
-                Some(custom)
-            } else {
-                None
-            }
+        let binary_path = if custom_path
+            .as_ref()
+            .map(|p| Path::new(p).exists())
+            .unwrap_or(false)
+        {
+            custom_path.clone()
         } else {
             which::which(&dep.name)
                 .ok()
@@ -341,7 +336,7 @@ pub fn check_dependencies_result() -> Result<DependencyCheckResult> {
             results.push(DependencyResult {
                 name: dep.name.clone(),
                 found: false,
-                path: None,
+                path: custom_path.clone(),
                 version: None,
                 running: None,
                 skipped: false,
@@ -596,6 +591,9 @@ pub async fn execute(json: bool) -> Result<()> {
                 running: None,
                 skipped: false,
                 skip_reason: None,
+                description: Some(dep.description.clone()),
+                website: dep.website.clone(),
+                install_instructions: Some(dep.install_instructions.clone()),
             });
         } else if let Some(path) = binary_path {
             // Binary found - check version
