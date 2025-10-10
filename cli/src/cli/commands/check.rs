@@ -100,14 +100,14 @@ pub fn check_single_dependency(
     }
 
     // Check if the binary exists at custom path or in PATH
-    let binary_path = if let Some(custom) = custom_path {
-        // Validate that the custom path is actually the correct binary
-        if std::path::Path::new(&custom).exists() {
+    let mut fallback_path: Option<String> = custom_path.clone();
+
+    let direct_path = if let Some(custom) = custom_path.as_ref() {
+        if Path::new(custom).exists() {
             // Verify this is actually the right tool by checking its version
             let is_valid = match dep.name.as_str() {
                 "java" => {
-                    // Try to get Java version from this specific path
-                    Command::new(&custom)
+                    Command::new(custom)
                         .arg("-version")
                         .output()
                         .map(|output| {
@@ -118,47 +118,35 @@ pub fn check_single_dependency(
                         })
                         .unwrap_or(false)
                 }
-                "docker" => {
-                    // Try to get Docker version from this specific path
-                    Command::new(&custom)
-                        .arg("--version")
-                        .output()
-                        .map(|output| {
-                            let version_str = String::from_utf8_lossy(&output.stdout);
-                            version_str.contains("Docker")
-                        })
-                        .unwrap_or(false)
-                }
-                "nextflow" => {
-                    // Try to get Nextflow version from this specific path
-                    Command::new(&custom)
-                        .arg("-version")
-                        .output()
-                        .map(|output| {
-                            let version_str = String::from_utf8_lossy(&output.stdout);
-                            version_str.contains("nextflow") || version_str.contains("version")
-                        })
-                        .unwrap_or(false)
-                }
-                "syftbox" => {
-                    // Try to get SyftBox version from this specific path
-                    Command::new(&custom)
-                        .arg("--version")
-                        .output()
-                        .map(|output| {
-                            let version_str = String::from_utf8_lossy(&output.stdout);
-                            version_str.contains("syftbox") || version_str.contains("version")
-                        })
-                        .unwrap_or(false)
-                }
-                _ => {
-                    // For other tools, just check if it's executable
-                    true
-                }
+                "docker" => Command::new(custom)
+                    .arg("--version")
+                    .output()
+                    .map(|output| {
+                        let version_str = String::from_utf8_lossy(&output.stdout);
+                        version_str.contains("Docker")
+                    })
+                    .unwrap_or(false),
+                "nextflow" => Command::new(custom)
+                    .arg("-version")
+                    .output()
+                    .map(|output| {
+                        let version_str = String::from_utf8_lossy(&output.stdout);
+                        version_str.contains("nextflow") || version_str.contains("version")
+                    })
+                    .unwrap_or(false),
+                "syftbox" => Command::new(custom)
+                    .arg("--version")
+                    .output()
+                    .map(|output| {
+                        let version_str = String::from_utf8_lossy(&output.stdout);
+                        version_str.contains("syftbox") || version_str.contains("version")
+                    })
+                    .unwrap_or(false),
+                _ => true,
             };
 
             if is_valid {
-                Some(custom)
+                Some(custom.clone())
             } else {
                 None
             }
@@ -168,28 +156,26 @@ pub fn check_single_dependency(
     } else {
         // Check config for custom path
         let bv_config = Config::load().ok();
-        let config_path = bv_config
+        if let Some(config_path) = bv_config
             .as_ref()
-            .and_then(|cfg| cfg.binary_paths.as_ref())
-            .and_then(|bp| match dep.name.as_str() {
-                "java" => bp.java.clone(),
-                "docker" => bp.docker.clone(),
-                "nextflow" => bp.nextflow.clone(),
-                _ => None,
-            });
-
-        if let Some(custom) = config_path {
-            if std::path::Path::new(&custom).exists() {
-                Some(custom)
+            .and_then(|cfg| cfg.get_binary_path(&dep.name))
+        {
+            fallback_path = Some(config_path.clone());
+            if Path::new(&config_path).exists() {
+                Some(config_path)
             } else {
                 None
             }
         } else {
-            which::which(&dep.name)
-                .ok()
-                .map(|p| p.display().to_string())
+            None
         }
     };
+
+    let binary_path = direct_path.or_else(|| {
+        which::which(&dep.name)
+            .ok()
+            .map(|p| p.display().to_string())
+    });
 
     // Special handling for Java on macOS
     let mut java_brew_path: Option<String> = None;
@@ -201,7 +187,7 @@ pub fn check_single_dependency(
         return Ok(DependencyResult {
             name: dep.name.clone(),
             found: false,
-            path: None,
+            path: fallback_path,
             version: None,
             running: None,
             skipped: false,
