@@ -96,10 +96,8 @@ dependencies:
           - sudo chmod +x /usr/local/bin/nextflow
         verify_command: nextflow -version
       windows:
-        install_commands:
-          - powershell -Command "Invoke-WebRequest -Uri 'https://github.com/nextflow-io/nextflow/releases/latest/download/nextflow' -OutFile '$env:USERPROFILE\nextflow.exe'"
-          - powershell -Command "[Environment]::SetEnvironmentVariable('PATH', \"$env:USERPROFILE;$env:PATH\", 'Process')"
-        verify_command: nextflow -version
+        skip: true
+        skip_reason: "Nextflow doesn't have a Windows CLI installer. Please use WSL or Docker to run Nextflow on Windows"
   
   - name: syftbox
     check_running: false
@@ -140,8 +138,9 @@ dependencies:
     environments:
       google_colab:
         install_commands:
-          - curl -LsSf https://astral.sh/uv/install.sh | sh
-          - export PATH="$HOME/.cargo/bin:$PATH"
+          # Check if uv is already installed (real Colab has it pre-installed)
+          - which uv || (curl -LsSf https://astral.sh/uv/install.sh | sh && mv $HOME/.cargo/bin/uv /usr/local/bin/uv 2>/dev/null || mv $HOME/.local/bin/uv /usr/local/bin/uv 2>/dev/null || true)
+          - chmod +x /usr/local/bin/uv 2>/dev/null || true
         verify_command: uv --version
       ubuntu:
         install_commands:
@@ -160,5 +159,6 @@ dependencies:
         verify_command: uv --version
       windows:
         install_commands:
-          - powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
-        verify_command: uv --version
+          - winget install --id=astral-sh.uv -e --silent --accept-package-agreements --accept-source-agreements
+        # Check if UV can be found - this will fail initially, triggering installation
+        verify_command: if (Get-Command uv -ErrorAction SilentlyContinue) { exit 0 } elseif (Test-Path "$env:LOCALAPPDATA\Programs\uv\uv.exe") { exit 0 } elseif (Test-Path "$env:LOCALAPPDATA\uv\bin\uv.exe") { exit 0 } elseif (Test-Path "$env:USERPROFILE\.cargo\bin\uv.exe") { exit 0 } else { exit 1 }
