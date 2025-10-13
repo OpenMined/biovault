@@ -103,7 +103,7 @@ dependencies:
     check_running: false
     install_instructions: |
       Install via curl: curl -fsSL https://syftbox.net/install.sh | sh
-    description: Software tool for system analysis and reporting
+    description: An open-source network for privacy-first, offline-capable data science collaboration
     website: https://syftbox.net
     environments:
       google_colab:

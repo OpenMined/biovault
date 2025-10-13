@@ -61,6 +61,12 @@ pub async fn show(json: bool) -> crate::error::Result<()> {
             if let Some(ref nextflow) = bp.nextflow {
                 println!("  Nextflow: {}", nextflow);
             }
+            if let Some(ref syftbox) = bp.syftbox {
+                println!("  SyftBox: {}", syftbox);
+            }
+            if let Some(ref uv) = bp.uv {
+                println!("  UV: {}", uv);
+            }
         }
     }
 

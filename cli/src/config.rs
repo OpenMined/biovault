@@ -26,7 +26,7 @@ pub struct Config {
     pub syftbox_credentials: Option<SyftboxCredentials>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct BinaryPaths {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub java: Option<String>,
@@ -34,6 +34,10 @@ pub struct BinaryPaths {
     pub docker: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nextflow: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub syftbox: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uv: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -77,9 +81,80 @@ impl Config {
             })?;
         }
         let yaml_content = serde_yaml::to_string(&self)?;
+
+        if let Some(dir) = path.parent() {
+            fs::create_dir_all(dir)
+                .with_context(|| format!("Failed to create config directory: {}", dir.display()))?;
+        }
+
         fs::write(path, yaml_content)
             .with_context(|| format!("Failed to write config file: {}", path.display()))?;
         Ok(())
+    }
+
+    pub fn new(email: String) -> Self {
+        Self {
+            email,
+            syftbox_config: None,
+            version: None,
+            binary_paths: None,
+        }
+    }
+
+    pub fn load_or_new(default_email: &str) -> crate::error::Result<Self> {
+        match Self::load() {
+            Ok(config) => Ok(config),
+            Err(Error::NotInitialized) => Ok(Self::new(default_email.to_string())),
+            Err(err) => Err(err),
+        }
+    }
+
+    pub fn set_binary_path(
+        &mut self,
+        name: &str,
+        path: Option<String>,
+    ) -> crate::error::Result<()> {
+        let paths = self.binary_paths.get_or_insert_with(BinaryPaths::default);
+
+        match name {
+            "java" => paths.java = path,
+            "docker" => paths.docker = path,
+            "nextflow" => paths.nextflow = path,
+            "syftbox" => paths.syftbox = path,
+            "uv" => paths.uv = path,
+            _ => return Err(anyhow::anyhow!("Unknown dependency: {}", name).into()),
+        }
+
+        Ok(())
+    }
+
+    pub fn get_binary_path(&self, name: &str) -> Option<String> {
+        self.binary_paths.as_ref().and_then(|paths| match name {
+            "java" => paths.java.clone(),
+            "docker" => paths.docker.clone(),
+            "nextflow" => paths.nextflow.clone(),
+            "syftbox" => paths.syftbox.clone(),
+            "uv" => paths.uv.clone(),
+            _ => None,
+        })
+    }
+
+    pub fn save_binary_path(name: &str, path: Option<String>) -> crate::error::Result<Self> {
+        let mut config = Self::load_or_new("setup@pending")?;
+
+        let normalized = path.and_then(|p| {
+            let trimmed = p.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        });
+
+        config.set_binary_path(name, normalized)?;
+        let config_path = Self::get_config_path()?;
+        config.save(&config_path)?;
+        Ok(config)
     }
 
     pub fn get_syftbox_data_dir(&self) -> crate::error::Result<PathBuf> {
