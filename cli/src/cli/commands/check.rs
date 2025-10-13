@@ -24,6 +24,10 @@ pub struct Dependency {
     pub website: Option<String>,
     #[serde(default)]
     pub environments: Option<HashMap<String, EnvironmentConfig>>,
+    #[serde(default)]
+    pub package_manager: bool,
+    #[serde(default)]
+    pub os_filter: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -327,7 +331,21 @@ pub fn check_dependencies_result() -> Result<DependencyCheckResult> {
     let mut all_running = true;
     let mut results: Vec<DependencyResult> = Vec::new();
 
+    // Get current OS for filtering
+    let current_os = std::env::consts::OS;
+
     for dep in &config.dependencies {
+        // Skip package managers (they're checked separately during onboarding)
+        if dep.package_manager {
+            continue;
+        }
+
+        // Check OS filter - skip if this dependency is not for the current OS
+        if let Some(os_filter) = &dep.os_filter {
+            if !os_filter.contains(&current_os.to_string()) {
+                continue;
+            }
+        }
         // Check if this dependency should be skipped in Colab
         if is_colab {
             if let Some(environments) = &dep.environments {
@@ -605,7 +623,21 @@ pub async fn execute(json: bool) -> Result<()> {
     let mut all_running = true;
     let mut results: Vec<DependencyResult> = Vec::new();
 
+    // Get current OS for filtering
+    let current_os = std::env::consts::OS;
+
     for dep in &config.dependencies {
+        // Skip package managers (they're checked separately during onboarding)
+        if dep.package_manager {
+            continue;
+        }
+
+        // Check OS filter - skip if this dependency is not for the current OS
+        if let Some(os_filter) = &dep.os_filter {
+            if !os_filter.contains(&current_os.to_string()) {
+                continue;
+            }
+        }
         // Check if this dependency should be skipped in Colab
         if is_colab {
             if let Some(environments) = &dep.environments {
@@ -1338,6 +1370,61 @@ fn get_uv_version(uv_path: &str) -> Option<String> {
     let version_str = String::from_utf8_lossy(&output.stdout);
     // UV version output format: "uv 0.4.29"
     version_str.split_whitespace().nth(1).map(|v| v.to_string())
+}
+
+/// Check if Homebrew is installed on macOS (for library use)
+pub fn check_brew_installed() -> Result<bool> {
+    // Only relevant on macOS
+    #[cfg(not(target_os = "macos"))]
+    {
+        return Ok(true); // Not needed on other platforms
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        // Check if brew command exists
+        let brew_check = which::which("brew").is_ok();
+        Ok(brew_check)
+    }
+}
+
+/// Install Homebrew on macOS (for library use)
+pub fn install_brew() -> Result<String> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        return Err(anyhow!("Homebrew installation is only supported on macOS").into());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        use std::process::Stdio;
+
+        let install_script = r#"/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)""#;
+
+        let mut child = Command::new("/bin/bash")
+            .arg("-c")
+            .arg(install_script)
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .map_err(|e| anyhow!("Failed to start Homebrew installation: {}", e))?;
+
+        let status = child
+            .wait()
+            .map_err(|e| anyhow!("Failed to wait for Homebrew installation: {}", e))?;
+
+        if status.success() {
+            let brew_path = which::which("brew")
+                .ok()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "/opt/homebrew/bin/brew".to_string());
+
+            Ok(brew_path)
+        } else {
+            Err(anyhow!("Homebrew installation failed").into())
+        }
+    }
 }
 
 #[cfg(test)]

@@ -141,7 +141,11 @@ impl Config {
     }
 
     pub fn save_binary_path(name: &str, path: Option<String>) -> crate::error::Result<Self> {
-        let mut config = Self::load_or_new("setup@pending")?;
+        // Try to load existing config, but preserve the email if it exists
+        let mut config = match Self::load() {
+            Ok(existing) => existing,
+            Err(_) => Self::new("setup@pending".to_string()),
+        };
 
         let normalized = path.and_then(|p| {
             let trimmed = p.trim();
@@ -264,27 +268,48 @@ pub fn get_config() -> anyhow::Result<Config> {
 /// 3. BIOVAULT_HOME env var
 /// 4. SYFTBOX_DATA_DIR/.biovault (if in virtualenv)
 /// 5. Walk up from cwd looking for .biovault/config.yaml (for sbenv)
-/// 6. ~/.biovault/config.yaml (legacy - if exists, use it)
-/// 7. ~/Desktop/BioVault (new default for desktop users)
+/// 6. ~/Desktop/BioVault (default for desktop users)
+///
+/// Creates the directory if it doesn't exist.
 pub fn get_biovault_home() -> anyhow::Result<PathBuf> {
     // Thread-local test override first
     if let Some(home) = TEST_BIOVAULT_HOME.with(|h| h.borrow().clone()) {
+        // Ensure test directory exists
+        fs::create_dir_all(&home).with_context(|| {
+            format!(
+                "Failed to create test biovault directory: {}",
+                home.display()
+            )
+        })?;
         return Ok(home);
     }
 
     // Check for test environment (must be before directory walk to prevent finding global config)
     if let Ok(test_home) = env::var("BIOVAULT_TEST_HOME") {
-        return Ok(PathBuf::from(test_home).join(".biovault"));
+        let path = PathBuf::from(test_home).join(".biovault");
+        fs::create_dir_all(&path).with_context(|| {
+            format!(
+                "Failed to create test biovault directory: {}",
+                path.display()
+            )
+        })?;
+        return Ok(path);
     }
 
     // Check for explicit BIOVAULT_HOME
     if let Ok(biovault_home) = env::var("BIOVAULT_HOME") {
-        return Ok(PathBuf::from(biovault_home));
+        let path = PathBuf::from(biovault_home);
+        fs::create_dir_all(&path)
+            .with_context(|| format!("Failed to create biovault directory: {}", path.display()))?;
+        return Ok(path);
     }
 
     // Check for SyftBox virtualenv
     if let Ok(syftbox_data_dir) = env::var("SYFTBOX_DATA_DIR") {
-        return Ok(PathBuf::from(syftbox_data_dir).join(".biovault"));
+        let path = PathBuf::from(syftbox_data_dir).join(".biovault");
+        fs::create_dir_all(&path)
+            .with_context(|| format!("Failed to create biovault directory: {}", path.display()))?;
+        return Ok(path);
     }
 
     // Walk up from current directory looking for .biovault/config.yaml (for sbenv)
@@ -304,21 +329,25 @@ pub fn get_biovault_home() -> anyhow::Result<PathBuf> {
         }
     }
 
-    // Check for legacy ~/.biovault location (backward compatibility)
+    // Default to Desktop/BioVault (user-friendly, visible location)
     let home_dir =
         dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
-    let legacy_biovault = home_dir.join(".biovault");
-    if legacy_biovault.join("config.yaml").exists() {
-        return Ok(legacy_biovault);
-    }
-
-    // Default to Desktop/BioVault (user-friendly, visible location)
-    if let Some(desktop_dir) = dirs::desktop_dir() {
-        Ok(desktop_dir.join("BioVault"))
+    let default_path = if let Some(desktop_dir) = dirs::desktop_dir() {
+        desktop_dir.join("BioVault")
     } else {
         // Fallback if desktop_dir() fails (shouldn't happen on modern systems)
-        Ok(home_dir.join(".biovault"))
-    }
+        home_dir.join("Desktop").join("BioVault")
+    };
+
+    // Create the default directory if it doesn't exist
+    fs::create_dir_all(&default_path).with_context(|| {
+        format!(
+            "Failed to create biovault directory: {}",
+            default_path.display()
+        )
+    })?;
+
+    Ok(default_path)
 }
 
 /// Get the shared cache directory

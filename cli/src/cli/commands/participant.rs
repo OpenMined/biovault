@@ -1020,6 +1020,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn test_list_with_participants() {
         let temp = TempDir::new().unwrap();
         std::env::set_var("BIOVAULT_HOME", temp.path());
