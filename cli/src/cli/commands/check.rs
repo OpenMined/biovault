@@ -4,7 +4,7 @@ use anyhow::anyhow;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::env;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -171,11 +171,13 @@ pub fn check_single_dependency(
         }
     };
 
-    let binary_path = direct_path.or_else(|| {
-        which::which(&dep.name)
-            .ok()
-            .map(|p| p.display().to_string())
-    });
+    let binary_path = direct_path
+        .or_else(|| {
+            which::which(&dep.name)
+                .ok()
+                .map(|p| p.display().to_string())
+        })
+        .or_else(|| find_in_well_known_locations(&dep.name));
 
     // Special handling for Java on macOS
     let mut java_brew_path: Option<String> = None;
@@ -183,7 +185,23 @@ pub fn check_single_dependency(
         java_brew_path = check_java_in_brew_not_in_path();
     }
 
-    if binary_path.is_none() && java_brew_path.is_none() {
+    // Special handling for Docker on macOS - check if Docker Desktop is installed
+    #[cfg(target_os = "macos")]
+    let docker_desktop_installed = dep.name == "docker" && is_docker_desktop_installed();
+    #[cfg(not(target_os = "macos"))]
+    let docker_desktop_installed = false;
+
+    // Special handling for syftbox - check in ~/.sbenv/binaries
+    let mut syftbox_sbenv_path: Option<String> = None;
+    if binary_path.is_none() && dep.name == "syftbox" {
+        syftbox_sbenv_path = check_syftbox_in_sbenv();
+    }
+
+    if binary_path.is_none()
+        && java_brew_path.is_none()
+        && !docker_desktop_installed
+        && syftbox_sbenv_path.is_none()
+    {
         return Ok(DependencyResult {
             name: dep.name.clone(),
             found: false,
@@ -202,6 +220,46 @@ pub fn check_single_dependency(
             found: true,
             path: Some(format!("{}/java", brew_path)),
             version: None,
+            running: None,
+            skipped: false,
+            skip_reason: None,
+            description: Some(dep.description.clone()),
+            website: dep.website.clone(),
+            install_instructions: Some(dep.install_instructions.clone()),
+        });
+    } else if docker_desktop_installed && binary_path.is_none() {
+        // Docker Desktop is installed but docker CLI is not available in PATH
+        // This typically happens when Docker Desktop is installed but not running
+        return Ok(DependencyResult {
+            name: dep.name.clone(),
+            found: true,
+            path: Some("/Applications/Docker.app".to_string()),
+            version: None,
+            running: Some(false),
+            skipped: false,
+            skip_reason: None,
+            description: Some(dep.description.clone()),
+            website: dep.website.clone(),
+            install_instructions: Some("Docker Desktop is installed but not running. Please start Docker Desktop from your Applications folder.".to_string()),
+        });
+    } else if let Some(sbenv_path) = syftbox_sbenv_path {
+        // Syftbox found in ~/.sbenv/binaries
+        // Get version from the syftbox binary
+        let version = Command::new(&sbenv_path)
+            .arg("--version")
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .and_then(|output| {
+                let version_str = String::from_utf8_lossy(&output.stdout);
+                version_str.split_whitespace().nth(2).map(|v| v.to_string())
+            });
+
+        return Ok(DependencyResult {
+            name: dep.name.clone(),
+            found: true,
+            path: Some(sbenv_path),
+            version,
             running: None,
             skipped: false,
             skip_reason: None,
@@ -309,7 +367,8 @@ pub fn check_dependencies_result() -> Result<DependencyCheckResult> {
             which::which(&dep.name)
                 .ok()
                 .map(|p| p.display().to_string())
-        };
+        }
+        .or_else(|| find_in_well_known_locations(&dep.name));
 
         // Special handling for Java on macOS
         let mut java_brew_path: Option<String> = None;
@@ -317,7 +376,23 @@ pub fn check_dependencies_result() -> Result<DependencyCheckResult> {
             java_brew_path = check_java_in_brew_not_in_path();
         }
 
-        if binary_path.is_none() && java_brew_path.is_none() {
+        // Special handling for Docker on macOS - check if Docker Desktop is installed
+        #[cfg(target_os = "macos")]
+        let docker_desktop_installed = dep.name == "docker" && is_docker_desktop_installed();
+        #[cfg(not(target_os = "macos"))]
+        let docker_desktop_installed = false;
+
+        // Special handling for syftbox - check in ~/.sbenv/binaries
+        let mut syftbox_sbenv_path: Option<String> = None;
+        if binary_path.is_none() && dep.name == "syftbox" {
+            syftbox_sbenv_path = check_syftbox_in_sbenv();
+        }
+
+        if binary_path.is_none()
+            && java_brew_path.is_none()
+            && !docker_desktop_installed
+            && syftbox_sbenv_path.is_none()
+        {
             all_found = false;
             results.push(DependencyResult {
                 name: dep.name.clone(),
@@ -331,12 +406,51 @@ pub fn check_dependencies_result() -> Result<DependencyCheckResult> {
                 website: dep.website.clone(),
                 install_instructions: Some(dep.install_instructions.clone()),
             });
+        } else if docker_desktop_installed && binary_path.is_none() {
+            // Docker Desktop is installed but docker CLI is not available
+            all_running = false; // Mark as not running since docker CLI is not available
+            results.push(DependencyResult {
+                name: dep.name.clone(),
+                found: true,
+                path: Some("/Applications/Docker.app".to_string()),
+                version: None,
+                running: Some(false),
+                skipped: false,
+                skip_reason: None,
+                description: Some(dep.description.clone()),
+                website: dep.website.clone(),
+                install_instructions: Some("Docker Desktop is installed but not running. Please start Docker Desktop from your Applications folder.".to_string()),
+            });
         } else if let Some(brew_path) = java_brew_path {
             results.push(DependencyResult {
                 name: dep.name.clone(),
                 found: true,
                 path: Some(format!("{}/java", brew_path)),
                 version: None,
+                running: None,
+                skipped: false,
+                skip_reason: None,
+                description: Some(dep.description.clone()),
+                website: dep.website.clone(),
+                install_instructions: Some(dep.install_instructions.clone()),
+            });
+        } else if let Some(sbenv_path) = syftbox_sbenv_path {
+            // Syftbox found in ~/.sbenv/binaries
+            let version = Command::new(&sbenv_path)
+                .arg("--version")
+                .output()
+                .ok()
+                .filter(|output| output.status.success())
+                .and_then(|output| {
+                    let version_str = String::from_utf8_lossy(&output.stdout);
+                    version_str.split_whitespace().nth(2).map(|v| v.to_string())
+                });
+
+            results.push(DependencyResult {
+                name: dep.name.clone(),
+                found: true,
+                path: Some(sbenv_path),
+                version,
                 running: None,
                 skipped: false,
                 skip_reason: None,
@@ -388,6 +502,81 @@ pub fn check_dependencies_result() -> Result<DependencyCheckResult> {
         dependencies: results,
         all_satisfied: all_found && all_running,
     })
+}
+
+fn find_in_well_known_locations(executable: &str) -> Option<String> {
+    let mut search_dirs: Vec<PathBuf> = Vec::new();
+
+    #[cfg(target_os = "macos")]
+    {
+        search_dirs.extend([
+            PathBuf::from("/opt/homebrew/bin"),
+            PathBuf::from("/opt/homebrew/sbin"),
+            PathBuf::from("/usr/local/bin"),
+            PathBuf::from("/usr/local/sbin"),
+            PathBuf::from("/usr/bin"),
+            PathBuf::from("/usr/sbin"),
+            PathBuf::from("/bin"),
+            PathBuf::from("/sbin"),
+        ]);
+
+        if executable == "docker" {
+            search_dirs.extend([
+                PathBuf::from("/Applications/Docker.app/Contents/Resources/bin"),
+                PathBuf::from("/usr/local/bin"), // Docker CLI installed via brew
+                PathBuf::from("/opt/homebrew/bin"), // Docker CLI on Apple Silicon
+            ]);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        search_dirs.extend([
+            PathBuf::from("/usr/local/bin"),
+            PathBuf::from("/usr/bin"),
+            PathBuf::from("/bin"),
+            PathBuf::from("/usr/local/sbin"),
+            PathBuf::from("/usr/sbin"),
+            PathBuf::from("/sbin"),
+            PathBuf::from("/snap/bin"),
+            PathBuf::from("/var/lib/snapd/snap/bin"),
+        ]);
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        search_dirs.extend([
+            PathBuf::from("C:/Program Files"),
+            PathBuf::from("C:/Program Files (x86)"),
+        ]);
+
+        if executable == "docker" {
+            search_dirs.push(PathBuf::from(
+                "C:/Program Files/Docker/Docker/resources/bin",
+            ));
+        }
+    }
+
+    if let Some(home) = dirs::home_dir() {
+        search_dirs.push(home.join(".local/bin"));
+        search_dirs.push(home.join(".cargo/bin"));
+        search_dirs.push(home.join("bin"));
+    }
+
+    let binary_name = if cfg!(target_os = "windows") {
+        format!("{}.exe", executable)
+    } else {
+        executable.to_string()
+    };
+
+    for dir in search_dirs {
+        let candidate = dir.join(&binary_name);
+        if candidate.is_file() {
+            return Some(candidate.display().to_string());
+        }
+    }
+
+    None
 }
 
 pub async fn execute(json: bool) -> Result<()> {
@@ -492,7 +681,24 @@ pub async fn execute(json: bool) -> Result<()> {
             uv_windows_path = check_uv_in_windows_not_in_path();
         }
 
-        if binary_path.is_none() && java_brew_path.is_none() && uv_windows_path.is_none() {
+        // Special handling for Docker on macOS - check if Docker Desktop is installed
+        #[cfg(target_os = "macos")]
+        let docker_desktop_installed = dep.name == "docker" && is_docker_desktop_installed();
+        #[cfg(not(target_os = "macos"))]
+        let docker_desktop_installed = false;
+
+        // Special handling for syftbox - check in ~/.sbenv/binaries
+        let mut syftbox_sbenv_path: Option<String> = None;
+        if binary_path.is_none() && dep.name == "syftbox" {
+            syftbox_sbenv_path = check_syftbox_in_sbenv();
+        }
+
+        if binary_path.is_none()
+            && java_brew_path.is_none()
+            && uv_windows_path.is_none()
+            && !docker_desktop_installed
+            && syftbox_sbenv_path.is_none()
+        {
             all_found = false;
             if !json {
                 println!("❌ NOT FOUND");
@@ -516,6 +722,28 @@ pub async fn execute(json: bool) -> Result<()> {
                 description: Some(dep.description.clone()),
                 website: dep.website.clone(),
                 install_instructions: Some(dep.install_instructions.clone()),
+            });
+        } else if docker_desktop_installed && binary_path.is_none() {
+            // Docker Desktop is installed but not running
+            all_running = false;
+            if !json {
+                println!("⚠️  Found (Docker Desktop installed but not running)");
+                println!("  Docker Desktop is installed on your system.");
+                println!("  To start Docker, open Docker Desktop from your Applications folder.");
+                println!("  Location: /Applications/Docker.app");
+                println!();
+            }
+            results.push(DependencyResult {
+                name: dep.name.clone(),
+                found: true,
+                path: Some("/Applications/Docker.app".to_string()),
+                version: None,
+                running: Some(false),
+                skipped: false,
+                skip_reason: None,
+                description: Some(dep.description.clone()),
+                website: dep.website.clone(),
+                install_instructions: Some("Docker Desktop is installed but not running. Please start Docker Desktop from your Applications folder.".to_string()),
             });
         } else if let Some(brew_path) = java_brew_path {
             // Java is installed via brew but not in PATH
@@ -574,6 +802,40 @@ pub async fn execute(json: bool) -> Result<()> {
                 found: true,
                 path: Some(uv_path.clone()),
                 version: get_uv_version(&uv_path),
+                running: None,
+                skipped: false,
+                skip_reason: None,
+                description: Some(dep.description.clone()),
+                website: dep.website.clone(),
+                install_instructions: Some(dep.install_instructions.clone()),
+            });
+        } else if let Some(sbenv_path) = syftbox_sbenv_path {
+            // Syftbox found in ~/.sbenv/binaries
+            let version = Command::new(&sbenv_path)
+                .arg("--version")
+                .output()
+                .ok()
+                .filter(|output| output.status.success())
+                .and_then(|output| {
+                    let version_str = String::from_utf8_lossy(&output.stdout);
+                    version_str.split_whitespace().nth(2).map(|v| v.to_string())
+                });
+
+            if !json {
+                if let Some(ref ver) = version {
+                    println!("✓ Found (version {})", ver);
+                } else {
+                    println!("✓ Found");
+                }
+                println!("  Path: {}", sbenv_path);
+                println!("  Note: Found in ~/.sbenv/binaries");
+            }
+
+            results.push(DependencyResult {
+                name: dep.name.clone(),
+                found: true,
+                path: Some(sbenv_path),
+                version,
                 running: None,
                 skipped: false,
                 skip_reason: None,
@@ -717,6 +979,96 @@ fn check_if_running(service: &str) -> bool {
     }
 }
 
+#[cfg(target_os = "macos")]
+fn is_docker_desktop_installed() -> bool {
+    // Check if Docker Desktop app exists on macOS
+    let docker_app = Path::new("/Applications/Docker.app");
+    if docker_app.exists() {
+        return true;
+    }
+
+    // Also check user-specific Applications folder
+    if let Some(home) = dirs::home_dir() {
+        let user_docker_app = home.join("Applications/Docker.app");
+        if user_docker_app.exists() {
+            return true;
+        }
+    }
+
+    false
+}
+
+#[cfg(not(target_os = "macos"))]
+#[allow(dead_code)]
+fn is_docker_desktop_installed() -> bool {
+    // On non-macOS systems, we rely on the docker binary check
+    false
+}
+
+fn check_syftbox_in_sbenv() -> Option<String> {
+    // Check for syftbox binaries in ~/.sbenv/binaries
+    let home = dirs::home_dir()?;
+    let sbenv_binaries = home.join(".sbenv").join("binaries");
+
+    if !sbenv_binaries.exists() {
+        return None;
+    }
+
+    // Find all syftbox binaries and pick the latest one
+    let mut syftbox_binaries = Vec::new();
+
+    // Look in version subdirectories
+    if let Ok(entries) = std::fs::read_dir(&sbenv_binaries) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                // Check for syftbox binary in each version directory
+                let syftbox_path = path.join("syftbox");
+                if syftbox_path.is_file() {
+                    // Check if it's executable on Unix systems
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        if let Ok(metadata) = syftbox_path.metadata() {
+                            let permissions = metadata.permissions();
+                            if permissions.mode() & 0o111 != 0 {
+                                syftbox_binaries.push(syftbox_path);
+                            }
+                        }
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        syftbox_binaries.push(syftbox_path);
+                    }
+                }
+            }
+        }
+    }
+
+    if syftbox_binaries.is_empty() {
+        return None;
+    }
+
+    // Sort by path (which includes version) to get the latest version
+    // Versions like 0.8.6 > 0.8.5 > 0.8.3
+    syftbox_binaries.sort_by(|a, b| {
+        // Extract version from path
+        let a_parent = a
+            .parent()
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy());
+        let b_parent = b
+            .parent()
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy());
+
+        // Compare versions - this will work for simple semantic versions
+        b_parent.cmp(&a_parent)
+    });
+
+    syftbox_binaries.first().map(|p| p.display().to_string())
+}
+
 fn get_start_command(service: &str) -> String {
     match service {
         "docker" => {
@@ -819,6 +1171,7 @@ fn get_version_string(tool: &str) -> Option<String> {
         "docker" => get_docker_version(),
         "syftbox" => get_syftbox_version(),
         "nextflow" => get_nextflow_version(),
+        "uv" => get_uv_version(tool),
         _ => None,
     }
 }
