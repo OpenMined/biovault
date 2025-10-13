@@ -1304,11 +1304,16 @@ status: {}
 
     #[test]
     fn test_get_inbox_path() {
+        let tmp = TempDir::new().unwrap();
+        crate::config::set_test_biovault_home(tmp.path().join(".bv"));
+
         let result = super::get_inbox_path();
         assert!(result.is_ok());
         let path = result.unwrap();
         // Path should contain inbox
         assert!(path.to_string_lossy().contains("inbox"));
+
+        crate::config::clear_test_biovault_home();
     }
 
     #[tokio::test]

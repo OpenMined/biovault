@@ -1,4 +1,19 @@
 dependencies:
+  - name: brew
+    check_running: false
+    package_manager: true
+    os_filter:
+      - macos
+    install_instructions: |
+      /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+    description: Package manager for macOS
+    website: https://brew.sh
+    environments:
+      macos:
+        install_commands:
+          - /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+        verify_command: brew --version
+
   - name: java
     check_running: false
     min_version: 17
