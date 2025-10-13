@@ -908,8 +908,8 @@ mod tests {
             email: "me@example.com".into(),
             syftbox_config: None,
             version: None,
-
             binary_paths: None,
+            syftbox_credentials: None,
         }
     }
 

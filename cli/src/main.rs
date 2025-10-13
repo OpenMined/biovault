@@ -469,6 +469,12 @@ enum Commands {
         json: bool,
     },
 
+    #[command(about = "Manage SyftBox authentication")]
+    Syftbox {
+        #[command(subcommand)]
+        command: SyftboxCommands,
+    },
+
     #[command(about = "FASTQ file operations")]
     Fastq {
         #[command(subcommand)]
@@ -829,6 +835,35 @@ enum ConfigCommands {
     Syftbox {
         #[arg(help = "Path to SyftBox config.json (omit to use default)")]
         path: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum SyftboxCommands {
+    #[command(about = "Request a SyftBox OTP email")]
+    RequestOtp {
+        #[arg(long, help = "Email address to send the OTP to")]
+        email: Option<String>,
+        #[arg(long, help = "Display name to include in the request")]
+        name: Option<String>,
+        #[arg(long, help = "SyftBox server base URL")]
+        server: Option<String>,
+    },
+
+    #[command(about = "Submit an OTP and store SyftBox tokens")]
+    SubmitOtp {
+        #[arg(help = "OTP code received via email")]
+        code: String,
+        #[arg(long, help = "Email address associated with the OTP")]
+        email: Option<String>,
+        #[arg(long, help = "SyftBox server base URL")]
+        server: Option<String>,
+        #[arg(long, help = "Path to syftbox config.json to update")]
+        config: Option<String>,
+        #[arg(long, help = "SyftBox data directory to embed in config")]
+        data_dir: Option<String>,
+        #[arg(long, help = "SyftBox client URL to store in config")]
+        client_url: Option<String>,
     },
 }
 
@@ -1532,6 +1567,26 @@ async fn async_main_with(cli: Cli) -> Result<()> {
                 commands::config_cmd::show(json).await?;
             }
         }
+        Commands::Syftbox { command } => match command {
+            SyftboxCommands::RequestOtp {
+                email,
+                name,
+                server,
+            } => {
+                commands::syftbox::request_otp(email, name, server).await?;
+            }
+            SyftboxCommands::SubmitOtp {
+                code,
+                email,
+                server,
+                config,
+                data_dir,
+                client_url,
+            } => {
+                commands::syftbox::submit_otp(&code, email, server, config, data_dir, client_url)
+                    .await?;
+            }
+        },
         Commands::Fastq { command } => match command {
             FastqCommands::Combine {
                 input_folder,

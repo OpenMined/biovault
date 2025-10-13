@@ -22,6 +22,8 @@ pub struct Config {
     pub version: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub binary_paths: Option<BinaryPaths>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub syftbox_credentials: Option<SyftboxCredentials>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -39,6 +41,22 @@ pub struct SyftBoxConfig {
     pub data_dir: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SyftboxCredentials {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refresh_token: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub access_token: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data_dir: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+}
+
 impl Config {
     pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
         let path = path.as_ref();
@@ -53,6 +71,11 @@ impl Config {
 
     pub fn save<P: AsRef<Path>>(&self, path: P) -> crate::error::Result<()> {
         let path = path.as_ref();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).with_context(|| {
+                format!("Failed to create config directory: {}", parent.display())
+            })?;
+        }
         let yaml_content = serde_yaml::to_string(&self)?;
         fs::write(path, yaml_content)
             .with_context(|| format!("Failed to write config file: {}", path.display()))?;
@@ -305,8 +328,8 @@ mod tests {
             email: "user@example.com".into(),
             syftbox_config: None,
             version: Some("1.0.0".into()),
-
             binary_paths: None,
+            syftbox_credentials: None,
         };
         cfg.save(&path).unwrap();
         let loaded = Config::from_file(&path).unwrap();
@@ -330,8 +353,8 @@ mod tests {
             email: "user@example.com".into(),
             syftbox_config: Some(syft_cfg_path.to_string_lossy().to_string()),
             version: None,
-
             binary_paths: None,
+            syftbox_credentials: None,
         };
 
         let dir = cfg.get_syftbox_data_dir().unwrap();
