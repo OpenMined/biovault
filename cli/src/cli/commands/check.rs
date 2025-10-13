@@ -999,6 +999,7 @@ fn is_docker_desktop_installed() -> bool {
 }
 
 #[cfg(not(target_os = "macos"))]
+#[allow(dead_code)]
 fn is_docker_desktop_installed() -> bool {
     // On non-macOS systems, we rely on the docker binary check
     false
