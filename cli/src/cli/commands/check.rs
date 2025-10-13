@@ -1377,7 +1377,7 @@ pub fn check_brew_installed() -> Result<bool> {
     // Only relevant on macOS
     #[cfg(not(target_os = "macos"))]
     {
-        return Ok(true); // Not needed on other platforms
+        Ok(true) // Not needed on other platforms
     }
 
     #[cfg(target_os = "macos")]
