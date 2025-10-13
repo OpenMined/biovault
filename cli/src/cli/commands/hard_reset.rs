@@ -143,6 +143,7 @@ pub async fn execute(ignore_warning: bool) -> Result<()> {
                 syftbox_config: None,
                 version: None,
                 binary_paths: None,
+                syftbox_credentials: None,
             }
         }
     };
@@ -337,6 +338,7 @@ mod tests {
             syftbox_config: None,
             version: None,
             binary_paths: None,
+            syftbox_credentials: None,
         }
     }
 

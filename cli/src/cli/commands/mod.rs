@@ -20,4 +20,5 @@ pub mod sample_data;
 pub mod samplesheet;
 pub mod setup;
 pub mod submit;
+pub mod syftbox;
 pub mod update;

@@ -602,6 +602,7 @@ mod tests {
             syftbox_config: None,
             version: None,
             binary_paths: None,
+            syftbox_credentials: None,
         };
         config.save(bv_home.join("config.yaml")).unwrap();
 
@@ -870,6 +871,7 @@ mod tests {
             syftbox_config: None,
             version: None,
             binary_paths: None,
+            syftbox_credentials: None,
         };
 
         let datasite_path = syft_dir.join("datasites").join(&config.email); // SyftBoxApp::new lazily creates this, but ensure base exists
@@ -996,6 +998,7 @@ mod tests {
             syftbox_config: None,
             version: None,
             binary_paths: None,
+            syftbox_credentials: None,
         })
         .unwrap();
         let db = MessageDb::new(&db_path).unwrap();

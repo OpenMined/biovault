@@ -1443,6 +1443,7 @@ mod tests {
             syftbox_config: None,
             version: None,
             binary_paths: None,
+            syftbox_credentials: None,
         };
         let name = get_service_name(&config);
         assert!(name.starts_with("biovault-daemon-"));
@@ -1460,6 +1461,7 @@ mod tests {
             syftbox_config: None,
             version: None,
             binary_paths: None,
+            syftbox_credentials: None,
         };
         let dir = get_biovault_dir(&config);
         assert!(dir.is_ok());
@@ -1476,6 +1478,7 @@ mod tests {
             syftbox_config: None,
             version: None,
             binary_paths: None,
+            syftbox_credentials: None,
         };
         let path = get_pid_file_path(&config);
         assert!(path.is_ok());
@@ -1493,6 +1496,7 @@ mod tests {
             syftbox_config: None,
             version: None,
             binary_paths: None,
+            syftbox_credentials: None,
         };
         let path = get_status_file_path(&config);
         assert!(path.is_ok());
@@ -1510,6 +1514,7 @@ mod tests {
             syftbox_config: None,
             version: None,
             binary_paths: None,
+            syftbox_credentials: None,
         };
         let path = get_log_file_path(&config);
         assert!(path.is_ok());
@@ -1583,6 +1588,7 @@ mod tests {
             syftbox_config: None,
             version: None,
             binary_paths: None,
+            syftbox_credentials: None,
         };
 
         let result = is_daemon_running(&config);
@@ -1601,6 +1607,7 @@ mod tests {
             syftbox_config: None,
             version: None,
             binary_paths: None,
+            syftbox_credentials: None,
         };
 
         let result = cleanup_stale_pid_files(&config);
@@ -1618,6 +1625,7 @@ mod tests {
             syftbox_config: None,
             version: None,
             binary_paths: None,
+            syftbox_credentials: None,
         };
 
         let result = get_daemon_status(&config);
@@ -1638,6 +1646,7 @@ mod tests {
             syftbox_config: None,
             version: None,
             binary_paths: None,
+            syftbox_credentials: None,
         };
 
         let result = generate_systemd_service_content(&config);
@@ -1656,6 +1665,7 @@ mod tests {
             syftbox_config: None,
             version: None,
             binary_paths: None,
+            syftbox_credentials: None,
         };
 
         // Create invalid PID file
@@ -1681,6 +1691,7 @@ mod tests {
             syftbox_config: None,
             version: None,
             binary_paths: None,
+            syftbox_credentials: None,
         };
 
         // Create invalid PID file
@@ -1707,6 +1718,7 @@ mod tests {
             syftbox_config: None,
             version: None,
             binary_paths: None,
+            syftbox_credentials: None,
         };
 
         // Create valid status file
@@ -1742,6 +1754,7 @@ mod tests {
             syftbox_config: None,
             version: None,
             binary_paths: None,
+            syftbox_credentials: None,
         };
         let name = get_service_name(&config);
         assert!(name.contains("user-at-example-com"));
@@ -1774,6 +1787,7 @@ mod tests {
             syftbox_config: None,
             version: None,
             binary_paths: None,
+            syftbox_credentials: None,
         };
 
         let biovault_dir = get_biovault_dir(&config).unwrap();
@@ -1817,6 +1831,7 @@ mod tests {
             syftbox_config: None,
             version: None,
             binary_paths: None,
+            syftbox_credentials: None,
         };
 
         let result = stop(&config).await;
@@ -1834,6 +1849,7 @@ mod tests {
             syftbox_config: None,
             version: None,
             binary_paths: None,
+            syftbox_credentials: None,
         };
 
         let result = logs(&config, false, Some(10)).await;
@@ -1851,6 +1867,7 @@ mod tests {
             syftbox_config: None,
             version: None,
             binary_paths: None,
+            syftbox_credentials: None,
         };
 
         // Should work even when daemon not running
@@ -1866,6 +1883,7 @@ mod tests {
             syftbox_config: None,
             version: None,
             binary_paths: None,
+            syftbox_credentials: None,
         };
 
         let result = install_service(&config).await;
@@ -1880,6 +1898,7 @@ mod tests {
             syftbox_config: None,
             version: None,
             binary_paths: None,
+            syftbox_credentials: None,
         };
 
         let result = uninstall_service(&config).await;
@@ -1894,6 +1913,7 @@ mod tests {
             syftbox_config: None,
             version: None,
             binary_paths: None,
+            syftbox_credentials: None,
         };
 
         let result = service_status(&config).await;
@@ -1908,6 +1928,7 @@ mod tests {
             syftbox_config: None,
             version: None,
             binary_paths: None,
+            syftbox_credentials: None,
         };
 
         let result = show_service(&config).await;
@@ -1922,6 +1943,7 @@ mod tests {
             syftbox_config: None,
             version: None,
             binary_paths: None,
+            syftbox_credentials: None,
         };
 
         let result = reinstall_service(&config).await;
@@ -1939,6 +1961,7 @@ mod tests {
             syftbox_config: None,
             version: None,
             binary_paths: None,
+            syftbox_credentials: None,
         };
 
         if let Ok(content) = generate_systemd_service_content(&config) {
@@ -1982,6 +2005,7 @@ mod tests {
             syftbox_config: None,
             version: None,
             binary_paths: None,
+            syftbox_credentials: None,
         };
 
         // Create invalid JSON status file
@@ -2004,6 +2028,7 @@ mod tests {
             syftbox_config: None,
             version: None,
             binary_paths: None,
+            syftbox_credentials: None,
         };
 
         // Create PID file with non-existent PID
@@ -2026,6 +2051,7 @@ mod tests {
             syftbox_config: None,
             version: None,
             binary_paths: None,
+            syftbox_credentials: None,
         };
 
         // Create PID file with non-existent PID
@@ -2064,6 +2090,7 @@ mod tests {
                 syftbox_config: None,
                 version: None,
                 binary_paths: None,
+                syftbox_credentials: None,
             };
             let name = get_service_name(&config);
             assert!(
@@ -2087,6 +2114,7 @@ mod tests {
             syftbox_config: None,
             version: None,
             binary_paths: None,
+            syftbox_credentials: None,
         };
 
         let config2 = Config {
@@ -2094,6 +2122,7 @@ mod tests {
             syftbox_config: None,
             version: None,
             binary_paths: None,
+            syftbox_credentials: None,
         };
 
         let dir1 = get_biovault_dir(&config1).unwrap();
@@ -2118,6 +2147,7 @@ mod tests {
             syftbox_config: None,
             version: None,
             binary_paths: None,
+            syftbox_credentials: None,
         };
 
         // Create PID file with current process ID (which is running)
@@ -2154,6 +2184,7 @@ mod tests {
             syftbox_config: None,
             version: None,
             binary_paths: None,
+            syftbox_credentials: None,
         };
 
         let pid_path = get_pid_file_path(&config).unwrap();
@@ -2172,6 +2203,7 @@ mod tests {
             syftbox_config: None,
             version: None,
             binary_paths: None,
+            syftbox_credentials: None,
         };
 
         let log_path = get_log_file_path(&config).unwrap();
@@ -2190,6 +2222,7 @@ mod tests {
             syftbox_config: None,
             version: None,
             binary_paths: None,
+            syftbox_credentials: None,
         };
 
         // Test with different line counts
@@ -2220,6 +2253,7 @@ mod tests {
             syftbox_config: None,
             version: None,
             binary_paths: None,
+            syftbox_credentials: None,
         };
 
         let status_path = get_status_file_path(&config).unwrap();
@@ -2248,6 +2282,7 @@ mod tests {
             syftbox_config: None,
             version: None,
             binary_paths: None,
+            syftbox_credentials: None,
         };
 
         let name = get_service_name(&config);

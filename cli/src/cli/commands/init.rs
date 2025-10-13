@@ -121,6 +121,7 @@ pub async fn execute(email: Option<&str>, quiet: bool) -> Result<()> {
             syftbox_config: syftbox_config.clone(),
             version: Some("0.1.27".to_string()),
             binary_paths: None,
+            syftbox_credentials: None,
         };
 
         config.save(&config_file)?;
@@ -368,8 +369,8 @@ mod tests {
             email: "old@example.com".to_string(),
             syftbox_config: None,
             version: None,
-
             binary_paths: None,
+            syftbox_credentials: None,
         };
         let config_path = temp_dir.path().join(".biovault").join("config.yaml");
         fs::create_dir_all(config_path.parent().unwrap()).unwrap();
