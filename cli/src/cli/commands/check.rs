@@ -1392,7 +1392,7 @@ pub fn check_brew_installed() -> Result<bool> {
 pub fn install_brew() -> Result<String> {
     #[cfg(not(target_os = "macos"))]
     {
-        return Err(anyhow!("Homebrew installation is only supported on macOS").into());
+        Err(anyhow!("Homebrew installation is only supported on macOS").into())
     }
 
     #[cfg(target_os = "macos")]
