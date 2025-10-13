@@ -98,6 +98,7 @@ impl Config {
             syftbox_config: None,
             version: None,
             binary_paths: None,
+            syftbox_credentials: None,
         }
     }
 
