@@ -142,8 +142,8 @@ mod tests {
             email: "initial@example.com".to_string(),
             syftbox_config: None,
             version: None,
-
             binary_paths: None,
+            syftbox_credentials: None,
         };
         initial_config.save(config_dir.join("config.yaml"))?;
 
@@ -184,8 +184,8 @@ mod tests {
             email: "e@example".into(),
             syftbox_config: None,
             version: None,
-
             binary_paths: None,
+            syftbox_credentials: None,
         };
         cfg.save(tmp.path().join(".bv/config.yaml"))?;
 
@@ -226,8 +226,8 @@ mod tests {
             email: "show@example.com".to_string(),
             syftbox_config: Some("/custom/syftbox.json".to_string()),
             version: Some("1.0.0".to_string()),
-
             binary_paths: None,
+            syftbox_credentials: None,
         };
         config.save(config_dir.join("config.yaml"))?;
 
@@ -253,8 +253,8 @@ mod tests {
             email: "initial@example.com".to_string(),
             syftbox_config: None,
             version: None,
-
             binary_paths: None,
+            syftbox_credentials: None,
         };
         initial_config.save(config_dir.join("config.yaml"))?;
 
