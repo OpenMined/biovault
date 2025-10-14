@@ -62,6 +62,61 @@ pub async fn import_project_record(
     }
 }
 
+/// Create a new project and register it in the database (for desktop app)
+pub async fn create_project_record(name: String, example: Option<String>) -> Result<Project> {
+    let db = BioVaultDb::new()?;
+
+    // Check if project already exists
+    if let Some(existing) = db.get_project(&name)? {
+        return Err(anyhow::anyhow!(
+            "Project '{}' already exists (id: {}). Please choose a different name.",
+            name,
+            existing.id
+        )
+        .into());
+    }
+
+    // Get BIOVAULT_HOME and create projects directory
+    let biovault_home = config::get_biovault_home()?;
+    let projects_dir = biovault_home.join("projects");
+    fs::create_dir_all(&projects_dir)?;
+
+    let project_folder = projects_dir.join(&name);
+    let project_folder_str = project_folder.to_string_lossy().to_string();
+
+    // Use the existing project::create function to create files
+    crate::cli::commands::project::create(
+        Some(name.clone()),
+        Some(project_folder_str.clone()),
+        example,
+    )
+    .await?;
+
+    // Load the created project.yaml to get details
+    let yaml_path = project_folder.join("project.yaml");
+    let yaml_content =
+        fs::read_to_string(&yaml_path).context("Failed to read project.yaml after creation")?;
+
+    let project_yaml: ProjectYaml =
+        serde_yaml::from_str(&yaml_content).context("Failed to parse project.yaml")?;
+
+    // Register the project in the database
+    db.register_project(
+        &name,
+        &project_yaml.author,
+        &project_yaml.workflow,
+        &project_yaml.template,
+        &project_folder,
+    )?;
+
+    // Get the registered project from the database and return it
+    let project = db
+        .get_project(&name)?
+        .ok_or_else(|| anyhow::anyhow!("Project was created but not found in database"))?;
+
+    Ok(project)
+}
+
 async fn import_from_url(
     db: &BioVaultDb,
     url: &str,
