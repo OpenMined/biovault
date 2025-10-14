@@ -63,10 +63,7 @@ pub async fn import_project_record(
 }
 
 /// Create a new project and register it in the database (for desktop app)
-pub async fn create_project_record(
-    name: String,
-    example: Option<String>,
-) -> Result<Project> {
+pub async fn create_project_record(name: String, example: Option<String>) -> Result<Project> {
     let db = BioVaultDb::new()?;
 
     // Check if project already exists
@@ -97,11 +94,11 @@ pub async fn create_project_record(
 
     // Load the created project.yaml to get details
     let yaml_path = project_folder.join("project.yaml");
-    let yaml_content = fs::read_to_string(&yaml_path)
-        .context("Failed to read project.yaml after creation")?;
+    let yaml_content =
+        fs::read_to_string(&yaml_path).context("Failed to read project.yaml after creation")?;
 
-    let project_yaml: ProjectYaml = serde_yaml::from_str(&yaml_content)
-        .context("Failed to parse project.yaml")?;
+    let project_yaml: ProjectYaml =
+        serde_yaml::from_str(&yaml_content).context("Failed to parse project.yaml")?;
 
     // Register the project in the database
     db.register_project(

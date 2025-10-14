@@ -202,7 +202,6 @@ dependencies = [
  "notify",
  "predicates",
  "rand 0.8.5",
- "rayon",
  "regex",
  "reqwest",
  "rusqlite",
