@@ -1134,7 +1134,7 @@ pub async fn execute(params: RunParams) -> anyhow::Result<()> {
     cmd.arg("run")
         .arg(&temp_template)
         .arg("--participant_id")
-        .arg(&participant.id);
+        .arg(format!("'{}'", &participant.id));
 
     // Add CRAM-specific parameters if present
     if let Some(ref_version) = &participant.ref_version {

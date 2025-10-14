@@ -1,0 +1,7 @@
+name: pgsc-prep
+author: biovault@openmined.org
+workflow: workflow.nf
+template: snp
+assets:
+  - convert_to_plink.py
+  - README.md

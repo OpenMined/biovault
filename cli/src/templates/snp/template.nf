@@ -13,7 +13,7 @@ params.results_dir = params.results_dir ?: null
 // workflow file
 params.work_flow_file = params.work_flow_file ?: null
 
-participant_id_ch    = Channel.value(params.participant_id)
+participant_id_ch    = Channel.value(params.participant_id.toString())
 snp_ch               = Channel.fromPath(params.snp)
 assets_dir_ch        = Channel.fromPath(params.assets_dir)
 work_flow_file       = Channel.fromPath(params.work_flow_file)

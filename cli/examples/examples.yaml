@@ -1,7 +1,7 @@
 examples:
   haplo-y:
-    name: "Haplogroup Y Analysis"
-    description: "Analyze Y chromosome haplogroups"
+    name: 'Haplogroup Y Analysis'
+    description: 'Analyze Y chromosome haplogroups'
     template: default
     files:
       - project.yaml
@@ -11,8 +11,8 @@ examples:
       - assets/y_haplogroup_panel.GRCh38.tsv
 
   eye-color:
-    name: "Eye Color Prediction"
-    description: "Predict eye color from genetic markers"
+    name: 'Eye Color Prediction'
+    description: 'Predict eye color from genetic markers'
     template: default
     files:
       - project.yaml
@@ -20,8 +20,8 @@ examples:
       - assets/eye_color.py
 
   red-hair:
-    name: "Red Hair Prediction"
-    description: "Predict red hair trait from MC1R gene variants"
+    name: 'Red Hair Prediction'
+    description: 'Predict red hair trait from MC1R gene variants'
     template: default
     files:
       - project.yaml
@@ -29,17 +29,27 @@ examples:
       - assets/red_hair.py
 
   count-snps:
-    name: "Count SNPs"
-    description: "Count the number of SNPs in genomic data"
+    name: 'Count SNPs'
+    description: 'Count the number of SNPs in genomic data'
     template: snp
     files:
       - project.yaml
       - workflow.nf
       - assets/count_number_of_snps.py
 
+  pgsc-prep:
+    name: 'PGS Catalog Preparation'
+    description: 'Convert SNP files to plink format for pgsc_calc (Polygenic Score calculation)'
+    template: snp
+    files:
+      - project.yaml
+      - workflow.nf
+      - assets/convert_to_plink.py
+      - assets/README.md
+
   sheet-add:
-    name: "Sheet Add"
-    description: "Add derived columns to participant data"
+    name: 'Sheet Add'
+    description: 'Add derived columns to participant data'
     template: sheet
     files:
       - project.yaml
@@ -48,8 +58,8 @@ examples:
       - participants.csv
 
   apol1-sheet:
-    name: "APOL1 Sheet Analysis"
-    description: "Analyze APOL1 genotypes and add derived columns to participant data"
+    name: 'APOL1 Sheet Analysis'
+    description: 'Analyze APOL1 genotypes and add derived columns to participant data'
     template: sheet
     files:
       - project.yaml
@@ -65,8 +75,8 @@ examples:
       - apol1_input/participants.csv
 
   apol1-bs:
-    name: "APOL1 BioScript"
-    description: "Analyze APOL1 genotypes and add derived columns to participant data using BioScript"
+    name: 'APOL1 BioScript'
+    description: 'Analyze APOL1 genotypes and add derived columns to participant data using BioScript'
     template: sheet
     files:
       - project.yaml
