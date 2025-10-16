@@ -8,6 +8,9 @@ use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
+#[cfg(test)]
+use std::collections::HashMap;
+
 thread_local! {
     static TEST_CONFIG: RefCell<Option<Config>> = const { RefCell::new(None) };
     static TEST_SYFTBOX_DATA_DIR: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
@@ -15,12 +18,18 @@ thread_local! {
     static TEST_POINTER_FILE: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
 }
 
+#[cfg(test)]
+thread_local! {
+    static TEST_ENV_OVERRIDES: RefCell<HashMap<String, Vec<Option<String>>>> =
+        RefCell::new(HashMap::new());
+}
+
 const BIOVAULT_POINTER_DIR: &str = "BioVault";
 const BIOVAULT_POINTER_FILE: &str = "home_path";
 const BIOVAULT_POINTER_OVERRIDE: &str = "BIOVAULT_POINTER_PATH";
 
 fn should_persist_home_pointer() -> bool {
-    env::var_os("BIOVAULT_HOME").is_none() && env::var_os("SYFTBOX_DATA_DIR").is_none()
+    get_env_var("BIOVAULT_HOME").is_none() && get_env_var("SYFTBOX_DATA_DIR").is_none()
 }
 
 fn pointer_file_path() -> Option<PathBuf> {
@@ -31,6 +40,21 @@ fn pointer_file_path() -> Option<PathBuf> {
         return Some(PathBuf::from(path));
     }
     dirs::config_dir().map(|dir| dir.join(BIOVAULT_POINTER_DIR).join(BIOVAULT_POINTER_FILE))
+}
+
+fn get_env_var(key: &str) -> Option<String> {
+    #[cfg(test)]
+    {
+        if let Some(value) = TEST_ENV_OVERRIDES.with(|map| {
+            map.borrow()
+                .get(key)
+                .and_then(|stack| stack.last().cloned())
+        }) {
+            return value;
+        }
+    }
+
+    env::var(key).ok()
 }
 
 fn read_persisted_home() -> Option<PathBuf> {
@@ -368,7 +392,7 @@ pub fn get_biovault_home() -> anyhow::Result<PathBuf> {
     }
 
     // Check for test environment (must be before directory walk to prevent finding global config)
-    if let Ok(test_home) = env::var("BIOVAULT_TEST_HOME") {
+    if let Some(test_home) = get_env_var("BIOVAULT_TEST_HOME") {
         let path = PathBuf::from(test_home).join(".biovault");
         fs::create_dir_all(&path).with_context(|| {
             format!(
@@ -380,7 +404,7 @@ pub fn get_biovault_home() -> anyhow::Result<PathBuf> {
     }
 
     // Check for explicit BIOVAULT_HOME
-    if let Ok(biovault_home) = env::var("BIOVAULT_HOME") {
+    if let Some(biovault_home) = get_env_var("BIOVAULT_HOME") {
         let path = PathBuf::from(biovault_home);
         fs::create_dir_all(&path)
             .with_context(|| format!("Failed to create biovault directory: {}", path.display()))?;
@@ -388,7 +412,7 @@ pub fn get_biovault_home() -> anyhow::Result<PathBuf> {
     }
 
     // Check for SyftBox virtualenv
-    if let Ok(syftbox_data_dir) = env::var("SYFTBOX_DATA_DIR") {
+    if let Some(syftbox_data_dir) = get_env_var("SYFTBOX_DATA_DIR") {
         let path = PathBuf::from(syftbox_data_dir).join(".biovault");
         fs::create_dir_all(&path)
             .with_context(|| format!("Failed to create biovault directory: {}", path.display()))?;
@@ -535,6 +559,30 @@ pub fn clear_test_pointer_file() {
 }
 
 #[cfg(test)]
+pub fn set_test_env_override(key: &str, value: Option<&str>) {
+    TEST_ENV_OVERRIDES.with(|overrides| {
+        overrides
+            .borrow_mut()
+            .entry(key.to_string())
+            .or_default()
+            .push(value.map(|v| v.to_string()));
+    });
+}
+
+#[cfg(test)]
+pub fn clear_test_env_override(key: &str) {
+    TEST_ENV_OVERRIDES.with(|overrides| {
+        let mut map = overrides.borrow_mut();
+        if let Some(stack) = map.get_mut(key) {
+            stack.pop();
+            if stack.is_empty() {
+                map.remove(key);
+            }
+        }
+    });
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
@@ -549,6 +597,7 @@ mod tests {
         fn set(key: &str, value: &str) -> Self {
             let previous = env::var(key).ok();
             env::set_var(key, value);
+            set_test_env_override(key, Some(value));
             Self {
                 key: key.to_string(),
                 previous,
@@ -558,6 +607,7 @@ mod tests {
         fn unset(key: &str) -> Self {
             let previous = env::var(key).ok();
             env::remove_var(key);
+            set_test_env_override(key, None);
             Self {
                 key: key.to_string(),
                 previous,
@@ -572,6 +622,7 @@ mod tests {
             } else {
                 env::remove_var(&self.key);
             }
+            clear_test_env_override(&self.key);
         }
     }
 
