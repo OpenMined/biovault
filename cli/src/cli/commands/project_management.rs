@@ -1,3 +1,4 @@
+use crate::cli::examples;
 use crate::config;
 use crate::data::{BioVaultDb, Project, ProjectYaml};
 use crate::error::Result;
@@ -62,59 +63,173 @@ pub async fn import_project_record(
     }
 }
 
-/// Create a new project and register it in the database (for desktop app)
-pub async fn create_project_record(name: String, example: Option<String>) -> Result<Project> {
-    let db = BioVaultDb::new()?;
+pub fn create_project_record(name: String, example: Option<String>) -> Result<Project> {
+    let project_name = name.trim();
+    if project_name.is_empty() {
+        return Err(anyhow::anyhow!("Project name cannot be empty").into());
+    }
+    if project_name == "."
+        || project_name == ".."
+        || project_name.contains('/')
+        || project_name.contains('\\')
+    {
+        return Err(anyhow::anyhow!("Project name contains invalid characters").into());
+    }
 
-    // Check if project already exists
-    if let Some(existing) = db.get_project(&name)? {
+    let example = example.and_then(|raw| {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    });
+
+    let email_config = crate::config::Config::load()
+        .map(|cfg| cfg.email)
+        .unwrap_or_default();
+    let email_trimmed = email_config.trim().to_string();
+
+    let db = BioVaultDb::new()?;
+    if let Some(existing) = db.get_project(project_name)? {
         return Err(anyhow::anyhow!(
             "Project '{}' already exists (id: {}). Please choose a different name.",
-            name,
+            project_name,
             existing.id
         )
         .into());
     }
 
-    // Get BIOVAULT_HOME and create projects directory
     let biovault_home = config::get_biovault_home()?;
     let projects_dir = biovault_home.join("projects");
     fs::create_dir_all(&projects_dir)?;
 
-    let project_folder = projects_dir.join(&name);
-    let project_folder_str = project_folder.to_string_lossy().to_string();
+    let project_dir = projects_dir.join(project_name);
+    if project_dir.exists() {
+        return Err(anyhow::anyhow!(
+            "A project named '{}' already exists at {}",
+            project_name,
+            project_dir.display()
+        )
+        .into());
+    }
 
-    // Use the existing project::create function to create files
-    crate::cli::commands::project::create(
-        Some(name.clone()),
-        Some(project_folder_str.clone()),
-        example,
-    )
-    .await?;
+    fs::create_dir_all(&project_dir)?;
+    let project_dir_for_cleanup = project_dir.clone();
+    let project_name_owned = project_name.to_string();
 
-    // Load the created project.yaml to get details
-    let yaml_path = project_folder.join("project.yaml");
-    let yaml_content =
-        fs::read_to_string(&yaml_path).context("Failed to read project.yaml after creation")?;
+    let build_result: Result<Project> = (|| {
+        if let Some(ref example_name) = example {
+            examples::write_example_to_directory(example_name, &project_dir).with_context(
+                || {
+                    format!(
+                        "Failed to scaffold project from example '{}': {}",
+                        example_name,
+                        project_dir.display()
+                    )
+                },
+            )?;
+        } else {
+            let project_template = include_str!("../../templates/project.yaml");
+            let workflow_template = include_str!("../../templates/workflow.nf");
 
-    let project_yaml: ProjectYaml =
-        serde_yaml::from_str(&yaml_content).context("Failed to parse project.yaml")?;
+            let author_placeholder = if email_trimmed.is_empty() {
+                "user@example.com"
+            } else {
+                email_trimmed.as_str()
+            };
 
-    // Register the project in the database
-    db.register_project(
-        &name,
-        &project_yaml.author,
-        &project_yaml.workflow,
-        &project_yaml.template,
-        &project_folder,
-    )?;
+            let project_yaml = project_template
+                .replace("{project_name}", project_name)
+                .replace("{email}", author_placeholder);
 
-    // Get the registered project from the database and return it
-    let project = db
-        .get_project(&name)?
-        .ok_or_else(|| anyhow::anyhow!("Project was created but not found in database"))?;
+            fs::write(project_dir.join("project.yaml"), project_yaml)
+                .context("Failed to write project.yaml")?;
+            fs::write(project_dir.join("workflow.nf"), workflow_template)
+                .context("Failed to write workflow.nf")?;
+            fs::create_dir_all(project_dir.join("assets"))
+                .context("Failed to create assets directory")?;
+        }
 
-    Ok(project)
+        let yaml_path = project_dir.join("project.yaml");
+        let yaml_str = fs::read_to_string(&yaml_path).context("Failed to read project.yaml")?;
+
+        let mut yaml_value: serde_yaml::Value =
+            serde_yaml::from_str(&yaml_str).context("Invalid project.yaml format")?;
+
+        let mut author_field = email_trimmed.clone();
+        let mut workflow_field = "workflow.nf".to_string();
+        let mut template_field = example.clone().unwrap_or_else(|| "custom".to_string());
+
+        if let serde_yaml::Value::Mapping(ref mut map) = yaml_value {
+            let name_key = serde_yaml::Value::String("name".to_string());
+            map.insert(
+                name_key,
+                serde_yaml::Value::String(project_name_owned.clone()),
+            );
+
+            let author_key = serde_yaml::Value::String("author".to_string());
+            if !email_trimmed.is_empty() {
+                map.insert(
+                    author_key.clone(),
+                    serde_yaml::Value::String(email_trimmed.clone()),
+                );
+            }
+            if let Some(serde_yaml::Value::String(existing)) = map.get(&author_key) {
+                if !existing.trim().is_empty() {
+                    author_field = existing.clone();
+                }
+            }
+
+            let workflow_key = serde_yaml::Value::String("workflow".to_string());
+            if let Some(serde_yaml::Value::String(existing)) = map.get(&workflow_key) {
+                if !existing.trim().is_empty() {
+                    workflow_field = existing.clone();
+                }
+            }
+
+            let template_key = serde_yaml::Value::String("template".to_string());
+            if !map.contains_key(&template_key) {
+                map.insert(
+                    template_key.clone(),
+                    serde_yaml::Value::String(template_field.clone()),
+                );
+            }
+            if let Some(serde_yaml::Value::String(existing)) = map.get(&template_key) {
+                if !existing.trim().is_empty() {
+                    template_field = existing.clone();
+                }
+            }
+        } else {
+            return Err(anyhow::anyhow!("project.yaml has unexpected structure").into());
+        }
+
+        let updated_yaml =
+            serde_yaml::to_string(&yaml_value).context("Failed to serialize project.yaml")?;
+        fs::write(&yaml_path, updated_yaml).context("Failed to update project.yaml")?;
+
+        db.register_project(
+            &project_name_owned,
+            &author_field,
+            &workflow_field,
+            &template_field,
+            &project_dir,
+        )?;
+
+        let created = db
+            .get_project(&project_name_owned)?
+            .ok_or_else(|| anyhow::anyhow!("Project registration completed but not found"))?;
+
+        Ok(created)
+    })();
+
+    match build_result {
+        Ok(project) => Ok(project),
+        Err(err) => {
+            let _ = fs::remove_dir_all(project_dir_for_cleanup);
+            Err(err)
+        }
+    }
 }
 
 async fn import_from_url(
