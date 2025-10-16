@@ -1,9 +1,9 @@
-use anyhow::Result;
+use anyhow::{anyhow, bail, Result};
 use chrono::{DateTime, Utc};
 use regex::Regex;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
@@ -82,6 +82,7 @@ pub struct CsvFileImport {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct PatternSuggestion {
     pub pattern: String,
+    pub regex_pattern: String,
     pub description: String,
     pub example: String,
     pub sample_extractions: Vec<(String, String)>, // (filename, extracted_id)
@@ -204,16 +205,14 @@ pub fn import(
     let mut errors = Vec::new();
     let mut imported_file_ids = Vec::new();
 
-    for file_info in scan_result.files {
-        // Extract participant ID if pattern is provided
-        let participant_id = if let Some(pat) = pattern {
-            // Pass full path to extract_id_from_pattern (needed for {parent} and other path-based patterns)
-            extract_id_from_pattern(&file_info.path, pat)
-        } else {
-            None
-        };
+    let compiled_pattern = pattern.map(compile_pattern).transpose()?;
 
-        match import_file_with_participant(db, &file_info, participant_id.as_deref()) {
+    for file_info in scan_result.files {
+        let extracted_id = compiled_pattern
+            .as_ref()
+            .and_then(|matcher| matcher.extract(&file_info.path));
+
+        match import_file_with_participant(db, &file_info, extracted_id.as_deref()) {
             Ok(Some(file_id)) => {
                 imported += 1;
                 imported_file_ids.push(file_id);
@@ -661,7 +660,6 @@ pub fn suggest_patterns(
     extension: Option<&str>,
     recursive: bool,
 ) -> Result<SuggestPatternsResult> {
-    // First scan for files
     let scan_result = scan(path, extension, recursive)?;
 
     if scan_result.files.is_empty() {
@@ -671,154 +669,566 @@ pub fn suggest_patterns(
         });
     }
 
-    // Extract filenames
-    let filenames: Vec<String> = scan_result
-        .files
-        .iter()
-        .filter_map(|f| Path::new(&f.path).file_name())
-        .filter_map(|n| n.to_str())
-        .map(|s| s.to_string())
-        .collect();
+    let entries = collect_file_entries(&scan_result.files);
 
-    if filenames.is_empty() {
+    if entries.is_empty() {
         return Ok(SuggestPatternsResult {
             suggestions: vec![],
             sample_files: vec![],
         });
     }
 
-    let mut suggestions = Vec::new();
-    let first = &filenames[0];
+    let mut candidates = Vec::new();
+    candidates.extend(suggest_directory_candidates(&entries));
+    candidates.extend(suggest_leading_numeric_candidates(&entries));
+    candidates.extend(suggest_alpha_prefix_numeric_candidates(&entries));
+    candidates.extend(suggest_generic_numeric_candidates(&entries));
 
-    // Pattern 1: case_XXXX_ pattern
-    if first.contains("case_") {
-        let re = Regex::new(r"case_(\d+)").unwrap();
-        if re.is_match(first) {
-            let pattern = "case_{id}_*".to_string();
-            let mut sample_extractions = Vec::new();
+    let suggestions = coalesce_candidates(candidates)
+        .into_iter()
+        .map(|candidate| PatternSuggestion {
+            pattern: candidate.pattern,
+            regex_pattern: candidate.regex_pattern,
+            description: candidate.description,
+            example: candidate.example,
+            sample_extractions: candidate.sample_extractions,
+        })
+        .collect();
 
-            for filename in filenames.iter().take(3) {
-                if let Some(captures) = re.captures(filename) {
-                    if let Some(id) = captures.get(1) {
-                        sample_extractions.push((filename.clone(), id.as_str().to_string()));
+    let sample_files = entries
+        .iter()
+        .filter_map(|entry| {
+            if entry.file_name.is_empty() {
+                None
+            } else {
+                Some(entry.file_name.clone())
+            }
+        })
+        .take(5)
+        .collect();
+
+    Ok(SuggestPatternsResult {
+        suggestions,
+        sample_files,
+    })
+}
+
+#[derive(Clone, Debug)]
+struct FileEntry {
+    file_name: String,
+    stem: Option<String>,
+    parent: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+struct PatternCandidate {
+    pattern: String,
+    regex_pattern: String,
+    description: String,
+    example: String,
+    sample_extractions: Vec<(String, String)>,
+    coverage: usize,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum PatternScope {
+    Path,
+    Parent,
+    Basename,
+    Stem,
+}
+
+#[derive(Clone, Debug)]
+pub struct CompiledPattern {
+    scope: PatternScope,
+    regex: Regex,
+}
+
+impl CompiledPattern {
+    fn new(scope: PatternScope, regex: Regex) -> Self {
+        Self { scope, regex }
+    }
+
+    pub fn extract(&self, filepath: &str) -> Option<String> {
+        let target = match self.scope {
+            PatternScope::Path => Some(filepath.to_string()),
+            PatternScope::Parent => Path::new(filepath)
+                .parent()
+                .and_then(|p| p.file_name())
+                .and_then(|n| n.to_str())
+                .map(|s| s.to_string()),
+            PatternScope::Basename => Path::new(filepath)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|s| s.to_string()),
+            PatternScope::Stem => Path::new(filepath)
+                .file_stem()
+                .and_then(|n| n.to_str())
+                .map(|s| s.to_string()),
+        }?;
+
+        let caps = self.regex.captures(&target)?;
+        if let Some(id) = caps.name("id") {
+            return Some(id.as_str().to_string());
+        }
+
+        for idx in 1..caps.len() {
+            if let Some(mat) = caps.get(idx) {
+                return Some(mat.as_str().to_string());
+            }
+        }
+
+        None
+    }
+}
+
+/// Compile a participant ID pattern into a reusable matcher.
+///
+/// Patterns may be expressed as raw regular expressions, structured templates
+/// (`{scope:template}`), or legacy glob strings containing `{id}`. Structured
+/// templates support scopes such as `path`, `parent`, `filename`, `basename`,
+/// and `stem`, with glob-style wildcards (`*`, `**`, `?`).
+pub fn compile_pattern(pattern: &str) -> Result<CompiledPattern> {
+    compile_pattern_internal(pattern)
+}
+
+/// Convenience helper that compiles a pattern and applies it to a single path.
+pub fn extract_id_from_pattern(filepath: &str, pattern: &str) -> Result<Option<String>> {
+    let compiled = compile_pattern_internal(pattern)?;
+    Ok(compiled.extract(filepath))
+}
+
+fn compile_pattern_internal(pattern: &str) -> Result<CompiledPattern> {
+    let trimmed = pattern.trim();
+    if trimmed.is_empty() {
+        bail!("Pattern cannot be empty");
+    }
+
+    match trimmed {
+        "{parent}" | "{dirname}" | "{dir}" | "{id}/*" => {
+            let regex = Regex::new(r"^(?P<id>[A-Za-z0-9._-]+)$").unwrap();
+            return Ok(CompiledPattern::new(PatternScope::Parent, regex));
+        }
+        "{filename}" => {
+            let regex = Regex::new(r"^(?P<id>.+)$").unwrap();
+            return Ok(CompiledPattern::new(PatternScope::Stem, regex));
+        }
+        "{basename}" => {
+            let regex = Regex::new(r"^(?P<id>.+)$").unwrap();
+            return Ok(CompiledPattern::new(PatternScope::Basename, regex));
+        }
+        _ => {}
+    }
+
+    if let Some((scope_label, template)) = parse_structured_template(trimmed) {
+        let scope = parse_scope(&scope_label)?;
+        let regex_source = build_regex_from_template(&template, scope)?;
+        let regex = Regex::new(&regex_source).map_err(|err| {
+            anyhow!(
+                "Invalid regex derived from template '{}': {}",
+                template,
+                err
+            )
+        })?;
+        ensure_has_capture(&regex)?;
+        return Ok(CompiledPattern::new(scope, regex));
+    }
+
+    if trimmed.contains("{id}") {
+        let scope = if trimmed.contains('/') {
+            PatternScope::Path
+        } else {
+            PatternScope::Basename
+        };
+        let regex_source = build_regex_from_template(trimmed, scope)?;
+        let regex = Regex::new(&regex_source)
+            .map_err(|err| anyhow!("Invalid regex derived from pattern '{}': {}", trimmed, err))?;
+        ensure_has_capture(&regex)?;
+        return Ok(CompiledPattern::new(scope, regex));
+    }
+
+    let regex =
+        Regex::new(trimmed).map_err(|err| anyhow!("Invalid regex '{}': {}", trimmed, err))?;
+    ensure_has_capture(&regex)?;
+    Ok(CompiledPattern::new(PatternScope::Path, regex))
+}
+
+fn ensure_has_capture(regex: &Regex) -> Result<()> {
+    let mut has_capture = false;
+    for name in regex.capture_names().flatten() {
+        if name == "id" {
+            has_capture = true;
+            break;
+        }
+    }
+    if !has_capture && regex.captures_len() > 1 {
+        has_capture = true;
+    }
+
+    if !has_capture {
+        bail!("Regex must contain at least one capture group (use (?P<id>...))");
+    }
+
+    Ok(())
+}
+
+fn parse_structured_template(pattern: &str) -> Option<(String, String)> {
+    if !(pattern.starts_with('{') && pattern.ends_with('}')) {
+        return None;
+    }
+
+    let inner = &pattern[1..pattern.len() - 1];
+    let mut parts = inner.splitn(2, ':');
+    let scope = parts.next()?.trim();
+    let template = parts.next()?.trim();
+
+    if scope.is_empty() || template.is_empty() {
+        return None;
+    }
+
+    Some((scope.to_string(), template.to_string()))
+}
+
+fn parse_scope(label: &str) -> Result<PatternScope> {
+    match label.to_lowercase().as_str() {
+        "path" | "full" => Ok(PatternScope::Path),
+        "parent" | "dir" | "dirname" | "folder" | "directory" => Ok(PatternScope::Parent),
+        "filename" | "basename" => Ok(PatternScope::Basename),
+        "stem" | "name" => Ok(PatternScope::Stem),
+        other => bail!(
+            "Unknown pattern scope '{}'. Expected one of path, parent, filename, stem",
+            other
+        ),
+    }
+}
+
+fn build_regex_from_template(template: &str, scope: PatternScope) -> Result<String> {
+    if !template.contains("{id}") {
+        bail!("Template must include {{id}} placeholder");
+    }
+
+    let mut regex = String::from("^");
+    let mut chars = template.chars().peekable();
+    let mut found_id = false;
+
+    while let Some(ch) = chars.next() {
+        match ch {
+            '*' => {
+                if chars.peek() == Some(&'*') {
+                    chars.next();
+                    regex.push_str(".*");
+                } else {
+                    match scope {
+                        PatternScope::Path => regex.push_str("[^/]*"),
+                        _ => regex.push_str(".*"),
                     }
                 }
             }
+            '?' => regex.push('.'),
+            '{' => {
+                let mut lookahead = String::new();
+                while let Some(&next_ch) = chars.peek() {
+                    if next_ch == '}' {
+                        chars.next();
+                        break;
+                    }
+                    lookahead.push(next_ch);
+                    chars.next();
+                }
 
-            suggestions.push(PatternSuggestion {
-                pattern: pattern.clone(),
-                description: "Case ID pattern (e.g., case_0001_...)".to_string(),
-                example: first.clone(),
-                sample_extractions,
-            });
+                if lookahead == "id" {
+                    if found_id {
+                        bail!("Template may contain only one {{id}} placeholder");
+                    }
+                    found_id = true;
+                    let capture = match scope {
+                        PatternScope::Path => r"(?P<id>[^/]+)",
+                        _ => r"(?P<id>[A-Za-z0-9._-]+)",
+                    };
+                    regex.push_str(capture);
+                } else {
+                    regex.push_str(&escape_literal(&format!("{{{}}}", lookahead)));
+                }
+            }
+            '.' | '+' | '^' | '$' | '(' | ')' | '[' | ']' | '|' | '\\' => {
+                regex.push('\\');
+                regex.push(ch);
+            }
+            _ => regex.push(ch),
         }
     }
 
-    // Pattern 2: XXXX_X_X_ pattern (numbers at start)
-    let re_start = Regex::new(r"^(\d+)_").unwrap();
-    if re_start.is_match(first) {
-        let pattern = "{id}_*".to_string();
-        let mut sample_extractions = Vec::new();
+    if !found_id {
+        bail!("Template must include {{id}} placeholder");
+    }
 
-        for filename in filenames.iter().take(3) {
-            if let Some(captures) = re_start.captures(filename) {
-                if let Some(id) = captures.get(1) {
-                    sample_extractions.push((filename.clone(), id.as_str().to_string()));
+    regex.push('$');
+    Ok(regex)
+}
+
+fn escape_literal(text: &str) -> String {
+    let mut escaped = String::new();
+    for ch in text.chars() {
+        match ch {
+            '.' | '+' | '^' | '$' | '(' | ')' | '[' | ']' | '{' | '}' | '|' | '\\' => {
+                escaped.push('\\');
+                escaped.push(ch);
+            }
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+enum TokenClass {
+    Numeric,
+    Hex,
+    Alpha,
+    Alphanumeric,
+    Other,
+}
+
+fn collect_file_entries(files: &[FileInfo]) -> Vec<FileEntry> {
+    files
+        .iter()
+        .filter_map(|info| {
+            let path = Path::new(&info.path);
+            let file_name = path.file_name()?.to_str()?.to_string();
+            if file_name.starts_with('.') {
+                return None;
+            }
+            let stem = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .map(|s| s.to_string());
+            let parent = path
+                .parent()
+                .and_then(|p| p.file_name())
+                .and_then(|s| s.to_str())
+                .map(|s| s.to_string());
+
+            Some(FileEntry {
+                file_name,
+                stem,
+                parent,
+            })
+        })
+        .collect()
+}
+
+fn coalesce_candidates(mut candidates: Vec<PatternCandidate>) -> Vec<PatternCandidate> {
+    if candidates.is_empty() {
+        return candidates;
+    }
+
+    let mut map: HashMap<String, PatternCandidate> = HashMap::new();
+
+    for candidate in candidates.drain(..) {
+        map.entry(candidate.pattern.clone())
+            .and_modify(|existing| {
+                if candidate.coverage > existing.coverage {
+                    existing.coverage = candidate.coverage;
+                    existing.description = candidate.description.clone();
+                    existing.example = candidate.example.clone();
+                    existing.regex_pattern = candidate.regex_pattern.clone();
+                }
+
+                for sample in &candidate.sample_extractions {
+                    if !existing.sample_extractions.contains(sample)
+                        && existing.sample_extractions.len() < 5
+                    {
+                        existing.sample_extractions.push(sample.clone());
+                    }
+                }
+            })
+            .or_insert(candidate);
+    }
+
+    let mut deduped: Vec<PatternCandidate> = map.into_values().collect();
+    deduped.sort_by(|a, b| {
+        b.coverage
+            .cmp(&a.coverage)
+            .then_with(|| a.pattern.cmp(&b.pattern))
+    });
+    deduped
+}
+
+fn suggest_directory_candidates(entries: &[FileEntry]) -> Vec<PatternCandidate> {
+    let mut parent_map: HashMap<&str, Vec<&FileEntry>> = HashMap::new();
+
+    for entry in entries {
+        if let Some(parent) = entry.parent.as_deref() {
+            if parent.starts_with('.') {
+                continue;
+            }
+            parent_map.entry(parent).or_default().push(entry);
+        }
+    }
+
+    if parent_map.len() < 2 {
+        return Vec::new();
+    }
+
+    let id_like_parents: Vec<(&str, &Vec<&FileEntry>)> = parent_map
+        .iter()
+        .filter_map(|(name, files)| {
+            if is_id_like_parent(name) {
+                Some((*name, files))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    if id_like_parents.len() < 2 {
+        return Vec::new();
+    }
+
+    let id_like_parent_ratio = id_like_parents.len() as f64 / parent_map.len() as f64;
+    if parent_map.len() >= 4 && id_like_parent_ratio < 0.6 {
+        return Vec::new();
+    }
+
+    let id_like_coverage: usize = id_like_parents.iter().map(|(_, files)| files.len()).sum();
+    if id_like_coverage == 0 {
+        return Vec::new();
+    }
+
+    let mut candidates = Vec::new();
+
+    // Generic parent directory suggestion limited to ID-like parent names
+    let mut seen = HashSet::new();
+    let mut sample_extractions = Vec::new();
+    let mut example = String::new();
+    for (parent, files) in &id_like_parents {
+        if seen.insert(*parent) {
+            if let Some(entry) = files.first() {
+                let source = format!("{}/{}", parent, entry.file_name);
+                if example.is_empty() {
+                    example = source.clone();
+                }
+                sample_extractions.push((source, (*parent).to_string()));
+                if sample_extractions.len() >= 3 {
+                    break;
                 }
             }
         }
+    }
 
-        suggestions.push(PatternSuggestion {
-            pattern,
-            description: "Leading ID pattern (e.g., 001_...)".to_string(),
-            example: first.clone(),
+    if !sample_extractions.is_empty() {
+        candidates.push(PatternCandidate {
+            pattern: "{parent:{id}}".to_string(),
+            regex_pattern: r".*/(?P<id>[A-Za-z0-9._-]+)/[^/]+$".to_string(),
+            description: "Use parent directory names as participant IDs".to_string(),
+            example: example.clone(),
             sample_extractions,
+            coverage: id_like_coverage,
         });
     }
 
-    // Pattern 3: Generic number sequences (3+ digits)
-    let re_numbers = Regex::new(r"\d{3,}").unwrap();
-    if let Some(mat) = re_numbers.find(first) {
-        let start = mat.start();
-        let end = mat.end();
-        let before = &first[..start];
-        let after = &first[end..];
-        let pattern = format!("{}{{id}}{}", before, after);
-
-        let mut sample_extractions = Vec::new();
-        for filename in filenames.iter().take(3) {
-            if let Some(mat) = re_numbers.find(filename) {
-                sample_extractions.push((filename.clone(), mat.as_str().to_string()));
-            }
-        }
-
-        suggestions.push(PatternSuggestion {
-            pattern,
-            description: "Numeric ID pattern".to_string(),
-            example: first.clone(),
-            sample_extractions,
-        });
+    // Look for shared prefixes in the ID-like parent directory names
+    let parent_names: Vec<&str> = id_like_parents.iter().map(|(name, _)| *name).collect();
+    if parent_names.len() < 2 {
+        return candidates;
     }
 
-    // Pattern 4: participant_XXX or sample_XXX
-    let re_participant = Regex::new(r"(participant|sample|subject|patient)_(\d+)").unwrap();
-    if let Some(captures) = re_participant.captures(first) {
-        let prefix = captures.get(1).unwrap().as_str();
-        let pattern = format!("{}_{{id}}_*", prefix);
+    let prefix = longest_common_prefix(&parent_names);
 
-        let mut sample_extractions = Vec::new();
-        for filename in filenames.iter().take(3) {
-            if let Some(captures) = re_participant.captures(filename) {
-                if let Some(id) = captures.get(2) {
-                    sample_extractions.push((filename.clone(), id.as_str().to_string()));
+    if prefix.len() >= 2 {
+        let mut remainders: Vec<String> = Vec::new();
+        for parent in &parent_names {
+            if let Some(rest) = parent.strip_prefix(&prefix) {
+                if rest.is_empty() {
+                    remainders.clear();
+                    break;
                 }
+                remainders.push(rest.to_string());
+            } else {
+                remainders.clear();
+                break;
             }
         }
 
-        suggestions.push(PatternSuggestion {
-            pattern,
-            description: format!("{} ID pattern", prefix).to_string(),
-            example: first.clone(),
-            sample_extractions,
-        });
-    }
+        if !remainders.is_empty() {
+            let remainder_refs: Vec<&str> = remainders.iter().map(|r| r.as_str()).collect();
+            let class = classify_token_slice(&remainder_refs);
+            let unique_remainders: HashSet<&str> = remainder_refs.iter().copied().collect();
+            let consistent_length = remainders
+                .iter()
+                .map(|r| r.len())
+                .collect::<HashSet<_>>()
+                .len()
+                == 1;
 
-    // Pattern 5: Directory name as ID
-    // Check if files are organized in subdirectories where directory name is the ID
-    let first_file_path = scan_result.files.first().map(|f| Path::new(&f.path));
-    if let Some(first_path) = first_file_path {
-        if let Some(parent) = first_path.parent() {
-            if let Some(dir_name) = parent.file_name().and_then(|n| n.to_str()) {
-                // Check if directory name looks like an ID (contains numbers or is alphanumeric)
-                let re_dir_id = Regex::new(r"^\d+$|^[a-zA-Z0-9_-]+$").unwrap();
-                if re_dir_id.is_match(dir_name) && dir_name.len() >= 3 {
-                    let mut sample_extractions = Vec::new();
-                    let mut seen_dirs = std::collections::HashSet::new();
+            if matches!(
+                class,
+                TokenClass::Numeric | TokenClass::Hex | TokenClass::Alphanumeric
+            ) && unique_remainders.len() >= 2
+                && consistent_length
+            {
+                let mut sample_extractions = Vec::new();
+                let mut example = String::new();
+                let mut seen_dirs = HashSet::new();
 
-                    for file_scan in scan_result.files.iter().take(10) {
-                        if let Some(file_parent) = Path::new(&file_scan.path).parent() {
-                            if let Some(parent_name) =
-                                file_parent.file_name().and_then(|n| n.to_str())
-                            {
-                                if seen_dirs.insert(parent_name.to_string()) {
-                                    sample_extractions.push((
-                                        format!("{}/...", parent_name),
-                                        parent_name.to_string(),
-                                    ));
-                                }
-                                if sample_extractions.len() >= 3 {
-                                    break;
-                                }
+                for (parent, files) in &id_like_parents {
+                    if parent.starts_with(&prefix) && seen_dirs.insert(*parent) {
+                        if let Some(entry) = files.first() {
+                            let remainder = parent[prefix.len()..].to_string();
+                            let source = format!("{}/{}", parent, entry.file_name);
+                            if example.is_empty() {
+                                example = source.clone();
+                            }
+                            sample_extractions.push((source, remainder));
+                            if sample_extractions.len() >= 3 {
+                                break;
                             }
                         }
                     }
+                }
 
-                    if !sample_extractions.is_empty() {
-                        suggestions.push(PatternSuggestion {
-                            pattern: "{parent}".to_string(),
-                            description: "Directory name as participant ID".to_string(),
-                            example: format!("{}/...", dir_name),
+                if !sample_extractions.is_empty() {
+                    let coverage = id_like_parents
+                        .iter()
+                        .filter(|(name, _)| name.starts_with(&prefix))
+                        .map(|(_, files)| files.len())
+                        .sum();
+
+                    if coverage > 0 {
+                        let descriptor = match class {
+                            TokenClass::Numeric => "digits",
+                            TokenClass::Hex => "hexadecimal IDs",
+                            TokenClass::Alpha => "letters",
+                            TokenClass::Alphanumeric => "alphanumeric IDs",
+                            TokenClass::Other => "IDs",
+                        };
+
+                        let template_prefix = sanitize_glob_fragment(&prefix);
+                        let remainder_len = remainders.first().map(|r| r.len()).unwrap_or(1);
+                        let capture_pattern = match class {
+                            TokenClass::Numeric => format!("\\d{{{}}}", remainder_len),
+                            TokenClass::Hex => format!("[A-Fa-f0-9]{{{}}}", remainder_len),
+                            TokenClass::Alphanumeric => format!("[A-Za-z0-9]{{{}}}", remainder_len),
+                            TokenClass::Alpha => format!("[A-Za-z]{{{}}}", remainder_len),
+                            TokenClass::Other => format!("[^/]{{{}}}", remainder_len),
+                        };
+
+                        let regex_pattern = format!(
+                            r".*/(?P<id>{}{})/[^/]+$",
+                            escape_literal(&prefix),
+                            capture_pattern
+                        );
+
+                        candidates.push(PatternCandidate {
+                            pattern: format!("{{parent:{}{{id}}}}", template_prefix),
+                            regex_pattern,
+                            description: format!(
+                                "Directories with prefix '{}' followed by {}",
+                                prefix, descriptor
+                            ),
+                            example,
                             sample_extractions,
+                            coverage,
                         });
                     }
                 }
@@ -826,141 +1236,382 @@ pub fn suggest_patterns(
         }
     }
 
-    Ok(SuggestPatternsResult {
-        suggestions,
-        sample_files: filenames.into_iter().take(5).collect(),
-    })
+    candidates
 }
 
-/// Extract participant ID from filepath using glob-style pattern
-///
-/// Pattern Syntax:
-/// - `{id}` - Marks the capture group - this is what gets extracted as the participant ID
-/// - `*` - Matches any characters (non-greedy, doesn't cross `/` boundaries)
-/// - `**` - Matches any characters including `/` (for multi-level paths)
-/// - `?` - Matches single character
-/// - Literal text matches exactly
-///
-/// Special Shortcuts (for convenience):
-/// - `{parent}` - Shortcut for extracting parent directory name
-/// - `{filename}` - Shortcut for extracting filename without extension
-/// - `{basename}` - Shortcut for extracting filename with extension
-///
-/// Examples:
-/// - `{id}/*` → `/data/PT001/scan.txt` extracts `PT001` (parent directory)
-/// - `hu{id}/*` → `/data/hu627574/file.txt` extracts `627574` (after "hu" in parent)
-/// - `{id}_*.txt` → `123456_data.txt` extracts `123456` (before underscore)
-/// - `case_{id}_*` → `case_789_report.pdf` extracts `789` (between delimiters)
-/// - `*/{id}/*.txt` → `/path/PT001/scan.txt` extracts `PT001` (middle directory)
-/// - `participant_{id}.{sample_id}.*` → `participant_PT001.S001.csv` extracts `PT001` (first capture)
-///
-/// The `{id}` token can be used multiple times, but only the first occurrence will be captured.
-pub fn extract_id_from_pattern(filepath: &str, pattern: &str) -> Option<String> {
-    let path = Path::new(filepath);
+fn suggest_leading_numeric_candidates(entries: &[FileEntry]) -> Vec<PatternCandidate> {
+    let mut records = Vec::new();
+    let re = Regex::new(r"^(\d{3,})").unwrap();
 
-    // Handle special shortcut patterns
-    match pattern {
-        "{parent}" | "{dirname}" | "{dir}" | "{id}/*" => {
-            return path
-                .parent()
-                .and_then(|p| p.file_name())
-                .and_then(|n| n.to_str())
-                .map(|s| s.to_string());
+    for entry in entries {
+        if let Some(stem) = &entry.stem {
+            if let Some(mat) = re.captures(stem) {
+                let digits = mat.get(1).unwrap().as_str().to_string();
+                let next_char = stem.chars().nth(digits.len());
+                let delimiter = match next_char {
+                    Some('_') | Some('-') | Some('.') => Some(next_char.unwrap()),
+                    _ => None,
+                };
+
+                records.push((entry.clone(), digits, delimiter));
+            }
         }
-        "{filename}" => {
-            return path
-                .file_stem()
-                .and_then(|n| n.to_str())
-                .map(|s| s.to_string());
-        }
-        "{basename}" => {
-            return path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .map(|s| s.to_string());
-        }
-        _ => {}
     }
 
-    // Pattern must contain {id} to capture
-    if !pattern.contains("{id}") {
-        return None;
+    if records.len() < 3 {
+        return Vec::new();
     }
 
-    // Build regex from glob-style pattern
-    // Determine if pattern should match against full path or just filename
-    let match_target = if pattern.contains('/') {
-        // Pattern has path separators, match against full path
-        filepath
-    } else {
-        // Pattern is filename-only, match against just the filename
-        path.file_name()?.to_str()?
+    let mut length_counts: HashMap<usize, usize> = HashMap::new();
+    for (_, id, _) in &records {
+        *length_counts.entry(id.len()).or_insert(0) += 1;
+    }
+
+    let (dominant_len, dominant_count) = length_counts
+        .into_iter()
+        .max_by_key(|(_, count)| *count)
+        .unwrap();
+
+    if dominant_count < 2 {
+        return Vec::new();
+    }
+
+    if dominant_count * 100 / records.len() < 70 {
+        return Vec::new();
+    }
+
+    records.retain(|(_, id, _)| id.len() == dominant_len);
+
+    let unique_ids: HashSet<&str> = records.iter().map(|(_, id, _)| id.as_str()).collect();
+    if unique_ids.len() < 2 {
+        return Vec::new();
+    }
+
+    let mut delimiter_counts: HashMap<char, usize> = HashMap::new();
+    for (_, _, delimiter) in &records {
+        if let Some(d) = delimiter {
+            *delimiter_counts.entry(*d).or_insert(0) += 1;
+        }
+    }
+
+    let chosen_delimiter = delimiter_counts
+        .into_iter()
+        .max_by_key(|(_, count)| *count)
+        .map(|(delim, _)| delim);
+
+    let mut sample_extractions = Vec::new();
+    let mut example = String::new();
+    for (entry, id, _) in &records {
+        sample_extractions.push((entry.file_name.clone(), id.clone()));
+        if example.is_empty() {
+            example = entry.file_name.clone();
+        }
+        if sample_extractions.len() >= 3 {
+            break;
+        }
+    }
+
+    let template = match chosen_delimiter {
+        Some(d) => format!("{{id}}{}*", d),
+        None => "{id}*".to_string(),
+    };
+    let pattern = format!("{{stem:{}}}", template);
+
+    let delimiter_desc = match chosen_delimiter {
+        Some('_') => "underscore",
+        Some('-') => "dash",
+        Some('.') => "dot",
+        None => "", // No delimiter description used
+        Some(_) => "delimiter",
     };
 
-    // Convert pattern to regex
-    let mut regex_pattern = String::new();
-    let mut chars = pattern.chars().peekable();
+    let base_description = format!("Leading numeric ID ({} digits)", dominant_len);
+    let description = if delimiter_desc.is_empty() {
+        base_description.clone()
+    } else {
+        format!("{} before {}", base_description, delimiter_desc)
+    };
 
-    while let Some(ch) = chars.next() {
-        match ch {
-            '*' => {
-                // Check for ** (multi-level wildcard)
-                if chars.peek() == Some(&'*') {
-                    chars.next(); // consume second *
-                    regex_pattern.push_str(".*"); // Match anything including /
-                } else {
-                    // Single * doesn't cross directory boundaries
-                    regex_pattern.push_str("[^/]*");
-                }
-            }
-            '?' => regex_pattern.push('.'), // Single character wildcard
-            '.' | '+' | '^' | '$' | '(' | ')' | '[' | ']' | '\\' | '|' => {
-                // Escape regex special characters
-                regex_pattern.push('\\');
-                regex_pattern.push(ch);
-            }
-            '{' => {
-                // Check for {id} token
-                let rest: String = chars.clone().collect();
-                if rest.starts_with("id}") {
-                    // Consume "id}"
-                    chars.next(); // i
-                    chars.next(); // d
-                    chars.next(); // }
+    let regex_pattern = match chosen_delimiter {
+        Some(d) => format!(
+            "^(?P<id>\\d{{{}}}){}.*$",
+            dominant_len,
+            escape_literal(&d.to_string())
+        ),
+        None => format!("^(?P<id>\\d{{{}}}).*$", dominant_len),
+    };
 
-                    // Check what comes after {id} to determine character class
-                    // If followed by underscore or other delimiter, use non-greedy match
-                    let next_char = chars.peek();
-                    if next_char == Some(&'_') || next_char == Some(&'-') || next_char == Some(&'.')
-                    {
-                        // Use non-greedy match (+?) that stops at the first delimiter
-                        // Exclude the delimiter character from the capture group
-                        match next_char {
-                            Some(&'_') => regex_pattern.push_str(r"([a-zA-Z0-9\-]+?)"),
-                            Some(&'-') => regex_pattern.push_str(r"([a-zA-Z0-9_]+?)"),
-                            Some(&'.') => regex_pattern.push_str(r"([a-zA-Z0-9_\-]+?)"),
-                            _ => regex_pattern.push_str(r"([a-zA-Z0-9_\-]+?)"),
-                        }
-                    } else {
-                        // Include underscore (alphanumeric, underscore, hyphen), non-greedy
-                        regex_pattern.push_str(r"([a-zA-Z0-9_\-]+?)");
-                    }
-                } else {
-                    // Unknown token, treat as literal
-                    regex_pattern.push(ch);
-                }
+    vec![PatternCandidate {
+        pattern,
+        regex_pattern,
+        description,
+        example,
+        sample_extractions,
+        coverage: records.len(),
+    }]
+}
+
+fn suggest_alpha_prefix_numeric_candidates(entries: &[FileEntry]) -> Vec<PatternCandidate> {
+    let re = Regex::new(r"^([A-Za-z]{2,}[_-])(\d{3,})").unwrap();
+    let mut records: HashMap<String, Vec<(FileEntry, String)>> = HashMap::new();
+
+    for entry in entries {
+        if let Some(stem) = &entry.stem {
+            if let Some(caps) = re.captures(stem) {
+                let prefix = caps.get(1).unwrap().as_str().to_string();
+                let id = caps.get(2).unwrap().as_str().to_string();
+                records.entry(prefix).or_default().push((entry.clone(), id));
             }
-            _ => regex_pattern.push(ch),
         }
     }
 
-    // Anchor the pattern to match the full string
-    let regex_pattern = format!("^{}$", regex_pattern);
+    let mut candidates = Vec::new();
 
-    // Try to match and extract ID
-    let re = Regex::new(&regex_pattern).ok()?;
-    let captures = re.captures(match_target)?;
-    captures.get(1).map(|m| m.as_str().to_string())
+    for (prefix, matches) in records {
+        if matches.len() < 3 {
+            continue;
+        }
+
+        let unique_ids: HashSet<&str> = matches.iter().map(|(_, id)| id.as_str()).collect();
+        if unique_ids.len() < 2 {
+            continue;
+        }
+
+        let mut sample_extractions = Vec::new();
+        let mut example = String::new();
+        for (entry, id) in &matches {
+            sample_extractions.push((entry.file_name.clone(), id.clone()));
+            if example.is_empty() {
+                example = entry.file_name.clone();
+            }
+            if sample_extractions.len() >= 3 {
+                break;
+            }
+        }
+
+        let mut lengths: Vec<usize> = matches.iter().map(|(_, id)| id.len()).collect();
+        lengths.sort_unstable();
+        let min_len = *lengths.first().unwrap_or(&1);
+        let max_len = *lengths.last().unwrap_or(&min_len);
+        let capture = if min_len == max_len {
+            format!("\\d{{{}}}", min_len)
+        } else {
+            format!("\\d{{{},{}}}", min_len, max_len)
+        };
+
+        let regex_pattern = format!("^{}(?P<id>{}).*$", escape_literal(&prefix), capture);
+
+        let template = format!("{}{{id}}*", prefix);
+        let pattern = format!("{{stem:{}}}", template);
+
+        candidates.push(PatternCandidate {
+            pattern,
+            regex_pattern,
+            description: format!(
+                "Prefix '{}' followed by digits",
+                prefix.trim_end_matches(&['-', '_'][..])
+            ),
+            example,
+            sample_extractions,
+            coverage: matches.len(),
+        });
+    }
+
+    candidates
+}
+
+fn suggest_generic_numeric_candidates(entries: &[FileEntry]) -> Vec<PatternCandidate> {
+    let re = Regex::new(r"(\d{3,})").unwrap();
+    let mut context_map: HashMap<(String, String), Vec<(FileEntry, String)>> = HashMap::new();
+
+    for entry in entries {
+        if let Some(stem) = &entry.stem {
+            if let Some(mat) = re.find(stem) {
+                let id = mat.as_str().to_string();
+                let before = stem[..mat.start()].to_string();
+                let after = stem[mat.end()..].to_string();
+                context_map
+                    .entry((before, after))
+                    .or_default()
+                    .push((entry.clone(), id));
+            }
+        }
+    }
+
+    let mut candidates = Vec::new();
+
+    for ((before, after), matches) in context_map {
+        if matches.len() < 3 {
+            continue;
+        }
+
+        let unique_ids: HashSet<&str> = matches.iter().map(|(_, id)| id.as_str()).collect();
+        if unique_ids.len() < 2 {
+            continue;
+        }
+
+        let mut sample_extractions = Vec::new();
+        let mut example = String::new();
+        for (entry, id) in &matches {
+            sample_extractions.push((entry.file_name.clone(), id.clone()));
+            if example.is_empty() {
+                example = entry.file_name.clone();
+            }
+            if sample_extractions.len() >= 3 {
+                break;
+            }
+        }
+
+        let template = format!(
+            "{}{{id}}{}",
+            sanitize_glob_fragment(&before),
+            sanitize_glob_fragment(&after)
+        );
+        let pattern = format!("{{stem:{}}}", template);
+
+        let mut lengths: Vec<usize> = matches.iter().map(|(_, id)| id.len()).collect();
+        lengths.sort_unstable();
+        let min_len = *lengths.first().unwrap_or(&3);
+        let max_len = *lengths.last().unwrap_or(&min_len);
+        let capture = if min_len == max_len {
+            format!("\\d{{{}}}", min_len)
+        } else {
+            format!("\\d{{{},{}}}", min_len, max_len)
+        };
+
+        let regex_pattern = format!(
+            "^{}(?P<id>{}){}$",
+            escape_literal(&before),
+            capture,
+            escape_literal(&after)
+        );
+
+        candidates.push(PatternCandidate {
+            pattern,
+            regex_pattern,
+            description: "Repeated numeric sequence".to_string(),
+            example,
+            sample_extractions,
+            coverage: matches.len(),
+        });
+    }
+
+    candidates
+}
+
+fn is_id_like_parent(name: &str) -> bool {
+    if name.len() < 3 {
+        return false;
+    }
+
+    matches!(
+        classify_token(name),
+        TokenClass::Numeric | TokenClass::Hex | TokenClass::Alphanumeric
+    )
+}
+
+fn sanitize_glob_fragment(fragment: &str) -> String {
+    if fragment.is_empty() {
+        return String::new();
+    }
+
+    let mut sanitized = String::new();
+    for ch in fragment.chars() {
+        match ch {
+            '*' | '?' | '{' | '}' | '[' | ']' => {
+                sanitized.push('[');
+                sanitized.push(ch);
+                sanitized.push(']');
+            }
+            _ => sanitized.push(ch),
+        }
+    }
+    sanitized
+}
+
+fn longest_common_prefix(strings: &[&str]) -> String {
+    if strings.is_empty() {
+        return String::new();
+    }
+
+    let first = strings[0];
+    let mut end = first.len();
+
+    for s in strings.iter().skip(1) {
+        let mut idx = 0;
+        let max_len = std::cmp::min(end, s.len());
+        while idx < max_len && first.as_bytes()[idx] == s.as_bytes()[idx] {
+            idx += 1;
+        }
+        end = idx;
+        if end == 0 {
+            break;
+        }
+    }
+
+    first[..end].to_string()
+}
+
+fn classify_token(token: &str) -> TokenClass {
+    if token.is_empty() {
+        return TokenClass::Other;
+    }
+
+    let mut has_alpha = false;
+    let mut has_digit = false;
+    let mut has_other = false;
+
+    for ch in token.chars() {
+        match ch {
+            '0'..='9' => has_digit = true,
+            'a'..='z' | 'A'..='Z' => has_alpha = true,
+            '-' | '_' => {}
+            _ => {
+                has_other = true;
+                break;
+            }
+        }
+    }
+
+    if has_other {
+        TokenClass::Other
+    } else if has_alpha && has_digit {
+        if token.chars().all(|c| c.is_ascii_hexdigit()) {
+            TokenClass::Hex
+        } else {
+            TokenClass::Alphanumeric
+        }
+    } else if has_digit {
+        TokenClass::Numeric
+    } else if has_alpha {
+        TokenClass::Alpha
+    } else {
+        TokenClass::Other
+    }
+}
+
+fn classify_token_slice(tokens: &[&str]) -> TokenClass {
+    let mut classes: HashSet<TokenClass> = HashSet::new();
+    for token in tokens {
+        classes.insert(classify_token(token));
+    }
+
+    if classes.len() == 1 {
+        *classes.iter().next().unwrap()
+    } else if classes.contains(&TokenClass::Other) {
+        TokenClass::Other
+    } else if classes.contains(&TokenClass::Alphanumeric)
+        || classes.contains(&TokenClass::Hex)
+        || (classes.contains(&TokenClass::Alpha) && classes.contains(&TokenClass::Numeric))
+    {
+        TokenClass::Alphanumeric
+    } else if classes.contains(&TokenClass::Alpha) {
+        TokenClass::Alpha
+    } else if classes.contains(&TokenClass::Numeric) {
+        TokenClass::Numeric
+    } else {
+        TokenClass::Other
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1460,18 +2111,128 @@ mod tests {
     }
 
     #[test]
+    fn test_suggest_patterns_leading_numeric() {
+        let temp = TempDir::new().unwrap();
+        let filenames = [
+            "000000_carika.txt",
+            "103704_X_X_GSAv3-DTC_GRCh38-07-01-2025.txt",
+            "111442_X_X_GSAv3-DTC_GRCh38-07-01-2025.txt",
+            "117292_X_X_GSAv3-DTC_GRCh38-07-01-2025.txt",
+            "123364_X_X_GSAv3-DTC_GRCh38-07-01-2025.txt",
+            "256789_Combined_Genome.txt",
+            "356789_Eric_Uhden_Full_20110718111059.txt",
+        ];
+
+        for filename in filenames.iter() {
+            fs::write(temp.path().join(filename), b"content").unwrap();
+        }
+
+        let result = suggest_patterns(temp.path().to_str().unwrap(), Some(".txt"), false).unwrap();
+
+        assert!(!result
+            .suggestions
+            .iter()
+            .any(|suggestion| suggestion.pattern == "{parent:{id}}"));
+
+        assert!(result
+            .suggestions
+            .iter()
+            .any(|suggestion| suggestion.pattern == "{stem:{id}_*}"));
+
+        let lead_numeric = result
+            .suggestions
+            .iter()
+            .find(|suggestion| suggestion.pattern == "{stem:{id}_*}")
+            .unwrap();
+
+        // Ensure we captured canonical six-digit IDs
+        assert!(lead_numeric
+            .sample_extractions
+            .iter()
+            .any(|(_, id)| id.len() == 6));
+        assert_eq!(lead_numeric.regex_pattern, "^(?P<id>\\d{6})_.*$");
+    }
+
+    #[test]
+    fn test_suggest_patterns_directory_prefix() {
+        let temp = TempDir::new().unwrap();
+        let dirs = [
+            ("hu17DFDB", vec!["23andMe_Genotyping.txt"]),
+            ("hu44DCFF", vec!["JKP001_genotypes.txt"]),
+            ("hu2D53F2", vec!["hu2D53F2_20120421013417.txt"]),
+            (
+                "hu836D0A",
+                vec!["genome_Maureen_Markov_Full_20100823192336.txt"],
+            ),
+            ("huB714CA", vec!["huB714CA_20110726215545.txt"]),
+        ];
+
+        for (dir, files) in dirs.iter() {
+            let dir_path = temp.path().join(dir);
+            fs::create_dir_all(&dir_path).unwrap();
+            for file in files {
+                fs::write(dir_path.join(file), b"content").unwrap();
+            }
+        }
+
+        let result = suggest_patterns(temp.path().to_str().unwrap(), None, true).unwrap();
+
+        assert!(result
+            .suggestions
+            .iter()
+            .any(|suggestion| suggestion.pattern == "{parent:{id}}"));
+
+        let parent_pattern = result
+            .suggestions
+            .iter()
+            .find(|suggestion| suggestion.pattern == "{parent:{id}}")
+            .unwrap();
+
+        assert_eq!(
+            parent_pattern.regex_pattern,
+            r".*/(?P<id>[A-Za-z0-9._-]+)/[^/]+$"
+        );
+
+        assert!(result
+            .suggestions
+            .iter()
+            .any(|suggestion| suggestion.pattern == "{parent:hu{id}}"));
+
+        let dir_prefix = result
+            .suggestions
+            .iter()
+            .find(|suggestion| suggestion.pattern == "{parent:hu{id}}")
+            .unwrap();
+
+        assert!(dir_prefix
+            .sample_extractions
+            .iter()
+            .all(|(_, id)| id.len() == 6));
+        assert_eq!(
+            dir_prefix.regex_pattern,
+            r".*/(?P<id>hu[A-Fa-f0-9]{6})/[^/]+$"
+        );
+    }
+
+    #[test]
     fn test_extract_id_from_pattern_parent() {
         // Test {parent} token - extract parent directory name
         let file_path = "/data/genotype_files/huE922FC/AncestryDNA.txt";
-        let id = extract_id_from_pattern(file_path, "{parent}").unwrap();
+        let id = extract_id_from_pattern(file_path, "{parent:{id}}")
+            .unwrap()
+            .unwrap();
         assert_eq!(id, "huE922FC");
 
         // Test {dirname} alias
-        let id = extract_id_from_pattern(file_path, "{dirname}").unwrap();
+        let id = extract_id_from_pattern(file_path, "{dirname}")
+            .unwrap()
+            .unwrap();
         assert_eq!(id, "huE922FC");
 
         // Test {dir} alias
-        let id = extract_id_from_pattern(file_path, "{dir}").unwrap();
+        let id = extract_id_from_pattern(file_path, "{dir}")
+            .unwrap()
+            .unwrap();
         assert_eq!(id, "huE922FC");
     }
 
@@ -1479,11 +2240,15 @@ mod tests {
     fn test_extract_id_from_pattern_filename() {
         // Test {filename} token - filename without extension
         let file_path = "/data/genotype_files/huE922FC/AncestryDNA.txt";
-        let id = extract_id_from_pattern(file_path, "{filename}").unwrap();
+        let id = extract_id_from_pattern(file_path, "{filename}")
+            .unwrap()
+            .unwrap();
         assert_eq!(id, "AncestryDNA");
 
         // Test {basename} token - filename with extension
-        let id = extract_id_from_pattern(file_path, "{basename}").unwrap();
+        let id = extract_id_from_pattern(file_path, "{basename}")
+            .unwrap()
+            .unwrap();
         assert_eq!(id, "AncestryDNA.txt");
     }
 
@@ -1491,7 +2256,9 @@ mod tests {
     fn test_extract_id_from_pattern_legacy() {
         // Test legacy {id}/* pattern
         let file_path = "/data/genotype_files/huE922FC/AncestryDNA.txt";
-        let id = extract_id_from_pattern(file_path, "{id}/*").unwrap();
+        let id = extract_id_from_pattern(file_path, "{id}/*")
+            .unwrap()
+            .unwrap();
         assert_eq!(id, "huE922FC");
     }
 
@@ -1499,12 +2266,34 @@ mod tests {
     fn test_extract_id_from_pattern_filename_pattern() {
         // Test {id} in filename pattern
         let file_path = "/data/files/123456_sample.txt";
-        let id = extract_id_from_pattern(file_path, "{id}_*").unwrap();
+        let id = extract_id_from_pattern(file_path, "{stem:{id}_*}")
+            .unwrap()
+            .unwrap();
         assert_eq!(id, "123456");
 
         // Test alphanumeric IDs
         let file_path = "/data/files/ABC123_sample.txt";
-        let id = extract_id_from_pattern(file_path, "{id}_*").unwrap();
+        let id = extract_id_from_pattern(file_path, "{stem:{id}_*}")
+            .unwrap()
+            .unwrap();
         assert_eq!(id, "ABC123");
+    }
+
+    #[test]
+    fn test_extract_id_with_structured_template() {
+        let file_path = "/data/files/genome_Full_20120106210128.txt";
+        let id = extract_id_from_pattern(file_path, "{basename:genome_Full_{id}.txt}")
+            .unwrap()
+            .unwrap();
+        assert_eq!(id, "20120106210128");
+    }
+
+    #[test]
+    fn test_extract_id_with_regex() {
+        let file_path = "/data/genotype_files/huE922FC/AncestryDNA.txt";
+        let id = extract_id_from_pattern(file_path, r"(?P<id>hu[0-9A-F]{6})")
+            .unwrap()
+            .unwrap();
+        assert_eq!(id, "huE922FC");
     }
 }
