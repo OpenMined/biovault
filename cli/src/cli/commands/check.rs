@@ -1,4 +1,5 @@
 use crate::config::Config;
+#[cfg(target_os = "macos")]
 use crate::error::Error as CliError;
 use crate::Result;
 use anyhow::anyhow;
@@ -196,9 +197,6 @@ fn log_homebrew_install(message: &str) {
         eprintln!("🍺 {message}");
     }
 }
-
-#[cfg(not(target_os = "macos"))]
-fn log_homebrew_install(_message: &str) {}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DependencyConfig {
@@ -1435,82 +1433,74 @@ fn is_google_colab() -> bool {
     false
 }
 
+#[cfg(target_os = "macos")]
 fn check_java_in_brew_not_in_path() -> Option<String> {
-    #[cfg(target_os = "macos")]
-    {
-        // Check known Homebrew opt prefixes first (covers keg-only installs)
-        for base in OPENJDK_OPT_BASES.iter() {
-            let base_path = Path::new(base);
-            if !base_path.exists() {
-                continue;
-            }
+    // Check known Homebrew opt prefixes first (covers keg-only installs)
+    for base in OPENJDK_OPT_BASES.iter() {
+        let base_path = Path::new(base);
+        if !base_path.exists() {
+            continue;
+        }
 
-            if let Ok(entries) = std::fs::read_dir(base_path) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                        if name.starts_with("openjdk") {
-                            if let Some(bin_dir) =
-                                java_bin_from_prefix(path.to_string_lossy().as_ref())
-                            {
-                                let java_path = format!("{}/java", bin_dir);
-                                if is_valid_java_binary(&java_path) {
-                                    return Some(bin_dir);
-                                }
+        if let Ok(entries) = std::fs::read_dir(base_path) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                    if name.starts_with("openjdk") {
+                        if let Some(bin_dir) = java_bin_from_prefix(path.to_string_lossy().as_ref())
+                        {
+                            let java_path = format!("{}/java", bin_dir);
+                            if is_valid_java_binary(&java_path) {
+                                return Some(bin_dir);
                             }
                         }
                     }
                 }
             }
         }
+    }
 
-        if let Some(brew_cmd) = resolve_brew_command() {
-            let formulas = [
-                "openjdk",
-                "openjdk@25",
-                "openjdk@24",
-                "openjdk@23",
-                "openjdk@21",
-                "openjdk@20",
-                "openjdk@19",
-                "openjdk@18",
-                "openjdk@17",
-                "openjdk@11",
-                "openjdk@8",
-            ];
+    if let Some(brew_cmd) = resolve_brew_command() {
+        let formulas = [
+            "openjdk",
+            "openjdk@25",
+            "openjdk@24",
+            "openjdk@23",
+            "openjdk@21",
+            "openjdk@20",
+            "openjdk@19",
+            "openjdk@18",
+            "openjdk@17",
+            "openjdk@11",
+            "openjdk@8",
+        ];
 
-            for formula in formulas.iter() {
-                let output = Command::new(&brew_cmd)
-                    .args(["--prefix", formula])
-                    .output()
-                    .ok();
+        for formula in formulas.iter() {
+            let output = Command::new(&brew_cmd)
+                .args(["--prefix", formula])
+                .output()
+                .ok();
 
-                let output = match output {
-                    Some(out) if out.status.success() => out,
-                    _ => continue,
-                };
+            let output = match output {
+                Some(out) if out.status.success() => out,
+                _ => continue,
+            };
 
-                let prefix = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if prefix.is_empty() {
-                    continue;
-                }
+            let prefix = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if prefix.is_empty() {
+                continue;
+            }
 
-                if let Some(bin_dir) = java_bin_from_prefix(&prefix) {
-                    let java_path = format!("{}/java", bin_dir);
-                    if is_valid_java_binary(&java_path) {
-                        return Some(bin_dir);
-                    }
+            if let Some(bin_dir) = java_bin_from_prefix(&prefix) {
+                let java_path = format!("{}/java", bin_dir);
+                if is_valid_java_binary(&java_path) {
+                    return Some(bin_dir);
                 }
             }
         }
-
-        None
     }
 
-    #[cfg(not(target_os = "macos"))]
-    {
-        None
-    }
+    None
 }
 
 fn check_uv_in_windows_not_in_path() -> Option<String> {

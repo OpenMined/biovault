@@ -1362,7 +1362,7 @@ async fn check_and_configure_java_path(is_ci: bool) -> Result<()> {
 
     Ok(())
 }
-
+#[cfg(target_os = "macos")]
 fn check_java_in_brew_not_in_path() -> Option<String> {
     // Find brew command (in PATH or common locations)
     let brew_cmd = find_brew_command();
@@ -1412,6 +1412,11 @@ fn check_java_in_brew_not_in_path() -> Option<String> {
     }
 }
 
+#[cfg(not(target_os = "macos"))]
+fn check_java_in_brew_not_in_path() -> Option<String> {
+    None
+}
+#[cfg(target_os = "macos")]
 fn find_brew_command() -> Option<String> {
     // First check if brew is in PATH
     if which::which("brew").is_ok() {
@@ -1430,6 +1435,11 @@ fn find_brew_command() -> Option<String> {
         }
     }
 
+    None
+}
+
+#[cfg(not(target_os = "macos"))]
+fn find_brew_command() -> Option<String> {
     None
 }
 

@@ -986,11 +986,14 @@ mod tests {
     #[serial_test::serial]
     fn test_get_participants_file_path() {
         let temp = TempDir::new().unwrap();
-        std::env::set_var("BIOVAULT_HOME", temp.path());
+        let home = temp.path().join("biovault-home");
+        std::env::set_var("BIOVAULT_HOME", &home);
 
         let path = get_participants_file_path().unwrap();
         assert!(path.ends_with("participants.yaml"));
-        assert!(path.starts_with(temp.path()));
+        assert!(path.starts_with(&home));
+
+        std::env::remove_var("BIOVAULT_HOME");
     }
 
     #[test]
