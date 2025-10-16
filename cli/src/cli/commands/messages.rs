@@ -686,11 +686,14 @@ fn sender_project_root(
 fn receiver_private_submissions_path(config: &Config) -> anyhow::Result<PathBuf> {
     let data_dir = config.get_syftbox_data_dir()?;
 
-    // Get the real root data_dir (handling case where SYFTBOX_DATA_DIR points to datasite)
-    let real_data_dir = if data_dir.components().any(|c| c.as_os_str() == "datasites")
+    // Check if this is a normal SyftBox root (has datasites/ folder inside)
+    let real_data_dir = if data_dir.join("datasites").exists() {
+        // Normal case: data_dir/datasites/email exists, so data_dir is the root
+        data_dir
+    } else if data_dir.components().any(|c| c.as_os_str() == "datasites")
         && data_dir.to_string_lossy().contains(&config.email)
     {
-        // SYFTBOX_DATA_DIR is pointing to the datasite itself
+        // Edge case: SYFTBOX_DATA_DIR is pointing to datasite itself (no datasites/ folder inside)
         // Walk up to find the parent that doesn't contain "datasites"
         let mut parent = data_dir.clone();
         while parent.components().any(|c| c.as_os_str() == "datasites") {
@@ -702,11 +705,11 @@ fn receiver_private_submissions_path(config: &Config) -> anyhow::Result<PathBuf>
         }
         parent
     } else {
-        // Normal case: data_dir is already the root
+        // Fallback: treat as normal case
         data_dir
     };
 
-    // Private is at ROOT level, not inside datasite!
+    // Private is at data_dir root level
     Ok(real_data_dir
         .join("private")
         .join("app_data")

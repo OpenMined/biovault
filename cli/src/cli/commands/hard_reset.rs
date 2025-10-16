@@ -36,26 +36,29 @@ fn get_cleanup_paths(config: &Config) -> Vec<CleanupPath> {
 
     if let Some(data_dir) = data_dir {
         // Determine the actual root data_dir and datasite path
-        let (real_data_dir, datasite_path) =
-            if data_dir.components().any(|c| c.as_os_str() == "datasites")
-                && data_dir.to_string_lossy().contains(&config.email)
-            {
-                // SYFTBOX_DATA_DIR is pointing to the datasite itself
-                // We need to find the parent that doesn't contain "datasites"
-                let mut parent = data_dir.clone();
-                while parent.components().any(|c| c.as_os_str() == "datasites") {
-                    if let Some(p) = parent.parent() {
-                        parent = p.to_path_buf();
-                    } else {
-                        break;
-                    }
+        let (real_data_dir, datasite_path) = if data_dir.join("datasites").exists() {
+            // Normal case: data_dir has datasites/ folder inside
+            let datasite = data_dir.join("datasites").join(&config.email);
+            (data_dir.clone(), datasite)
+        } else if data_dir.components().any(|c| c.as_os_str() == "datasites")
+            && data_dir.to_string_lossy().contains(&config.email)
+        {
+            // Edge case: SYFTBOX_DATA_DIR is pointing to the datasite itself
+            // We need to find the parent that doesn't contain "datasites"
+            let mut parent = data_dir.clone();
+            while parent.components().any(|c| c.as_os_str() == "datasites") {
+                if let Some(p) = parent.parent() {
+                    parent = p.to_path_buf();
+                } else {
+                    break;
                 }
-                (parent, data_dir.clone())
-            } else {
-                // Normal case: data_dir is the root
-                let datasite = data_dir.join("datasites").join(&config.email);
-                (data_dir.clone(), datasite)
-            };
+            }
+            (parent, data_dir.clone())
+        } else {
+            // Fallback: treat as normal case
+            let datasite = data_dir.join("datasites").join(&config.email);
+            (data_dir.clone(), datasite)
+        };
 
         // Show the datasite base path for context
         info!("Using datasite path: {}", datasite_path.display());

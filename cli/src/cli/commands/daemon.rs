@@ -496,10 +496,8 @@ impl Daemon {
     }
 }
 
-fn get_biovault_dir(config: &Config) -> Result<PathBuf> {
-    // Use the syftbox data dir as the base, then add .biovault
-    let data_dir = config.get_syftbox_data_dir()?;
-    Ok(data_dir.join(".biovault"))
+fn get_biovault_dir(_config: &Config) -> Result<PathBuf> {
+    crate::config::get_biovault_home()
 }
 
 fn get_pid_file_path(config: &Config) -> Result<PathBuf> {
@@ -1619,6 +1617,8 @@ mod tests {
         use tempfile::TempDir;
         let tmp = TempDir::new().unwrap();
         crate::config::set_test_syftbox_data_dir(tmp.path());
+        let bv_home = tmp.path().join("bv_home");
+        crate::config::set_test_biovault_home(&bv_home);
 
         let config = Config {
             email: "test@example.com".to_string(),
@@ -1631,6 +1631,9 @@ mod tests {
         let result = get_daemon_status(&config);
         assert!(result.is_ok());
         assert!(result.unwrap().is_none());
+
+        crate::config::clear_test_biovault_home();
+        crate::config::clear_test_syftbox_data_dir();
     }
 
     #[test]
@@ -1999,6 +2002,8 @@ mod tests {
         use tempfile::TempDir;
         let tmp = TempDir::new().unwrap();
         crate::config::set_test_syftbox_data_dir(tmp.path());
+        let bv_home = tmp.path().join("bv_home");
+        crate::config::set_test_biovault_home(&bv_home);
 
         let config = Config {
             email: "test@example.com".to_string(),
@@ -2015,6 +2020,9 @@ mod tests {
 
         let result = get_daemon_status(&config);
         assert!(result.is_err());
+
+        crate::config::clear_test_biovault_home();
+        crate::config::clear_test_syftbox_data_dir();
     }
 
     #[test]
