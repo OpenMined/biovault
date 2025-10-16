@@ -117,6 +117,7 @@ mod tests {
                 resume,
                 template,
                 results_dir,
+                nextflow_args,
             } => {
                 assert_eq!(project_folder, "project-dir");
                 assert_eq!(participant_source, "participant.yaml");
@@ -128,6 +129,39 @@ mod tests {
                 assert!(!resume);
                 assert!(template.is_none());
                 assert_eq!(results_dir.as_deref(), Some("out"));
+                assert!(nextflow_args.is_empty());
+            }
+            _ => panic!("unexpected command variant"),
+        }
+    }
+
+    #[test]
+    fn clap_parses_run_command_with_nextflow_args() {
+        let cli = Cli::parse_from([
+            "bv",
+            "run",
+            "project-dir",
+            "participant.yaml",
+            "-with-docker",
+            "ghcr.io/openmined/bioscript:latest",
+            "-with-trace",
+        ]);
+        match cli.command {
+            Commands::Run {
+                project_folder,
+                participant_source,
+                nextflow_args,
+                with_docker,
+                ..
+            } => {
+                assert_eq!(project_folder, "project-dir");
+                assert_eq!(participant_source, "participant.yaml");
+                assert_eq!(nextflow_args.len(), 3);
+                assert_eq!(nextflow_args[0], "-with-docker");
+                assert_eq!(nextflow_args[1], "ghcr.io/openmined/bioscript:latest");
+                assert_eq!(nextflow_args[2], "-with-trace");
+                // with_docker should still be true (default), but will be overridden in execution
+                assert!(with_docker);
             }
             _ => panic!("unexpected command variant"),
         }
@@ -420,7 +454,11 @@ enum Commands {
         #[arg(long, help = "Show commands without executing")]
         dry_run: bool,
 
-        #[arg(long, default_value = "true", help = "Run with Docker")]
+        #[arg(
+            long,
+            default_value = "true",
+            help = "Run with Docker (can be overridden by providing -with-docker in nextflow args)"
+        )]
         with_docker: bool,
 
         #[arg(long, help = "Nextflow work directory")]
@@ -434,6 +472,13 @@ enum Commands {
 
         #[arg(long, help = "Custom results directory name")]
         results_dir: Option<String>,
+
+        #[arg(
+            trailing_var_arg = true,
+            allow_hyphen_values = true,
+            help = "Additional Nextflow arguments (e.g., -with-singularity, -with-trace, etc.)"
+        )]
+        nextflow_args: Vec<String>,
     },
 
     #[command(name = "sample-data", about = "Manage sample data")]
@@ -1432,6 +1477,7 @@ async fn async_main_with(cli: Cli) -> Result<()> {
             resume,
             template,
             results_dir,
+            nextflow_args,
         } => {
             commands::run::execute(commands::run::RunParams {
                 project_folder,
@@ -1444,6 +1490,7 @@ async fn async_main_with(cli: Cli) -> Result<()> {
                 resume,
                 template,
                 results_dir,
+                nextflow_args,
             })
             .await?;
         }
