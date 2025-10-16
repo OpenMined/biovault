@@ -68,6 +68,11 @@ pub async fn import(
         return Ok(());
     }
 
+    let compiled_pattern = pattern
+        .as_ref()
+        .map(|pat| data::compile_pattern(pat))
+        .transpose()?;
+
     // Show preview
     if format != "json" {
         println!("{}", "📋 Import Preview:".bold());
@@ -84,7 +89,7 @@ pub async fn import(
         );
 
         // Show sample extractions if pattern provided
-        if let Some(pat) = &pattern {
+        if let Some(compiled) = &compiled_pattern {
             println!();
             println!("{}", "Sample participant ID extractions:".bold());
             for file_info in scan_result.files.iter().take(5) {
@@ -93,8 +98,7 @@ pub async fn import(
                     .and_then(|n| n.to_str())
                     .unwrap_or(&file_info.path);
 
-                // Pass full path for pattern matching (needed for {parent} and path-based patterns)
-                if let Some(id) = data::extract_id_from_pattern(&file_info.path, pat) {
+                if let Some(id) = compiled.extract(&file_info.path) {
                     println!(
                         "  {} → participant: {}",
                         filename.dimmed(),
@@ -362,6 +366,7 @@ pub async fn suggest_patterns(
                 suggestion.pattern.green().bold(),
                 suggestion.description
             );
+            println!("   Regex: {}", suggestion.regex_pattern.cyan());
             println!("   Example: {}", suggestion.example.dimmed());
 
             if !suggestion.sample_extractions.is_empty() {
@@ -744,6 +749,11 @@ pub async fn export_csv(
         format!("📊 Found {} files", scan_result.total_files).bold()
     );
 
+    let compiled_pattern = pattern
+        .as_ref()
+        .map(|pat| data::compile_pattern(pat))
+        .transpose()?;
+
     // Create CSV file
     let mut csv_file = File::create(&output)?;
 
@@ -757,11 +767,10 @@ pub async fn export_csv(
     let mut count = 0;
     for file_info in scan_result.files {
         // Extract participant ID if pattern provided
-        let participant_id = if let Some(pat) = &pattern {
-            data::extract_id_from_pattern(&file_info.path, pat).unwrap_or_default()
-        } else {
-            String::new()
-        };
+        let participant_id = compiled_pattern
+            .as_ref()
+            .and_then(|compiled| compiled.extract(&file_info.path))
+            .unwrap_or_default();
 
         writeln!(csv_file, "{},{},,,,,,", file_info.path, participant_id)?;
         count += 1;
