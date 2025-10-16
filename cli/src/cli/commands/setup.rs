@@ -11,6 +11,70 @@ fn skip_install_commands() -> bool {
         .unwrap_or(false)
 }
 
+fn run_install_command(
+    system_type: &SystemType,
+    command: &str,
+) -> io::Result<std::process::ExitStatus> {
+    match system_type {
+        SystemType::Windows => {
+            if command.starts_with("winget") {
+                let mut parts = command.split_whitespace();
+                parts.next();
+                Command::new("winget").args(parts).status()
+            } else {
+                Command::new("powershell")
+                    .arg("-Command")
+                    .arg(command)
+                    .status()
+            }
+        }
+        SystemType::MacOs => run_macos_install_command(command),
+        _ => Command::new("sh").arg("-c").arg(command).status(),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn needs_brew_cask_elevation(command: &str) -> bool {
+    let lowered = command.to_lowercase();
+    lowered.contains("brew") && lowered.contains("--cask") && lowered.contains("install")
+}
+
+#[cfg(target_os = "macos")]
+fn escape_for_applescript(input: &str) -> String {
+    input
+        .replace("\\", "\\\\")
+        .replace('"', "\\\"")
+        .replace("'", "\\'")
+}
+
+#[cfg(target_os = "macos")]
+fn run_brew_cask_with_admin(command: &str) -> io::Result<std::process::ExitStatus> {
+    let env_prefix =
+        "HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_CASK_OPTS=\\\"--appdir=$HOME/Applications\\\" ";
+    let full_command = format!("{}{}", env_prefix, command);
+    let escaped = escape_for_applescript(&full_command);
+    let script = format!(
+        "do shell script \"{}\" with administrator privileges",
+        escaped
+    );
+
+    Command::new("osascript").arg("-e").arg(&script).status()
+}
+
+#[cfg(target_os = "macos")]
+fn run_macos_install_command(command: &str) -> io::Result<std::process::ExitStatus> {
+    if needs_brew_cask_elevation(command) {
+        run_brew_cask_with_admin(command)
+    } else {
+        Command::new("sh").arg("-c").arg(command).status()
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn run_macos_install_command(command: &str) -> io::Result<std::process::ExitStatus> {
+    Command::new("sh").arg("-c").arg(command).status()
+}
+
 /// Install a single dependency and return the path to the installed binary (for library use)
 pub async fn install_single_dependency(name: &str) -> Result<Option<String>> {
     // Load the deps.yaml file to get dependency information
@@ -83,21 +147,7 @@ pub async fn install_single_dependency(name: &str) -> Result<Option<String>> {
             cmd.clone()
         };
 
-        let status = match system_type {
-            SystemType::Windows => {
-                if adjusted_cmd.starts_with("winget") {
-                    Command::new("winget")
-                        .args(adjusted_cmd.split_whitespace().skip(1))
-                        .status()
-                } else {
-                    Command::new("powershell")
-                        .arg("-Command")
-                        .arg(&adjusted_cmd)
-                        .status()
-                }
-            }
-            _ => Command::new("sh").arg("-c").arg(&adjusted_cmd).status(),
-        };
+        let status = run_install_command(&system_type, &adjusted_cmd);
 
         match status {
             Ok(s) if s.success() => {
