@@ -1,11 +1,201 @@
 use crate::config::Config;
+use crate::error::Error as CliError;
 use crate::Result;
 use anyhow::anyhow;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env;
+#[cfg(target_os = "macos")]
+use std::io::Write;
+#[cfg(target_os = "macos")]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+#[cfg(target_os = "macos")]
+use std::sync::{Arc, OnceLock};
+#[cfg(target_os = "macos")]
+use tempfile::NamedTempFile;
+
+#[cfg(target_os = "macos")]
+static HOMEBREW_INSTALL_LOGGER: OnceLock<Arc<dyn Fn(&str) + Send + Sync>> = OnceLock::new();
+
+#[cfg(target_os = "macos")]
+const BREW_COMMON_PATHS: [&str; 3] = [
+    "/opt/homebrew/bin/brew",
+    "/usr/local/bin/brew",
+    "/home/linuxbrew/.linuxbrew/bin/brew",
+];
+
+#[cfg(target_os = "macos")]
+const OPENJDK_OPT_BASES: [&str; 3] = [
+    "/opt/homebrew/opt",
+    "/usr/local/opt",
+    "/home/linuxbrew/.linuxbrew/opt",
+];
+
+#[cfg(target_os = "macos")]
+fn resolve_brew_command() -> Option<String> {
+    if let Ok(path) = which::which("brew") {
+        return Some(path.display().to_string());
+    }
+
+    BREW_COMMON_PATHS
+        .iter()
+        .map(|p| Path::new(p))
+        .find(|candidate| candidate.exists())
+        .map(|path| path.display().to_string())
+}
+
+#[cfg(target_os = "macos")]
+fn java_bin_from_prefix(prefix: &str) -> Option<String> {
+    let prefix_path = Path::new(prefix);
+    let direct = prefix_path.join("bin/java");
+    if direct.exists() {
+        return Some(prefix_path.join("bin").display().to_string());
+    }
+
+    let alt = prefix_path
+        .join("libexec")
+        .join("openjdk.jdk")
+        .join("Contents")
+        .join("Home")
+        .join("bin/java");
+    if alt.exists() {
+        let bin_dir = alt.parent()?;
+        return Some(bin_dir.display().to_string());
+    }
+
+    None
+}
+
+fn is_valid_java_binary(path: &str) -> bool {
+    Command::new(path)
+        .arg("-version")
+        .output()
+        .map(|output| {
+            if !output.status.success() {
+                return false;
+            }
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let combined = format!("{}\n{}", stderr, stdout);
+            combined.contains("version")
+                && (combined.contains("java") || combined.contains("openjdk"))
+                && !combined.contains("Unable to locate a Java Runtime")
+        })
+        .unwrap_or(false)
+}
+
+fn adjust_java_binary(mut current: Option<String>) -> Option<String> {
+    if let Some(ref path) = current {
+        if !is_valid_java_binary(path) {
+            current = None;
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        if current.is_none() {
+            if let Some(brew_bin) = check_java_in_brew_not_in_path() {
+                let candidate = format!("{}/java", brew_bin);
+                if is_valid_java_binary(&candidate) {
+                    return Some(candidate);
+                }
+            }
+
+            if let Ok(output) = Command::new("/usr/libexec/java_home").output() {
+                if output.status.success() {
+                    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    if !path.is_empty() {
+                        let candidate = format!("{}/bin/java", path);
+                        if is_valid_java_binary(&candidate) {
+                            return Some(candidate);
+                        }
+                    }
+                }
+            }
+
+            let fallback_paths = [
+                "/Library/Internet Plug-Ins/JavaAppletPlugin.plugin/Contents/Home/bin/java",
+                "/Library/Java/JavaVirtualMachines/openjdk.jdk/Contents/Home/bin/java",
+                "/Library/Java/JavaVirtualMachines/temurin-21.jdk/Contents/Home/bin/java",
+                "/Library/Java/JavaVirtualMachines/temurin-17.jdk/Contents/Home/bin/java",
+            ];
+
+            for path in fallback_paths.iter() {
+                if Path::new(path).exists() && is_valid_java_binary(path) {
+                    return Some(path.to_string());
+                }
+            }
+        }
+    }
+
+    current
+}
+
+fn version_path_from_sources<'a>(
+    primary: &'a Option<String>,
+    fallback: &'a Option<String>,
+) -> Option<&'a str> {
+    primary
+        .as_ref()
+        .map(|s| s.as_str())
+        .or_else(|| fallback.as_ref().map(|s| s.as_str()))
+}
+
+fn get_java_version_string(path: Option<&str>) -> Option<String> {
+    let command = path.unwrap_or("java");
+    let output = Command::new(command).arg("-version").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let version_str = String::from_utf8_lossy(&output.stderr);
+    parse_java_version(&version_str).map(|v| v.to_string())
+}
+
+fn check_java_version_with_info_at(path: Option<&str>, min_version: u32) -> (bool, Option<String>) {
+    let command = path.unwrap_or("java");
+    let output = Command::new(command).arg("-version").output();
+
+    match output {
+        Ok(output) => {
+            let version_str = String::from_utf8_lossy(&output.stderr);
+            if let Some(version) = parse_java_version(&version_str) {
+                (version >= min_version, Some(version.to_string()))
+            } else {
+                (false, None)
+            }
+        }
+        Err(_) => (false, None),
+    }
+}
+
+pub fn set_homebrew_install_logger<F>(logger: F)
+where
+    F: Fn(&str) + Send + Sync + 'static,
+{
+    #[cfg(target_os = "macos")]
+    {
+        let _ = HOMEBREW_INSTALL_LOGGER.set(Arc::new(logger));
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = logger;
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn log_homebrew_install(message: &str) {
+    if let Some(callback) = HOMEBREW_INSTALL_LOGGER.get() {
+        callback(message);
+    } else {
+        eprintln!("🍺 {message}");
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn log_homebrew_install(_message: &str) {}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DependencyConfig {
@@ -103,6 +293,40 @@ pub fn check_single_dependency(
         }
     }
 
+    let forced_missing: Option<HashSet<String>> = std::env::var("BIOVAULT_FORCE_MISSING_DEPS")
+        .ok()
+        .map(|value| {
+            value
+                .split(',')
+                .map(|item| item.trim().to_lowercase())
+                .filter(|item| !item.is_empty())
+                .collect()
+        });
+
+    let should_force_missing = forced_missing.as_ref().is_some_and(|set| {
+        set.contains("all") || set.contains("*") || set.contains(&dep.name.to_lowercase())
+    });
+
+    if should_force_missing {
+        eprintln!(
+            "🔧 Forcing dependency '{}' to appear missing (BIOVAULT_FORCE_MISSING_DEPS)",
+            dep.name
+        );
+
+        return Ok(DependencyResult {
+            name: dep.name.clone(),
+            found: false,
+            path: custom_path.clone(),
+            version: None,
+            running: None,
+            skipped: false,
+            skip_reason: None,
+            description: Some(dep.description.clone()),
+            website: dep.website.clone(),
+            install_instructions: Some(dep.install_instructions.clone()),
+        });
+    }
+
     // Check if the binary exists at custom path or in PATH
     let mut fallback_path: Option<String> = custom_path.clone();
 
@@ -110,18 +334,7 @@ pub fn check_single_dependency(
         if Path::new(custom).exists() {
             // Verify this is actually the right tool by checking its version
             let is_valid = match dep.name.as_str() {
-                "java" => {
-                    Command::new(custom)
-                        .arg("-version")
-                        .output()
-                        .map(|output| {
-                            // Java outputs version to stderr
-                            let version_str = String::from_utf8_lossy(&output.stderr);
-                            version_str.contains("version")
-                                && (version_str.contains("java") || version_str.contains("openjdk"))
-                        })
-                        .unwrap_or(false)
-                }
+                "java" => is_valid_java_binary(custom),
                 "docker" => Command::new(custom)
                     .arg("--version")
                     .output()
@@ -175,7 +388,7 @@ pub fn check_single_dependency(
         }
     };
 
-    let binary_path = direct_path
+    let mut binary_path = direct_path
         .or_else(|| {
             which::which(&dep.name)
                 .ok()
@@ -183,10 +396,11 @@ pub fn check_single_dependency(
         })
         .or_else(|| find_in_well_known_locations(&dep.name));
 
-    // Special handling for Java on macOS
-    let mut java_brew_path: Option<String> = None;
-    if binary_path.is_none() && dep.name == "java" && std::env::consts::OS == "macos" {
-        java_brew_path = check_java_in_brew_not_in_path();
+    if dep.name == "java" {
+        binary_path = adjust_java_binary(binary_path);
+        if binary_path.is_some() {
+            fallback_path = binary_path.clone();
+        }
     }
 
     // Special handling for Docker on macOS - check if Docker Desktop is installed
@@ -201,28 +415,11 @@ pub fn check_single_dependency(
         syftbox_sbenv_path = check_syftbox_in_sbenv();
     }
 
-    if binary_path.is_none()
-        && java_brew_path.is_none()
-        && !docker_desktop_installed
-        && syftbox_sbenv_path.is_none()
-    {
+    if binary_path.is_none() && !docker_desktop_installed && syftbox_sbenv_path.is_none() {
         return Ok(DependencyResult {
             name: dep.name.clone(),
             found: false,
             path: fallback_path,
-            version: None,
-            running: None,
-            skipped: false,
-            skip_reason: None,
-            description: Some(dep.description.clone()),
-            website: dep.website.clone(),
-            install_instructions: Some(dep.install_instructions.clone()),
-        });
-    } else if let Some(brew_path) = java_brew_path {
-        return Ok(DependencyResult {
-            name: dep.name.clone(),
-            found: true,
-            path: Some(format!("{}/java", brew_path)),
             version: None,
             running: None,
             skipped: false,
@@ -271,10 +468,17 @@ pub fn check_single_dependency(
             website: dep.website.clone(),
             install_instructions: Some(dep.install_instructions.clone()),
         });
-    } else if let Some(path) = binary_path {
+    } else if let Some(ref path) = binary_path {
         // Binary found - check version
+        let version_source = version_path_from_sources(&binary_path, &fallback_path);
         let (version_ok, version_str) = if let Some(min_version) = dep.min_version {
-            check_version_with_info(&dep.name, min_version)
+            if dep.name == "java" {
+                check_java_version_with_info_at(version_source, min_version)
+            } else {
+                check_version_with_info(&dep.name, min_version)
+            }
+        } else if dep.name == "java" {
+            (true, get_java_version_string(version_source))
         } else {
             (true, get_version_string(&dep.name))
         };
@@ -289,7 +493,7 @@ pub fn check_single_dependency(
         return Ok(DependencyResult {
             name: dep.name.clone(),
             found: version_ok,
-            path: Some(path),
+            path: Some(path.clone()),
             version: version_str,
             running: is_running,
             skipped: false,
@@ -375,7 +579,7 @@ pub fn check_dependencies_result() -> Result<DependencyCheckResult> {
             .and_then(|cfg| cfg.get_binary_path(&dep.name));
 
         // Check if the binary exists in PATH or use custom path
-        let binary_path = if custom_path
+        let mut binary_path = if custom_path
             .as_ref()
             .map(|p| Path::new(p).exists())
             .unwrap_or(false)
@@ -387,11 +591,8 @@ pub fn check_dependencies_result() -> Result<DependencyCheckResult> {
                 .map(|p| p.display().to_string())
         }
         .or_else(|| find_in_well_known_locations(&dep.name));
-
-        // Special handling for Java on macOS
-        let mut java_brew_path: Option<String> = None;
-        if binary_path.is_none() && dep.name == "java" && std::env::consts::OS == "macos" {
-            java_brew_path = check_java_in_brew_not_in_path();
+        if dep.name == "java" {
+            binary_path = adjust_java_binary(binary_path);
         }
 
         // Special handling for Docker on macOS - check if Docker Desktop is installed
@@ -406,11 +607,7 @@ pub fn check_dependencies_result() -> Result<DependencyCheckResult> {
             syftbox_sbenv_path = check_syftbox_in_sbenv();
         }
 
-        if binary_path.is_none()
-            && java_brew_path.is_none()
-            && !docker_desktop_installed
-            && syftbox_sbenv_path.is_none()
-        {
+        if binary_path.is_none() && !docker_desktop_installed && syftbox_sbenv_path.is_none() {
             all_found = false;
             results.push(DependencyResult {
                 name: dep.name.clone(),
@@ -439,19 +636,6 @@ pub fn check_dependencies_result() -> Result<DependencyCheckResult> {
                 website: dep.website.clone(),
                 install_instructions: Some("Docker Desktop is installed but not running. Please start Docker Desktop from your Applications folder.".to_string()),
             });
-        } else if let Some(brew_path) = java_brew_path {
-            results.push(DependencyResult {
-                name: dep.name.clone(),
-                found: true,
-                path: Some(format!("{}/java", brew_path)),
-                version: None,
-                running: None,
-                skipped: false,
-                skip_reason: None,
-                description: Some(dep.description.clone()),
-                website: dep.website.clone(),
-                install_instructions: Some(dep.install_instructions.clone()),
-            });
         } else if let Some(sbenv_path) = syftbox_sbenv_path {
             // Syftbox found in ~/.sbenv/binaries
             let version = Command::new(&sbenv_path)
@@ -476,10 +660,17 @@ pub fn check_dependencies_result() -> Result<DependencyCheckResult> {
                 website: dep.website.clone(),
                 install_instructions: Some(dep.install_instructions.clone()),
             });
-        } else if let Some(path) = binary_path {
+        } else if let Some(ref path) = binary_path {
             // Binary found - check version
+            let version_source = Some(path.as_str());
             let (version_ok, version_str) = if let Some(min_version) = dep.min_version {
-                check_version_with_info(&dep.name, min_version)
+                if dep.name == "java" {
+                    check_java_version_with_info_at(version_source, min_version)
+                } else {
+                    check_version_with_info(&dep.name, min_version)
+                }
+            } else if dep.name == "java" {
+                (true, get_java_version_string(version_source))
             } else {
                 (true, get_version_string(&dep.name))
             };
@@ -504,7 +695,7 @@ pub fn check_dependencies_result() -> Result<DependencyCheckResult> {
             results.push(DependencyResult {
                 name: dep.name.clone(),
                 found: version_ok,
-                path: Some(path),
+                path: Some(path.clone()),
                 version: version_str,
                 running: is_running,
                 skipped: false,
@@ -688,7 +879,7 @@ pub async fn execute(json: bool) -> Result<()> {
             });
 
         // Check if the binary exists in PATH or use custom path
-        let binary_path = if let Some(custom) = custom_path {
+        let mut binary_path = if let Some(custom) = custom_path {
             if std::path::Path::new(&custom).exists() {
                 Some(custom)
             } else {
@@ -700,11 +891,8 @@ pub async fn execute(json: bool) -> Result<()> {
                 .map(|p| p.display().to_string())
         };
 
-        // Special handling for Java on macOS
-        let mut java_brew_path: Option<String> = None;
-        if binary_path.is_none() && dep.name == "java" && std::env::consts::OS == "macos" {
-            // Check if Java is installed via Homebrew but not in PATH
-            java_brew_path = check_java_in_brew_not_in_path();
+        if dep.name == "java" {
+            binary_path = adjust_java_binary(binary_path);
         }
 
         // Special handling for UV on Windows (WinGet installs but PATH needs refresh)
@@ -726,7 +914,6 @@ pub async fn execute(json: bool) -> Result<()> {
         }
 
         if binary_path.is_none()
-            && java_brew_path.is_none()
             && uv_windows_path.is_none()
             && !docker_desktop_installed
             && syftbox_sbenv_path.is_none()
@@ -776,43 +963,6 @@ pub async fn execute(json: bool) -> Result<()> {
                 description: Some(dep.description.clone()),
                 website: dep.website.clone(),
                 install_instructions: Some("Docker Desktop is installed but not running. Please start Docker Desktop from your Applications folder.".to_string()),
-            });
-        } else if let Some(brew_path) = java_brew_path {
-            // Java is installed via brew but not in PATH
-            if !json {
-                println!("⚠️  Found (not in PATH)");
-                println!("  Java is installed via Homebrew at: {}", brew_path);
-                println!("  But it's not available in your PATH.");
-                println!("  To fix this, add the following to your shell config:");
-                let shell = env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
-                let shell_config = if shell.contains("zsh") {
-                    "~/.zshrc"
-                } else if shell.contains("bash") {
-                    "~/.bash_profile"
-                } else {
-                    "your shell config file"
-                };
-                println!(
-                    "    echo 'export PATH=\"{}:$PATH\"' >> {}",
-                    brew_path, shell_config
-                );
-                println!("    source {}", shell_config);
-                if !is_ci {
-                    println!("  Or run 'bv setup' to configure this automatically.");
-                }
-                println!();
-            }
-            results.push(DependencyResult {
-                name: dep.name.clone(),
-                found: true,
-                path: Some(format!("{}/java", brew_path)),
-                version: None,
-                running: None,
-                skipped: false,
-                skip_reason: None,
-                description: Some(dep.description.clone()),
-                website: dep.website.clone(),
-                install_instructions: Some(dep.install_instructions.clone()),
             });
         } else if let Some(uv_path) = uv_windows_path {
             // UV is installed on Windows but not in PATH
@@ -875,10 +1025,17 @@ pub async fn execute(json: bool) -> Result<()> {
                 website: dep.website.clone(),
                 install_instructions: Some(dep.install_instructions.clone()),
             });
-        } else if let Some(path) = binary_path {
+        } else if let Some(ref path) = binary_path {
             // Binary found - check version
+            let version_source = Some(path.as_str());
             let (version_ok, version_str) = if let Some(min_version) = dep.min_version {
-                check_version_with_info(&dep.name, min_version)
+                if dep.name == "java" {
+                    check_java_version_with_info_at(version_source, min_version)
+                } else {
+                    check_version_with_info(&dep.name, min_version)
+                }
+            } else if dep.name == "java" {
+                (true, get_java_version_string(version_source))
             } else {
                 (true, get_version_string(&dep.name))
             };
@@ -900,7 +1057,7 @@ pub async fn execute(json: bool) -> Result<()> {
                 results.push(DependencyResult {
                     name: dep.name.clone(),
                     found: true,
-                    path: Some(path),
+                    path: Some(path.clone()),
                     version: version_str,
                     running: None,
                     skipped: false,
@@ -951,7 +1108,7 @@ pub async fn execute(json: bool) -> Result<()> {
                 results.push(DependencyResult {
                     name: dep.name.clone(),
                     found: true,
-                    path: Some(path),
+                    path: Some(path.clone()),
                     version: version_str,
                     running: is_running,
                     skipped: false,
@@ -1276,50 +1433,79 @@ fn is_google_colab() -> bool {
 }
 
 fn check_java_in_brew_not_in_path() -> Option<String> {
-    // Check if brew command exists
-    if which::which("brew").is_err() {
-        return None;
-    }
+    #[cfg(target_os = "macos")]
+    {
+        // Check known Homebrew opt prefixes first (covers keg-only installs)
+        for base in OPENJDK_OPT_BASES.iter() {
+            let base_path = Path::new(base);
+            if !base_path.exists() {
+                continue;
+            }
 
-    // Check if Java/OpenJDK is installed via brew
-    let output = Command::new("brew")
-        .args(["list", "--formula"])
-        .output()
-        .ok()?;
-
-    let installed_packages = String::from_utf8_lossy(&output.stdout);
-
-    // Look for any OpenJDK version
-    let mut found_java_package = None;
-    for line in installed_packages.lines() {
-        if line.starts_with("openjdk") {
-            found_java_package = Some(line.to_string());
-            break;
+            if let Ok(entries) = std::fs::read_dir(base_path) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                        if name.starts_with("openjdk") {
+                            if let Some(bin_dir) =
+                                java_bin_from_prefix(path.to_string_lossy().as_ref())
+                            {
+                                let java_path = format!("{}/java", bin_dir);
+                                if is_valid_java_binary(&java_path) {
+                                    return Some(bin_dir);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
+
+        if let Some(brew_cmd) = resolve_brew_command() {
+            let formulas = [
+                "openjdk",
+                "openjdk@25",
+                "openjdk@24",
+                "openjdk@23",
+                "openjdk@21",
+                "openjdk@20",
+                "openjdk@19",
+                "openjdk@18",
+                "openjdk@17",
+                "openjdk@11",
+                "openjdk@8",
+            ];
+
+            for formula in formulas.iter() {
+                let output = Command::new(&brew_cmd)
+                    .args(["--prefix", formula])
+                    .output()
+                    .ok();
+
+                let output = match output {
+                    Some(out) if out.status.success() => out,
+                    _ => continue,
+                };
+
+                let prefix = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if prefix.is_empty() {
+                    continue;
+                }
+
+                if let Some(bin_dir) = java_bin_from_prefix(&prefix) {
+                    let java_path = format!("{}/java", bin_dir);
+                    if is_valid_java_binary(&java_path) {
+                        return Some(bin_dir);
+                    }
+                }
+            }
+        }
+
+        None
     }
 
-    found_java_package.as_ref()?;
-
-    // Get the actual path where brew installed Java
-    let pkg = found_java_package.unwrap();
-    let prefix_output = Command::new("brew")
-        .args(["--prefix", &pkg])
-        .output()
-        .ok()?;
-
-    if !prefix_output.status.success() {
-        return None;
-    }
-
-    let brew_prefix = String::from_utf8_lossy(&prefix_output.stdout)
-        .trim()
-        .to_string();
-    let java_bin_path = format!("{}/bin", brew_prefix);
-
-    // Check if this path contains java binary
-    if std::path::Path::new(&format!("{}/java", java_bin_path)).exists() {
-        Some(java_bin_path)
-    } else {
+    #[cfg(not(target_os = "macos"))]
+    {
         None
     }
 }
@@ -1382,9 +1568,7 @@ pub fn check_brew_installed() -> Result<bool> {
 
     #[cfg(target_os = "macos")]
     {
-        // Check if brew command exists
-        let brew_check = which::which("brew").is_ok();
-        Ok(brew_check)
+        Ok(resolve_brew_command().is_some())
     }
 }
 
@@ -1397,32 +1581,395 @@ pub fn install_brew() -> Result<String> {
 
     #[cfg(target_os = "macos")]
     {
-        use std::process::Stdio;
+        // If Homebrew is already available, return early with its path.
+        if let Ok(existing) = which::which("brew") {
+            return Ok(existing.display().to_string());
+        }
 
-        let install_script = r#"/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)""#;
+        log_homebrew_install("Homebrew installer: brew not detected, preparing installation");
 
-        let mut child = Command::new("/bin/bash")
-            .arg("-c")
-            .arg(install_script)
-            .stdin(Stdio::inherit())
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .map_err(|e| anyhow!("Failed to start Homebrew installation: {}", e))?;
+        fn command_output(program: &str, args: &[&str]) -> Result<String> {
+            let output = Command::new(program)
+                .args(args)
+                .output()
+                .map_err(|e| CliError::Anyhow(anyhow!("Failed to execute '{}': {}", program, e)))?;
 
-        let status = child
-            .wait()
-            .map_err(|e| anyhow!("Failed to wait for Homebrew installation: {}", e))?;
+            if !output.status.success() {
+                return Err(CliError::Anyhow(anyhow!(
+                    "'{}' exited with status {:?}",
+                    program,
+                    output.status.code()
+                )));
+            }
 
-        if status.success() {
+            let value = String::from_utf8(output.stdout).map_err(|e| {
+                CliError::Anyhow(anyhow!(
+                    "Output from '{}' was not valid UTF-8: {}",
+                    program,
+                    e
+                ))
+            })?;
+
+            Ok(value.trim().to_string())
+        }
+
+        fn escape_for_shell_double_quotes(input: &str) -> String {
+            input.replace("\\", "\\\\").replace('"', "\\\"")
+        }
+
+        fn escape_for_applescript(input: &str) -> String {
+            input.replace('"', "\\\"")
+        }
+
+        let prompt_message =
+            "BioVault needs Homebrew to manage required dependencies. macOS will ask for your administrator password.";
+
+        let target_user = match std::env::var("SUDO_USER") {
+            Ok(value) if !value.is_empty() => value,
+            _ => match std::env::var("USER") {
+                Ok(value) if !value.is_empty() => value,
+                _ => {
+                    log_homebrew_install(
+                        "Homebrew installer: SUDO_USER/USER missing, falling back to 'id -un'",
+                    );
+                    command_output("id", &["-un"])?
+                }
+            },
+        };
+
+        let user_uid = command_output("id", &["-u", &target_user])?;
+        let user_group = command_output("id", &["-gn", &target_user])?;
+        log_homebrew_install(&format!(
+            "Homebrew installer: target user '{}', uid {}, group {}",
+            target_user, user_uid, user_group
+        ));
+
+        let user_groups_output = command_output("id", &["-Gn", &target_user])?;
+        log_homebrew_install(&format!(
+            "Homebrew installer: '{}' groups => {}",
+            target_user, user_groups_output
+        ));
+        let is_admin = user_groups_output
+            .split_whitespace()
+            .any(|group| group == "admin");
+        if !is_admin {
+            log_homebrew_install(&format!(
+                "Homebrew installer: user '{}' is not a member of the 'admin' group — cannot proceed",
+                target_user
+            ));
+            return Err(CliError::Anyhow(anyhow!(
+                "User '{target_user}' does not have administrator privileges required to install Homebrew automatically."
+            )));
+        }
+
+        let clt_ready = Command::new("xcode-select")
+            .arg("-p")
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+
+        if !clt_ready {
+            log_homebrew_install(
+                "Homebrew installer: Command Line Tools not detected. Triggering installer",
+            );
+
+            let status = Command::new("xcode-select")
+                .arg("--install")
+                .status()
+                .map_err(|e| {
+                    CliError::Anyhow(anyhow!(
+                        "Failed to launch Command Line Tools installer: {}",
+                        e
+                    ))
+                })?;
+
+            log_homebrew_install(&format!(
+                "Homebrew installer: xcode-select --install exited with status {:?}",
+                status.code()
+            ));
+
+            return Err(CliError::Anyhow(anyhow!(
+                "macOS Command Line Tools must be installed. The installer has been launched—complete it, then click 'Check Again'."
+            )));
+        }
+
+        let arch = command_output("uname", &["-m"])?;
+        log_homebrew_install(&format!(
+            "Homebrew installer: detected architecture {}",
+            arch
+        ));
+
+        let brew_prefix = if arch.trim() == "arm64" {
+            "/opt/homebrew"
+        } else {
+            "/usr/local"
+        };
+        log_homebrew_install(&format!("Homebrew installer: using prefix {}", brew_prefix));
+
+        let home_dir = dirs::home_dir().ok_or_else(|| {
+            CliError::Anyhow(anyhow!(
+                "Could not determine home directory for '{}'. Please ensure BIOVAULT_HOME is set.",
+                target_user
+            ))
+        })?;
+        log_homebrew_install(&format!(
+            "Homebrew installer: resolved home directory {}",
+            home_dir.to_string_lossy()
+        ));
+        let home_dir = home_dir.to_string_lossy();
+
+        let escaped_user = escape_for_shell_double_quotes(&target_user);
+        let escaped_group = escape_for_shell_double_quotes(&user_group);
+        let escaped_uid = escape_for_shell_double_quotes(&user_uid);
+        let escaped_home = escape_for_shell_double_quotes(&home_dir);
+        let escaped_prefix = escape_for_shell_double_quotes(brew_prefix);
+
+        let user_script_contents = r#"#!/bin/bash
+set -euo pipefail
+
+/usr/bin/env git --version >/dev/null 2>&1 || {
+  echo "git is required to install Homebrew. Please install Xcode Command Line Tools." >&2
+  exit 2
+}
+
+if [ -n "${HOMEBREW_PREFIX:-}" ]; then
+  BREW_PREFIX="${HOMEBREW_PREFIX}"
+else
+  ARCH="$(uname -m)"
+  if [ "$ARCH" = "arm64" ]; then
+    BREW_PREFIX="/opt/homebrew"
+  else
+    BREW_PREFIX="/usr/local"
+  fi
+fi
+
+BREW_REPOSITORY="${BREW_PREFIX}/Homebrew"
+BREW_BIN_DIR="${BREW_PREFIX}/bin"
+BREW_BIN="${BREW_BIN_DIR}/brew"
+
+if [ ! -d "${BREW_REPOSITORY}/.git" ]; then
+  rm -rf "${BREW_REPOSITORY}"
+  /usr/bin/env git clone https://github.com/Homebrew/brew "${BREW_REPOSITORY}"
+else
+  /usr/bin/env git -C "${BREW_REPOSITORY}" fetch origin --force
+  /usr/bin/env git -C "${BREW_REPOSITORY}" reset --hard origin/HEAD
+fi
+
+/bin/mkdir -p "${BREW_BIN_DIR}"
+/bin/ln -sf "${BREW_REPOSITORY}/bin/brew" "${BREW_BIN}"
+
+PROFILE_LINE="eval \"$(${BREW_BIN} shellenv)\""
+
+append_if_missing() {
+  local file="$1"
+  local line="$2"
+  if [ -f "$file" ]; then
+    if /usr/bin/grep -F "$line" "$file" >/dev/null 2>&1; then
+      return
+    fi
+    printf '\n%s\n' "$line" >>"$file"
+  else
+    printf '%s\n' "$line" >"$file"
+  fi
+}
+
+/bin/mkdir -p "$HOME/.config"
+append_if_missing "$HOME/.zprofile" "$PROFILE_LINE"
+append_if_missing "$HOME/.bash_profile" "$PROFILE_LINE"
+
+"${BREW_BIN}" update --force --quiet
+"${BREW_BIN}" analytics off >/dev/null 2>&1 || true
+"#;
+
+        let mut user_script = NamedTempFile::new().map_err(|e| {
+            CliError::Anyhow(anyhow!(
+                "Failed to create Homebrew user installer script: {}",
+                e
+            ))
+        })?;
+        user_script
+            .write_all(user_script_contents.as_bytes())
+            .map_err(|e| {
+                CliError::Anyhow(anyhow!(
+                    "Failed to write Homebrew user installer script: {}",
+                    e
+                ))
+            })?;
+        user_script.flush().map_err(|e| {
+            CliError::Anyhow(anyhow!(
+                "Failed to flush Homebrew user installer script: {}",
+                e
+            ))
+        })?;
+        std::fs::set_permissions(user_script.path(), PermissionsExt::from_mode(0o755)).map_err(
+            |e| {
+                CliError::Anyhow(anyhow!(
+                    "Failed to set permissions on Homebrew user installer script: {}",
+                    e
+                ))
+            },
+        )?;
+
+        let user_script_path = user_script.path().to_string_lossy().to_string();
+        log_homebrew_install(&format!(
+            "Homebrew installer: created user script at {}",
+            user_script_path
+        ));
+        let escaped_user_script_path = escape_for_shell_double_quotes(&user_script_path);
+
+        log_homebrew_install("Homebrew installer: preparing privileged bootstrap steps");
+
+        log_homebrew_install("Homebrew installer: bootstrap will invoke user script via sudo -u");
+
+        let script_contents = format!(
+            r#"#!/bin/bash
+set -euo pipefail
+
+USER_NAME="{user}"
+USER_GROUP="{group}"
+USER_UID="{uid}"
+USER_HOME="{home}"
+USER_INSTALL_SCRIPT="{user_script}"
+
+trap 'rm -f "${{USER_INSTALL_SCRIPT}}"' EXIT
+
+BREW_PREFIX="{prefix}"
+
+paths=(
+  "${{BREW_PREFIX}}"
+  "${{BREW_PREFIX}}/bin"
+  "${{BREW_PREFIX}}/etc"
+  "${{BREW_PREFIX}}/include"
+  "${{BREW_PREFIX}}/lib"
+  "${{BREW_PREFIX}}/sbin"
+  "${{BREW_PREFIX}}/share"
+  "${{BREW_PREFIX}}/share/man"
+  "${{BREW_PREFIX}}/share/man/man1"
+  "${{BREW_PREFIX}}/share/zsh"
+  "${{BREW_PREFIX}}/share/zsh/site-functions"
+  "${{BREW_PREFIX}}/var"
+  "${{BREW_PREFIX}}/Homebrew"
+  "${{BREW_PREFIX}}/Cellar"
+  "${{BREW_PREFIX}}/Caskroom"
+)
+
+for path in "${{paths[@]}}"; do
+  if [ ! -d "$path" ]; then
+    mkdir -p "$path"
+  fi
+  chown "${{USER_NAME}}:${{USER_GROUP}}" "$path" 2>/dev/null || true
+done
+
+/bin/chmod 0755 "${{USER_INSTALL_SCRIPT}}"
+
+sudo -u "${{USER_NAME}}" -H /usr/bin/env HOME="${{USER_HOME}}" USER="${{USER_NAME}}" LOGNAME="${{USER_NAME}}" HOMEBREW_PREFIX="${{BREW_PREFIX}}" NONINTERACTIVE=1 /bin/bash "${{USER_INSTALL_SCRIPT}}"
+"#,
+            user = escaped_user,
+            group = escaped_group,
+            uid = escaped_uid,
+            home = escaped_home,
+            user_script = escaped_user_script_path,
+            prefix = escaped_prefix
+        );
+
+        let mut temp_script = NamedTempFile::new().map_err(|e| {
+            CliError::Anyhow(anyhow!(
+                "Failed to create temporary Homebrew installer script: {}",
+                e
+            ))
+        })?;
+        temp_script
+            .write_all(script_contents.as_bytes())
+            .map_err(|e| {
+                CliError::Anyhow(anyhow!("Failed to write Homebrew installer script: {}", e))
+            })?;
+        temp_script.flush().map_err(|e| {
+            CliError::Anyhow(anyhow!("Failed to flush Homebrew installer script: {}", e))
+        })?;
+
+        let script_path = temp_script.path().to_string_lossy().to_string();
+        log_homebrew_install(&format!(
+            "Homebrew installer: created privileged bootstrap script at {}",
+            script_path
+        ));
+
+        let applescript = format!(
+            r#"set shellCommand to "/bin/bash " & quoted form of "{}"
+do shell script shellCommand with prompt "{}" with administrator privileges"#,
+            escape_for_applescript(&script_path),
+            escape_for_applescript(prompt_message)
+        );
+
+        log_homebrew_install("Homebrew installer: invoking osascript to run bootstrap script");
+
+        let output = Command::new("osascript")
+            .arg("-e")
+            .arg(&applescript)
+            .output()
+            .map_err(|e| {
+                CliError::Anyhow(anyhow!(
+                    "Failed to request administrator privileges for Homebrew: {}",
+                    e
+                ))
+            })?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+        if !stdout.trim().is_empty() {
+            eprintln!("Homebrew installer stdout: {}", stdout.trim());
+            log_homebrew_install(&format!("Homebrew installer stdout: {}", stdout.trim()));
+        }
+        if !stderr.trim().is_empty() {
+            eprintln!("Homebrew installer stderr: {}", stderr.trim());
+            log_homebrew_install(&format!("Homebrew installer stderr: {}", stderr.trim()));
+        }
+
+        if output.status.success() {
             let brew_path = which::which("brew")
                 .ok()
                 .map(|p| p.display().to_string())
                 .unwrap_or_else(|| "/opt/homebrew/bin/brew".to_string());
 
+            log_homebrew_install(&format!(
+                "Homebrew installer: brew detected at {}",
+                brew_path
+            ));
+
             Ok(brew_path)
         } else {
-            Err(anyhow!("Homebrew installation failed").into())
+            let combined = format!("{}\n{}", stdout, stderr).to_lowercase();
+            let was_cancelled = output.status.code() == Some(1)
+                || combined.contains("user canceled")
+                || combined.contains("user cancelled")
+                || combined.contains("canceled")
+                || combined.contains("cancelled");
+
+            let reason = if was_cancelled {
+                "Homebrew installation was cancelled."
+            } else {
+                "Homebrew installation failed."
+            };
+
+            let mut detail = String::new();
+            if !stderr.trim().is_empty() {
+                detail = format!(" Details: {}", stderr.trim());
+            } else if !stdout.trim().is_empty() {
+                detail = format!(" Details: {}", stdout.trim());
+            }
+
+            log_homebrew_install(&format!(
+                "Homebrew installer: osascript exit code {:?}, cancelled: {}",
+                output.status.code(),
+                was_cancelled
+            ));
+
+            Err(anyhow!(
+                "{} BioVault needs Homebrew to manage dependencies on macOS. Please install Homebrew manually from https://brew.sh and try again.{}",
+                reason,
+                detail
+            )
+            .into())
         }
     }
 }
