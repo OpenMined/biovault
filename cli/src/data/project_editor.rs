@@ -119,12 +119,7 @@ pub fn save_project_metadata(project_root: &Path, metadata: &ProjectMetadata) ->
 
     map.insert(
         Value::String("assets".into()),
-        Value::Sequence(
-            assets
-                .into_iter()
-                .map(Value::String)
-                .collect(),
-        ),
+        Value::Sequence(assets.into_iter().map(Value::String).collect()),
     );
 
     let yaml_str = serde_yaml::to_string(&value)
