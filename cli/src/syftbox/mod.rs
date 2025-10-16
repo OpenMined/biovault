@@ -1,9 +1,14 @@
 pub mod app;
+pub mod control;
 pub mod endpoint;
 pub mod rpc;
 pub mod types;
 
 pub use app::SyftBoxApp;
+pub use control::{
+    detect_mode, is_syftbox_running, start_syftbox, state as syftbox_state, stop_syftbox,
+    SyftBoxMode, SyftBoxState,
+};
 pub use endpoint::Endpoint;
 pub use rpc::{check_requests, send_response};
 pub use types::{RpcHeaders, RpcRequest, RpcResponse};

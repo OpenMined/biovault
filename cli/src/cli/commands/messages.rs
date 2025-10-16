@@ -119,6 +119,19 @@ mod tests_fast_helpers {
 
 /// Initialize the message system
 pub fn init_message_system(config: &Config) -> Result<(MessageDb, MessageSync)> {
+    let (db, sync) = build_message_system(config)?;
+
+    println!("BioVault messaging initialized for {}", config.email);
+
+    Ok((db, sync))
+}
+
+/// Initialize the message system without printing status output
+pub fn init_message_system_quiet(config: &Config) -> Result<(MessageDb, MessageSync)> {
+    build_message_system(config)
+}
+
+fn build_message_system(config: &Config) -> Result<(MessageDb, MessageSync)> {
     let db_path = get_message_db_path(config)?;
     let db = MessageDb::new(&db_path)?;
 
@@ -127,8 +140,6 @@ pub fn init_message_system(config: &Config) -> Result<(MessageDb, MessageSync)> 
     app.register_endpoint(MESSAGE_ENDPOINT)?;
 
     let sync = MessageSync::new(&db_path, app)?;
-
-    println!("BioVault messaging initialized for {}", config.email);
 
     Ok((db, sync))
 }
