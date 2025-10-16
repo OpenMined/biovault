@@ -1294,6 +1294,25 @@ pub async fn reinstall_service(config: &Config) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
+
+    struct TestDirGuard;
+
+    impl TestDirGuard {
+        fn new(temp: &TempDir) -> Self {
+            crate::config::set_test_syftbox_data_dir(temp.path());
+            let home = temp.path().join(".biovault");
+            crate::config::set_test_biovault_home(&home);
+            TestDirGuard
+        }
+    }
+
+    impl Drop for TestDirGuard {
+        fn drop(&mut self) {
+            crate::config::clear_test_biovault_home();
+            crate::config::clear_test_syftbox_data_dir();
+        }
+    }
 
     // ============================================================================
     // UNIT TESTING GUIDELINES FOR DAEMON MODULE
@@ -1353,9 +1372,8 @@ mod tests {
 
     #[test]
     fn test_get_biovault_dir() {
-        use tempfile::TempDir;
         let tmp = TempDir::new().unwrap();
-        crate::config::set_test_syftbox_data_dir(tmp.path());
+        let _guard = TestDirGuard::new(&tmp);
 
         let config = Config {
             email: "test@example.com".to_string(),
@@ -1370,9 +1388,8 @@ mod tests {
 
     #[test]
     fn test_get_pid_file_path() {
-        use tempfile::TempDir;
         let tmp = TempDir::new().unwrap();
-        crate::config::set_test_syftbox_data_dir(tmp.path());
+        let _guard = TestDirGuard::new(&tmp);
 
         let config = Config {
             email: "test@example.com".to_string(),
@@ -1388,9 +1405,8 @@ mod tests {
 
     #[test]
     fn test_get_status_file_path() {
-        use tempfile::TempDir;
         let tmp = TempDir::new().unwrap();
-        crate::config::set_test_syftbox_data_dir(tmp.path());
+        let _guard = TestDirGuard::new(&tmp);
 
         let config = Config {
             email: "test@example.com".to_string(),
@@ -1406,9 +1422,8 @@ mod tests {
 
     #[test]
     fn test_get_log_file_path() {
-        use tempfile::TempDir;
         let tmp = TempDir::new().unwrap();
-        crate::config::set_test_syftbox_data_dir(tmp.path());
+        let _guard = TestDirGuard::new(&tmp);
 
         let config = Config {
             email: "test@example.com".to_string(),
@@ -1480,9 +1495,8 @@ mod tests {
 
     #[test]
     fn test_is_daemon_running_no_pid_file() {
-        use tempfile::TempDir;
         let tmp = TempDir::new().unwrap();
-        crate::config::set_test_syftbox_data_dir(tmp.path());
+        let _guard = TestDirGuard::new(&tmp);
 
         let config = Config {
             email: "test@example.com".to_string(),
@@ -1499,9 +1513,8 @@ mod tests {
 
     #[test]
     fn test_cleanup_stale_pid_files_no_file() {
-        use tempfile::TempDir;
         let tmp = TempDir::new().unwrap();
-        crate::config::set_test_syftbox_data_dir(tmp.path());
+        let _guard = TestDirGuard::new(&tmp);
 
         let config = Config {
             email: "test@example.com".to_string(),
@@ -1517,11 +1530,8 @@ mod tests {
 
     #[test]
     fn test_get_daemon_status_no_file() {
-        use tempfile::TempDir;
         let tmp = TempDir::new().unwrap();
-        crate::config::set_test_syftbox_data_dir(tmp.path());
-        let bv_home = tmp.path().join("bv_home");
-        crate::config::set_test_biovault_home(&bv_home);
+        let _guard = TestDirGuard::new(&tmp);
 
         let config = Config {
             email: "test@example.com".to_string(),
@@ -1534,9 +1544,6 @@ mod tests {
         let result = get_daemon_status(&config);
         assert!(result.is_ok());
         assert!(result.unwrap().is_none());
-
-        crate::config::clear_test_biovault_home();
-        crate::config::clear_test_syftbox_data_dir();
     }
 
     #[test]
@@ -1562,11 +1569,8 @@ mod tests {
 
     #[test]
     fn test_cleanup_stale_pid_files_with_invalid_pid() {
-        use tempfile::TempDir;
         let tmp = TempDir::new().unwrap();
-        crate::config::set_test_syftbox_data_dir(tmp.path());
-        let bv_home = tmp.path().join("bv_home");
-        crate::config::set_test_biovault_home(&bv_home);
+        let _guard = TestDirGuard::new(&tmp);
 
         let config = Config {
             email: "test@example.com".to_string(),
@@ -1586,16 +1590,12 @@ mod tests {
 
         // Should have cleaned up the invalid file
         assert!(!pid_path.exists());
-
-        crate::config::clear_test_biovault_home();
-        crate::config::clear_test_syftbox_data_dir();
     }
 
     #[test]
     fn test_is_daemon_running_with_invalid_pid() {
-        use tempfile::TempDir;
         let tmp = TempDir::new().unwrap();
-        crate::config::set_test_syftbox_data_dir(tmp.path());
+        let _guard = TestDirGuard::new(&tmp);
 
         let config = Config {
             email: "test@example.com".to_string(),
@@ -1622,7 +1622,7 @@ mod tests {
     fn test_get_daemon_status_with_valid_file() {
         use tempfile::TempDir;
         let tmp = TempDir::new().unwrap();
-        crate::config::set_test_syftbox_data_dir(tmp.path());
+        let _guard = TestDirGuard::new(&tmp);
 
         let config = Config {
             email: "test@example.com".to_string(),
@@ -1691,7 +1691,7 @@ mod tests {
     fn test_path_helpers_consistency() {
         use tempfile::TempDir;
         let tmp = TempDir::new().unwrap();
-        crate::config::set_test_syftbox_data_dir(tmp.path());
+        let _guard = TestDirGuard::new(&tmp);
 
         let config = Config {
             email: "test@example.com".to_string(),
@@ -1735,7 +1735,7 @@ mod tests {
     async fn test_stop_daemon_not_running() {
         use tempfile::TempDir;
         let tmp = TempDir::new().unwrap();
-        crate::config::set_test_syftbox_data_dir(tmp.path());
+        let _guard = TestDirGuard::new(&tmp);
 
         let config = Config {
             email: "test@example.com".to_string(),
@@ -1753,7 +1753,7 @@ mod tests {
     async fn test_logs_no_file() {
         use tempfile::TempDir;
         let tmp = TempDir::new().unwrap();
-        crate::config::set_test_syftbox_data_dir(tmp.path());
+        let _guard = TestDirGuard::new(&tmp);
 
         let config = Config {
             email: "test@example.com".to_string(),
@@ -1771,7 +1771,7 @@ mod tests {
     async fn test_daemon_status_display() {
         use tempfile::TempDir;
         let tmp = TempDir::new().unwrap();
-        crate::config::set_test_syftbox_data_dir(tmp.path());
+        let _guard = TestDirGuard::new(&tmp);
 
         let config = Config {
             email: "test@example.com".to_string(),
@@ -1865,7 +1865,7 @@ mod tests {
     fn test_generate_systemd_service_content_fields() {
         use tempfile::TempDir;
         let tmp = TempDir::new().unwrap();
-        crate::config::set_test_syftbox_data_dir(tmp.path());
+        let _guard = TestDirGuard::new(&tmp);
 
         let config = Config {
             email: "test@example.com".to_string(),
@@ -1909,7 +1909,7 @@ mod tests {
     fn test_get_daemon_status_invalid_json() {
         use tempfile::TempDir;
         let tmp = TempDir::new().unwrap();
-        crate::config::set_test_syftbox_data_dir(tmp.path());
+        let _guard = TestDirGuard::new(&tmp);
         let bv_home = tmp.path().join("bv_home");
         crate::config::set_test_biovault_home(&bv_home);
 
@@ -1928,16 +1928,13 @@ mod tests {
 
         let result = get_daemon_status(&config);
         assert!(result.is_err());
-
-        crate::config::clear_test_biovault_home();
-        crate::config::clear_test_syftbox_data_dir();
     }
 
     #[test]
     fn test_cleanup_stale_pid_files_with_stale_process() {
         use tempfile::TempDir;
         let tmp = TempDir::new().unwrap();
-        crate::config::set_test_syftbox_data_dir(tmp.path());
+        let _guard = TestDirGuard::new(&tmp);
 
         let config = Config {
             email: "test@example.com".to_string(),
@@ -1960,7 +1957,7 @@ mod tests {
     fn test_is_daemon_running_with_stale_pid() {
         use tempfile::TempDir;
         let tmp = TempDir::new().unwrap();
-        crate::config::set_test_syftbox_data_dir(tmp.path());
+        let _guard = TestDirGuard::new(&tmp);
 
         let config = Config {
             email: "test@example.com".to_string(),
@@ -2023,7 +2020,7 @@ mod tests {
     #[test]
     fn test_path_helpers_different_emails() {
         let tmp = tempfile::TempDir::new().unwrap();
-        crate::config::set_test_syftbox_data_dir(tmp.path());
+        let _guard = TestDirGuard::new(&tmp);
 
         let config1 = Config {
             email: "user1@example.com".to_string(),
@@ -2056,7 +2053,7 @@ mod tests {
     fn test_cleanup_stale_pid_files_preserves_running_daemon() {
         use tempfile::TempDir;
         let tmp = TempDir::new().unwrap();
-        crate::config::set_test_syftbox_data_dir(tmp.path());
+        let _guard = TestDirGuard::new(&tmp);
 
         let config = Config {
             email: "test@example.com".to_string(),
@@ -2093,7 +2090,7 @@ mod tests {
     fn test_get_pid_file_path_creates_parent() {
         use tempfile::TempDir;
         let tmp = TempDir::new().unwrap();
-        crate::config::set_test_syftbox_data_dir(tmp.path());
+        let _guard = TestDirGuard::new(&tmp);
         let bv_home = tmp.path().join("bv_home");
         crate::config::set_test_biovault_home(&bv_home);
 
@@ -2108,16 +2105,13 @@ mod tests {
         let pid_path = get_pid_file_path(&config).unwrap();
         assert!(pid_path.parent().is_some());
         assert!(pid_path.starts_with(&bv_home));
-
-        crate::config::clear_test_biovault_home();
-        crate::config::clear_test_syftbox_data_dir();
     }
 
     #[test]
     fn test_get_log_file_path_structure() {
         use tempfile::TempDir;
         let tmp = TempDir::new().unwrap();
-        crate::config::set_test_syftbox_data_dir(tmp.path());
+        let _guard = TestDirGuard::new(&tmp);
 
         let config = Config {
             email: "test@example.com".to_string(),
@@ -2136,7 +2130,7 @@ mod tests {
     async fn test_logs_with_lines_parameter() {
         use tempfile::TempDir;
         let tmp = TempDir::new().unwrap();
-        crate::config::set_test_syftbox_data_dir(tmp.path());
+        let _guard = TestDirGuard::new(&tmp);
 
         let config = Config {
             email: "test@example.com".to_string(),
@@ -2167,7 +2161,7 @@ mod tests {
     fn test_get_status_file_path_uniqueness() {
         use tempfile::TempDir;
         let tmp = TempDir::new().unwrap();
-        crate::config::set_test_syftbox_data_dir(tmp.path());
+        let _guard = TestDirGuard::new(&tmp);
 
         let config = Config {
             email: "test@example.com".to_string(),
