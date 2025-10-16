@@ -968,10 +968,7 @@ async fn test_submission(
 
         println!("🔬 Running test with participant: {}", participant.cyan());
 
-        let home_dir = dirs::home_dir()
-            .ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
-        let mock_data_path = home_dir
-            .join(".biovault")
+        let mock_data_path = crate::config::get_biovault_home()?
             .join("data")
             .join("sample")
             .join(participant);

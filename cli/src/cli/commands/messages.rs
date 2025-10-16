@@ -686,9 +686,32 @@ fn sender_project_root(
 
 fn receiver_private_submissions_path(config: &Config) -> anyhow::Result<PathBuf> {
     let data_dir = config.get_syftbox_data_dir()?;
-    Ok(data_dir
-        .join("datasites")
-        .join(&config.email)
+
+    // Check if this is a normal SyftBox root (has datasites/ folder inside)
+    let real_data_dir = if data_dir.join("datasites").exists() {
+        // Normal case: data_dir/datasites/email exists, so data_dir is the root
+        data_dir
+    } else if data_dir.components().any(|c| c.as_os_str() == "datasites")
+        && data_dir.to_string_lossy().contains(&config.email)
+    {
+        // Edge case: SYFTBOX_DATA_DIR is pointing to datasite itself (no datasites/ folder inside)
+        // Walk up to find the parent that doesn't contain "datasites"
+        let mut parent = data_dir.clone();
+        while parent.components().any(|c| c.as_os_str() == "datasites") {
+            if let Some(p) = parent.parent() {
+                parent = p.to_path_buf();
+            } else {
+                break;
+            }
+        }
+        parent
+    } else {
+        // Fallback: treat as normal case
+        data_dir
+    };
+
+    // Private is at data_dir root level
+    Ok(real_data_dir
         .join("private")
         .join("app_data")
         .join("biovault")
@@ -733,9 +756,13 @@ fn build_run_project_copy(config: &Config, msg: &Message) -> anyhow::Result<Path
     let (sender_root, folder_name) = sender_project_root(config, meta)?;
     let dest_root = receiver_private_submissions_path(config)?;
     let dest_path = dest_root.join(&folder_name);
-    if !dest_path.exists() {
+
+    // Always copy if project.yaml is missing (handles incomplete/failed copies)
+    let project_yaml = dest_path.join("project.yaml");
+    if !project_yaml.exists() {
         copy_dir_recursive(&sender_root, &dest_path)?;
     }
+
     Ok(dest_path)
 }
 
@@ -1377,9 +1404,12 @@ mod tests {
         assert_eq!(folder, "proj1");
         assert!(sender_root.ends_with("proj1"));
 
-        // receiver path
+        // receiver path (should be at root level, not inside datasite)
         let recv = receiver_private_submissions_path(&cfg)?;
-        assert!(recv.ends_with("datasites/u@example.com/private/app_data/biovault/submissions"));
+        assert!(recv.ends_with("private/app_data/biovault/submissions"));
+        assert!(!recv
+            .to_string_lossy()
+            .contains("datasites/u@example.com/private"));
 
         // Copy behaviour: skip syft.pub.yaml and recreate tree
         let dest = recv.join(&folder);

@@ -5,12 +5,119 @@ use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::env;
 use std::fs;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+
+#[cfg(test)]
+use std::collections::HashMap;
 
 thread_local! {
     static TEST_CONFIG: RefCell<Option<Config>> = const { RefCell::new(None) };
     static TEST_SYFTBOX_DATA_DIR: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
     static TEST_BIOVAULT_HOME: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+    static TEST_POINTER_FILE: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_ENV_OVERRIDES: RefCell<HashMap<String, Vec<Option<String>>>> =
+        RefCell::new(HashMap::new());
+}
+
+const BIOVAULT_POINTER_DIR: &str = "BioVault";
+const BIOVAULT_POINTER_FILE: &str = "home_path";
+const BIOVAULT_POINTER_OVERRIDE: &str = "BIOVAULT_POINTER_PATH";
+
+fn should_persist_home_pointer() -> bool {
+    get_env_var("BIOVAULT_HOME").is_none() && get_env_var("SYFTBOX_DATA_DIR").is_none()
+}
+
+fn pointer_file_path() -> Option<PathBuf> {
+    if let Some(test_path) = TEST_POINTER_FILE.with(|p| p.borrow().clone()) {
+        return Some(test_path);
+    }
+    if let Ok(path) = env::var(BIOVAULT_POINTER_OVERRIDE) {
+        return Some(PathBuf::from(path));
+    }
+    dirs::config_dir().map(|dir| dir.join(BIOVAULT_POINTER_DIR).join(BIOVAULT_POINTER_FILE))
+}
+
+fn get_env_var(key: &str) -> Option<String> {
+    #[cfg(test)]
+    {
+        if let Some(value) = TEST_ENV_OVERRIDES.with(|map| {
+            map.borrow()
+                .get(key)
+                .and_then(|stack| stack.last().cloned())
+        }) {
+            return value;
+        }
+    }
+
+    env::var(key).ok()
+}
+
+fn read_persisted_home() -> Option<PathBuf> {
+    let pointer_path = pointer_file_path()?;
+    let contents = match fs::read_to_string(pointer_path) {
+        Ok(val) => val,
+        Err(err) => match err.kind() {
+            ErrorKind::NotFound => return None,
+            _ => return None,
+        },
+    };
+
+    let trimmed = contents.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(trimmed))
+    }
+}
+
+fn persist_home_pointer(path: &Path) {
+    if !should_persist_home_pointer() {
+        return;
+    }
+
+    if let Some(pointer_path) = pointer_file_path() {
+        if let Some(parent) = pointer_path.parent() {
+            if fs::create_dir_all(parent).is_err() {
+                return;
+            }
+        }
+
+        // Best effort persistence; ignore failures here
+        let path_str = path.to_string_lossy().into_owned();
+        let _ = fs::write(pointer_path, path_str);
+    }
+}
+
+fn detect_existing_home(home_dir: &Path) -> Option<PathBuf> {
+    let desktop_root = resolve_desktop_dir(home_dir);
+    let desktop_candidate = desktop_root.join("BioVault");
+    let legacy_candidate = home_dir.join(".biovault");
+
+    [desktop_candidate, legacy_candidate]
+        .into_iter()
+        .find(|candidate| {
+            candidate.join("config.yaml").exists()
+                || candidate.join("env").exists()
+                || candidate.join("data").exists()
+        })
+}
+
+fn resolve_desktop_dir(home_dir: &Path) -> PathBuf {
+    if let Some(desktop_dir) = dirs::desktop_dir() {
+        if desktop_dir.starts_with(home_dir) {
+            return desktop_dir;
+        }
+    }
+    home_dir.join("Desktop")
+}
+
+pub fn set_persisted_biovault_home<P: AsRef<Path>>(path: P) {
+    persist_home_pointer(path.as_ref());
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -285,7 +392,7 @@ pub fn get_biovault_home() -> anyhow::Result<PathBuf> {
     }
 
     // Check for test environment (must be before directory walk to prevent finding global config)
-    if let Ok(test_home) = env::var("BIOVAULT_TEST_HOME") {
+    if let Some(test_home) = get_env_var("BIOVAULT_TEST_HOME") {
         let path = PathBuf::from(test_home).join(".biovault");
         fs::create_dir_all(&path).with_context(|| {
             format!(
@@ -297,7 +404,7 @@ pub fn get_biovault_home() -> anyhow::Result<PathBuf> {
     }
 
     // Check for explicit BIOVAULT_HOME
-    if let Ok(biovault_home) = env::var("BIOVAULT_HOME") {
+    if let Some(biovault_home) = get_env_var("BIOVAULT_HOME") {
         let path = PathBuf::from(biovault_home);
         fs::create_dir_all(&path)
             .with_context(|| format!("Failed to create biovault directory: {}", path.display()))?;
@@ -305,11 +412,24 @@ pub fn get_biovault_home() -> anyhow::Result<PathBuf> {
     }
 
     // Check for SyftBox virtualenv
-    if let Ok(syftbox_data_dir) = env::var("SYFTBOX_DATA_DIR") {
+    if let Some(syftbox_data_dir) = get_env_var("SYFTBOX_DATA_DIR") {
         let path = PathBuf::from(syftbox_data_dir).join(".biovault");
         fs::create_dir_all(&path)
             .with_context(|| format!("Failed to create biovault directory: {}", path.display()))?;
         return Ok(path);
+    }
+
+    let home_dir =
+        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
+
+    if let Some(persisted) = read_persisted_home() {
+        fs::create_dir_all(&persisted).with_context(|| {
+            format!(
+                "Failed to create persisted biovault directory: {}",
+                persisted.display()
+            )
+        })?;
+        return Ok(persisted);
     }
 
     // Walk up from current directory looking for .biovault/config.yaml (for sbenv)
@@ -329,15 +449,20 @@ pub fn get_biovault_home() -> anyhow::Result<PathBuf> {
         }
     }
 
+    if let Some(existing) = detect_existing_home(&home_dir) {
+        fs::create_dir_all(&existing).with_context(|| {
+            format!(
+                "Failed to create biovault directory: {}",
+                existing.display()
+            )
+        })?;
+        persist_home_pointer(&existing);
+        return Ok(existing);
+    }
+
     // Default to Desktop/BioVault (user-friendly, visible location)
-    let home_dir =
-        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
-    let default_path = if let Some(desktop_dir) = dirs::desktop_dir() {
-        desktop_dir.join("BioVault")
-    } else {
-        // Fallback if desktop_dir() fails (shouldn't happen on modern systems)
-        home_dir.join("Desktop").join("BioVault")
-    };
+    let desktop_dir = resolve_desktop_dir(&home_dir);
+    let default_path = desktop_dir.join("BioVault");
 
     // Create the default directory if it doesn't exist
     fs::create_dir_all(&default_path).with_context(|| {
@@ -346,6 +471,8 @@ pub fn get_biovault_home() -> anyhow::Result<PathBuf> {
             default_path.display()
         )
     })?;
+
+    persist_home_pointer(&default_path);
 
     Ok(default_path)
 }
@@ -360,10 +487,8 @@ pub fn get_cache_dir() -> anyhow::Result<PathBuf> {
         return Ok(PathBuf::from(cache_dir));
     }
 
-    // Always use the shared cache in user's home directory
-    let home_dir =
-        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
-    Ok(home_dir.join(".biovault").join("data").join("cache"))
+    // Always use the shared cache within the BioVault home directory
+    Ok(get_biovault_home()?.join("data").join("cache"))
 }
 
 /// Check if running in a SyftBox virtualenv
@@ -420,10 +545,86 @@ pub fn clear_test_biovault_home() {
 }
 
 #[cfg(test)]
+pub fn set_test_pointer_file<P: Into<PathBuf>>(path: P) {
+    TEST_POINTER_FILE.with(|p| {
+        *p.borrow_mut() = Some(path.into());
+    });
+}
+
+#[cfg(test)]
+pub fn clear_test_pointer_file() {
+    TEST_POINTER_FILE.with(|p| {
+        *p.borrow_mut() = None;
+    });
+}
+
+#[cfg(test)]
+pub fn set_test_env_override(key: &str, value: Option<&str>) {
+    TEST_ENV_OVERRIDES.with(|overrides| {
+        overrides
+            .borrow_mut()
+            .entry(key.to_string())
+            .or_default()
+            .push(value.map(|v| v.to_string()));
+    });
+}
+
+#[cfg(test)]
+pub fn clear_test_env_override(key: &str) {
+    TEST_ENV_OVERRIDES.with(|overrides| {
+        let mut map = overrides.borrow_mut();
+        if let Some(stack) = map.get_mut(key) {
+            stack.pop();
+            if stack.is_empty() {
+                map.remove(key);
+            }
+        }
+    });
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    struct EnvGuard {
+        key: String,
+        previous: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &str, value: &str) -> Self {
+            let previous = env::var(key).ok();
+            env::set_var(key, value);
+            set_test_env_override(key, Some(value));
+            Self {
+                key: key.to_string(),
+                previous,
+            }
+        }
+
+        fn unset(key: &str) -> Self {
+            let previous = env::var(key).ok();
+            env::remove_var(key);
+            set_test_env_override(key, None);
+            Self {
+                key: key.to_string(),
+                previous,
+            }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            if let Some(ref value) = self.previous {
+                env::set_var(&self.key, value);
+            } else {
+                env::remove_var(&self.key);
+            }
+            clear_test_env_override(&self.key);
+        }
+    }
 
     #[test]
     fn config_save_and_load_round_trip() {
@@ -501,5 +702,53 @@ mod tests {
         assert!(p.ends_with("config.yaml"));
         assert!(p.starts_with(&home));
         clear_test_biovault_home();
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn persisted_home_pointer_is_respected() {
+        let tmp = TempDir::new().unwrap();
+        let home_dir = tmp.path().join("home");
+        let config_dir = tmp.path().join("config");
+        fs::create_dir_all(&home_dir).unwrap();
+        fs::create_dir_all(&config_dir).unwrap();
+        fs::create_dir_all(home_dir.join("Desktop")).unwrap();
+
+        let home_guard = EnvGuard::set("HOME", home_dir.to_string_lossy().as_ref());
+        let config_guard = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy().as_ref());
+        let pointer_path = config_dir.join("pointer.txt");
+        set_test_pointer_file(&pointer_path);
+        let _unset_biovault_home = EnvGuard::unset("BIOVAULT_HOME");
+        let _unset_syftbox_dir = EnvGuard::unset("SYFTBOX_DATA_DIR");
+        let _unset_test_home = EnvGuard::unset("BIOVAULT_TEST_HOME");
+
+        clear_test_biovault_home();
+
+        let _ = fs::remove_file(&pointer_path);
+
+        let default_home = home_dir.join("Desktop").join("BioVault");
+        fs::create_dir_all(&default_home).unwrap();
+        set_test_biovault_home(&default_home);
+        let initial = get_biovault_home().unwrap();
+        assert_eq!(initial, default_home);
+        clear_test_biovault_home();
+
+        let custom_home = home_dir.join("custom_location");
+        set_persisted_biovault_home(&custom_home);
+        assert_eq!(
+            fs::read_to_string(&pointer_path).unwrap().trim(),
+            custom_home.to_string_lossy()
+        );
+        let resolved_home = get_biovault_home().unwrap();
+        assert_eq!(resolved_home, custom_home);
+        assert!(resolved_home.exists());
+
+        set_persisted_biovault_home(&default_home);
+        let resolved_again = get_biovault_home().unwrap();
+        assert_eq!(resolved_again, default_home);
+
+        clear_test_pointer_file();
+        drop(config_guard);
+        drop(home_guard);
     }
 }

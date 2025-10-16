@@ -116,7 +116,7 @@ enum ParticipantSource {
     SyftUrl(SyftURL),
     HttpUrl(String),
     SampleDataId(String),
-    RegisteredParticipant(String), // participant ID from ~/.biovault/participants.yaml
+    RegisteredParticipant(String), // participant ID from BioVault home participants.yaml
 }
 
 impl ParticipantSource {
