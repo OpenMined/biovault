@@ -12,6 +12,7 @@ thread_local! {
     static TEST_CONFIG: RefCell<Option<Config>> = const { RefCell::new(None) };
     static TEST_SYFTBOX_DATA_DIR: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
     static TEST_BIOVAULT_HOME: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+    static TEST_POINTER_FILE: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
 }
 
 const BIOVAULT_POINTER_DIR: &str = "BioVault";
@@ -23,6 +24,9 @@ fn should_persist_home_pointer() -> bool {
 }
 
 fn pointer_file_path() -> Option<PathBuf> {
+    if let Some(test_path) = TEST_POINTER_FILE.with(|p| p.borrow().clone()) {
+        return Some(test_path);
+    }
     if let Ok(path) = env::var(BIOVAULT_POINTER_OVERRIDE) {
         return Some(PathBuf::from(path));
     }
@@ -517,6 +521,20 @@ pub fn clear_test_biovault_home() {
 }
 
 #[cfg(test)]
+pub fn set_test_pointer_file<P: Into<PathBuf>>(path: P) {
+    TEST_POINTER_FILE.with(|p| {
+        *p.borrow_mut() = Some(path.into());
+    });
+}
+
+#[cfg(test)]
+pub fn clear_test_pointer_file() {
+    TEST_POINTER_FILE.with(|p| {
+        *p.borrow_mut() = None;
+    });
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
@@ -648,10 +666,7 @@ mod tests {
         let home_guard = EnvGuard::set("HOME", home_dir.to_string_lossy().as_ref());
         let config_guard = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy().as_ref());
         let pointer_path = config_dir.join("pointer.txt");
-        let pointer_guard = EnvGuard::set(
-            BIOVAULT_POINTER_OVERRIDE,
-            pointer_path.to_string_lossy().as_ref(),
-        );
+        set_test_pointer_file(&pointer_path);
         let _unset_biovault_home = EnvGuard::unset("BIOVAULT_HOME");
         let _unset_syftbox_dir = EnvGuard::unset("SYFTBOX_DATA_DIR");
         let _unset_test_home = EnvGuard::unset("BIOVAULT_TEST_HOME");
@@ -681,7 +696,7 @@ mod tests {
         let resolved_again = get_biovault_home().unwrap();
         assert_eq!(resolved_again, default_home);
 
-        drop(pointer_guard);
+        clear_test_pointer_file();
         drop(config_guard);
         drop(home_guard);
     }

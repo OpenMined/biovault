@@ -2186,6 +2186,8 @@ mod tests {
         use tempfile::TempDir;
         let tmp = TempDir::new().unwrap();
         crate::config::set_test_syftbox_data_dir(tmp.path());
+        let bv_home = tmp.path().join("bv_home");
+        crate::config::set_test_biovault_home(&bv_home);
 
         let config = Config {
             email: "test@example.com".to_string(),
@@ -2197,7 +2199,10 @@ mod tests {
 
         let pid_path = get_pid_file_path(&config).unwrap();
         assert!(pid_path.parent().is_some());
-        assert!(pid_path.to_string_lossy().contains(".biovault"));
+        assert!(pid_path.starts_with(&bv_home));
+
+        crate::config::clear_test_biovault_home();
+        crate::config::clear_test_syftbox_data_dir();
     }
 
     #[test]
