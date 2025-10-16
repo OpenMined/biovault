@@ -941,11 +941,20 @@ fn build_regex_from_template(template: &str, scope: PatternScope) -> Result<Stri
                         bail!("Template may contain only one {{id}} placeholder");
                     }
                     found_id = true;
-                    let capture = match scope {
-                        PatternScope::Path => r"(?P<id>[^/]+)",
-                        _ => r"(?P<id>[A-Za-z0-9._-]+)",
+                    let next_char = chars.peek().copied();
+                    let base_class = match scope {
+                        PatternScope::Path => "[^/]",
+                        _ => match next_char {
+                            Some('_') => "[^_]",
+                            Some('-') => "[^-]",
+                            Some('.') => "[^.]",
+                            Some(' ') => "[^ ]",
+                            _ => "[A-Za-z0-9._-]",
+                        },
                     };
-                    regex.push_str(capture);
+
+                    let capture = format!("(?P<id>{}+)", base_class);
+                    regex.push_str(&capture);
                 } else {
                     regex.push_str(&escape_literal(&format!("{{{}}}", lookahead)));
                 }
