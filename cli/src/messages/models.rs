@@ -101,6 +101,35 @@ pub enum MessageType {
     },
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ThreadFilter {
+    All,
+    Inbox,
+    Sent,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MessageThreadSummary {
+    pub thread_id: String,
+    pub subject: String,
+    pub participants: Vec<String>,
+    pub last_message_preview: String,
+    pub last_message_at: DateTime<Utc>,
+    pub last_message_id: String,
+    pub last_message_status: MessageStatus,
+    pub unread_count: usize,
+    pub total_messages: usize,
+    pub has_project: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_name: Option<String>,
+}
+
+impl MessageThreadSummary {
+    pub fn last_message_preview(&self) -> &str {
+        &self.last_message_preview
+    }
+}
+
 impl std::fmt::Display for MessageType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
