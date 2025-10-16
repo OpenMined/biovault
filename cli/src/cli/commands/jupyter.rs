@@ -1,8 +1,57 @@
 use crate::data::BioVaultDb;
 use crate::error::Result;
 use anyhow::anyhow;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+
+fn ensure_virtualenv(project_dir: &Path, python_version: &str) -> Result<()> {
+    let venv_path = project_dir.join(".venv");
+
+    if !venv_path.exists() {
+        println!("📦 Creating virtualenv with Python {}...", python_version);
+
+        let status = Command::new("uv")
+            .args(["venv", "--python", python_version, ".venv"])
+            .current_dir(project_dir)
+            .status()?;
+
+        if !status.success() {
+            return Err(anyhow!(
+                "Failed to create virtualenv. Try: bv python install {}",
+                python_version
+            )
+            .into());
+        }
+    } else {
+        println!("✅ Using existing virtualenv");
+    }
+
+    println!(
+        "📦 Installing/Updating packages via: uv pip install -U --python .venv jupyterlab bioscript"
+    );
+
+    let status = Command::new("uv")
+        .args([
+            "pip",
+            "install",
+            "-U",
+            "--python",
+            ".venv",
+            "jupyterlab",
+            "bioscript",
+        ])
+        .current_dir(project_dir)
+        .status()?;
+
+    if !status.success() {
+        return Err(
+            anyhow!("Failed to install required Python packages (jupyterlab/bioscript)").into(),
+        );
+    }
+
+    println!("✅ Virtualenv ready with jupyterlab and bioscript");
+    Ok(())
+}
 
 pub async fn start(project_path: &str, python_version: &str) -> Result<()> {
     // Check if project_path is a number (list index)
@@ -41,40 +90,7 @@ pub async fn start(project_path: &str, python_version: &str) -> Result<()> {
 
     let venv_path = project_dir.join(".venv");
 
-    // Check if venv exists
-    if !venv_path.exists() {
-        println!("📦 Creating virtualenv with Python {}...", python_version);
-
-        // Create venv with UV-managed Python
-        let status = Command::new("uv")
-            .args(["venv", "--python", python_version, ".venv"])
-            .current_dir(&project_dir)
-            .status()?;
-
-        if !status.success() {
-            return Err(anyhow!(
-                "Failed to create virtualenv. Try: bv python install {}",
-                python_version
-            )
-            .into());
-        }
-
-        println!("📦 Installing Jupyter Lab...");
-
-        // Install Jupyter using uv pip into the venv
-        let status = Command::new("uv")
-            .args(["pip", "install", "-U", "--python", ".venv", "jupyterlab"])
-            .current_dir(&project_dir)
-            .status()?;
-
-        if !status.success() {
-            return Err(anyhow!("Failed to install Jupyter Lab").into());
-        }
-
-        println!("✅ Virtualenv created and Jupyter installed");
-    } else {
-        println!("✅ Using existing virtualenv");
-    }
+    ensure_virtualenv(&project_dir, python_version)?;
 
     // Register/update in database
     let db = BioVaultDb::new()?;
@@ -104,15 +120,16 @@ pub async fn start(project_path: &str, python_version: &str) -> Result<()> {
     }
 
     // Launch Jupyter Lab
-    println!("🚀 Launching Jupyter Lab...");
+    println!("🚀 Launching Jupyter Lab with: uv run --python .venv jupyter lab");
 
-    let jupyter_bin = if cfg!(windows) {
-        venv_path.join("Scripts").join("jupyter.exe")
-    } else {
-        venv_path.join("bin").join("jupyter")
-    };
-
-    if !jupyter_bin.exists() {
+    if !venv_path
+        .join(if cfg!(windows) {
+            "Scripts/jupyter.exe"
+        } else {
+            "bin/jupyter"
+        })
+        .exists()
+    {
         return Err(anyhow!(
             "Jupyter not found in virtualenv. Try: bv jupyter reset {}",
             project_path
@@ -120,13 +137,10 @@ pub async fn start(project_path: &str, python_version: &str) -> Result<()> {
         .into());
     }
 
-    // Convert to absolute path for spawning
-    let jupyter_bin_abs = std::fs::canonicalize(&jupyter_bin)?;
-
     use std::process::Stdio;
 
-    let mut child = Command::new(jupyter_bin_abs)
-        .args(["lab"])
+    let mut child = Command::new("uv")
+        .args(["run", "--python", ".venv", "jupyter", "lab"])
         .current_dir(&project_dir)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -230,27 +244,18 @@ pub async fn stop(project_path: &str) -> Result<()> {
 
     let venv_path = project_dir.join(".venv");
 
-    let jupyter_bin = if cfg!(windows) {
-        venv_path.join("Scripts").join("jupyter.exe")
-    } else {
-        venv_path.join("bin").join("jupyter")
-    };
-
-    if !jupyter_bin.exists() {
+    if !venv_path.exists() {
         println!(
-            "⚠️  No Jupyter installation found in {}",
+            "⚠️  Virtualenv not found for {}. Nothing to stop.",
             project_dir.display()
         );
         return Ok(());
     }
 
-    println!("🛑 Stopping Jupyter Lab...");
+    println!("🛑 Stopping Jupyter Lab with: uv run --python .venv jupyter lab stop...");
 
-    // Convert to absolute path for spawning
-    let jupyter_bin_abs = std::fs::canonicalize(&jupyter_bin)?;
-
-    let status = Command::new(jupyter_bin_abs)
-        .args(["lab", "stop"])
+    let status = Command::new("uv")
+        .args(["run", "--python", ".venv", "jupyter", "lab", "stop"])
         .current_dir(&project_dir)
         .status()?;
 
@@ -314,13 +319,15 @@ pub async fn reset(project_path: &str, python_version: &str) -> Result<()> {
         let _ = db.delete_dev_env(canonical_path.to_str().unwrap());
     }
 
-    // Create fresh venv
+    // Create fresh venv without launching Jupyter
     println!("🔄 Creating fresh virtualenv...");
-    if let Some(path_str) = project_dir.to_str() {
-        start(path_str, python_version).await
-    } else {
-        Err(anyhow!("Invalid project path").into())
-    }
+    ensure_virtualenv(&project_dir, python_version)?;
+
+    db.register_dev_env(&project_dir, python_version, "jupyter", true)?;
+    db.update_jupyter_session(&project_dir, None, None)?;
+
+    println!("✅ Virtualenv rebuilt. Jupyter server is stopped.");
+    Ok(())
 }
 
 pub async fn status() -> Result<()> {

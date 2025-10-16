@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -155,6 +155,53 @@ impl BioVaultDb {
 
         if rows_affected == 0 {
             anyhow::bail!("Project '{}' not found", name);
+        }
+
+        Ok(())
+    }
+
+    /// Update an existing project by ID
+    pub fn update_project_by_id(
+        &self,
+        project_id: i64,
+        name: &str,
+        author: &str,
+        workflow: &str,
+        template: &str,
+        project_path: &Path,
+    ) -> Result<()> {
+        let path_str = project_path
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("Invalid project path"))?;
+
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id FROM projects WHERE name = ?1 AND id != ?2")
+            .context("Failed to prepare project uniqueness query")?;
+
+        let conflict = stmt
+            .query_row(params![name, project_id], |row| row.get::<_, i64>(0))
+            .optional()?;
+
+        if conflict.is_some() {
+            anyhow::bail!(
+                "Project name '{}' is already used by a different project",
+                name
+            );
+        }
+
+        let rows_affected = self
+            .conn
+            .execute(
+                "UPDATE projects
+                 SET name = ?1, author = ?2, workflow = ?3, template = ?4, project_path = ?5
+                 WHERE id = ?6",
+                params![name, author, workflow, template, path_str, project_id],
+            )
+            .context("Failed to update project record")?;
+
+        if rows_affected == 0 {
+            anyhow::bail!("Project id {} not found", project_id);
         }
 
         Ok(())
