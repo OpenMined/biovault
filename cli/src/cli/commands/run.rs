@@ -911,8 +911,14 @@ async fn execute_sheet_workflow(params: &RunParams, config: &ProjectConfig) -> a
         config.workflow, config.name
     );
 
+    // Get configured Nextflow path or use default
+    let nextflow_cmd = crate::config::get_config()
+        .ok()
+        .and_then(|cfg| cfg.get_binary_path("nextflow"))
+        .unwrap_or_else(|| "nextflow".to_string());
+
     // Build Nextflow command
-    let mut cmd = Command::new("nextflow");
+    let mut cmd = Command::new(&nextflow_cmd);
 
     // Set working directory to project directory
     cmd.current_dir(&project_path);
@@ -1125,8 +1131,14 @@ pub async fn execute(params: RunParams) -> anyhow::Result<()> {
         println!("Processing participant: {}", participant.id.cyan());
     }
 
+    // Get configured Nextflow path or use default
+    let nextflow_cmd = crate::config::get_config()
+        .ok()
+        .and_then(|cfg| cfg.get_binary_path("nextflow"))
+        .unwrap_or_else(|| "nextflow".to_string());
+
     // Build Nextflow command
-    let mut cmd = Command::new("nextflow");
+    let mut cmd = Command::new(&nextflow_cmd);
 
     // Set working directory to project directory
     cmd.current_dir(&project_path);
