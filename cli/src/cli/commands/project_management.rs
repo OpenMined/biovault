@@ -63,7 +63,11 @@ pub async fn import_project_record(
     }
 }
 
-pub fn create_project_record(name: String, example: Option<String>) -> Result<Project> {
+pub fn create_project_record(
+    name: String,
+    example: Option<String>,
+    target_dir: Option<PathBuf>,
+) -> Result<Project> {
     let project_name = name.trim();
     if project_name.is_empty() {
         return Err(anyhow::anyhow!("Project name cannot be empty").into());
@@ -100,21 +104,51 @@ pub fn create_project_record(name: String, example: Option<String>) -> Result<Pr
         .into());
     }
 
-    let biovault_home = config::get_biovault_home()?;
-    let projects_dir = biovault_home.join("projects");
-    fs::create_dir_all(&projects_dir)?;
+    let (project_dir, cleanup_on_error) = if let Some(dir) = target_dir {
+        let project_dir = dir;
 
-    let project_dir = projects_dir.join(project_name);
-    if project_dir.exists() {
-        return Err(anyhow::anyhow!(
-            "A project named '{}' already exists at {}",
-            project_name,
-            project_dir.display()
-        )
-        .into());
-    }
+        if project_dir.exists() {
+            if !project_dir.is_dir() {
+                return Err(anyhow::anyhow!(
+                    "Target path '{}' exists but is not a directory",
+                    project_dir.display()
+                )
+                .into());
+            }
 
-    fs::create_dir_all(&project_dir)?;
+            let yaml_path = project_dir.join("project.yaml");
+            if yaml_path.exists() {
+                return Err(anyhow::anyhow!(
+                    "A project.yaml already exists at {}",
+                    yaml_path.display()
+                )
+                .into());
+            }
+
+            (project_dir, false)
+        } else {
+            fs::create_dir_all(&project_dir)?;
+            (project_dir, true)
+        }
+    } else {
+        let biovault_home = config::get_biovault_home()?;
+        let projects_dir = biovault_home.join("projects");
+        fs::create_dir_all(&projects_dir)?;
+
+        let project_dir = projects_dir.join(project_name);
+        if project_dir.exists() {
+            return Err(anyhow::anyhow!(
+                "A project named '{}' already exists at {}",
+                project_name,
+                project_dir.display()
+            )
+            .into());
+        }
+
+        fs::create_dir_all(&project_dir)?;
+        (project_dir, true)
+    };
+
     let project_dir_for_cleanup = project_dir.clone();
     let project_name_owned = project_name.to_string();
 
@@ -226,7 +260,9 @@ pub fn create_project_record(name: String, example: Option<String>) -> Result<Pr
     match build_result {
         Ok(project) => Ok(project),
         Err(err) => {
-            let _ = fs::remove_dir_all(project_dir_for_cleanup);
+            if cleanup_on_error {
+                let _ = fs::remove_dir_all(project_dir_for_cleanup);
+            }
             Err(err)
         }
     }
