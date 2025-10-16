@@ -108,6 +108,7 @@ pub struct RunParams {
     pub resume: bool,
     pub template: Option<String>,
     pub results_dir: Option<String>,
+    pub nextflow_args: Vec<String>,
 }
 
 enum ParticipantSource {
@@ -950,8 +951,20 @@ async fn execute_sheet_workflow(params: &RunParams, config: &ProjectConfig) -> a
     }
 
     // Docker/Singularity configuration
-    if params.with_docker {
+    // Only add -with-docker if user hasn't provided it in nextflow_args
+    let has_docker_arg = params.nextflow_args.iter().any(|arg| {
+        arg.starts_with("-with-docker")
+            || arg.starts_with("-with-singularity")
+            || arg.starts_with("-with-podman")
+    });
+
+    if params.with_docker && !has_docker_arg {
         cmd.arg("-with-docker");
+    }
+
+    // Add additional Nextflow arguments
+    for arg in &params.nextflow_args {
+        cmd.arg(arg);
     }
 
     // Add config file
@@ -1194,8 +1207,20 @@ pub async fn execute(params: RunParams) -> anyhow::Result<()> {
     }
 
     // Docker/Singularity configuration
-    if params.with_docker {
+    // Only add -with-docker if user hasn't provided it in nextflow_args
+    let has_docker_arg = params.nextflow_args.iter().any(|arg| {
+        arg.starts_with("-with-docker")
+            || arg.starts_with("-with-singularity")
+            || arg.starts_with("-with-podman")
+    });
+
+    if params.with_docker && !has_docker_arg {
         cmd.arg("-with-docker");
+    }
+
+    // Add additional Nextflow arguments
+    for arg in &params.nextflow_args {
+        cmd.arg(arg);
     }
 
     // Add config file
@@ -1343,6 +1368,7 @@ participants:
             resume: false,
             template: None,
             results_dir: None,
+            nextflow_args: vec![],
         };
 
         assert_eq!(params.project_folder, "/test");
@@ -1354,6 +1380,7 @@ participants:
         assert!(params.work_dir.is_none());
         assert!(!params.resume);
         assert!(params.template.is_none());
+        assert!(params.nextflow_args.is_empty());
     }
 
     #[test]
@@ -1548,6 +1575,7 @@ participants:
             resume: false,
             template: Some("test_tpl".into()),
             results_dir: None,
+            nextflow_args: vec![],
         };
 
         // Use a writable cache dir during test
@@ -1618,6 +1646,7 @@ participants:
             resume: true,
             template: Some("full_tpl".into()),
             results_dir: None,
+            nextflow_args: vec![],
         };
 
         let cache_td = TempDir::new().unwrap();
@@ -1644,6 +1673,7 @@ participants:
             resume: false,
             template: None,
             results_dir: None,
+            nextflow_args: vec![],
         };
         assert!(execute(params).await.is_err());
 
@@ -1660,6 +1690,7 @@ participants:
             resume: false,
             template: None,
             results_dir: None,
+            nextflow_args: vec![],
         };
         assert!(execute(params).await.is_err());
 
@@ -1680,6 +1711,7 @@ participants:
             resume: false,
             template: None,
             results_dir: None,
+            nextflow_args: vec![],
         };
         assert!(execute(params).await.is_err());
 
@@ -1709,6 +1741,7 @@ participants:
             resume: false,
             template: Some("missing_tpl".into()),
             results_dir: None,
+            nextflow_args: vec![],
         };
         assert!(execute(params).await.is_err());
 

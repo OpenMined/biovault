@@ -91,6 +91,14 @@ pub fn create_project_record(name: String, example: Option<String>) -> Result<Pr
     let email_trimmed = email_config.trim().to_string();
 
     let db = BioVaultDb::new()?;
+    if let Some(existing) = db.get_project(project_name)? {
+        return Err(anyhow::anyhow!(
+            "Project '{}' already exists (id: {}). Please choose a different name.",
+            project_name,
+            existing.id
+        )
+        .into());
+    }
 
     let biovault_home = config::get_biovault_home()?;
     let projects_dir = biovault_home.join("projects");
@@ -108,7 +116,6 @@ pub fn create_project_record(name: String, example: Option<String>) -> Result<Pr
 
     fs::create_dir_all(&project_dir)?;
     let project_dir_for_cleanup = project_dir.clone();
-
     let project_name_owned = project_name.to_string();
 
     let build_result: Result<Project> = (|| {

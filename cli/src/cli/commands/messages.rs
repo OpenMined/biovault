@@ -584,6 +584,7 @@ pub async fn process_project_message(
         resume: false,
         template: Some("snp".to_string()),
         results_dir: None,
+        nextflow_args: vec![],
     })
     .await;
 
@@ -852,6 +853,7 @@ async fn run_project_test(config: &Config, msg: &Message) -> anyhow::Result<()> 
         resume: false,
         template: None,
         results_dir: None,
+        nextflow_args: vec![],
     })
     .await?;
     println!("{}", "Test run completed.".green());
@@ -883,6 +885,7 @@ async fn run_project_real(config: &Config, msg: &Message) -> anyhow::Result<()> 
         resume: false,
         template: None,
         results_dir: None,
+        nextflow_args: vec![],
     })
     .await?;
     println!("{}", "Real data run completed.".green());
