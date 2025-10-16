@@ -14,6 +14,9 @@ use tracing::{debug, error, info, warn};
 use crate::config::Config;
 use crate::messages::sync::MessageSync;
 use crate::syftbox::app::SyftBoxApp;
+use crate::syftbox::{
+    detect_mode, is_syftbox_running, start_syftbox as start_syftbox_process, SyftBoxMode,
+};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DaemonStatus {
@@ -138,128 +141,28 @@ impl Daemon {
         }
     }
 
-    fn is_in_sbenv(&self) -> Result<bool> {
-        // Check if we're in an sbenv by looking for .sbenv file
-        let data_dir = self.config.get_syftbox_data_dir()?;
-        let sbenv_file = data_dir.join(".sbenv");
-        Ok(sbenv_file.exists())
-    }
-
-    fn check_syftbox_running(&self) -> Result<bool> {
-        let data_dir = self.config.get_syftbox_data_dir()?;
-        let config_path = self.config.get_syftbox_config_path()?;
-
-        // Try to find syftbox process using the specific config file
-        let output = Command::new("ps").args(["aux"]).output()?;
-
-        let ps_output = String::from_utf8_lossy(&output.stdout);
-        let config_str = config_path.to_string_lossy();
-
-        // Check if there's a syftbox process using our config
-        let is_running = ps_output.lines().any(|line| {
-            line.contains("syftbox")
-                && (line.contains(&*config_str)
-                    || line.contains(data_dir.to_string_lossy().as_ref()))
-        });
-
-        Ok(is_running)
-    }
-
     // NOT unit testable - spawns actual SyftBox processes (sbenv or syftbox command)
     async fn start_syftbox(&self) -> Result<()> {
-        let data_dir = self.config.get_syftbox_data_dir()?;
-        let is_sbenv = self.is_in_sbenv()?;
+        let mode = detect_mode(&self.config)?;
+        match mode {
+            SyftBoxMode::Sbenv => self.log("INFO", "Starting SyftBox via sbenv..."),
+            SyftBoxMode::Direct => self.log("INFO", "Starting SyftBox directly..."),
+        }
 
-        if is_sbenv {
-            self.log("INFO", "Starting SyftBox via sbenv...");
-
-            // Change to the data directory and run sbenv start
-            let output = Command::new("sbenv")
-                .arg("start")
-                .arg("--skip-login-check")
-                .current_dir(&data_dir)
-                .output();
-
-            match output {
-                Ok(out) => {
-                    if out.status.success() {
-                        self.log("INFO", "Successfully started SyftBox via sbenv");
-                        tokio::time::sleep(Duration::from_secs(2)).await;
-                        Ok(())
-                    } else {
-                        let stderr = String::from_utf8_lossy(&out.stderr);
-                        self.log("ERROR", &format!("sbenv start failed: {}", stderr));
-                        Err(anyhow::anyhow!(
-                            "Failed to start SyftBox via sbenv: {}",
-                            stderr
-                        ))
-                    }
-                }
-                Err(e) => {
-                    self.log("ERROR", &format!("Failed to run sbenv: {}", e));
-                    Err(anyhow::anyhow!(
-                        "Failed to run sbenv: {}. Is sbenv installed?",
-                        e
-                    ))
-                }
-            }
-        } else {
-            self.log("INFO", "Starting SyftBox directly...");
-
-            let syftbox_config_path = self.config.get_syftbox_config_path()?;
-
-            // Check if syftbox command is available
-            let syftbox_check = Command::new("which").arg("syftbox").output();
-
-            if syftbox_check.is_err() || !syftbox_check.as_ref().unwrap().status.success() {
-                self.log("ERROR", "syftbox command not found in PATH");
-                return Err(anyhow::anyhow!(
-                    "SyftBox is not installed. Please install it: pip install syftbox"
-                ));
-            }
-
-            // Start SyftBox with the config
-            let mut start_cmd = Command::new("syftbox");
-            start_cmd.arg("-c").arg(&syftbox_config_path);
-
-            let start_output = start_cmd
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn();
-
-            match start_output {
-                Ok(mut child) => {
-                    tokio::time::sleep(Duration::from_secs(3)).await;
-
-                    match child.try_wait() {
-                        Ok(None) => {
-                            self.log("INFO", "Successfully started SyftBox");
-                            Ok(())
-                        }
-                        Ok(Some(status)) => {
-                            let msg = format!("SyftBox exited with status: {}", status);
-                            self.log("ERROR", &msg);
-                            Err(anyhow::anyhow!(msg))
-                        }
-                        Err(e) => {
-                            let msg = format!("Failed to check SyftBox status: {}", e);
-                            self.log("ERROR", &msg);
-                            Err(anyhow::anyhow!(msg))
-                        }
-                    }
-                }
-                Err(e) => {
-                    let msg = format!("Failed to start SyftBox: {}", e);
-                    self.log("ERROR", &msg);
-                    Err(anyhow::anyhow!(msg))
-                }
+        match start_syftbox_process(&self.config) {
+            Ok(true) => self.log("INFO", "Successfully started SyftBox"),
+            Ok(false) => self.log("INFO", "SyftBox already running"),
+            Err(e) => {
+                self.log("ERROR", &format!("Failed to start SyftBox: {}", e));
+                return Err(e);
             }
         }
+
+        Ok(())
     }
 
     async fn ensure_syftbox_running(&self) -> Result<()> {
-        if self.check_syftbox_running()? {
+        if is_syftbox_running(&self.config)? {
             self.log("INFO", "SyftBox is already running");
             Ok(())
         } else {
@@ -309,8 +212,8 @@ impl Daemon {
         let data_dir = self.config.get_syftbox_data_dir()?;
         self.log("INFO", &format!("SyftBox data_dir: {:?}", data_dir));
 
-        let is_sbenv = self.is_in_sbenv()?;
-        self.log("INFO", &format!("Is sbenv: {}", is_sbenv));
+        let mode = detect_mode(&self.config)?;
+        self.log("INFO", &format!("SyftBox mode: {:?}", mode));
 
         // Ensure SyftBox is running first
         if let Err(e) = self.ensure_syftbox_running().await {

@@ -2,13 +2,13 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, Row};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use super::models::{Message, MessageStatus, SyncStatus};
+use super::models::{Message, MessageStatus, MessageThreadSummary, SyncStatus, ThreadFilter};
 
 #[derive(Serialize, Deserialize)]
 struct LockInfo {
@@ -487,6 +487,120 @@ impl MessageDb {
         Ok(messages)
     }
 
+    pub fn list_thread_summaries(
+        &self,
+        filter: ThreadFilter,
+        limit: Option<usize>,
+    ) -> Result<Vec<MessageThreadSummary>> {
+        let messages = self.list_messages(None)?;
+        let mut grouped: HashMap<String, Vec<Message>> = HashMap::new();
+
+        for msg in messages {
+            let key = msg.thread_id.clone().unwrap_or_else(|| msg.id.clone());
+            grouped.entry(key).or_default().push(msg);
+        }
+
+        let mut summaries = Vec::with_capacity(grouped.len());
+
+        for (thread_id, mut thread_messages) in grouped {
+            thread_messages.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+
+            let has_inbox = thread_messages
+                .iter()
+                .any(|m| Self::is_inbox_status(&m.status));
+            let has_sent = thread_messages
+                .iter()
+                .any(|m| Self::is_sent_status(&m.status));
+
+            let include = match filter {
+                ThreadFilter::All => true,
+                ThreadFilter::Inbox => has_inbox,
+                ThreadFilter::Sent => has_sent,
+            };
+
+            if !include {
+                continue;
+            }
+
+            if let Some(last_message) = thread_messages.last() {
+                let subject = last_message.display_subject();
+                let preview = Self::preview_text(&last_message.body);
+
+                let participants: Vec<String> = {
+                    let mut set: BTreeSet<String> = BTreeSet::new();
+                    for msg in &thread_messages {
+                        set.insert(msg.from.clone());
+                        set.insert(msg.to.clone());
+                    }
+                    set.into_iter().collect()
+                };
+
+                let unread_count = thread_messages
+                    .iter()
+                    .filter(|m| matches!(m.status, MessageStatus::Received))
+                    .count();
+
+                let has_project = thread_messages.iter().any(|m| {
+                    matches!(m.message_type, crate::messages::MessageType::Project { .. })
+                });
+
+                let project_name = thread_messages.iter().find_map(|m| {
+                    if let crate::messages::MessageType::Project { project_name, .. } =
+                        &m.message_type
+                    {
+                        if !project_name.trim().is_empty() {
+                            return Some(project_name.clone());
+                        }
+                    }
+
+                    m.metadata.as_ref().and_then(|meta| {
+                        if let Some(name) = meta.get("project_name").and_then(|v| v.as_str()) {
+                            if !name.trim().is_empty() {
+                                return Some(name.to_string());
+                            }
+                        }
+                        if let Some(project) = meta.get("project") {
+                            if let Some(name) = project.get("name").and_then(|v| v.as_str()) {
+                                if !name.trim().is_empty() {
+                                    return Some(name.to_string());
+                                }
+                            }
+                            if let Some(name) = project.get("project_name").and_then(|v| v.as_str())
+                            {
+                                if !name.trim().is_empty() {
+                                    return Some(name.to_string());
+                                }
+                            }
+                        }
+                        None
+                    })
+                });
+
+                summaries.push(MessageThreadSummary {
+                    thread_id,
+                    subject,
+                    participants,
+                    last_message_preview: preview,
+                    last_message_at: last_message.created_at,
+                    last_message_id: last_message.id.clone(),
+                    last_message_status: last_message.status.clone(),
+                    unread_count,
+                    total_messages: thread_messages.len(),
+                    has_project,
+                    project_name,
+                });
+            }
+        }
+
+        summaries.sort_by(|a, b| b.last_message_at.cmp(&a.last_message_at));
+
+        if let Some(limit) = limit {
+            summaries.truncate(limit);
+        }
+
+        Ok(summaries)
+    }
+
     pub fn get_thread_messages(&self, thread_id: &str) -> Result<Vec<Message>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, thread_id, parent_id, from_address, to_address, subject, body,
@@ -502,6 +616,24 @@ impl MessageDb {
             messages.push(row??);
         }
         Ok(messages)
+    }
+
+    pub fn mark_thread_as_read(&self, thread_id: &str) -> Result<usize> {
+        let now = Utc::now().to_rfc3339();
+        let updated = self.conn.execute(
+            "UPDATE messages SET status = 'read', read_at = ?2 WHERE thread_id = ?1 AND status = 'received'",
+            params![thread_id, now],
+        )?;
+
+        if updated == 0 {
+            let updated_by_id = self.conn.execute(
+                "UPDATE messages SET status = 'read', read_at = ?2 WHERE id = ?1 AND status = 'received'",
+                params![thread_id, now],
+            )?;
+            Ok(updated_by_id)
+        } else {
+            Ok(updated)
+        }
     }
 
     pub fn mark_as_read(&self, id: &str) -> Result<()> {
@@ -827,12 +959,43 @@ impl MessageDb {
             }
         }
     }
+
+    fn preview_text(text: &str) -> String {
+        let cleaned: String = text
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        let fallback = if cleaned.is_empty() {
+            text.trim()
+        } else {
+            cleaned.as_str()
+        };
+
+        const MAX_CHARS: usize = 180;
+        let mut chars = fallback.chars();
+        let mut preview: String = chars.by_ref().take(MAX_CHARS).collect();
+        if chars.next().is_some() {
+            preview.push_str("...");
+        }
+        preview
+    }
+
+    fn is_inbox_status(status: &MessageStatus) -> bool {
+        matches!(status, MessageStatus::Received | MessageStatus::Read)
+    }
+
+    fn is_sent_status(status: &MessageStatus) -> bool {
+        matches!(status, MessageStatus::Sent | MessageStatus::Draft)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::messages::models::{Message, MessageStatus};
+    use crate::messages::models::{Message, MessageStatus, ThreadFilter};
     use tempfile::TempDir;
 
     fn new_db(tmp: &TempDir) -> MessageDb {
@@ -982,5 +1145,90 @@ mod tests {
         let requests = db.list_messages_by_type("request", None).unwrap();
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].id, r.id);
+    }
+
+    #[test]
+    fn thread_summaries_group_and_filter() {
+        let tmp = TempDir::new().unwrap();
+        let db = new_db(&tmp);
+
+        let mut inbound = Message::new(
+            "alice@example.com".into(),
+            "me@example.com".into(),
+            "incoming".into(),
+        );
+        inbound.status = MessageStatus::Received;
+        db.insert_message(&inbound).unwrap();
+
+        let mut outbound = Message::reply_to(&inbound, "me@example.com".into(), "outgoing".into());
+        outbound.status = MessageStatus::Sent;
+        db.insert_message(&outbound).unwrap();
+
+        let mut project_msg =
+            Message::reply_to(&inbound, "me@example.com".into(), "project details".into());
+        project_msg.status = MessageStatus::Sent;
+        project_msg.message_type = crate::messages::MessageType::Project {
+            project_name: "Genome Study".into(),
+            submission_id: "sub123".into(),
+            files_hash: None,
+        };
+        project_msg.metadata = Some(serde_json::json!({
+            "project": { "name": "Genome Study" }
+        }));
+        db.insert_message(&project_msg).unwrap();
+
+        let mut outbound_only = Message::new(
+            "me@example.com".into(),
+            "bob@example.com".into(),
+            "ping".into(),
+        );
+        outbound_only.status = MessageStatus::Sent;
+        db.insert_message(&outbound_only).unwrap();
+
+        let inbox_threads = db.list_thread_summaries(ThreadFilter::Inbox, None).unwrap();
+        assert_eq!(inbox_threads.len(), 1);
+        let summary = &inbox_threads[0];
+        assert_eq!(summary.total_messages, 3);
+        assert_eq!(summary.unread_count, 1);
+        assert!(summary
+            .participants
+            .contains(&"alice@example.com".to_string()));
+        assert!(summary.participants.contains(&"me@example.com".to_string()));
+        assert!(summary.has_project);
+        assert_eq!(summary.project_name.as_deref(), Some("Genome Study"));
+
+        let sent_threads = db.list_thread_summaries(ThreadFilter::Sent, None).unwrap();
+        assert_eq!(sent_threads.len(), 2);
+
+        let all_threads = db
+            .list_thread_summaries(ThreadFilter::All, Some(10))
+            .unwrap();
+        assert_eq!(all_threads.len(), 2);
+    }
+
+    #[test]
+    fn mark_thread_as_read_updates_status() {
+        let tmp = TempDir::new().unwrap();
+        let db = new_db(&tmp);
+
+        let mut inbound = Message::new(
+            "alice@example.com".into(),
+            "me@example.com".into(),
+            "incoming".into(),
+        );
+        inbound.status = MessageStatus::Received;
+        db.insert_message(&inbound).unwrap();
+
+        let thread_id = inbound.thread_id.clone().unwrap();
+        let updated = db.mark_thread_as_read(&thread_id).unwrap();
+        assert_eq!(updated, 1);
+
+        let refreshed = db.get_message(&inbound.id).unwrap().unwrap();
+        assert_eq!(refreshed.status, MessageStatus::Read);
+        assert!(refreshed.read_at.is_some());
+
+        // Calling with message id should still work (fallback)
+        let updated_again = db.mark_thread_as_read(&inbound.id).unwrap();
+        assert_eq!(updated_again, 0);
     }
 }
