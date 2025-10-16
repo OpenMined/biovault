@@ -93,8 +93,20 @@ pub fn detect_genotype_metadata(file_path: &str) -> Result<GenotypeMetadata> {
     // File is a genotype - extract metadata from headers
     let header_lower = header_text.to_lowercase();
 
-    let source = detect_source(&header_lower);
-    let grch_version = detect_grch_version(&header_lower);
+    let source = detect_source(&header_lower, &data_lines);
+    let mut grch_version = detect_grch_version(&header_lower);
+
+    if matches!(source.as_deref(), Some("FamilyTreeDNA"))
+        && matches!(grch_version.as_deref(), Some("Unknown"))
+    {
+        grch_version = Some("37".to_string());
+    }
+
+    if matches!(source.as_deref(), Some("deCODEme"))
+        && matches!(grch_version.as_deref(), Some("Unknown"))
+    {
+        grch_version = Some("36".to_string());
+    }
 
     Ok(GenotypeMetadata {
         data_type: "Genotype".to_string(),
@@ -155,25 +167,28 @@ fn count_rows_and_chromosomes(
             continue;
         }
 
-        // Count this as a data row
+        let fields = split_fields(&line);
+
+        let Some((chr_idx, _pos_idx, genotype_idx)) = identify_data_columns(&fields) else {
+            continue;
+        };
+
         row_count += 1;
 
-        // Extract chromosome (column 2 in TSV format)
-        let parts: Vec<&str> = line.split('\t').collect();
-        if parts.len() >= 4 {
-            let rsid = parts[0].trim();
-            let chr = parts[1].trim();
-            let genotype = parts[3].trim();
+        let rsid = fields[0].trim();
+        let chr = fields[chr_idx].trim();
+        let genotype = fields[genotype_idx].trim();
 
-            chromosomes.insert(chr.to_string());
+        chromosomes.insert(chr.to_string());
 
-            // For 23andMe files, check male-specific Y markers
-            if is_23andme && (chr == "Y" || chr == "24") && MALE_Y_MARKERS.contains(&rsid) {
-                // Check if genotype is called (not missing)
-                if !genotype.is_empty() && genotype != "--" && genotype != "00" {
-                    male_markers_called += 1;
-                }
-            }
+        if is_23andme
+            && (chr == "Y" || chr == "24")
+            && MALE_Y_MARKERS.contains(&rsid)
+            && !genotype.is_empty()
+            && genotype != "--"
+            && genotype != "00"
+        {
+            male_markers_called += 1;
         }
     }
 
@@ -216,38 +231,11 @@ fn validate_genotype_structure(data_lines: &[String]) -> bool {
     let mut valid_lines = 0;
 
     for line in data_lines {
-        let parts: Vec<&str> = line.split('\t').collect();
+        let parts = split_fields(line);
 
-        // Should have at least 4 columns (rsid, chromosome, position, genotype)
-        // Additional columns (like Dynamic DNA's gs, baf, lrr) are allowed
-        if parts.len() < 4 {
-            continue;
+        if identify_data_columns(&parts).is_some() {
+            valid_lines += 1;
         }
-
-        // Check column 1: rsid (should start with 'rs' or 'i')
-        let rsid = parts[0].trim();
-        if !rsid.starts_with("rs") && !rsid.starts_with('i') {
-            continue;
-        }
-
-        // Check column 2: chromosome (should be 1-22, X, Y, MT, or similar)
-        let chr = parts[1].trim();
-        if !is_valid_chromosome(chr) {
-            continue;
-        }
-
-        // Check column 3: position (should be an integer)
-        if parts[2].trim().parse::<u64>().is_err() {
-            continue;
-        }
-
-        // Check column 4: genotype (should be valid genotype format)
-        let genotype = parts[3].trim();
-        if !is_valid_genotype(genotype) {
-            continue;
-        }
-
-        valid_lines += 1;
     }
 
     // Consider it a genotype file if at least 70% of data lines are valid
@@ -297,8 +285,68 @@ fn is_valid_genotype(genotype: &str) -> bool {
     matches!(g.len(), 1 | 2)
 }
 
+fn split_fields(line: &str) -> Vec<String> {
+    let delimiter = if line.contains('\t') {
+        '\t'
+    } else if line.contains(',') {
+        ','
+    } else {
+        '\t'
+    };
+
+    line.split(delimiter)
+        .map(|part| {
+            part.trim()
+                .trim_matches('\"')
+                .trim_matches('\r')
+                .to_string()
+        })
+        .collect()
+}
+
+fn is_header_fields(fields: &[String]) -> bool {
+    fields
+        .first()
+        .map(|value| {
+            let lower = value.trim().to_lowercase();
+            matches!(lower.as_str(), "rsid" | "name" | "snp" | "marker" | "id")
+        })
+        .unwrap_or(false)
+}
+
+fn identify_data_columns(fields: &[String]) -> Option<(usize, usize, usize)> {
+    if fields.len() < 4 || is_header_fields(fields) {
+        return None;
+    }
+
+    let rsid = fields[0].trim();
+    if !rsid.starts_with("rs") && !rsid.starts_with('i') {
+        return None;
+    }
+
+    for chr_idx in 1..fields.len() {
+        if !is_valid_chromosome(fields[chr_idx].trim()) {
+            continue;
+        }
+
+        for pos_idx in (chr_idx + 1)..fields.len() {
+            if fields[pos_idx].trim().parse::<u64>().is_err() {
+                continue;
+            }
+
+            for (genotype_idx, genotype_value) in fields.iter().enumerate().skip(pos_idx + 1) {
+                if is_valid_genotype(genotype_value.trim()) {
+                    return Some((chr_idx, pos_idx, genotype_idx));
+                }
+            }
+        }
+    }
+
+    None
+}
+
 /// Detect source from header text (case-insensitive)
-fn detect_source(header_lower: &str) -> Option<String> {
+fn detect_source(header_lower: &str, data_lines: &[String]) -> Option<String> {
     if header_lower.contains("23andme") {
         Some("23andMe".to_string())
     } else if header_lower.contains("ancestrydna") || header_lower.contains("ancestry dna") {
@@ -310,9 +358,44 @@ fn detect_source(header_lower: &str) -> Option<String> {
         || header_lower.contains("dynamicdnalabs")
     {
         Some("Dynamic DNA".to_string())
+    } else if header_lower.contains("living dna") {
+        Some("Living DNA".to_string())
+    } else if header_lower.contains("myheritage") {
+        Some("MyHeritage".to_string())
+    } else if header_lower.contains("decodeme")
+        || data_lines.iter().any(|line| is_decodeme_header(line))
+    {
+        Some("deCODEme".to_string())
+    } else if data_lines.iter().any(|line| is_familytreedna_header(line)) {
+        Some("FamilyTreeDNA".to_string())
     } else {
         Some("Unknown".to_string())
     }
+}
+
+fn is_familytreedna_header(line: &str) -> bool {
+    let parts = split_fields(line);
+    if parts.len() < 4 {
+        return false;
+    }
+
+    parts[0].eq_ignore_ascii_case("rsid")
+        && parts[1].eq_ignore_ascii_case("chromosome")
+        && parts[2].eq_ignore_ascii_case("position")
+        && (parts[3].eq_ignore_ascii_case("result") || parts[3].eq_ignore_ascii_case("result1"))
+}
+
+fn is_decodeme_header(line: &str) -> bool {
+    let parts = split_fields(line);
+    if parts.len() < 6 {
+        return false;
+    }
+
+    parts[0].eq_ignore_ascii_case("name")
+        && parts[1].eq_ignore_ascii_case("variation")
+        && parts[2].eq_ignore_ascii_case("chromosome")
+        && parts[3].eq_ignore_ascii_case("position")
+        && parts[5].eq_ignore_ascii_case("yourcode")
 }
 
 /// Detect GRCh version from header text (case-insensitive)
@@ -379,30 +462,54 @@ mod tests {
     #[test]
     fn test_detect_source() {
         assert_eq!(
-            detect_source("this is from 23andme"),
+            detect_source("this is from 23andme", &[]),
             Some("23andMe".to_string())
         );
         assert_eq!(
-            detect_source("ancestrydna test"),
+            detect_source("ancestrydna test", &[]),
             Some("AncestryDNA".to_string())
         );
         assert_eq!(
-            detect_source("genes for good data"),
+            detect_source("genes for good data", &[]),
             Some("Genes for Good".to_string())
         );
         assert_eq!(
-            detect_source("# this data file generated by dynamic dna (ddna) laboratories"),
+            detect_source(
+                "# this data file generated by dynamic dna (ddna) laboratories",
+                &[]
+            ),
             Some("Dynamic DNA".to_string())
         );
         assert_eq!(
-            detect_source("data from ddna"),
+            detect_source("data from ddna", &[]),
             Some("Dynamic DNA".to_string())
         );
         assert_eq!(
-            detect_source("https://dynamicdnalabs.com"),
+            detect_source("https://dynamicdnalabs.com", &[]),
             Some("Dynamic DNA".to_string())
         );
-        assert_eq!(detect_source("unknown source"), Some("Unknown".to_string()));
+        assert_eq!(
+            detect_source("# myheritage dna raw data", &[]),
+            Some("MyHeritage".to_string())
+        );
+        let decodeme_header = "Name,Variation,Chromosome,Position,Strand,YourCode".to_string();
+        assert_eq!(
+            detect_source("", &[decodeme_header]),
+            Some("deCODEme".to_string())
+        );
+        assert_eq!(
+            detect_source("unknown source", &[]),
+            Some("Unknown".to_string())
+        );
+    }
+
+    #[test]
+    fn test_detect_source_familytree_via_header_line() {
+        let header = "RSID,CHROMOSOME,POSITION,RESULT".to_string();
+        assert_eq!(
+            detect_source("", &[header]),
+            Some("FamilyTreeDNA".to_string())
+        );
     }
 
     #[test]

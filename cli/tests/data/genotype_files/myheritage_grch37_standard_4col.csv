@@ -1,0 +1,12 @@
+# MyHeritage DNA raw data. 
+# This file was generated on 2018-02-14 04:06:47 
+# For each SNP, we provide the identifier, chromosome number, base pair position and genotype.The genotype is reported on the forward (+) strand with respect to the human reference build 37. 
+# THIS INFORMATION IS FOR YOUR PERSONAL USE AND IS INTENDED FOR GENEALOGICAL RESEARCH 
+# ONLY. IT IS NOT INTENDED FOR MEDICAL OR HEALTH PURPOSES. PLEASE BE AWARE THAT THE 
+# DOWNLOADED DATA WILL NO LONGER BE PROTECTED BY OUR SECURITY MEASURES.
+RSID,CHROMOSOME,POSITION,RESULT
+"rs4477212","1","82154","AA"
+"rs3094315","1","752566","--"
+"rs3131972","1","752721","GG"
+"rs12562034","1","768448","--"
+"rs12124819","1","776546","--"
