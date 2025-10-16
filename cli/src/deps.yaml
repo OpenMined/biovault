@@ -18,7 +18,7 @@ dependencies:
     check_running: false
     min_version: 17
     install_instructions: |
-      macOS: brew install openjdk@17
+      macOS: brew install openjdk
       Ubuntu/Debian: sudo apt-get install openjdk-17-jdk
       RHEL/CentOS: sudo yum install java-17-openjdk
       Or download from: https://openjdk.org/
@@ -37,7 +37,7 @@ dependencies:
         verify_command: java -version
       macos:
         install_commands:
-          - brew install openjdk@17
+          - brew install openjdk
         verify_command: java -version
       arch:
         install_commands:
