@@ -17,7 +17,10 @@ use std::sync::{Arc, OnceLock};
 use tempfile::NamedTempFile;
 
 #[cfg(target_os = "macos")]
-static HOMEBREW_INSTALL_LOGGER: OnceLock<Arc<dyn Fn(&str) + Send + Sync>> = OnceLock::new();
+type HomebrewLogger = Arc<dyn Fn(&str) + Send + Sync>;
+
+#[cfg(target_os = "macos")]
+static HOMEBREW_INSTALL_LOGGER: OnceLock<HomebrewLogger> = OnceLock::new();
 
 #[cfg(target_os = "macos")]
 const BREW_COMMON_PATHS: [&str; 3] = [
@@ -41,7 +44,7 @@ fn resolve_brew_command() -> Option<String> {
 
     BREW_COMMON_PATHS
         .iter()
-        .map(|p| Path::new(p))
+        .map(Path::new)
         .find(|candidate| candidate.exists())
         .map(|path| path.display().to_string())
 }
