@@ -476,12 +476,12 @@ pub fn check_single_dependency(
             if dep.name == "java" {
                 check_java_version_with_info_at(version_source, min_version)
             } else {
-                check_version_with_info(&dep.name, min_version)
+                check_version_with_info(&dep.name, min_version, version_source)
             }
         } else if dep.name == "java" {
             (true, get_java_version_string(version_source))
         } else {
-            (true, get_version_string(&dep.name))
+            (true, get_version_string(&dep.name, version_source))
         };
 
         // Check if it needs to be running
@@ -668,12 +668,12 @@ pub fn check_dependencies_result() -> Result<DependencyCheckResult> {
                 if dep.name == "java" {
                     check_java_version_with_info_at(version_source, min_version)
                 } else {
-                    check_version_with_info(&dep.name, min_version)
+                    check_version_with_info(&dep.name, min_version, version_source)
                 }
             } else if dep.name == "java" {
                 (true, get_java_version_string(version_source))
             } else {
-                (true, get_version_string(&dep.name))
+                (true, get_version_string(&dep.name, version_source))
             };
 
             if !version_ok {
@@ -1033,12 +1033,12 @@ pub async fn execute(json: bool) -> Result<()> {
                 if dep.name == "java" {
                     check_java_version_with_info_at(version_source, min_version)
                 } else {
-                    check_version_with_info(&dep.name, min_version)
+                    check_version_with_info(&dep.name, min_version, version_source)
                 }
             } else if dep.name == "java" {
                 (true, get_java_version_string(version_source))
             } else {
-                (true, get_version_string(&dep.name))
+                (true, get_version_string(&dep.name, version_source))
             };
 
             if !version_ok {
@@ -1349,25 +1349,34 @@ fn parse_java_version(output: &str) -> Option<u32> {
     None
 }
 
-fn check_version_with_info(tool: &str, min_version: u32) -> (bool, Option<String>) {
+fn check_version_with_info(
+    tool: &str,
+    min_version: u32,
+    version_source: Option<&str>,
+) -> (bool, Option<String>) {
     match tool {
         "java" => check_java_version_with_info(min_version),
-        _ => (true, get_version_string(tool)),
+        _ => (true, get_version_string(tool, version_source)),
     }
 }
 
-fn get_version_string(tool: &str) -> Option<String> {
+fn get_version_string(tool: &str, version_source: Option<&str>) -> Option<String> {
     match tool {
-        "docker" => get_docker_version(),
-        "syftbox" => get_syftbox_version(),
-        "nextflow" => get_nextflow_version(),
-        "uv" => get_uv_version(tool),
+        "docker" => get_docker_version(version_source),
+        "syftbox" => get_syftbox_version(version_source),
+        "nextflow" => get_nextflow_version(version_source),
+        "uv" => get_uv_version(version_source.unwrap_or(tool)),
         _ => None,
     }
 }
 
-fn get_docker_version() -> Option<String> {
-    let output = Command::new("docker").arg("--version").output().ok()?;
+fn command_for_version(path: Option<&str>, fallback: &str) -> Option<Command> {
+    Some(Command::new(path.unwrap_or(fallback)))
+}
+
+fn get_docker_version(version_source: Option<&str>) -> Option<String> {
+    let mut command = command_for_version(version_source, "docker")?;
+    let output = command.arg("--version").output().ok()?;
     if !output.status.success() {
         return None;
     }
@@ -1378,8 +1387,9 @@ fn get_docker_version() -> Option<String> {
         .map(|v| v.trim_end_matches(',').to_string())
 }
 
-fn get_syftbox_version() -> Option<String> {
-    let output = Command::new("syftbox").arg("--version").output().ok()?;
+fn get_syftbox_version(version_source: Option<&str>) -> Option<String> {
+    let mut command = command_for_version(version_source, "syftbox")?;
+    let output = command.arg("--version").output().ok()?;
     if !output.status.success() {
         return None;
     }
@@ -1387,8 +1397,9 @@ fn get_syftbox_version() -> Option<String> {
     version_str.split_whitespace().nth(2).map(|v| v.to_string())
 }
 
-fn get_nextflow_version() -> Option<String> {
-    let output = Command::new("nextflow").arg("-version").output().ok()?;
+fn get_nextflow_version(version_source: Option<&str>) -> Option<String> {
+    let mut command = command_for_version(version_source, "nextflow")?;
+    let output = command.arg("-version").output().ok()?;
     if !output.status.success() {
         return None;
     }
