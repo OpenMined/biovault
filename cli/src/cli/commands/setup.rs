@@ -200,12 +200,10 @@ fn prime_macos_sudo_credentials(askpass_path: &str) -> io::Result<()> {
             SUDO_PRIMED.store(true, Ordering::SeqCst);
             Ok(())
         }
-        Ok(status) if status.code() == Some(1) => Err(io::Error::new(
-            io::ErrorKind::Other,
+        Ok(status) if status.code() == Some(1) => Err(io::Error::other(
             "Administrator authentication was cancelled.",
         )),
-        Ok(status) => Err(io::Error::new(
-            io::ErrorKind::Other,
+        Ok(status) => Err(io::Error::other(
             format!("sudo validation failed with status {:?}", status.code()),
         )),
         Err(err) => Err(err),
@@ -472,8 +470,7 @@ fn run_macos_sudo_command(args: &[&str]) -> io::Result<()> {
         if status.success() {
             Ok(())
         } else {
-            Err(io::Error::new(
-                io::ErrorKind::Other,
+            Err(io::Error::other(
                 format!("sudo command failed: {:?}", args),
             ))
         }
@@ -483,13 +480,12 @@ fn run_macos_sudo_command(args: &[&str]) -> io::Result<()> {
             .map(|arg| shell_escape(arg))
             .collect::<Vec<_>>()
             .join(" ");
-        let command = format!("{}", escaped);
+        let command = escaped.to_string();
         let output = run_macos_authorized_command(&command)?;
         if output.status.success() {
             Ok(())
         } else {
-            Err(io::Error::new(
-                io::ErrorKind::Other,
+            Err(io::Error::other(
                 format!("command failed: {:?}", args),
             ))
         }
@@ -521,7 +517,6 @@ fn ensure_docker_cli_plugin_dir() -> io::Result<()> {
 
 fn is_brew_command(command: &str) -> bool {
     command
-        .trim_start()
         .split_whitespace()
         .next()
         .map(|token| token == "brew" || token.ends_with("/brew"))
