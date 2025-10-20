@@ -203,9 +203,10 @@ fn prime_macos_sudo_credentials(askpass_path: &str) -> io::Result<()> {
         Ok(status) if status.code() == Some(1) => Err(io::Error::other(
             "Administrator authentication was cancelled.",
         )),
-        Ok(status) => Err(io::Error::other(
-            format!("sudo validation failed with status {:?}", status.code()),
-        )),
+        Ok(status) => Err(io::Error::other(format!(
+            "sudo validation failed with status {:?}",
+            status.code()
+        ))),
         Err(err) => Err(err),
     }
 }
@@ -470,9 +471,7 @@ fn run_macos_sudo_command(args: &[&str]) -> io::Result<()> {
         if status.success() {
             Ok(())
         } else {
-            Err(io::Error::other(
-                format!("sudo command failed: {:?}", args),
-            ))
+            Err(io::Error::other(format!("sudo command failed: {:?}", args)))
         }
     } else {
         let escaped = args
@@ -485,9 +484,7 @@ fn run_macos_sudo_command(args: &[&str]) -> io::Result<()> {
         if output.status.success() {
             Ok(())
         } else {
-            Err(io::Error::other(
-                format!("command failed: {:?}", args),
-            ))
+            Err(io::Error::other(format!("command failed: {:?}", args)))
         }
     }
 }
