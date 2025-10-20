@@ -1,9 +1,81 @@
 use super::check::DependencyConfig;
 use crate::Result;
 use anyhow::anyhow;
+use std::collections::HashSet;
 use std::env;
 use std::io::{self, Write};
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
+#[cfg(target_os = "macos")]
+use std::thread;
+#[cfg(target_os = "macos")]
+use std::time::{Duration, Instant};
+
+#[cfg(target_os = "macos")]
+use std::fs;
+#[cfg(target_os = "macos")]
+use std::os::unix::fs::PermissionsExt;
+#[cfg(target_os = "macos")]
+use std::path::Path;
+#[cfg(target_os = "macos")]
+use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(target_os = "macos")]
+use std::sync::OnceLock;
+
+use tracing::error;
+
+const MAX_CAPTURED_OUTPUT: usize = 4000;
+
+#[cfg(target_os = "macos")]
+static SUDO_PRIMED: AtomicBool = AtomicBool::new(false);
+#[cfg(target_os = "macos")]
+static COMMAND_LINE_TOOLS_READY: AtomicBool = AtomicBool::new(false);
+
+struct InstallCommandOutput {
+    status: ExitStatus,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+impl InstallCommandOutput {
+    fn from_output(output: std::process::Output) -> Self {
+        Self {
+            status: output.status,
+            stdout: output.stdout,
+            stderr: output.stderr,
+        }
+    }
+}
+
+fn truncate_output(text: &str) -> String {
+    if text.len() > MAX_CAPTURED_OUTPUT {
+        let mut truncated = text[..MAX_CAPTURED_OUTPUT].to_string();
+        truncated.push_str("\n… (truncated)");
+        truncated
+    } else {
+        text.to_string()
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn shell_escape(segment: &str) -> String {
+    if segment.is_empty() {
+        "''".to_string()
+    } else if segment.as_bytes().iter().all(|b| {
+        matches!(b,
+            b'0'..=b'9'
+                | b'a'..=b'z'
+                | b'A'..=b'Z'
+                | b'.'
+                | b'-'
+                | b'_'
+                | b'/'
+        )
+    }) {
+        segment.to_string()
+    } else {
+        format!("'{}'", segment.replace("'", "'\\''"))
+    }
+}
 
 fn skip_install_commands() -> bool {
     env::var("BIOVAULT_SKIP_INSTALLS")
@@ -11,68 +83,447 @@ fn skip_install_commands() -> bool {
         .unwrap_or(false)
 }
 
+#[cfg(target_os = "macos")]
+fn ensure_macos_command_line_tools_installed() -> Result<()> {
+    if COMMAND_LINE_TOOLS_READY.load(Ordering::SeqCst) {
+        if Command::new("xcode-select")
+            .arg("-p")
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+        {
+            return Ok(());
+        }
+
+        COMMAND_LINE_TOOLS_READY.store(false, Ordering::SeqCst);
+    }
+
+    match Command::new("xcode-select").arg("-p").status() {
+        Ok(status) if status.success() => {
+            COMMAND_LINE_TOOLS_READY.store(true, Ordering::SeqCst);
+            return Ok(());
+        }
+        Ok(_) => {}
+        Err(err) => {
+            return Err(anyhow!("Failed to check for macOS Command Line Tools: {}", err).into());
+        }
+    }
+
+    eprintln!("🍎 macOS Command Line Tools missing – launching installer before proceeding",);
+
+    let launch_result = Command::new("xcode-select").arg("--install").status();
+
+    match launch_result {
+        Ok(status) if status.success() => {
+            eprintln!(
+                "🍎 Command Line Tools installer launched. Complete the Apple dialog to continue."
+            );
+        }
+        Ok(status) => {
+            if status.code() == Some(1) {
+                eprintln!(
+                    "🍎 Command Line Tools installer already running. Complete the Apple dialog to continue."
+                );
+            } else {
+                return Err(anyhow!(
+                    "macOS Command Line Tools installer exited with status {:?}. Run 'xcode-select --install' manually, complete it, then rerun 'Install Missing'.",
+                    status.code()
+                )
+                .into());
+            }
+        }
+        Err(err) => {
+            return Err(anyhow!(
+                "Failed to launch the macOS Command Line Tools installer: {}. Run 'xcode-select --install' manually, complete it, then rerun 'Install Missing'.",
+                err
+            )
+            .into());
+        }
+    }
+
+    eprintln!(
+        "🍎 Waiting for Command Line Tools installation to finish (this can take several minutes)..."
+    );
+
+    let start = Instant::now();
+    let max_wait = Duration::from_secs(60 * 30); // 30 minutes maximum
+    let poll_interval = Duration::from_secs(5);
+
+    loop {
+        if Command::new("xcode-select")
+            .arg("-p")
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+        {
+            COMMAND_LINE_TOOLS_READY.store(true, Ordering::SeqCst);
+            eprintln!("🍎 Command Line Tools detected. Continuing installation.");
+            return Ok(());
+        }
+
+        if start.elapsed() >= max_wait {
+            return Err(anyhow!(
+                "macOS Command Line Tools installation did not complete within 30 minutes. Finish the Apple installer, then rerun 'Install Missing'."
+            )
+            .into());
+        }
+
+        thread::sleep(poll_interval);
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+#[allow(dead_code)]
+fn ensure_macos_command_line_tools_installed() -> Result<()> {
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn prime_macos_sudo_credentials(askpass_path: &str) -> io::Result<()> {
+    if SUDO_PRIMED.load(Ordering::SeqCst) {
+        if Command::new("/usr/bin/sudo")
+            .arg("-n")
+            .arg("true")
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+        {
+            return Ok(());
+        }
+
+        SUDO_PRIMED.store(false, Ordering::SeqCst);
+    }
+
+    let mut cmd = Command::new("/usr/bin/sudo");
+    cmd.arg("-Av");
+    cmd.env("SUDO_ASKPASS", askpass_path);
+    cmd.env("HOMEBREW_SUDO_ASKPASS", askpass_path);
+
+    match cmd.status() {
+        Ok(status) if status.success() => {
+            SUDO_PRIMED.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+        Ok(status) if status.code() == Some(1) => Err(io::Error::other(
+            "Administrator authentication was cancelled.",
+        )),
+        Ok(status) => Err(io::Error::other(format!(
+            "sudo validation failed with status {:?}",
+            status.code()
+        ))),
+        Err(err) => Err(err),
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+#[allow(dead_code)]
+fn prime_macos_sudo_credentials(_: &str) -> io::Result<()> {
+    Ok(())
+}
+
 fn run_install_command(
     system_type: &SystemType,
     command: &str,
-) -> io::Result<std::process::ExitStatus> {
+) -> io::Result<InstallCommandOutput> {
     match system_type {
         SystemType::Windows => {
             if command.starts_with("winget") {
                 let mut parts = command.split_whitespace();
                 parts.next();
-                Command::new("winget").args(parts).status()
+                Command::new("winget")
+                    .args(parts)
+                    .output()
+                    .map(InstallCommandOutput::from_output)
             } else {
                 Command::new("powershell")
                     .arg("-Command")
                     .arg(command)
-                    .status()
+                    .output()
+                    .map(InstallCommandOutput::from_output)
             }
         }
         SystemType::MacOs => run_macos_install_command(command),
-        _ => Command::new("sh").arg("-c").arg(command).status(),
+        _ => Command::new("sh")
+            .arg("-c")
+            .arg(command)
+            .output()
+            .map(InstallCommandOutput::from_output),
     }
 }
 
 #[cfg(target_os = "macos")]
-fn needs_brew_cask_elevation(command: &str) -> bool {
-    let lowered = command.to_lowercase();
-    lowered.contains("brew") && lowered.contains("--cask") && lowered.contains("install")
+fn run_macos_install_command(command: &str) -> io::Result<InstallCommandOutput> {
+    if is_brew_command(command) {
+        match ensure_macos_askpass_script()? {
+            Some(askpass_path) => {
+                let mut cmd = Command::new("sh");
+                cmd.arg("-c").arg(command);
+                prime_macos_sudo_credentials(&askpass_path)?;
+                cmd.env("SUDO_ASKPASS", &askpass_path);
+                cmd.env("HOMEBREW_SUDO_ASKPASS", &askpass_path);
+                cmd.env("HOMEBREW_NO_AUTO_UPDATE", "1");
+
+                if let Some(wrapper_path) = ensure_macos_sudo_wrapper()? {
+                    let existing_path = env::var("PATH").unwrap_or_default();
+                    let wrapper_dir = std::path::Path::new(&wrapper_path)
+                        .parent()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_default();
+                    let combined_path = if existing_path.is_empty() {
+                        wrapper_dir
+                    } else {
+                        format!("{}:{}", wrapper_dir, existing_path)
+                    };
+                    cmd.env("PATH", combined_path);
+                }
+
+                return cmd.output().map(InstallCommandOutput::from_output);
+            }
+            None => {
+                let prefixed = format!(
+                    "PATH=\"/usr/local/bin:/opt/homebrew/bin:$PATH\"; export PATH; HOMEBREW_NO_AUTO_UPDATE=1 {}",
+                    command.trim_start()
+                );
+                return run_macos_authorized_command(&prefixed);
+            }
+        }
+    }
+
+    Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .output()
+        .map(InstallCommandOutput::from_output)
 }
 
 #[cfg(target_os = "macos")]
 fn escape_for_applescript(input: &str) -> String {
-    input
-        .replace("\\", "\\\\")
-        .replace('"', "\\\"")
-        .replace("'", "\\'")
+    input.replace("\\", "\\\\").replace("\"", "\\\"")
 }
 
 #[cfg(target_os = "macos")]
-fn run_brew_cask_with_admin(command: &str) -> io::Result<std::process::ExitStatus> {
-    let env_prefix =
-        "HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_CASK_OPTS=\\\"--appdir=$HOME/Applications\\\" ";
-    let full_command = format!("{}{}", env_prefix, command);
-    let escaped = escape_for_applescript(&full_command);
-    let script = format!(
+fn run_macos_authorized_command(command: &str) -> io::Result<InstallCommandOutput> {
+    let applescript = format!(
         "do shell script \"{}\" with administrator privileges",
-        escaped
+        escape_for_applescript(command.trim_start())
     );
-
-    Command::new("osascript").arg("-e").arg(&script).status()
-}
-
-#[cfg(target_os = "macos")]
-fn run_macos_install_command(command: &str) -> io::Result<std::process::ExitStatus> {
-    if needs_brew_cask_elevation(command) {
-        run_brew_cask_with_admin(command)
-    } else {
-        Command::new("sh").arg("-c").arg(command).status()
-    }
+    let output = Command::new("osascript")
+        .arg("-e")
+        .arg(applescript)
+        .output()?;
+    Ok(InstallCommandOutput::from_output(output))
 }
 
 #[cfg(not(target_os = "macos"))]
-fn run_macos_install_command(command: &str) -> io::Result<std::process::ExitStatus> {
-    Command::new("sh").arg("-c").arg(command).status()
+fn run_macos_install_command(command: &str) -> io::Result<InstallCommandOutput> {
+    Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .output()
+        .map(InstallCommandOutput::from_output)
+}
+
+#[cfg(target_os = "macos")]
+fn ensure_macos_askpass_script() -> io::Result<Option<String>> {
+    static ASKPASS_PATH: OnceLock<Option<String>> = OnceLock::new();
+
+    if let Some(existing) = ASKPASS_PATH.get() {
+        return Ok(existing.clone());
+    }
+
+    if Path::new("/usr/libexec/ssh-askpass").exists() {
+        let result = Some("/usr/libexec/ssh-askpass".to_string());
+        let _ = ASKPASS_PATH.set(result.clone());
+        return Ok(result);
+    }
+
+    let mut path = std::env::temp_dir();
+    path.push("biovault_brew_askpass.sh");
+
+    let script = r#"#!/bin/bash
+result=$(/usr/bin/osascript <<'APPLESCRIPT'
+on promptForPassword()
+    tell application "System Events"
+        activate
+        set dialogText to "BioVault needs your administrator password to continue installing required tools. macOS is requesting this password on behalf of BioVault."
+        repeat
+            try
+                set dialogResult to display dialog dialogText default answer "" with title "BioVault Installer" buttons {"Cancel", "Continue"} default button "Continue" with icon caution with hidden answer
+                set userPassword to text returned of dialogResult
+                if userPassword is not "" then
+                    return userPassword
+                end if
+            on error number -128
+                error number -128
+            end try
+        end repeat
+    end tell
+end promptForPassword
+
+with timeout of 600 seconds
+    promptForPassword()
+end timeout
+APPLESCRIPT
+)
+status=$?
+if [ "$status" -ne 0 ]; then
+    exit "$status"
+fi
+printf '%s\n' "$result"
+"#;
+
+    let result = match fs::write(&path, script) {
+        Ok(()) => match fs::metadata(&path) {
+            Ok(metadata) => {
+                let mut perms = metadata.permissions();
+                perms.set_mode(0o700);
+                if let Err(err) = fs::set_permissions(&path, perms) {
+                    eprintln!(
+                        "⚠️  Failed to set askpass helper permissions at {}: {}",
+                        path.display(),
+                        err
+                    );
+                    None
+                } else {
+                    Some(path.to_string_lossy().to_string())
+                }
+            }
+            Err(err) => {
+                eprintln!(
+                    "⚠️  Failed to read askpass helper metadata at {}: {}",
+                    path.display(),
+                    err
+                );
+                None
+            }
+        },
+        Err(err) => {
+            eprintln!(
+                "⚠️  Failed to create askpass helper at {}: {}",
+                path.display(),
+                err
+            );
+            None
+        }
+    };
+
+    let _ = ASKPASS_PATH.set(result.clone());
+    Ok(result)
+}
+
+#[cfg(target_os = "macos")]
+fn ensure_macos_sudo_wrapper() -> io::Result<Option<String>> {
+    static WRAPPER_PATH: OnceLock<Option<String>> = OnceLock::new();
+
+    if let Some(existing) = WRAPPER_PATH.get() {
+        return Ok(existing.clone());
+    }
+
+    let mut path = std::env::temp_dir();
+    path.push("biovault_sudo_wrapper.sh");
+
+    let script = "#!/bin/bash\nexec /usr/bin/sudo -A \"$@\"\n";
+
+    let result = match fs::write(&path, script) {
+        Ok(()) => match fs::metadata(&path) {
+            Ok(metadata) => {
+                let mut perms = metadata.permissions();
+                perms.set_mode(0o700);
+                if let Err(err) = fs::set_permissions(&path, perms) {
+                    eprintln!(
+                        "⚠️  Failed to set sudo wrapper permissions at {}: {}",
+                        path.display(),
+                        err
+                    );
+                    None
+                } else {
+                    Some(path.to_string_lossy().to_string())
+                }
+            }
+            Err(err) => {
+                eprintln!(
+                    "⚠️  Failed to read sudo wrapper metadata at {}: {}",
+                    path.display(),
+                    err
+                );
+                None
+            }
+        },
+        Err(err) => {
+            eprintln!(
+                "⚠️  Failed to create sudo wrapper at {}: {}",
+                path.display(),
+                err
+            );
+            None
+        }
+    };
+
+    let _ = WRAPPER_PATH.set(result.clone());
+    Ok(result)
+}
+
+#[cfg(target_os = "macos")]
+fn run_macos_sudo_command(args: &[&str]) -> io::Result<()> {
+    let askpass = ensure_macos_askpass_script()?;
+    if let Some(askpass_path) = askpass {
+        let mut cmd = Command::new("/usr/bin/sudo");
+        cmd.arg("-A").args(args);
+        cmd.env("SUDO_ASKPASS", &askpass_path);
+        cmd.env("HOMEBREW_SUDO_ASKPASS", &askpass_path);
+
+        let status = cmd.status()?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(io::Error::other(format!("sudo command failed: {:?}", args)))
+        }
+    } else {
+        let escaped = args
+            .iter()
+            .map(|arg| shell_escape(arg))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let command = escaped.to_string();
+        let output = run_macos_authorized_command(&command)?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(io::Error::other(format!("command failed: {:?}", args)))
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn ensure_docker_cli_plugin_dir() -> io::Result<()> {
+    let plugin_dir = Path::new("/usr/local/cli-plugins");
+
+    if plugin_dir.exists() {
+        return Ok(());
+    }
+
+    run_macos_sudo_command(&["/bin/mkdir", "-p", "/usr/local/cli-plugins"])?;
+
+    if let Ok(username) = env::var("USER") {
+        if !username.is_empty() {
+            let ownership = format!("{}:staff", username);
+            let _ =
+                run_macos_sudo_command(&["/usr/sbin/chown", &ownership, "/usr/local/cli-plugins"]);
+        }
+    }
+
+    let _ = run_macos_sudo_command(&["/bin/chmod", "755", "/usr/local/cli-plugins"]);
+
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn is_brew_command(command: &str) -> bool {
+    command
+        .split_whitespace()
+        .next()
+        .map(|token| token == "brew" || token.ends_with("/brew"))
+        .unwrap_or(false)
 }
 
 /// Install a single dependency and return the path to the installed binary (for library use)
@@ -128,12 +579,53 @@ pub async fn install_single_dependency(name: &str) -> Result<Option<String>> {
         .as_ref()
         .ok_or_else(|| anyhow!("No installation commands available for {}", name))?;
 
+    #[cfg(target_os = "macos")]
+    if matches!(system_type, SystemType::MacOs)
+        && install_commands
+            .iter()
+            .any(|cmd| cmd.trim_start().starts_with("brew "))
+    {
+        ensure_macos_command_line_tools_installed()?;
+    }
+
     // Special handling for Homebrew on macOS
     let brew_cmd = if matches!(system_type, SystemType::MacOs) {
         find_brew_command()
     } else {
         None
     };
+
+    #[cfg(target_os = "macos")]
+    if matches!(system_type, SystemType::MacOs) {
+        if let Some(ref brew) = brew_cmd {
+            match Command::new(brew).arg("--version").status() {
+                Ok(status) if status.success() => {}
+                Ok(status) => {
+                    return Err(anyhow!(
+                        "Homebrew at '{}' is not working (brew --version exited with status {:?}). Reinstall Homebrew, then retry installing {}.",
+                        brew,
+                        status.code(),
+                        name
+                    )
+                    .into());
+                }
+                Err(err) => {
+                    return Err(anyhow!(
+                        "Failed to execute '{} --version': {}. Reinstall Homebrew, then retry installing {}.",
+                        brew,
+                        err,
+                        name
+                    )
+                    .into());
+                }
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    if matches!(system_type, SystemType::MacOs) && name == "docker" {
+        ensure_docker_cli_plugin_dir()?;
+    }
 
     // Execute installation commands
     for cmd in install_commands {
@@ -147,16 +639,64 @@ pub async fn install_single_dependency(name: &str) -> Result<Option<String>> {
             cmd.clone()
         };
 
-        let status = run_install_command(&system_type, &adjusted_cmd);
+        let command_result = run_install_command(&system_type, &adjusted_cmd);
 
-        match status {
-            Ok(s) if s.success() => {
-                // Continue to next command
+        match command_result {
+            Ok(output) if output.status.success() => {
+                if cfg!(debug_assertions) {
+                    // In debug builds emit captured stdout/stderr to aid local testing
+                    if !output.stdout.is_empty() {
+                        println!("{}", String::from_utf8_lossy(&output.stdout).trim_end());
+                    }
+                    if !output.stderr.is_empty() {
+                        eprintln!("{}", String::from_utf8_lossy(&output.stderr).trim_end());
+                    }
+                }
             }
-            _ => {
-                return Err(
-                    anyhow!("Failed to execute installation command: {}", adjusted_cmd).into(),
+            Ok(output) => {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let stderr = String::from_utf8_lossy(&output.stderr);
+
+                let stdout_trimmed = stdout.trim_end();
+                let stderr_trimmed = stderr.trim_end();
+
+                let mut details = Vec::new();
+                if !stdout_trimmed.is_empty() {
+                    details.push(format!("stdout:\n{}", truncate_output(stdout_trimmed)));
+                }
+                if !stderr_trimmed.is_empty() {
+                    details.push(format!("stderr:\n{}", truncate_output(stderr_trimmed)));
+                }
+                if details.is_empty() {
+                    details.push("(no output captured)".to_string());
+                }
+
+                let detail_text = details.join("\n\n");
+                error!(
+                    command = %adjusted_cmd,
+                    stdout = %truncate_output(stdout_trimmed),
+                    stderr = %truncate_output(stderr_trimmed),
+                    "Installation command failed"
                 );
+                return Err(anyhow!(
+                    "Failed to execute installation command: {}\n{}",
+                    adjusted_cmd,
+                    detail_text
+                )
+                .into());
+            }
+            Err(error) => {
+                error!(
+                    command = %adjusted_cmd,
+                    ?error,
+                    "Failed to spawn installation command"
+                );
+                return Err(anyhow!(
+                    "Failed to spawn installation command: {} (error: {})",
+                    adjusted_cmd,
+                    error
+                )
+                .into());
             }
         }
     }
@@ -182,6 +722,29 @@ pub async fn install_single_dependency(name: &str) -> Result<Option<String>> {
     };
 
     Ok(installed_path)
+}
+
+pub async fn install_dependencies(names: &[String]) -> Result<Vec<(String, Option<String>)>> {
+    #[cfg(target_os = "macos")]
+    {
+        if matches!(detect_system(), SystemType::MacOs) {
+            ensure_macos_command_line_tools_installed()?;
+        }
+    }
+
+    let mut results = Vec::new();
+    let mut seen = HashSet::new();
+
+    for name in names {
+        if !seen.insert(name.clone()) {
+            continue;
+        }
+
+        let installed = install_single_dependency(name).await?;
+        results.push((name.clone(), installed));
+    }
+
+    Ok(results)
 }
 
 #[derive(Debug)]
@@ -639,18 +1202,54 @@ async fn setup_macos() -> Result<()> {
 
                         if let Some(verify_cmd) = &env_config.verify_command {
                             print!("   Verifying installation... ");
-                            let output = Command::new("sh").arg("-c").arg(verify_cmd).output();
-                            if let Ok(output) = output {
-                                if output.status.success() {
+                            let verify_result =
+                                Command::new("sh").arg("-c").arg(verify_cmd).output();
+
+                            match verify_result {
+                                Ok(output) if output.status.success() => {
                                     println!("✓");
                                     success_count += 1;
-                                } else {
+                                }
+                                Ok(_)
+                                    if dep.name == "docker" && docker_desktop_installed_macos() =>
+                                {
+                                    println!(
+                                        "⚠️  Docker Desktop installed – launch it once to finish CLI setup"
+                                    );
+                                    success_count += 1;
+                                }
+                                Ok(output) => {
                                     println!("❌ Verification failed");
+                                    if !output.stdout.is_empty() {
+                                        println!(
+                                            "   stdout: {}",
+                                            String::from_utf8_lossy(&output.stdout).trim_end()
+                                        );
+                                    }
+                                    if !output.stderr.is_empty() {
+                                        println!(
+                                            "   stderr: {}",
+                                            String::from_utf8_lossy(&output.stderr).trim_end()
+                                        );
+                                    }
                                     fail_count += 1;
                                 }
-                            } else {
-                                println!("❌ Could not verify");
-                                fail_count += 1;
+                                Err(err)
+                                    if dep.name == "docker" && docker_desktop_installed_macos() =>
+                                {
+                                    println!(
+                                        "⚠️  Docker Desktop installed – launch it once to finish CLI setup"
+                                    );
+                                    println!("   (could not run verification command: {})", err);
+                                    success_count += 1;
+                                }
+                                Err(err) => {
+                                    println!(
+                                        "❌ Could not verify (failed to run '{}'): {}",
+                                        verify_cmd, err
+                                    );
+                                    fail_count += 1;
+                                }
                             }
                         } else {
                             success_count += 1;
@@ -705,6 +1304,25 @@ fn print_syftbox_instructions() {
         arch
     );
     println!("After downloading, ensure the 'syftbox' binary is on your PATH (e.g., move to /usr/local/bin and chmod +x).");
+}
+
+#[cfg(target_os = "macos")]
+fn docker_desktop_installed_macos() -> bool {
+    if std::path::Path::new("/Applications/Docker.app").exists() {
+        return true;
+    }
+
+    if let Some(home_dir) = dirs::home_dir() {
+        let user_app = home_dir.join("Applications").join("Docker.app");
+        return user_app.exists();
+    }
+
+    false
+}
+
+#[cfg(not(target_os = "macos"))]
+fn docker_desktop_installed_macos() -> bool {
+    false
 }
 
 // Minimal java version detection to respect min_version in deps.yaml
