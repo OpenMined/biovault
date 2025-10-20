@@ -5,7 +5,9 @@ use std::collections::HashSet;
 use std::env;
 use std::io::{self, Write};
 use std::process::{Command, ExitStatus, Stdio};
+#[cfg(target_os = "macos")]
 use std::thread;
+#[cfg(target_os = "macos")]
 use std::time::{Duration, Instant};
 
 #[cfg(target_os = "macos")]
@@ -54,6 +56,7 @@ fn truncate_output(text: &str) -> String {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn shell_escape(segment: &str) -> String {
     if segment.is_empty() {
         "''".to_string()
@@ -170,6 +173,7 @@ fn ensure_macos_command_line_tools_installed() -> Result<()> {
 }
 
 #[cfg(not(target_os = "macos"))]
+#[allow(dead_code)]
 fn ensure_macos_command_line_tools_installed() -> Result<()> {
     Ok(())
 }
@@ -212,6 +216,7 @@ fn prime_macos_sudo_credentials(askpass_path: &str) -> io::Result<()> {
 }
 
 #[cfg(not(target_os = "macos"))]
+#[allow(dead_code)]
 fn prime_macos_sudo_credentials(_: &str) -> io::Result<()> {
     Ok(())
 }
@@ -512,6 +517,7 @@ fn ensure_docker_cli_plugin_dir() -> io::Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 fn is_brew_command(command: &str) -> bool {
     command
         .split_whitespace()
