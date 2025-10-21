@@ -5,34 +5,12 @@ use std::collections::HashSet;
 use std::env;
 use std::io::{self, Write};
 use std::process::{Command, ExitStatus, Stdio};
-#[cfg(target_os = "macos")]
-use std::thread;
-#[cfg(target_os = "macos")]
-use std::time::{Duration, Instant};
 
 #[cfg(target_os = "macos")]
 use std::fs;
-#[cfg(target_os = "macos")]
-use std::os::unix::fs::PermissionsExt;
-#[cfg(target_os = "macos")]
-use std::path::Path;
-#[cfg(target_os = "macos")]
-use std::sync::atomic::{AtomicBool, Ordering};
-#[cfg(target_os = "macos")]
-use std::sync::OnceLock;
-
-use tracing::error;
-
-const MAX_CAPTURED_OUTPUT: usize = 4000;
-
-#[cfg(target_os = "macos")]
-static SUDO_PRIMED: AtomicBool = AtomicBool::new(false);
-#[cfg(target_os = "macos")]
-static COMMAND_LINE_TOOLS_READY: AtomicBool = AtomicBool::new(false);
 
 struct InstallCommandOutput {
     status: ExitStatus,
-    stdout: Vec<u8>,
     stderr: Vec<u8>,
 }
 
@@ -40,40 +18,8 @@ impl InstallCommandOutput {
     fn from_output(output: std::process::Output) -> Self {
         Self {
             status: output.status,
-            stdout: output.stdout,
             stderr: output.stderr,
         }
-    }
-}
-
-fn truncate_output(text: &str) -> String {
-    if text.len() > MAX_CAPTURED_OUTPUT {
-        let mut truncated = text[..MAX_CAPTURED_OUTPUT].to_string();
-        truncated.push_str("\n… (truncated)");
-        truncated
-    } else {
-        text.to_string()
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn shell_escape(segment: &str) -> String {
-    if segment.is_empty() {
-        "''".to_string()
-    } else if segment.as_bytes().iter().all(|b| {
-        matches!(b,
-            b'0'..=b'9'
-                | b'a'..=b'z'
-                | b'A'..=b'Z'
-                | b'.'
-                | b'-'
-                | b'_'
-                | b'/'
-        )
-    }) {
-        segment.to_string()
-    } else {
-        format!("'{}'", segment.replace("'", "'\\''"))
     }
 }
 
@@ -81,670 +27,6 @@ fn skip_install_commands() -> bool {
     env::var("BIOVAULT_SKIP_INSTALLS")
         .map(|v| v != "0")
         .unwrap_or(false)
-}
-
-#[cfg(target_os = "macos")]
-fn ensure_macos_command_line_tools_installed() -> Result<()> {
-    if COMMAND_LINE_TOOLS_READY.load(Ordering::SeqCst) {
-        if Command::new("xcode-select")
-            .arg("-p")
-            .status()
-            .map(|status| status.success())
-            .unwrap_or(false)
-        {
-            return Ok(());
-        }
-
-        COMMAND_LINE_TOOLS_READY.store(false, Ordering::SeqCst);
-    }
-
-    match Command::new("xcode-select").arg("-p").status() {
-        Ok(status) if status.success() => {
-            COMMAND_LINE_TOOLS_READY.store(true, Ordering::SeqCst);
-            return Ok(());
-        }
-        Ok(_) => {}
-        Err(err) => {
-            return Err(anyhow!("Failed to check for macOS Command Line Tools: {}", err).into());
-        }
-    }
-
-    eprintln!("🍎 macOS Command Line Tools missing – launching installer before proceeding",);
-
-    let launch_result = Command::new("xcode-select").arg("--install").status();
-
-    match launch_result {
-        Ok(status) if status.success() => {
-            eprintln!(
-                "🍎 Command Line Tools installer launched. Complete the Apple dialog to continue."
-            );
-        }
-        Ok(status) => {
-            if status.code() == Some(1) {
-                eprintln!(
-                    "🍎 Command Line Tools installer already running. Complete the Apple dialog to continue."
-                );
-            } else {
-                return Err(anyhow!(
-                    "macOS Command Line Tools installer exited with status {:?}. Run 'xcode-select --install' manually, complete it, then rerun 'Install Missing'.",
-                    status.code()
-                )
-                .into());
-            }
-        }
-        Err(err) => {
-            return Err(anyhow!(
-                "Failed to launch the macOS Command Line Tools installer: {}. Run 'xcode-select --install' manually, complete it, then rerun 'Install Missing'.",
-                err
-            )
-            .into());
-        }
-    }
-
-    eprintln!(
-        "🍎 Waiting for Command Line Tools installation to finish (this can take several minutes)..."
-    );
-
-    let start = Instant::now();
-    let max_wait = Duration::from_secs(60 * 30); // 30 minutes maximum
-    let poll_interval = Duration::from_secs(5);
-
-    loop {
-        if Command::new("xcode-select")
-            .arg("-p")
-            .status()
-            .map(|status| status.success())
-            .unwrap_or(false)
-        {
-            COMMAND_LINE_TOOLS_READY.store(true, Ordering::SeqCst);
-            eprintln!("🍎 Command Line Tools detected. Continuing installation.");
-            return Ok(());
-        }
-
-        if start.elapsed() >= max_wait {
-            return Err(anyhow!(
-                "macOS Command Line Tools installation did not complete within 30 minutes. Finish the Apple installer, then rerun 'Install Missing'."
-            )
-            .into());
-        }
-
-        thread::sleep(poll_interval);
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
-#[allow(dead_code)]
-fn ensure_macos_command_line_tools_installed() -> Result<()> {
-    Ok(())
-}
-
-#[cfg(target_os = "macos")]
-fn prime_macos_sudo_credentials(askpass_path: &str) -> io::Result<()> {
-    if SUDO_PRIMED.load(Ordering::SeqCst) {
-        if Command::new("/usr/bin/sudo")
-            .arg("-n")
-            .arg("true")
-            .status()
-            .map(|status| status.success())
-            .unwrap_or(false)
-        {
-            return Ok(());
-        }
-
-        SUDO_PRIMED.store(false, Ordering::SeqCst);
-    }
-
-    let mut cmd = Command::new("/usr/bin/sudo");
-    cmd.arg("-Av");
-    cmd.env("SUDO_ASKPASS", askpass_path);
-    cmd.env("HOMEBREW_SUDO_ASKPASS", askpass_path);
-
-    match cmd.status() {
-        Ok(status) if status.success() => {
-            SUDO_PRIMED.store(true, Ordering::SeqCst);
-            Ok(())
-        }
-        Ok(status) if status.code() == Some(1) => Err(io::Error::other(
-            "Administrator authentication was cancelled.",
-        )),
-        Ok(status) => Err(io::Error::other(format!(
-            "sudo validation failed with status {:?}",
-            status.code()
-        ))),
-        Err(err) => Err(err),
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
-#[allow(dead_code)]
-fn prime_macos_sudo_credentials(_: &str) -> io::Result<()> {
-    Ok(())
-}
-
-fn run_install_command(
-    system_type: &SystemType,
-    command: &str,
-) -> io::Result<InstallCommandOutput> {
-    match system_type {
-        SystemType::Windows => {
-            if command.starts_with("winget") {
-                let mut parts = command.split_whitespace();
-                parts.next();
-                Command::new("winget")
-                    .args(parts)
-                    .output()
-                    .map(InstallCommandOutput::from_output)
-            } else {
-                Command::new("powershell")
-                    .arg("-Command")
-                    .arg(command)
-                    .output()
-                    .map(InstallCommandOutput::from_output)
-            }
-        }
-        SystemType::MacOs => run_macos_install_command(command),
-        _ => Command::new("sh")
-            .arg("-c")
-            .arg(command)
-            .output()
-            .map(InstallCommandOutput::from_output),
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn run_macos_install_command(command: &str) -> io::Result<InstallCommandOutput> {
-    if is_brew_command(command) {
-        match ensure_macos_askpass_script()? {
-            Some(askpass_path) => {
-                let mut cmd = Command::new("sh");
-                cmd.arg("-c").arg(command);
-                prime_macos_sudo_credentials(&askpass_path)?;
-                cmd.env("SUDO_ASKPASS", &askpass_path);
-                cmd.env("HOMEBREW_SUDO_ASKPASS", &askpass_path);
-                cmd.env("HOMEBREW_NO_AUTO_UPDATE", "1");
-
-                if let Some(wrapper_path) = ensure_macos_sudo_wrapper()? {
-                    let existing_path = env::var("PATH").unwrap_or_default();
-                    let wrapper_dir = std::path::Path::new(&wrapper_path)
-                        .parent()
-                        .map(|p| p.display().to_string())
-                        .unwrap_or_default();
-                    let combined_path = if existing_path.is_empty() {
-                        wrapper_dir
-                    } else {
-                        format!("{}:{}", wrapper_dir, existing_path)
-                    };
-                    cmd.env("PATH", combined_path);
-                }
-
-                return cmd.output().map(InstallCommandOutput::from_output);
-            }
-            None => {
-                let prefixed = format!(
-                    "PATH=\"/usr/local/bin:/opt/homebrew/bin:$PATH\"; export PATH; HOMEBREW_NO_AUTO_UPDATE=1 {}",
-                    command.trim_start()
-                );
-                return run_macos_authorized_command(&prefixed);
-            }
-        }
-    }
-
-    Command::new("sh")
-        .arg("-c")
-        .arg(command)
-        .output()
-        .map(InstallCommandOutput::from_output)
-}
-
-#[cfg(target_os = "macos")]
-fn escape_for_applescript(input: &str) -> String {
-    input.replace("\\", "\\\\").replace("\"", "\\\"")
-}
-
-#[cfg(target_os = "macos")]
-fn run_macos_authorized_command(command: &str) -> io::Result<InstallCommandOutput> {
-    let applescript = format!(
-        "do shell script \"{}\" with administrator privileges",
-        escape_for_applescript(command.trim_start())
-    );
-    let output = Command::new("osascript")
-        .arg("-e")
-        .arg(applescript)
-        .output()?;
-    Ok(InstallCommandOutput::from_output(output))
-}
-
-#[cfg(not(target_os = "macos"))]
-fn run_macos_install_command(command: &str) -> io::Result<InstallCommandOutput> {
-    Command::new("sh")
-        .arg("-c")
-        .arg(command)
-        .output()
-        .map(InstallCommandOutput::from_output)
-}
-
-#[cfg(target_os = "macos")]
-fn ensure_macos_askpass_script() -> io::Result<Option<String>> {
-    static ASKPASS_PATH: OnceLock<Option<String>> = OnceLock::new();
-
-    if let Some(existing) = ASKPASS_PATH.get() {
-        return Ok(existing.clone());
-    }
-
-    if Path::new("/usr/libexec/ssh-askpass").exists() {
-        let result = Some("/usr/libexec/ssh-askpass".to_string());
-        let _ = ASKPASS_PATH.set(result.clone());
-        return Ok(result);
-    }
-
-    let mut path = std::env::temp_dir();
-    path.push("biovault_brew_askpass.sh");
-
-    let script = r#"#!/bin/bash
-result=$(/usr/bin/osascript <<'APPLESCRIPT'
-on promptForPassword()
-    tell application "System Events"
-        activate
-        set dialogText to "BioVault needs your administrator password to continue installing required tools. macOS is requesting this password on behalf of BioVault."
-        repeat
-            try
-                set dialogResult to display dialog dialogText default answer "" with title "BioVault Installer" buttons {"Cancel", "Continue"} default button "Continue" with icon caution with hidden answer
-                set userPassword to text returned of dialogResult
-                if userPassword is not "" then
-                    return userPassword
-                end if
-            on error number -128
-                error number -128
-            end try
-        end repeat
-    end tell
-end promptForPassword
-
-with timeout of 600 seconds
-    promptForPassword()
-end timeout
-APPLESCRIPT
-)
-status=$?
-if [ "$status" -ne 0 ]; then
-    exit "$status"
-fi
-printf '%s\n' "$result"
-"#;
-
-    let result = match fs::write(&path, script) {
-        Ok(()) => match fs::metadata(&path) {
-            Ok(metadata) => {
-                let mut perms = metadata.permissions();
-                perms.set_mode(0o700);
-                if let Err(err) = fs::set_permissions(&path, perms) {
-                    eprintln!(
-                        "⚠️  Failed to set askpass helper permissions at {}: {}",
-                        path.display(),
-                        err
-                    );
-                    None
-                } else {
-                    Some(path.to_string_lossy().to_string())
-                }
-            }
-            Err(err) => {
-                eprintln!(
-                    "⚠️  Failed to read askpass helper metadata at {}: {}",
-                    path.display(),
-                    err
-                );
-                None
-            }
-        },
-        Err(err) => {
-            eprintln!(
-                "⚠️  Failed to create askpass helper at {}: {}",
-                path.display(),
-                err
-            );
-            None
-        }
-    };
-
-    let _ = ASKPASS_PATH.set(result.clone());
-    Ok(result)
-}
-
-#[cfg(target_os = "macos")]
-fn ensure_macos_sudo_wrapper() -> io::Result<Option<String>> {
-    static WRAPPER_PATH: OnceLock<Option<String>> = OnceLock::new();
-
-    if let Some(existing) = WRAPPER_PATH.get() {
-        return Ok(existing.clone());
-    }
-
-    let mut path = std::env::temp_dir();
-    path.push("biovault_sudo_wrapper.sh");
-
-    let script = "#!/bin/bash\nexec /usr/bin/sudo -A \"$@\"\n";
-
-    let result = match fs::write(&path, script) {
-        Ok(()) => match fs::metadata(&path) {
-            Ok(metadata) => {
-                let mut perms = metadata.permissions();
-                perms.set_mode(0o700);
-                if let Err(err) = fs::set_permissions(&path, perms) {
-                    eprintln!(
-                        "⚠️  Failed to set sudo wrapper permissions at {}: {}",
-                        path.display(),
-                        err
-                    );
-                    None
-                } else {
-                    Some(path.to_string_lossy().to_string())
-                }
-            }
-            Err(err) => {
-                eprintln!(
-                    "⚠️  Failed to read sudo wrapper metadata at {}: {}",
-                    path.display(),
-                    err
-                );
-                None
-            }
-        },
-        Err(err) => {
-            eprintln!(
-                "⚠️  Failed to create sudo wrapper at {}: {}",
-                path.display(),
-                err
-            );
-            None
-        }
-    };
-
-    let _ = WRAPPER_PATH.set(result.clone());
-    Ok(result)
-}
-
-#[cfg(target_os = "macos")]
-fn run_macos_sudo_command(args: &[&str]) -> io::Result<()> {
-    let askpass = ensure_macos_askpass_script()?;
-    if let Some(askpass_path) = askpass {
-        let mut cmd = Command::new("/usr/bin/sudo");
-        cmd.arg("-A").args(args);
-        cmd.env("SUDO_ASKPASS", &askpass_path);
-        cmd.env("HOMEBREW_SUDO_ASKPASS", &askpass_path);
-
-        let status = cmd.status()?;
-        if status.success() {
-            Ok(())
-        } else {
-            Err(io::Error::other(format!("sudo command failed: {:?}", args)))
-        }
-    } else {
-        let escaped = args
-            .iter()
-            .map(|arg| shell_escape(arg))
-            .collect::<Vec<_>>()
-            .join(" ");
-        let command = escaped.to_string();
-        let output = run_macos_authorized_command(&command)?;
-        if output.status.success() {
-            Ok(())
-        } else {
-            Err(io::Error::other(format!("command failed: {:?}", args)))
-        }
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn ensure_docker_cli_plugin_dir() -> io::Result<()> {
-    let plugin_dir = Path::new("/usr/local/cli-plugins");
-
-    if plugin_dir.exists() {
-        return Ok(());
-    }
-
-    run_macos_sudo_command(&["/bin/mkdir", "-p", "/usr/local/cli-plugins"])?;
-
-    if let Ok(username) = env::var("USER") {
-        if !username.is_empty() {
-            let ownership = format!("{}:staff", username);
-            let _ =
-                run_macos_sudo_command(&["/usr/sbin/chown", &ownership, "/usr/local/cli-plugins"]);
-        }
-    }
-
-    let _ = run_macos_sudo_command(&["/bin/chmod", "755", "/usr/local/cli-plugins"]);
-
-    Ok(())
-}
-
-#[cfg(target_os = "macos")]
-fn is_brew_command(command: &str) -> bool {
-    command
-        .split_whitespace()
-        .next()
-        .map(|token| token == "brew" || token.ends_with("/brew"))
-        .unwrap_or(false)
-}
-
-/// Install a single dependency and return the path to the installed binary (for library use)
-pub async fn install_single_dependency(name: &str) -> Result<Option<String>> {
-    // Load the deps.yaml file to get dependency information
-    let deps_yaml = include_str!("../../deps.yaml");
-    let config: DependencyConfig = serde_yaml::from_str(deps_yaml)?;
-
-    // Find the dependency by name
-    let dep = config
-        .dependencies
-        .iter()
-        .find(|d| d.name == name)
-        .ok_or_else(|| anyhow!("Dependency '{}' not found", name))?;
-
-    // Detect system type
-    let system_type = detect_system();
-    let env_name = match system_type {
-        SystemType::GoogleColab => "google_colab",
-        SystemType::MacOs => "macos",
-        SystemType::Ubuntu => "ubuntu",
-        SystemType::ArchLinux => "arch",
-        SystemType::Windows => "windows",
-        SystemType::Unknown => {
-            return Err(anyhow!(
-                "System type not detected or not supported for automated installation"
-            )
-            .into());
-        }
-    };
-
-    // Get environment-specific configuration
-    let env_config = dep
-        .environments
-        .as_ref()
-        .and_then(|envs| envs.get(env_name))
-        .ok_or_else(|| anyhow!("No installation configuration for {} on this system", name))?;
-
-    if env_config.skip {
-        return Err(anyhow!(
-            "Installation of {} is not supported on this system: {}",
-            name,
-            env_config
-                .skip_reason
-                .as_ref()
-                .unwrap_or(&"Not available".to_string())
-        )
-        .into());
-    }
-
-    let install_commands = env_config
-        .install_commands
-        .as_ref()
-        .ok_or_else(|| anyhow!("No installation commands available for {}", name))?;
-
-    #[cfg(target_os = "macos")]
-    if matches!(system_type, SystemType::MacOs)
-        && install_commands
-            .iter()
-            .any(|cmd| cmd.trim_start().starts_with("brew "))
-    {
-        ensure_macos_command_line_tools_installed()?;
-    }
-
-    // Special handling for Homebrew on macOS
-    let brew_cmd = if matches!(system_type, SystemType::MacOs) {
-        find_brew_command()
-    } else {
-        None
-    };
-
-    #[cfg(target_os = "macos")]
-    if matches!(system_type, SystemType::MacOs) {
-        if let Some(ref brew) = brew_cmd {
-            match Command::new(brew).arg("--version").status() {
-                Ok(status) if status.success() => {}
-                Ok(status) => {
-                    return Err(anyhow!(
-                        "Homebrew at '{}' is not working (brew --version exited with status {:?}). Reinstall Homebrew, then retry installing {}.",
-                        brew,
-                        status.code(),
-                        name
-                    )
-                    .into());
-                }
-                Err(err) => {
-                    return Err(anyhow!(
-                        "Failed to execute '{} --version': {}. Reinstall Homebrew, then retry installing {}.",
-                        brew,
-                        err,
-                        name
-                    )
-                    .into());
-                }
-            }
-        }
-    }
-
-    #[cfg(target_os = "macos")]
-    if matches!(system_type, SystemType::MacOs) && name == "docker" {
-        ensure_docker_cli_plugin_dir()?;
-    }
-
-    // Execute installation commands
-    for cmd in install_commands {
-        let adjusted_cmd = if matches!(system_type, SystemType::MacOs) && cmd.starts_with("brew ") {
-            if let Some(ref brew) = brew_cmd {
-                cmd.replace("brew ", &format!("{} ", brew))
-            } else {
-                return Err(anyhow!("Homebrew not found. Please install Homebrew first.").into());
-            }
-        } else {
-            cmd.clone()
-        };
-
-        let command_result = run_install_command(&system_type, &adjusted_cmd);
-
-        match command_result {
-            Ok(output) if output.status.success() => {
-                if cfg!(debug_assertions) {
-                    // In debug builds emit captured stdout/stderr to aid local testing
-                    if !output.stdout.is_empty() {
-                        println!("{}", String::from_utf8_lossy(&output.stdout).trim_end());
-                    }
-                    if !output.stderr.is_empty() {
-                        eprintln!("{}", String::from_utf8_lossy(&output.stderr).trim_end());
-                    }
-                }
-            }
-            Ok(output) => {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                let stderr = String::from_utf8_lossy(&output.stderr);
-
-                let stdout_trimmed = stdout.trim_end();
-                let stderr_trimmed = stderr.trim_end();
-
-                let mut details = Vec::new();
-                if !stdout_trimmed.is_empty() {
-                    details.push(format!("stdout:\n{}", truncate_output(stdout_trimmed)));
-                }
-                if !stderr_trimmed.is_empty() {
-                    details.push(format!("stderr:\n{}", truncate_output(stderr_trimmed)));
-                }
-                if details.is_empty() {
-                    details.push("(no output captured)".to_string());
-                }
-
-                let detail_text = details.join("\n\n");
-                error!(
-                    command = %adjusted_cmd,
-                    stdout = %truncate_output(stdout_trimmed),
-                    stderr = %truncate_output(stderr_trimmed),
-                    "Installation command failed"
-                );
-                return Err(anyhow!(
-                    "Failed to execute installation command: {}\n{}",
-                    adjusted_cmd,
-                    detail_text
-                )
-                .into());
-            }
-            Err(error) => {
-                error!(
-                    command = %adjusted_cmd,
-                    ?error,
-                    "Failed to spawn installation command"
-                );
-                return Err(anyhow!(
-                    "Failed to spawn installation command: {} (error: {})",
-                    adjusted_cmd,
-                    error
-                )
-                .into());
-            }
-        }
-    }
-
-    // After successful installation, find the installed binary path
-    let installed_path = match name {
-        "java" => {
-            // Special handling for Java on macOS (might be in brew path)
-            if matches!(system_type, SystemType::MacOs) {
-                if let Some(java_path) = check_java_in_brew_not_in_path() {
-                    Some(format!("{}/java", java_path))
-                } else {
-                    which::which("java").ok().map(|p| p.display().to_string())
-                }
-            } else {
-                which::which("java").ok().map(|p| p.display().to_string())
-            }
-        }
-        _ => {
-            // For other tools, try to find them in PATH
-            which::which(name).ok().map(|p| p.display().to_string())
-        }
-    };
-
-    Ok(installed_path)
-}
-
-pub async fn install_dependencies(names: &[String]) -> Result<Vec<(String, Option<String>)>> {
-    #[cfg(target_os = "macos")]
-    {
-        if matches!(detect_system(), SystemType::MacOs) {
-            ensure_macos_command_line_tools_installed()?;
-        }
-    }
-
-    let mut results = Vec::new();
-    let mut seen = HashSet::new();
-
-    for name in names {
-        if !seen.insert(name.clone()) {
-            continue;
-        }
-
-        let installed = install_single_dependency(name).await?;
-        results.push((name.clone(), installed));
-    }
-
-    Ok(results)
 }
 
 #[derive(Debug)]
@@ -757,34 +39,75 @@ enum SystemType {
     Unknown,
 }
 
-pub async fn execute() -> Result<()> {
+pub async fn execute(dependencies: Vec<String>, force: bool) -> Result<()> {
+    eprintln!(
+        "🔧 BioVault Setup: execute() called with dependencies: {:?}, force: {}",
+        dependencies, force
+    );
     println!("BioVault Environment Setup");
     println!("==========================\n");
 
+    // Validate dependency names
+    let valid_deps = ["java", "docker", "nextflow", "syftbox", "uv"];
+    if !dependencies.is_empty() {
+        for dep in &dependencies {
+            if !valid_deps.contains(&dep.as_str()) {
+                return Err(anyhow!(
+                    "Unknown dependency '{}'. Valid options are: {}",
+                    dep,
+                    valid_deps.join(", ")
+                )
+                .into());
+            }
+        }
+        println!(
+            "Installing specific dependencies: {}\n",
+            dependencies.join(", ")
+        );
+    } else {
+        eprintln!("🔧 No specific dependencies requested - will install all missing");
+    }
+
+    if force {
+        println!("🔄 Force mode enabled - reinstalling even if already present\n");
+    }
+
     let system_type = detect_system();
+    eprintln!("🔧 Detected system type: {:?}", system_type);
 
     match system_type {
         SystemType::GoogleColab => {
             println!("✓ Detected Google Colab environment");
-            setup_google_colab().await?;
+            eprintln!("🔧 Calling setup_google_colab()");
+            setup_google_colab(dependencies, force).await?;
+            eprintln!("✅ setup_google_colab() completed");
         }
         SystemType::MacOs => {
             println!("✓ Detected macOS environment");
-            setup_macos().await?;
+            eprintln!("🔧 Calling setup_macos()");
+            setup_macos(dependencies, force).await?;
+            eprintln!("✅ setup_macos() completed");
         }
         SystemType::Ubuntu => {
             println!("✓ Detected Ubuntu/Debian environment");
-            setup_ubuntu().await?;
+            eprintln!("🔧 Calling setup_ubuntu()");
+            setup_ubuntu(dependencies, force).await?;
+            eprintln!("✅ setup_ubuntu() completed");
         }
         SystemType::ArchLinux => {
             println!("✓ Detected Arch Linux environment");
-            setup_arch().await?;
+            eprintln!("🔧 Calling setup_arch()");
+            setup_arch(dependencies, force).await?;
+            eprintln!("✅ setup_arch() completed");
         }
         SystemType::Windows => {
             println!("✓ Detected Windows environment");
-            setup_windows().await?;
+            eprintln!("🔧 Calling setup_windows()");
+            setup_windows(dependencies, force).await?;
+            eprintln!("✅ setup_windows() completed");
         }
         SystemType::Unknown => {
+            eprintln!("⚠️  System type is Unknown - cannot proceed with installation");
             println!("ℹ️  System type not detected or not supported for automated setup");
             println!("   This command currently supports:");
             println!("   - Google Colab");
@@ -796,7 +119,53 @@ pub async fn execute() -> Result<()> {
         }
     }
 
+    eprintln!("✅ execute() completed successfully");
     Ok(())
+}
+
+/// Install a single dependency programmatically (for use by desktop app).
+/// Returns the path to the installed binary if it can be detected.
+pub async fn install_single_dependency(name: &str) -> Result<Option<String>> {
+    eprintln!("🔧 install_single_dependency('{}') called", name);
+
+    // Install the dependency
+    execute(vec![name.to_string()], false).await?;
+
+    // Try to detect the path using 'which' command
+    let path = Command::new("which")
+        .arg(name)
+        .output()
+        .ok()
+        .and_then(|output| {
+            if output.status.success() {
+                String::from_utf8(output.stdout)
+                    .ok()
+                    .map(|s| s.trim().to_string())
+            } else {
+                None
+            }
+        });
+
+    eprintln!(
+        "✅ install_single_dependency('{}') completed, path: {:?}",
+        name, path
+    );
+    Ok(path)
+}
+
+/// Install multiple dependencies programmatically (for use by desktop app).
+pub async fn install_dependencies(names: &[String]) -> Result<()> {
+    eprintln!("🔧 install_dependencies({:?}) called", names);
+    let result = execute(names.to_vec(), false).await;
+    if result.is_ok() {
+        eprintln!(
+            "✅ install_dependencies({:?}) completed successfully",
+            names
+        );
+    } else {
+        eprintln!("❌ install_dependencies({:?}) failed: {:?}", names, result);
+    }
+    result
 }
 
 fn detect_system() -> SystemType {
@@ -861,7 +230,7 @@ fn is_google_colab() -> bool {
     false
 }
 
-async fn setup_google_colab() -> Result<()> {
+async fn setup_google_colab(dependencies: Vec<String>, _force: bool) -> Result<()> {
     if skip_install_commands() {
         println!("(test mode) Skipping Google Colab setup commands");
         return Ok(());
@@ -873,11 +242,30 @@ async fn setup_google_colab() -> Result<()> {
     let deps_yaml = include_str!("../../deps.yaml");
     let config: DependencyConfig = serde_yaml::from_str(deps_yaml)?;
 
+    // Filter and reorder dependencies
+    let deps_to_install: Vec<_> = if dependencies.is_empty() {
+        // Install all dependencies, but put docker last
+        let mut all_deps: Vec<_> = config.dependencies.iter().collect();
+        if let Some(docker_idx) = all_deps.iter().position(|d| d.name == "docker") {
+            let docker = all_deps.remove(docker_idx);
+            all_deps.push(docker);
+        }
+        all_deps
+    } else {
+        // Only install specified dependencies
+        let dep_set: HashSet<_> = dependencies.iter().map(|s| s.as_str()).collect();
+        config
+            .dependencies
+            .iter()
+            .filter(|d| dep_set.contains(d.name.as_str()))
+            .collect()
+    };
+
     let mut success_count = 0;
     let mut skip_count = 0;
     let mut fail_count = 0;
 
-    for dep in &config.dependencies {
+    for dep in deps_to_install {
         // Check if this dependency has google_colab environment config
         if let Some(environments) = &dep.environments {
             if let Some(env_config) = environments.get("google_colab") {
@@ -994,7 +382,7 @@ async fn setup_google_colab() -> Result<()> {
     Ok(())
 }
 
-async fn setup_macos() -> Result<()> {
+async fn setup_macos(dependencies: Vec<String>, force: bool) -> Result<()> {
     if skip_install_commands() {
         println!("(test mode) Skipping macOS setup commands");
         return Ok(());
@@ -1007,6 +395,25 @@ async fn setup_macos() -> Result<()> {
 
     // Check if we're in CI mode (non-interactive)
     let is_ci = env::var("CI").is_ok() || env::var("GITHUB_ACTIONS").is_ok();
+    let assume_yes = env::var("BIOVAULT_SETUP_ASSUME_YES")
+        .map(|value| {
+            let normalized = value.to_ascii_lowercase();
+            normalized == "1" || normalized == "true" || normalized == "yes" || normalized == "y"
+        })
+        .unwrap_or(false);
+
+    if assume_yes {
+        env::set_var("NONINTERACTIVE", "1");
+        env::set_var("HOMEBREW_NO_AUTO_UPDATE", "1");
+        env::set_var("HOMEBREW_NO_ENV_HINTS", "1");
+    }
+
+    if let Ok(home_dir) = env::var("HOME") {
+        env::set_var(
+            "HOMEBREW_CASK_OPTS",
+            format!("--appdir={}/Applications", home_dir),
+        );
+    }
 
     // Check for Homebrew
     let brew_in_path = which::which("brew").is_ok();
@@ -1032,40 +439,45 @@ async fn setup_macos() -> Result<()> {
     if !brew_in_path && brew_path.is_none() {
         println!("📦 Homebrew not found. Would you like to install it? [Y/n]: ");
 
-        if is_ci {
+        if is_ci && !assume_yes {
             println!("   CI mode: Skipping Homebrew installation.");
             println!("   Please ensure Homebrew is pre-installed in CI environment.");
             return Ok(());
+        }
+
+        let should_install = if assume_yes {
+            println!("   Auto-confirming Homebrew installation (BIOVAULT_SETUP_ASSUME_YES=1).");
+            true
         } else {
             io::stdout().flush()?;
             let mut input = String::new();
             io::stdin().read_line(&mut input)?;
             let answer = input.trim().to_lowercase();
+            answer.is_empty() || answer == "y" || answer == "yes"
+        };
 
-            if answer.is_empty() || answer == "y" || answer == "yes" {
-                println!("Installing Homebrew...");
-                let install_cmd = "/bin/bash -c \"$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\"";
-                let status = Command::new("sh").arg("-c").arg(install_cmd).status()?;
+        if should_install {
+            println!("Installing Homebrew...");
+            let install_cmd = "/bin/bash -c \"$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\"";
+            let status = Command::new("sh").arg("-c").arg(install_cmd).status()?;
 
-                if status.success() {
-                    println!("✓ Homebrew installed successfully!");
-                    // Detect where Homebrew was installed
-                    if std::path::Path::new("/opt/homebrew/bin/brew").exists() {
-                        brew_path = Some("/opt/homebrew/bin/brew".to_string());
-                    } else if std::path::Path::new("/usr/local/bin/brew").exists() {
-                        brew_path = Some("/usr/local/bin/brew".to_string());
-                    }
-                } else {
-                    println!("❌ Homebrew installation failed.");
-                    println!("Please install manually from: https://brew.sh");
-                    return Ok(());
+            if status.success() {
+                println!("✓ Homebrew installed successfully!");
+                if std::path::Path::new("/opt/homebrew/bin/brew").exists() {
+                    brew_path = Some("/opt/homebrew/bin/brew".to_string());
+                } else if std::path::Path::new("/usr/local/bin/brew").exists() {
+                    brew_path = Some("/usr/local/bin/brew".to_string());
                 }
             } else {
-                println!("Skipping Homebrew installation.");
-                println!("Please install Homebrew manually from: https://brew.sh");
-                println!("Then re-run: bv setup");
+                println!("❌ Homebrew installation failed.");
+                println!("Please install manually from: https://brew.sh");
                 return Ok(());
             }
+        } else {
+            println!("Skipping Homebrew installation.");
+            println!("Please install Homebrew manually from: https://brew.sh");
+            println!("Then re-run: bv setup");
+            return Ok(());
         }
     }
 
@@ -1082,12 +494,32 @@ async fn setup_macos() -> Result<()> {
     let deps_yaml = include_str!("../../deps.yaml");
     let config: DependencyConfig = serde_yaml::from_str(deps_yaml)?;
 
+    // Filter and reorder dependencies
+    let deps_to_install: Vec<_> = if dependencies.is_empty() {
+        // Install all dependencies, but put docker last
+        let mut all_deps: Vec<_> = config.dependencies.iter().collect();
+        // Find docker and move it to the end
+        if let Some(docker_idx) = all_deps.iter().position(|d| d.name == "docker") {
+            let docker = all_deps.remove(docker_idx);
+            all_deps.push(docker);
+        }
+        all_deps
+    } else {
+        // Only install specified dependencies
+        let dep_set: HashSet<_> = dependencies.iter().map(|s| s.as_str()).collect();
+        config
+            .dependencies
+            .iter()
+            .filter(|d| dep_set.contains(d.name.as_str()))
+            .collect()
+    };
+
     let mut success_count = 0;
     let mut skip_count = 0;
     let mut fail_count = 0;
 
     // Use the brew command for installations
-    for dep in &config.dependencies {
+    for dep in deps_to_install {
         if let Some(environments) = &dep.environments {
             if let Some(env_config) = environments.get("macos") {
                 if env_config.skip {
@@ -1104,40 +536,47 @@ async fn setup_macos() -> Result<()> {
                 }
 
                 if let Some(install_commands) = &env_config.install_commands {
-                    // Decide if install is necessary
-                    let mut need_install = true;
-
-                    // If verify_command is available, try it first
-                    if let Some(verify_cmd) = &env_config.verify_command {
-                        let verified = Command::new("sh")
-                            .arg("-c")
-                            .arg(verify_cmd)
-                            .stdout(Stdio::null())
-                            .stderr(Stdio::null())
-                            .status()
-                            .map(|s| s.success())
-                            .unwrap_or(false);
-                        if verified {
-                            need_install = false;
-                        }
+                    // Decide if install is necessary (skip check if force mode)
+                    let need_install = if force {
+                        true
                     } else {
-                        // Fallback to which for simple presence
-                        if which::which(&dep.name).is_ok() {
-                            need_install = false;
-                        }
-                    }
+                        let mut should_install = true;
 
-                    // For Java, also enforce min_version if specified
-                    if dep.name == "java" {
-                        if let Some(min_v) = dep.min_version {
-                            if let Some(current) = java_major_version() {
-                                if current >= min_v {
-                                    println!("   Java version {} already meets minimum requirement of {}", current, min_v);
-                                    need_install = false;
+                        // If verify_command is available, try it first
+                        if let Some(verify_cmd) = &env_config.verify_command {
+                            let verified = Command::new("sh")
+                                .arg("-c")
+                                .arg(verify_cmd)
+                                .env("PATH", ensure_user_space_docker_path())
+                                .stdout(Stdio::null())
+                                .stderr(Stdio::null())
+                                .status()
+                                .map(|s| s.success())
+                                .unwrap_or(false);
+                            if verified {
+                                should_install = false;
+                            }
+                        } else {
+                            // Fallback to which for simple presence
+                            if which::which(&dep.name).is_ok() {
+                                should_install = false;
+                            }
+                        }
+
+                        // For Java, also enforce min_version if specified
+                        if dep.name == "java" {
+                            if let Some(min_v) = dep.min_version {
+                                if let Some(current) = java_major_version() {
+                                    if current >= min_v {
+                                        println!("   Java version {} already meets minimum requirement of {}", current, min_v);
+                                        should_install = false;
+                                    }
                                 }
                             }
                         }
-                    }
+
+                        should_install
+                    };
 
                     if !need_install {
                         println!("✓ {} already meets requirements. Skipping.", dep.name);
@@ -1152,12 +591,56 @@ async fn setup_macos() -> Result<()> {
                     let mut all_succeeded = true;
 
                     for cmd in install_commands {
+                        // Special handling for Docker - download and install from .dmg directly
+                        // Check this BEFORE modifying the command
+                        if dep.name == "docker" && cmd.contains("brew install --cask") {
+                            println!("   Installing Docker Desktop from official .dmg");
+                            match install_docker_desktop_from_dmg() {
+                                Ok(_) => {
+                                    // Verify installation by checking if Docker.app exists
+                                    if std::path::Path::new("/Applications/Docker.app").exists() {
+                                        println!("   ✓ Docker Desktop installed successfully");
+                                        println!("   ℹ️  Docker Desktop has been installed to /Applications");
+                                        println!("   ℹ️  Launch it manually to complete setup (Docker.app may not start in VMs)");
+                                    } else {
+                                        eprintln!("⚠️  Docker.app not found at /Applications/Docker.app after installation");
+                                        println!("   ❌ Docker Desktop installation could not be verified");
+                                        all_succeeded = false;
+                                        break;
+                                    }
+                                }
+                                Err(e) => {
+                                    println!("   ❌ Failed to install Docker Desktop: {}", e);
+                                    println!("   💡 Fallback: You can manually download Docker Desktop from:");
+                                    println!(
+                                        "      https://www.docker.com/products/docker-desktop/"
+                                    );
+                                    all_succeeded = false;
+                                    break;
+                                }
+                            }
+                            continue;
+                        }
+
                         // Replace 'brew' with the actual brew path if needed
-                        let adjusted_cmd = if !brew_in_path && cmd.starts_with("brew ") {
+                        let mut adjusted_cmd = if !brew_in_path && cmd.starts_with("brew ") {
                             cmd.replace("brew ", &format!("{} ", brew_cmd))
                         } else {
                             cmd.clone()
                         };
+
+                        // Add --force to brew install commands when force mode is enabled
+                        if force
+                            && adjusted_cmd.starts_with("brew install")
+                            && !adjusted_cmd.contains("--force")
+                        {
+                            // Insert --force before the package name
+                            if let Some(pkg_start) = adjusted_cmd.find("brew install") {
+                                let prefix = &adjusted_cmd[..pkg_start + "brew install".len()];
+                                let suffix = &adjusted_cmd[pkg_start + "brew install".len()..];
+                                adjusted_cmd = format!("{} --force{}", prefix, suffix);
+                            }
+                        }
 
                         println!("   Running: {}", adjusted_cmd);
                         let output = Command::new("sh")
@@ -1165,7 +648,9 @@ async fn setup_macos() -> Result<()> {
                             .arg(&adjusted_cmd)
                             .stdout(Stdio::piped())
                             .stderr(Stdio::piped())
-                            .output();
+                            .output()
+                            .map(InstallCommandOutput::from_output);
+
                         match output {
                             Ok(output) => {
                                 if output.status.success() {
@@ -1200,55 +685,81 @@ async fn setup_macos() -> Result<()> {
                             }
                         }
 
+                        if dep.name == "docker" {
+                            if !is_ci {
+                                println!("   ⚠️  Skipping automated Docker Desktop privileged installer.");
+                                println!(
+                                    "      Please open Docker Desktop manually once to finish setup."
+                                );
+                            } else {
+                                println!("   CI mode: Skipping Docker Desktop privileged setup.");
+                            }
+
+                            let updated_path = ensure_user_space_docker_path();
+                            env::set_var("PATH", &updated_path);
+                        }
+
                         if let Some(verify_cmd) = &env_config.verify_command {
                             print!("   Verifying installation... ");
-                            let verify_result =
-                                Command::new("sh").arg("-c").arg(verify_cmd).output();
+                            let verify_result = Command::new("sh")
+                                .arg("-c")
+                                .arg(verify_cmd)
+                                .env("PATH", ensure_user_space_docker_path())
+                                .output();
 
                             match verify_result {
                                 Ok(output) if output.status.success() => {
                                     println!("✓");
                                     success_count += 1;
                                 }
-                                Ok(_)
-                                    if dep.name == "docker" && docker_desktop_installed_macos() =>
-                                {
-                                    println!(
-                                        "⚠️  Docker Desktop installed – launch it once to finish CLI setup"
-                                    );
-                                    success_count += 1;
-                                }
                                 Ok(output) => {
-                                    println!("❌ Verification failed");
-                                    if !output.stdout.is_empty() {
-                                        println!(
-                                            "   stdout: {}",
-                                            String::from_utf8_lossy(&output.stdout).trim_end()
-                                        );
+                                    // Special handling for Docker: check if Docker.app exists
+                                    if dep.name == "docker"
+                                        && std::path::Path::new("/Applications/Docker.app").exists()
+                                    {
+                                        println!("✓ (Docker.app installed)");
+                                        println!("   ℹ️  Docker Desktop is installed but CLI tools aren't ready yet.");
+                                        println!("      Launch Docker Desktop and complete setup to activate CLI tools.");
+                                        success_count += 1;
+                                    } else {
+                                        // Installation commands succeeded but verification failed
+                                        // This often happens because PATH hasn't been updated yet
+                                        println!("⚠️  Verification failed (may need new shell to pick up PATH)");
+                                        if !output.stdout.is_empty() {
+                                            eprintln!(
+                                                "   stdout: {}",
+                                                String::from_utf8_lossy(&output.stdout).trim_end()
+                                            );
+                                        }
+                                        if !output.stderr.is_empty() {
+                                            eprintln!(
+                                                "   stderr: {}",
+                                                String::from_utf8_lossy(&output.stderr).trim_end()
+                                            );
+                                        }
+                                        println!("   ℹ️  Installation commands succeeded - try 'bv check' to verify");
+                                        // Count as success since install commands worked
+                                        success_count += 1;
                                     }
-                                    if !output.stderr.is_empty() {
-                                        println!(
-                                            "   stderr: {}",
-                                            String::from_utf8_lossy(&output.stderr).trim_end()
-                                        );
-                                    }
-                                    fail_count += 1;
-                                }
-                                Err(err)
-                                    if dep.name == "docker" && docker_desktop_installed_macos() =>
-                                {
-                                    println!(
-                                        "⚠️  Docker Desktop installed – launch it once to finish CLI setup"
-                                    );
-                                    println!("   (could not run verification command: {})", err);
-                                    success_count += 1;
                                 }
                                 Err(err) => {
-                                    println!(
-                                        "❌ Could not verify (failed to run '{}'): {}",
-                                        verify_cmd, err
-                                    );
-                                    fail_count += 1;
+                                    // Special handling for Docker: check if Docker.app exists
+                                    if dep.name == "docker"
+                                        && std::path::Path::new("/Applications/Docker.app").exists()
+                                    {
+                                        println!("✓ (Docker.app installed)");
+                                        println!("   ℹ️  Docker Desktop is installed but CLI tools aren't ready yet.");
+                                        println!("      Launch Docker Desktop and complete setup to activate CLI tools.");
+                                        success_count += 1;
+                                    } else {
+                                        println!(
+                                            "⚠️  Could not verify (failed to run '{}'): {}",
+                                            verify_cmd, err
+                                        );
+                                        println!("   ℹ️  Installation commands succeeded - try 'bv check' to verify");
+                                        // Count as success since install commands worked
+                                        success_count += 1;
+                                    }
                                 }
                             }
                         } else {
@@ -1307,22 +818,165 @@ fn print_syftbox_instructions() {
 }
 
 #[cfg(target_os = "macos")]
-fn docker_desktop_installed_macos() -> bool {
-    if std::path::Path::new("/Applications/Docker.app").exists() {
-        return true;
+fn install_docker_desktop_from_dmg() -> Result<()> {
+    use std::env;
+
+    eprintln!("🔧 install_docker_desktop_from_dmg() starting");
+
+    // Detect architecture
+    let arch = env::consts::ARCH;
+    let download_url = match arch {
+        "aarch64" => "https://desktop.docker.com/mac/main/arm64/Docker.dmg",
+        "x86_64" => "https://desktop.docker.com/mac/main/amd64/Docker.dmg",
+        _ => {
+            eprintln!("❌ Unsupported architecture: {}", arch);
+            return Err(anyhow!("Unsupported architecture: {}", arch).into());
+        }
+    };
+
+    eprintln!("🔧 Downloading Docker Desktop for architecture: {}", arch);
+    println!("   Downloading Docker Desktop for {}...", arch);
+
+    // Create temp directory
+    let temp_dir = env::temp_dir();
+    let dmg_path = temp_dir.join("Docker.dmg");
+    eprintln!("🔧 Download path: {:?}", dmg_path);
+
+    // Download the .dmg
+    let status = Command::new("curl")
+        .arg("-L")
+        .arg("-o")
+        .arg(&dmg_path)
+        .arg(download_url)
+        .arg("--progress-bar")
+        .status()
+        .map_err(|e| {
+            eprintln!("❌ Failed to execute curl: {}", e);
+            anyhow!("Failed to download Docker Desktop: {}", e)
+        })?;
+
+    if !status.success() {
+        eprintln!("❌ curl command failed with status: {:?}", status.code());
+        return Err(anyhow!(
+            "Failed to download Docker Desktop (curl exit code: {:?})",
+            status.code()
+        )
+        .into());
     }
 
-    if let Some(home_dir) = dirs::home_dir() {
-        let user_app = home_dir.join("Applications").join("Docker.app");
-        return user_app.exists();
+    eprintln!("✅ Download completed");
+    println!("   Mounting Docker.dmg...");
+
+    // Mount the .dmg
+    let output = Command::new("hdiutil")
+        .arg("attach")
+        .arg(&dmg_path)
+        .arg("-nobrowse")
+        .output()
+        .map_err(|e| {
+            eprintln!("❌ Failed to execute hdiutil: {}", e);
+            anyhow!("Failed to mount Docker.dmg: {}", e)
+        })?;
+
+    if !output.status.success() {
+        eprintln!(
+            "❌ hdiutil failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return Err(anyhow!(
+            "Failed to mount Docker.dmg: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )
+        .into());
     }
 
-    false
+    // Parse the mount point from hdiutil output
+    let mount_output = String::from_utf8_lossy(&output.stdout);
+    eprintln!("🔧 hdiutil output: {}", mount_output);
+
+    let mount_point = mount_output
+        .lines()
+        .filter(|line| line.contains("/Volumes/"))
+        .next_back()
+        .and_then(|line| line.split_whitespace().last())
+        .ok_or_else(|| {
+            eprintln!("❌ Could not find mount point in hdiutil output");
+            anyhow!("Could not find mount point")
+        })?;
+
+    eprintln!("✅ Mounted at: {}", mount_point);
+    println!("   Copying Docker.app to /Applications...");
+    println!("   (macOS will prompt for your password)");
+
+    // Copy Docker.app to /Applications using osascript for GUI authentication
+    let docker_app_source = format!("{}/Docker.app", mount_point);
+    let docker_app_dest = "/Applications/Docker.app";
+
+    eprintln!("🔧 Source: {}", docker_app_source);
+    eprintln!("🔧 Destination: {}", docker_app_dest);
+
+    // Build AppleScript command to remove old installation and copy new one in a single auth prompt
+    // Combine both operations into one shell script so user only authenticates once
+    let install_script = format!(
+        "do shell script \"rm -rf '{}' ; cp -R '{}' '{}'\" with administrator privileges",
+        docker_app_dest,
+        docker_app_source.replace("'", "'\\''"),
+        docker_app_dest
+    );
+
+    eprintln!("🔧 Installing Docker.app with administrator privileges...");
+    let output = Command::new("osascript")
+        .arg("-e")
+        .arg(&install_script)
+        .output()
+        .map_err(|e| {
+            eprintln!("❌ Failed to execute osascript: {}", e);
+            anyhow!("Failed to install Docker.app: {}", e)
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        eprintln!("❌ osascript failed: {}", stderr);
+
+        // Check if user cancelled
+        if stderr.contains("User canceled") || stderr.contains("-128") {
+            return Err(anyhow!("Installation cancelled by user").into());
+        }
+
+        return Err(anyhow!("Failed to copy Docker.app to /Applications: {}", stderr).into());
+    }
+
+    eprintln!("✅ Docker.app copied successfully");
+
+    // Unmount the .dmg
+    println!("   Cleaning up...");
+    eprintln!("🔧 Unmounting DMG...");
+    let _ = Command::new("hdiutil")
+        .arg("detach")
+        .arg(mount_point)
+        .status();
+
+    // Clean up downloaded .dmg
+    eprintln!("🔧 Removing temporary DMG file...");
+    let _ = fs::remove_file(&dmg_path);
+
+    // Launch Docker Desktop
+    println!("   Launching Docker Desktop...");
+    eprintln!("🔧 Launching Docker Desktop...");
+    let result = Command::new("open").arg(docker_app_dest).spawn();
+
+    match result {
+        Ok(_) => eprintln!("✅ Docker Desktop launched"),
+        Err(e) => eprintln!("⚠️  Could not launch Docker Desktop: {}", e),
+    }
+
+    eprintln!("✅ install_docker_desktop_from_dmg() completed successfully");
+    Ok(())
 }
 
 #[cfg(not(target_os = "macos"))]
-fn docker_desktop_installed_macos() -> bool {
-    false
+fn install_docker_desktop_from_dmg() -> Result<()> {
+    Err(anyhow!("Docker Desktop .dmg installation is only supported on macOS").into())
 }
 
 // Minimal java version detection to respect min_version in deps.yaml
@@ -1357,7 +1011,7 @@ fn parse_java_version(output: &str) -> Option<u32> {
     None
 }
 
-async fn setup_ubuntu() -> Result<()> {
+async fn setup_ubuntu(dependencies: Vec<String>, _force: bool) -> Result<()> {
     if skip_install_commands() {
         println!("(test mode) Skipping Ubuntu/Debian setup commands");
         return Ok(());
@@ -1384,11 +1038,30 @@ async fn setup_ubuntu() -> Result<()> {
     let deps_yaml = include_str!("../../deps.yaml");
     let config: DependencyConfig = serde_yaml::from_str(deps_yaml)?;
 
+    // Filter and reorder dependencies
+    let deps_to_install: Vec<_> = if dependencies.is_empty() {
+        // Install all dependencies, but put docker last
+        let mut all_deps: Vec<_> = config.dependencies.iter().collect();
+        if let Some(docker_idx) = all_deps.iter().position(|d| d.name == "docker") {
+            let docker = all_deps.remove(docker_idx);
+            all_deps.push(docker);
+        }
+        all_deps
+    } else {
+        // Only install specified dependencies
+        let dep_set: HashSet<_> = dependencies.iter().map(|s| s.as_str()).collect();
+        config
+            .dependencies
+            .iter()
+            .filter(|d| dep_set.contains(d.name.as_str()))
+            .collect()
+    };
+
     let mut success_count = 0;
     let mut skip_count = 0;
     let mut fail_count = 0;
 
-    for dep in &config.dependencies {
+    for dep in deps_to_install {
         if let Some(envs) = &dep.environments {
             if let Some(env_cfg) = envs.get("ubuntu") {
                 if env_cfg.skip {
@@ -1521,7 +1194,7 @@ async fn setup_ubuntu() -> Result<()> {
     Ok(())
 }
 
-async fn setup_arch() -> Result<()> {
+async fn setup_arch(dependencies: Vec<String>, _force: bool) -> Result<()> {
     if skip_install_commands() {
         println!("(test mode) Skipping Arch Linux setup commands");
         return Ok(());
@@ -1548,11 +1221,30 @@ async fn setup_arch() -> Result<()> {
     let deps_yaml = include_str!("../../deps.yaml");
     let config: DependencyConfig = serde_yaml::from_str(deps_yaml)?;
 
+    // Filter and reorder dependencies
+    let deps_to_install: Vec<_> = if dependencies.is_empty() {
+        // Install all dependencies, but put docker last
+        let mut all_deps: Vec<_> = config.dependencies.iter().collect();
+        if let Some(docker_idx) = all_deps.iter().position(|d| d.name == "docker") {
+            let docker = all_deps.remove(docker_idx);
+            all_deps.push(docker);
+        }
+        all_deps
+    } else {
+        // Only install specified dependencies
+        let dep_set: HashSet<_> = dependencies.iter().map(|s| s.as_str()).collect();
+        config
+            .dependencies
+            .iter()
+            .filter(|d| dep_set.contains(d.name.as_str()))
+            .collect()
+    };
+
     let mut success_count = 0;
     let mut skip_count = 0;
     let mut fail_count = 0;
 
-    for dep in &config.dependencies {
+    for dep in deps_to_install {
         if let Some(envs) = &dep.environments {
             if let Some(env_cfg) = envs.get("arch") {
                 if env_cfg.skip {
@@ -1677,7 +1369,7 @@ async fn setup_arch() -> Result<()> {
     Ok(())
 }
 
-async fn setup_windows() -> Result<()> {
+async fn setup_windows(dependencies: Vec<String>, _force: bool) -> Result<()> {
     if skip_install_commands() {
         println!("(test mode) Skipping Windows setup commands");
         return Ok(());
@@ -1722,11 +1414,30 @@ async fn setup_windows() -> Result<()> {
     let deps_yaml = include_str!("../../deps.yaml");
     let config: DependencyConfig = serde_yaml::from_str(deps_yaml)?;
 
+    // Filter and reorder dependencies
+    let deps_to_install: Vec<_> = if dependencies.is_empty() {
+        // Install all dependencies, but put docker last
+        let mut all_deps: Vec<_> = config.dependencies.iter().collect();
+        if let Some(docker_idx) = all_deps.iter().position(|d| d.name == "docker") {
+            let docker = all_deps.remove(docker_idx);
+            all_deps.push(docker);
+        }
+        all_deps
+    } else {
+        // Only install specified dependencies
+        let dep_set: HashSet<_> = dependencies.iter().map(|s| s.as_str()).collect();
+        config
+            .dependencies
+            .iter()
+            .filter(|d| dep_set.contains(d.name.as_str()))
+            .collect()
+    };
+
     let mut success_count = 0;
     let mut skip_count = 0;
     let mut fail_count = 0;
 
-    for dep in &config.dependencies {
+    for dep in deps_to_install {
         if let Some(envs) = &dep.environments {
             if let Some(env_cfg) = envs.get("windows") {
                 if env_cfg.skip {
@@ -1908,6 +1619,13 @@ async fn check_and_configure_java_path(is_ci: bool) -> Result<()> {
         return Ok(());
     }
 
+    let assume_yes = env::var("BIOVAULT_SETUP_ASSUME_YES")
+        .map(|value| {
+            let normalized = value.to_ascii_lowercase();
+            normalized == "1" || normalized == "true" || normalized == "yes" || normalized == "y"
+        })
+        .unwrap_or(false);
+
     // Check if Java is installed via brew but not in PATH
     let java_brew_path = check_java_in_brew_not_in_path();
 
@@ -1935,11 +1653,15 @@ async fn check_and_configure_java_path(is_ci: bool) -> Result<()> {
 
         let export_line = format!("export PATH=\"{}:$PATH\"", brew_path);
 
-        if is_ci {
-            // In CI mode, automatically add to PATH configuration
-            println!("   CI mode: Automatically configuring PATH...");
+        if is_ci || assume_yes {
+            if is_ci {
+                println!("   CI mode: Automatically configuring PATH...");
+            } else {
+                println!(
+                    "   Auto-confirming Java PATH configuration (BIOVAULT_SETUP_ASSUME_YES=1)."
+                );
+            }
 
-            // Add to the shell config file
             let mut file = std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
@@ -1950,7 +1672,6 @@ async fn check_and_configure_java_path(is_ci: bool) -> Result<()> {
             println!("   ✓ Added to {}", shell_config);
             println!("   Note: You'll need to restart your shell or run 'source {}' for changes to take effect.", shell_config);
         } else {
-            // Interactive mode - prompt the user
             println!("\n   Would you like to automatically add Java to your PATH? [Y/n]: ");
             io::stdout().flush()?;
 
@@ -1959,7 +1680,6 @@ async fn check_and_configure_java_path(is_ci: bool) -> Result<()> {
             let answer = input.trim().to_lowercase();
 
             if answer.is_empty() || answer == "y" || answer == "yes" {
-                // Add to the shell config file
                 let mut file = std::fs::OpenOptions::new()
                     .create(true)
                     .append(true)
@@ -2059,6 +1779,23 @@ fn find_brew_command() -> Option<String> {
 #[cfg(not(target_os = "macos"))]
 fn find_brew_command() -> Option<String> {
     None
+}
+
+fn ensure_user_space_docker_path() -> String {
+    let current_path = env::var("PATH").unwrap_or_default();
+
+    if let Ok(home) = env::var("HOME") {
+        let entry = format!("{}/.docker/bin", home);
+        if current_path.split(':').any(|segment| segment == entry) {
+            current_path
+        } else if current_path.is_empty() {
+            entry
+        } else {
+            format!("{}:{}", entry, current_path)
+        }
+    } else {
+        current_path
+    }
 }
 
 #[cfg(test)]
@@ -2218,14 +1955,14 @@ mod tests {
     #[cfg(target_os = "macos")]
     async fn setup_ubuntu_returns_ok_when_apt_missing() {
         let _guard = SkipInstallGuard::new();
-        super::setup_ubuntu().await.unwrap();
+        super::setup_ubuntu(vec![], false).await.unwrap();
     }
 
     #[tokio::test]
     #[cfg(target_os = "macos")]
     async fn setup_arch_returns_ok_when_pacman_missing() {
         let _guard = SkipInstallGuard::new();
-        super::setup_arch().await.unwrap();
+        super::setup_arch(vec![], false).await.unwrap();
     }
 
     #[test]
@@ -2241,7 +1978,7 @@ mod tests {
     #[tokio::test]
     async fn setup_google_colab_runs_without_panic() {
         let _guard = SkipInstallGuard::new();
-        super::setup_google_colab().await.unwrap();
+        super::setup_google_colab(vec![], false).await.unwrap();
     }
 
     #[tokio::test]
@@ -2255,7 +1992,7 @@ mod tests {
             .map(|s| s.success())
             .unwrap_or(false);
         if !brew_exists {
-            super::setup_macos().await.unwrap();
+            super::setup_macos(vec![], false).await.unwrap();
         }
     }
 
@@ -2267,7 +2004,7 @@ mod tests {
     )]
     async fn setup_windows_returns_ok_when_tools_missing() {
         let _guard = SkipInstallGuard::new();
-        super::setup_windows().await.unwrap();
+        super::setup_windows(vec![], false).await.unwrap();
     }
 
     #[tokio::test]
@@ -2279,7 +2016,7 @@ mod tests {
     async fn setup_execute_colab_branch() {
         let _guard = SkipInstallGuard::new();
         std::env::set_var("COLAB_RELEASE_TAG", "1");
-        super::execute().await.unwrap();
+        super::execute(vec![], false).await.unwrap();
         std::env::remove_var("COLAB_RELEASE_TAG");
     }
 

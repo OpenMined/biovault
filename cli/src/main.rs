@@ -427,7 +427,15 @@ enum Commands {
     },
 
     #[command(about = "Setup environment for known systems (e.g., Google Colab)")]
-    Setup,
+    Setup {
+        #[arg(
+            help = "Specific dependencies to install (java, docker, nextflow, syftbox, uv). If not specified, installs all."
+        )]
+        dependencies: Vec<String>,
+
+        #[arg(long, help = "Force reinstallation even if already installed")]
+        force: bool,
+    },
 
     #[command(about = "Project management commands")]
     Project {
@@ -1445,8 +1453,11 @@ async fn async_main_with(cli: Cli) -> Result<()> {
         Commands::Check { json } => {
             commands::check::execute(json).await?;
         }
-        Commands::Setup => {
-            commands::setup::execute().await?;
+        Commands::Setup {
+            dependencies,
+            force,
+        } => {
+            commands::setup::execute(dependencies, force).await?;
         }
         Commands::Project { command } => match command {
             ProjectCommands::Create {
