@@ -1777,6 +1777,7 @@ fn find_brew_command() -> Option<String> {
 }
 
 #[cfg(not(target_os = "macos"))]
+#[allow(dead_code)]
 fn find_brew_command() -> Option<String> {
     None
 }
