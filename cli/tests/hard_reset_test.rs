@@ -132,19 +132,46 @@ mod hard_reset_tests {
 
     // Safety check to prevent accidental deletion of real ~/.biovault
     fn is_safe_test_path(path: &Path) -> bool {
-        // Path must be in a temp directory or contain "test" or "tmp"
         let path_str = path.to_string_lossy().to_lowercase();
-
-        // Handle both forward and backslashes (Windows uses backslashes)
         let normalized = path_str.replace('\\', "/");
 
-        normalized.contains("/tmp/")
+        // First check: Is this path in common temp directories?
+        let is_temp_path = normalized.contains("/tmp/")
             || normalized.contains("/temp/")
-            || normalized.contains("test")
             || normalized.contains("tempfile")
             || normalized.contains("/var/folders/") // macOS temp dirs
             || normalized.contains("appdata/local/temp") // Windows temp dirs
-            || path_str.contains(".tmp") // Rust tempfile crate pattern
+            || path_str.contains(".tmp"); // Rust tempfile crate pattern
+
+        if is_temp_path {
+            return true;
+        }
+
+        // Second check: Specifically reject paths in the user's ACTUAL home directory
+        // that don't look like test directories
+        if let Some(home) = dirs::home_dir() {
+            if path.starts_with(&home) {
+                // Check if it's in a temp or test subdirectory of home
+                if let Ok(rel) = path.strip_prefix(&home) {
+                    let rel_str = rel.to_string_lossy().to_lowercase();
+                    // Allow if it's explicitly in a temp/test subdir
+                    if rel_str.contains("/tmp/")
+                        || rel_str.contains("/temp/")
+                        || rel_str.contains(".tmp")
+                        || rel_str.starts_with("tmp")
+                        || rel_str.starts_with("temp")
+                    {
+                        return true;
+                    }
+                }
+                // It's in the user's home but not in a safe subdir - REJECT
+                return false;
+            }
+        }
+
+        // Third check: For paths NOT in user's home, check for "test" pattern
+        // This allows test paths in other locations like /home/user/test_biovault
+        normalized.contains("test")
     }
 
     fn delete_path_safely(path: &Path) -> Result<()> {
