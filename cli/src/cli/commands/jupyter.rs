@@ -7,6 +7,7 @@ use std::process::Command;
 use serde_json::Value;
 use std::env;
 use std::fs;
+use std::io::{BufRead, BufReader};
 use std::time::{Duration, SystemTime};
 use tokio::net::TcpStream;
 
@@ -110,7 +111,7 @@ fn parse_runtime_file(path: &Path) -> Option<(JupyterRuntimeInfo, Option<i32>)> 
     Some((JupyterRuntimeInfo { port, url, token }, pid))
 }
 
-fn find_runtime_info(pid: u32) -> Option<JupyterRuntimeInfo> {
+fn find_runtime_info(_pid: u32) -> Option<JupyterRuntimeInfo> {
     let mut latest: Option<(SystemTime, JupyterRuntimeInfo)> = None;
 
     for dir in candidate_runtime_dirs() {
@@ -133,17 +134,13 @@ fn find_runtime_info(pid: u32) -> Option<JupyterRuntimeInfo> {
                     continue;
                 }
 
-                let (info, info_pid) = match parse_runtime_file(&path) {
+                let (info, _info_pid) = match parse_runtime_file(&path) {
                     Some(result) => result,
                     None => continue,
                 };
 
-                if let Some(info_pid) = info_pid {
-                    if info_pid as u32 == pid {
-                        return Some(info);
-                    }
-                }
-
+                // Instead of matching exact PID (which fails with uv run wrapper),
+                // find the most recent jpserver file within the last 2 minutes
                 if let Ok(metadata) = entry.metadata() {
                     if let Ok(modified) = metadata.modified() {
                         if let Ok(elapsed) = modified.elapsed() {
@@ -163,6 +160,41 @@ fn find_runtime_info(pid: u32) -> Option<JupyterRuntimeInfo> {
     }
 
     latest.map(|(_, info)| info)
+}
+
+/// Parse Jupyter URL from output line like:
+/// "[I 2025-10-22 22:57:28.681 ServerApp] http://localhost:8888/lab?token=abc123"
+fn parse_jupyter_url_from_line(line: &str) -> Option<(i32, String, String)> {
+    // Look for lines containing "http://localhost:" or "http://127.0.0.1:"
+    if let Some(start) = line.find("http://") {
+        let url_part = &line[start..];
+        // Extract URL until whitespace or end of line
+        let url = url_part.split_whitespace().next()?;
+
+        // Extract port from "http://localhost:8888" or "http://127.0.0.1:8888"
+        let port = if let Some(port_start) = url.find("://localhost:").or(url.find("://127.0.0.1:"))
+        {
+            let after_host = &url[port_start + 13..]; // Skip "://localhost:" or "://127.0.0.1:"
+            after_host
+                .split(&['/', '?'][..])
+                .next()?
+                .parse::<i32>()
+                .ok()?
+        } else {
+            8888 // Default port
+        };
+
+        // Extract token from "?token=abc123"
+        let token = if let Some(token_start) = url.find("?token=") {
+            let after_token = &url[token_start + 7..]; // Skip "?token="
+            after_token.split('&').next()?.to_string()
+        } else {
+            return None;
+        };
+
+        return Some((port, url.to_string(), token));
+    }
+    None
 }
 
 async fn wait_for_server_ready(port: i32) -> Result<()> {
@@ -282,8 +314,38 @@ pub async fn start(project_path: &str, python_version: &str) -> Result<()> {
     println!("✅ Jupyter Lab started (PID: {})", pid);
     println!("   Waiting for server to start...");
 
+    // Take stderr to read in background
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| anyhow!("Failed to capture stderr"))?;
+
+    // Spawn background thread to parse stderr for token
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<JupyterRuntimeInfo>(1);
+    std::thread::spawn(move || {
+        let reader = BufReader::new(stderr);
+        for line in reader.lines().map_while(|r| r.ok()) {
+            eprintln!("{}", line); // Still print to stderr
+            if let Some((port, url, token)) = parse_jupyter_url_from_line(&line) {
+                let _ = tx.blocking_send(JupyterRuntimeInfo {
+                    port: Some(port),
+                    url: Some(url),
+                    token: Some(token),
+                });
+                break;
+            }
+        }
+    });
+
     let mut runtime_info: Option<JupyterRuntimeInfo> = None;
     for _ in 0..60 {
+        // Try to get runtime info from stderr parsing
+        if let Ok(info) = rx.try_recv() {
+            runtime_info = Some(info);
+            break;
+        }
+
+        // Also try jpserver files as fallback
         if let Some(info) = find_runtime_info(pid) {
             runtime_info = Some(info);
             break;
