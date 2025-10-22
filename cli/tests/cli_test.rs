@@ -205,39 +205,38 @@ fn test_run_dry_run_cli() {
     let tmp = TempDir::new().unwrap();
     // Set explicit BIOVAULT_HOME for templates
     let bv_home = tmp.path().join(".bvhome");
-    fs::create_dir_all(bv_home.join("env/test_tpl")).unwrap();
-    fs::write(bv_home.join("env/test_tpl/template.nf"), "// template").unwrap();
-    fs::write(bv_home.join("env/test_tpl/nextflow.config"), "// config").unwrap();
+    fs::create_dir_all(bv_home.join("env/dynamic-nextflow")).unwrap();
+    // Copy embedded template
+    let template_content = include_str!("../src/templates/dynamic/template.nf");
+    fs::write(
+        bv_home.join("env/dynamic-nextflow/template.nf"),
+        template_content,
+    )
+    .unwrap();
+    fs::write(
+        bv_home.join("env/dynamic-nextflow/nextflow.config"),
+        "process.executor = 'local'\n",
+    )
+    .unwrap();
 
-    // Prepare minimal project
+    // Prepare minimal dynamic project with optional input
     let proj = tmp.path().join("proj");
     fs::create_dir_all(&proj).unwrap();
     fs::write(
         proj.join("project.yaml"),
-        "name: p\nauthor: a\nworkflow: main.nf\ntemplate: test_tpl\n",
+        "name: p\nauthor: a\nworkflow: workflow.nf\ntemplate: dynamic-nextflow\ninputs:\n  - name: data\n    type: File?\n",
     )
     .unwrap();
-    fs::write(proj.join("workflow.nf"), "// wf").unwrap();
-    fs::write(
-        proj.join("participants.yaml"),
-        "participants:\n  X:\n    ref_version: GRCh38\n",
-    )
-    .unwrap();
+    fs::write(proj.join("workflow.nf"), "workflow USER { }").unwrap();
 
     let mut cmd = Command::cargo_bin("bv").unwrap();
     cmd.env("BIOVAULT_HOME", &bv_home)
         .arg("run")
-        .arg(proj.to_string_lossy().to_string())
-        .arg(
-            proj.join("participants.yaml#participants.X")
-                .to_string_lossy()
-                .to_string(),
-        )
         .arg("--dry-run")
-        .arg("--template=test_tpl")
+        .arg(proj.to_string_lossy().to_string())
         .assert()
         .success()
-        .stdout(predicate::str::contains("Nextflow command:"));
+        .stdout(predicate::str::contains("Dry run - would execute:"));
 }
 
 // Removed test_check_command: behavior is covered by OS/nightly installation tests.

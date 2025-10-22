@@ -206,10 +206,39 @@ pub async fn execute(email: Option<&str>, quiet: bool) -> Result<()> {
             sheet_nextflow_config_path
         );
 
+        // Copy dynamic templates
+        let dynamic_dir = env_dir.join("dynamic-nextflow");
+        if !dynamic_dir.exists() {
+            fs::create_dir_all(&dynamic_dir)?;
+            info!("Created dynamic template directory: {:?}", dynamic_dir);
+        }
+
+        // Copy dynamic template.nf
+        let dynamic_template_nf_content = include_str!("../../templates/dynamic/template.nf");
+        let dynamic_template_nf_path = dynamic_dir.join("template.nf");
+        fs::write(&dynamic_template_nf_path, dynamic_template_nf_content)?;
+        info!(
+            "Created dynamic template.nf at: {:?}",
+            dynamic_template_nf_path
+        );
+
+        // Copy dynamic nextflow.config (minimal config)
+        let dynamic_nextflow_config_content = "process.executor = 'local'\n";
+        let dynamic_nextflow_config_path = dynamic_dir.join("nextflow.config");
+        fs::write(
+            &dynamic_nextflow_config_path,
+            dynamic_nextflow_config_content,
+        )?;
+        info!(
+            "Created dynamic nextflow.config at: {:?}",
+            dynamic_nextflow_config_path
+        );
+
         println!("✓ Nextflow templates installed:");
         println!("  - Default templates: {}", default_dir.display());
         println!("  - SNP templates: {}", snp_dir.display());
         println!("  - Sheet templates: {}", sheet_dir.display());
+        println!("  - Dynamic templates: {}", dynamic_dir.display());
 
         // Initialize SyftBox RPC folders for messaging if SyftBox is configured
         match config.get_syftbox_data_dir() {

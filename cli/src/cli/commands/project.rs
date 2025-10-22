@@ -1,12 +1,26 @@
 use crate::cli::examples;
 use crate::error::Result;
+use crate::project_spec::{self, InputSpec, OutputSpec, ParameterSpec, ProjectSpec};
 use crate::types::InboxSubmission;
 use colored::Colorize;
-use dialoguer::{theme::ColorfulTheme, Confirm, MultiSelect, Select};
+use dialoguer::{theme::ColorfulTheme, Confirm, Input, MultiSelect, Select};
+use serde_yaml::Value;
+use std::collections::HashSet;
 use std::fs;
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use walkdir::WalkDir;
+
+trait DialoguerResultExt<T> {
+    fn cli_result(self) -> Result<T>;
+}
+
+impl<T> DialoguerResultExt<T> for std::result::Result<T, dialoguer::Error> {
+    fn cli_result(self) -> Result<T> {
+        self.map_err(|err| crate::error::Error::Anyhow(anyhow::anyhow!(err)))
+    }
+}
 
 pub fn list_examples() -> Result<()> {
     let available = examples::get_available_examples()?;
@@ -30,10 +44,38 @@ pub fn list_examples() -> Result<()> {
     Ok(())
 }
 
+pub fn view(path: Option<String>) -> Result<()> {
+    let project_dir = path.unwrap_or_else(|| ".".to_string());
+    let project_path = Path::new(&project_dir);
+
+    if !project_path.exists() {
+        return Err(crate::error::Error::Anyhow(anyhow::anyhow!(
+            "Project directory does not exist: {}",
+            project_dir
+        )));
+    }
+
+    let spec_path = project_path.join("project.yaml");
+    if !spec_path.exists() {
+        return Err(crate::error::Error::Anyhow(anyhow::anyhow!(
+            "project.yaml not found in {}",
+            project_dir
+        )));
+    }
+
+    let spec = project_spec::ProjectSpec::load(&spec_path)?;
+    print_project_view(&spec, &project_dir);
+
+    Ok(())
+}
+
 pub async fn create(
     name: Option<String>,
     folder: Option<String>,
     example: Option<String>,
+    spec: Option<String>,
+    input_to: Option<String>,
+    output_from: Option<String>,
 ) -> Result<()> {
     // Determine which example to use
     let selected_example = if let Some(ex) = example {
@@ -52,10 +94,26 @@ pub async fn create(
     };
 
     // Determine project name
+    let mut prompted_for_name = false;
     let project_name = if let Some(ref ex) = selected_example {
         ex.clone()
     } else if let Some(n) = name {
         n
+    } else if std::io::stdin().is_terminal() {
+        prompted_for_name = true;
+        Input::with_theme(&ColorfulTheme::default())
+            .with_prompt("Project name")
+            .validate_with(|input: &String| {
+                if input.trim().is_empty() {
+                    Err("Project name cannot be empty")
+                } else {
+                    Ok(())
+                }
+            })
+            .interact_text()
+            .cli_result()?
+            .trim()
+            .to_string()
     } else {
         println!("Enter project name:");
         let mut input = String::new();
@@ -82,10 +140,11 @@ pub async fn create(
         examples::write_example_to_directory(example_name, project_path)
             .map_err(crate::error::Error::Anyhow)?;
 
-        println!(
-            "✅ Created project '{}' in {} from example '{}'",
-            project_name, project_folder, example_name
-        );
+        // Load the generated spec to display summary
+        let spec_path = project_path.join("project.yaml");
+        let spec = ProjectSpec::load(&spec_path)?;
+        println!("   (from example '{}')", example_name);
+        print_project_summary(&spec, &project_folder);
     } else {
         // Load user email from config (if available)
         let email = match crate::config::Config::load() {
@@ -93,34 +152,285 @@ pub async fn create(
             Err(_) => std::env::var("SYFTBOX_EMAIL").unwrap_or_else(|_| "".to_string()),
         };
 
-        // Write project.yaml from template
-        let tmpl = include_str!("../../templates/project.yaml");
-        let project_yaml = tmpl
-            .replace("{project_name}", &project_name)
-            .replace("{email}", &email);
-        fs::write(project_path.join("project.yaml"), project_yaml)?;
+        let author_default = if email.trim().is_empty() {
+            "user@example.com".to_string()
+        } else {
+            email.trim().to_string()
+        };
 
-        // Write workflow.nf from template (scaffold)
-        let workflow_tmpl = include_str!("../../templates/workflow.nf");
-        fs::write(project_path.join("workflow.nf"), workflow_tmpl)?;
+        // Only use interactive wizard if we have a terminal AND not in CI/non-interactive mode
+        let terminal_available = std::io::stdin().is_terminal()
+            && std::io::stdout().is_terminal()
+            && std::env::var("CI").is_err()
+            && std::env::var("BIOVAULT_NON_INTERACTIVE").is_err();
 
-        // Ensure assets directory exists for scaffold
-        fs::create_dir_all(project_path.join("assets"))?;
+        // Load prepopulated inputs/outputs for pipeline composition
+        // --output_from: new project's inputs FROM other project's outputs
+        let prepopulated_inputs = if let Some(ref output_from_path) = output_from {
+            let output_from_spec_path = Path::new(output_from_path).join("project.yaml");
+            if !output_from_spec_path.exists() {
+                return Err(crate::error::Error::Anyhow(anyhow::anyhow!(
+                    "Cannot load --output_from: project.yaml not found in {}",
+                    output_from_path
+                )));
+            }
+            let source_spec = project_spec::ProjectSpec::load(&output_from_spec_path)?;
+            Some(source_spec.outputs)
+        } else {
+            None
+        };
 
-        println!(
-            "✅ Created project '{}' in {}",
-            project_name, project_folder
-        );
-        println!("   - project.yaml");
-        println!("   - workflow.nf");
-        println!("   - assets/ (empty)");
-        println!("\nNext steps:");
-        println!("   1. cd {}", project_folder);
-        println!("   2. Edit workflow.nf in your project");
-        println!("   3. Run with: bv run . <participants>");
+        // --input_to: new project's outputs TO other project's inputs
+        let prepopulated_outputs = if let Some(ref input_to_path) = input_to {
+            let input_to_spec_path = Path::new(input_to_path).join("project.yaml");
+            if !input_to_spec_path.exists() {
+                return Err(crate::error::Error::Anyhow(anyhow::anyhow!(
+                    "Cannot load --input_to: project.yaml not found in {}",
+                    input_to_path
+                )));
+            }
+            let source_spec = project_spec::ProjectSpec::load(&input_to_spec_path)?;
+            Some(source_spec.inputs)
+        } else {
+            None
+        };
+
+        let spec_data = if let Some(spec_path) = spec {
+            let spec_path = Path::new(&spec_path);
+            let spec_loaded = project_spec::ProjectSpec::load(spec_path)?;
+            project_spec::scaffold_from_spec(spec_loaded, project_path)?
+        } else if terminal_available {
+            let wizard_spec = run_project_spec_wizard(
+                &project_name,
+                &author_default,
+                prompted_for_name,
+                prepopulated_inputs,
+                prepopulated_outputs,
+            )?;
+            project_spec::scaffold_from_spec(wizard_spec, project_path)?
+        } else {
+            // Non-interactive fallback - use prepopulated values if available
+            let fallback_inputs = if let Some(ref prepop) = prepopulated_inputs {
+                prepop
+                    .iter()
+                    .map(|output| InputSpec {
+                        name: output.name.clone(),
+                        raw_type: output.raw_type.clone(),
+                        description: output.description.clone(),
+                        format: output.format.clone(),
+                        path: output.path.clone(),
+                        mapping: None,
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+
+            let fallback_outputs = if let Some(ref prepop) = prepopulated_outputs {
+                prepop
+                    .iter()
+                    .map(|input| OutputSpec {
+                        name: input.name.clone(),
+                        raw_type: input.raw_type.clone(),
+                        description: input.description.clone(),
+                        format: input.format.clone(),
+                        path: input.path.clone(),
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+
+            let fallback = ProjectSpec {
+                name: project_name.clone(),
+                author: author_default.clone(),
+                workflow: "workflow.nf".to_string(),
+                template: Some("dynamic-nextflow".to_string()),
+                version: Some("0.1.0".to_string()),
+                assets: Vec::new(),
+                parameters: Vec::new(),
+                inputs: fallback_inputs,
+                outputs: fallback_outputs,
+            };
+            project_spec::scaffold_from_spec(fallback, project_path)?
+        };
+        print_project_summary(&spec_data, &project_folder);
     }
 
     Ok(())
+}
+
+fn print_project_summary(spec: &ProjectSpec, folder: &str) {
+    println!("\n✅ Created project '{}'", spec.name.bold());
+    println!("   Location: {}\n", folder);
+
+    // ASCII diagram
+    let max_width = 60;
+
+    // Helper to calculate visual width (emojis = 2 columns)
+    let visual_width = |s: &str| -> usize {
+        s.chars()
+            .map(|c| if c as u32 > 0x1F300 { 2 } else { 1 })
+            .sum()
+    };
+
+    println!("┌{}┐", "─".repeat(max_width - 2));
+    println!("│{:^width$}│", spec.name, width = max_width - 2);
+    println!("├{}┤", "─".repeat(max_width - 2));
+
+    // Inputs
+    if !spec.inputs.is_empty() {
+        let count_str = spec.inputs.len().to_string();
+        let header = format!("│ 📥 Inputs ({})", count_str);
+        let padding = max_width - visual_width(&header) - 1;
+        println!("{}{}│", header, " ".repeat(padding));
+        for input in &spec.inputs {
+            let line = format!("│   • {}: {}", input.name, input.raw_type);
+            let padding = max_width - visual_width(&line) - 1;
+            println!("{}{}│", line, " ".repeat(padding));
+        }
+    } else {
+        let line = "│ 📥 Inputs: none";
+        let padding = max_width - visual_width(line) - 1;
+        println!("{}{}│", line, " ".repeat(padding));
+    }
+
+    println!("│{}│", " ".repeat(max_width - 2));
+
+    // Outputs
+    if !spec.outputs.is_empty() {
+        let count_str = spec.outputs.len().to_string();
+        let header = format!("│ 📤 Outputs ({})", count_str);
+        let padding = max_width - visual_width(&header) - 1;
+        println!("{}{}│", header, " ".repeat(padding));
+        for output in &spec.outputs {
+            let line = format!("│   • {}: {}", output.name, output.raw_type);
+            let padding = max_width - visual_width(&line) - 1;
+            println!("{}{}│", line, " ".repeat(padding));
+        }
+    } else {
+        let line = "│ 📤 Outputs: none";
+        let padding = max_width - visual_width(line) - 1;
+        println!("{}{}│", line, " ".repeat(padding));
+    }
+
+    if !spec.parameters.is_empty() {
+        println!("│{}│", " ".repeat(max_width - 2));
+        let count_str = spec.parameters.len().to_string();
+        let header = format!("│ ⚙️  Parameters ({})", count_str);
+        let padding = max_width - visual_width(&header) - 1;
+        println!("{}{}│", header, " ".repeat(padding));
+        for param in &spec.parameters {
+            let line = format!("│   • {}: {}", param.name, param.raw_type);
+            let padding = max_width - visual_width(&line) - 1;
+            println!("{}{}│", line, " ".repeat(padding));
+        }
+    }
+
+    println!("└{}┘\n", "─".repeat(max_width - 2));
+
+    // File TOC
+    println!("📁 Files:");
+    println!("   ├─ project.yaml");
+    println!("   ├─ workflow.nf");
+    if spec.assets.is_empty() {
+        println!("   └─ assets/ (empty)");
+    } else {
+        println!(
+            "   └─ assets/ ({} item{})",
+            spec.assets.len(),
+            if spec.assets.len() == 1 { "" } else { "s" }
+        );
+    }
+
+    println!("\n💡 Next steps:");
+    println!("   1. cd {}", folder);
+    println!("   2. Edit workflow.nf to implement your logic");
+    println!("   3. Run with: bv run . --<input_name> <path>");
+}
+
+fn print_project_view(spec: &ProjectSpec, folder: &str) {
+    println!("\n📦 Project: {}", spec.name.bold());
+    println!("   Location: {}\n", folder);
+
+    // ASCII diagram
+    let max_width = 60;
+
+    // Helper to calculate visual width (emojis = 2 columns)
+    let visual_width = |s: &str| -> usize {
+        s.chars()
+            .map(|c| if c as u32 > 0x1F300 { 2 } else { 1 })
+            .sum()
+    };
+
+    println!("┌{}┐", "─".repeat(max_width - 2));
+    println!("│{:^width$}│", spec.name, width = max_width - 2);
+    println!("├{}┤", "─".repeat(max_width - 2));
+
+    // Inputs
+    if !spec.inputs.is_empty() {
+        let count_str = spec.inputs.len().to_string();
+        let header = format!("│ 📥 Inputs ({})", count_str);
+        let padding = max_width - visual_width(&header) - 1;
+        println!("{}{}│", header, " ".repeat(padding));
+        for input in &spec.inputs {
+            let line = format!("│   • {}: {}", input.name, input.raw_type);
+            let padding = max_width - visual_width(&line) - 1;
+            println!("{}{}│", line, " ".repeat(padding));
+        }
+    } else {
+        let line = "│ 📥 Inputs: none";
+        let padding = max_width - visual_width(line) - 1;
+        println!("{}{}│", line, " ".repeat(padding));
+    }
+
+    println!("│{}│", " ".repeat(max_width - 2));
+
+    // Outputs
+    if !spec.outputs.is_empty() {
+        let count_str = spec.outputs.len().to_string();
+        let header = format!("│ 📤 Outputs ({})", count_str);
+        let padding = max_width - visual_width(&header) - 1;
+        println!("{}{}│", header, " ".repeat(padding));
+        for output in &spec.outputs {
+            let line = format!("│   • {}: {}", output.name, output.raw_type);
+            let padding = max_width - visual_width(&line) - 1;
+            println!("{}{}│", line, " ".repeat(padding));
+        }
+    } else {
+        let line = "│ 📤 Outputs: none";
+        let padding = max_width - visual_width(line) - 1;
+        println!("{}{}│", line, " ".repeat(padding));
+    }
+
+    if !spec.parameters.is_empty() {
+        println!("│{}│", " ".repeat(max_width - 2));
+        let count_str = spec.parameters.len().to_string();
+        let header = format!("│ ⚙️  Parameters ({})", count_str);
+        let padding = max_width - visual_width(&header) - 1;
+        println!("{}{}│", header, " ".repeat(padding));
+        for param in &spec.parameters {
+            let line = format!("│   • {}: {}", param.name, param.raw_type);
+            let padding = max_width - visual_width(&line) - 1;
+            println!("{}{}│", line, " ".repeat(padding));
+        }
+    }
+
+    println!("└{}┘\n", "─".repeat(max_width - 2));
+
+    // File TOC
+    println!("📁 Files:");
+    println!("   ├─ project.yaml");
+    println!("   ├─ workflow.nf");
+    if spec.assets.is_empty() {
+        println!("   └─ assets/ (empty)");
+    } else {
+        println!(
+            "   └─ assets/ ({} item{})",
+            spec.assets.len(),
+            if spec.assets.len() == 1 { "" } else { "s" }
+        );
+    }
 }
 
 pub async fn list(show_all: bool, show_full: bool) -> Result<()> {
@@ -195,6 +505,383 @@ pub async fn list(show_all: bool, show_full: bool) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn prompt_non_empty(
+    prompt: &str,
+    default: Option<&str>,
+    seen: &mut HashSet<String>,
+) -> Result<String> {
+    let theme = ColorfulTheme::default();
+    loop {
+        let mut builder = Input::with_theme(&theme).with_prompt(prompt);
+        if let Some(d) = default {
+            builder = builder.default(d.to_string());
+        }
+        let value: String = builder.interact_text().cli_result()?;
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            println!("Value cannot be empty.");
+            continue;
+        }
+        if !seen.insert(trimmed.to_string()) {
+            println!("'{}' already used, choose another.", trimmed);
+            continue;
+        }
+        return Ok(trimmed.to_string());
+    }
+}
+
+fn prompt_optional_string(prompt: &str) -> Result<Option<String>> {
+    let theme = ColorfulTheme::default();
+    let input: String = Input::with_theme(&theme)
+        .with_prompt(prompt)
+        .allow_empty(true)
+        .interact_text()
+        .cli_result()?;
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(trimmed.to_string()))
+    }
+}
+
+fn run_project_spec_wizard(
+    project_name: &str,
+    default_author: &str,
+    skip_name_prompt: bool,
+    prepopulated_inputs: Option<Vec<OutputSpec>>,
+    prepopulated_outputs: Option<Vec<InputSpec>>,
+) -> Result<ProjectSpec> {
+    let theme = ColorfulTheme::default();
+
+    println!("\n🧪 Project wizard — let's describe your Nextflow wrapper");
+
+    let name: String = if skip_name_prompt {
+        project_name.to_string()
+    } else {
+        Input::with_theme(&theme)
+            .with_prompt("Project name (identifier)")
+            .default(project_name.to_string())
+            .interact_text()
+            .cli_result()?
+    };
+
+    let author: String = Input::with_theme(&theme)
+        .with_prompt("Author (email)")
+        .default(default_author.to_string())
+        .interact_text()
+        .cli_result()?;
+
+    let workflow: String = Input::with_theme(&theme)
+        .with_prompt("Workflow script filename (filepath)")
+        .default("workflow.nf".to_string())
+        .interact_text()
+        .cli_result()?;
+
+    let version: Option<String> = {
+        let value: String = Input::with_theme(&theme)
+            .with_prompt("Project version (semver)")
+            .default("0.1.0".to_string())
+            .interact_text()
+            .cli_result()?;
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    };
+
+    println!("\n📥 Inputs define data this workflow receives");
+    println!("Supported types: String, Bool, File, Directory, ParticipantSheet, GenotypeRecord, List[...], Map[String, ...], Optional(?)");
+
+    // Prepopulate inputs from --output_from (convert OutputSpec -> InputSpec)
+    let mut inputs = if let Some(ref prepop) = prepopulated_inputs {
+        println!(
+            "✨ Prepopulated {} input(s) from source project's outputs",
+            prepop.len()
+        );
+        prepop
+            .iter()
+            .map(|output| InputSpec {
+                name: output.name.clone(),
+                raw_type: output.raw_type.clone(),
+                description: output.description.clone(),
+                format: output.format.clone(),
+                path: output.path.clone(),
+                mapping: None, // Outputs don't have mapping
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let mut seen_inputs: HashSet<String> = inputs.iter().map(|i| i.name.clone()).collect();
+    while Confirm::with_theme(&theme)
+        .with_prompt(if inputs.is_empty() {
+            "Add an input?"
+        } else {
+            "Add another input?"
+        })
+        .default(inputs.is_empty())
+        .interact()
+        .cli_result()?
+    {
+        let name = prompt_non_empty(
+            "Input identifier (key name, e.g. 'rows', 'files')",
+            None,
+            &mut seen_inputs,
+        )?;
+        let raw_type = loop {
+            let ty: String = Input::with_theme(&theme)
+                .with_prompt("Input type (e.g. List[GenotypeRecord])")
+                .interact_text()
+                .cli_result()?;
+            match project_spec::validate_type_expr(&ty) {
+                Ok(_) => break ty.trim().to_string(),
+                Err(e) => {
+                    println!("{}", format!("Invalid type: {}", e).red());
+                }
+            }
+        };
+        let description = prompt_optional_string("Description (optional)")?;
+        let format = if raw_type.contains("ParticipantSheet") {
+            prompt_optional_string("Format hint (optional, e.g. csv, tsv)")?
+        } else {
+            None
+        };
+        let path = prompt_optional_string("Default path/pattern (optional filepath)")?;
+
+        inputs.push(InputSpec {
+            name,
+            raw_type,
+            description,
+            format,
+            path,
+            mapping: None,
+        });
+    }
+
+    println!("\n📤 Outputs define data this workflow produces");
+
+    // Prepopulate outputs from --input_to (convert InputSpec -> OutputSpec)
+    let mut outputs = if let Some(ref prepop) = prepopulated_outputs {
+        println!(
+            "✨ Prepopulated {} output(s) from source project's inputs",
+            prepop.len()
+        );
+        prepop
+            .iter()
+            .map(|input| OutputSpec {
+                name: input.name.clone(),
+                raw_type: input.raw_type.clone(),
+                description: input.description.clone(),
+                format: input.format.clone(),
+                path: input.path.clone(),
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let mut seen_outputs: HashSet<String> = outputs.iter().map(|o| o.name.clone()).collect();
+    while Confirm::with_theme(&theme)
+        .with_prompt(if outputs.is_empty() {
+            "Add an output?"
+        } else {
+            "Add another output?"
+        })
+        .default(outputs.is_empty())
+        .interact()
+        .cli_result()?
+    {
+        let name = prompt_non_empty(
+            "Output identifier (key name, e.g. 'scored_sheet')",
+            None,
+            &mut seen_outputs,
+        )?;
+        let raw_type = loop {
+            let ty: String = Input::with_theme(&theme)
+                .with_prompt("Output type (e.g. File, ParticipantSheet)")
+                .interact_text()
+                .cli_result()?;
+            match project_spec::validate_type_expr(&ty) {
+                Ok(_) => break ty.trim().to_string(),
+                Err(e) => {
+                    println!("{}", format!("Invalid type: {}", e).red());
+                }
+            }
+        };
+        let description = prompt_optional_string("Description (optional)")?;
+        let default_path = format!("results/{}", name.replace(':', "_"));
+        let path = {
+            let value: String = Input::with_theme(&theme)
+                .with_prompt("Output filepath (relative to results/)")
+                .default(default_path)
+                .interact_text()
+                .cli_result()?;
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        };
+        let format = if raw_type.contains("ParticipantSheet") {
+            prompt_optional_string("Format hint (optional, e.g. csv, tsv)")?
+        } else {
+            None
+        };
+
+        outputs.push(OutputSpec {
+            name,
+            raw_type,
+            description,
+            format,
+            path,
+        });
+    }
+
+    println!("\n⚙️  Parameters define runtime configuration toggles (optional)");
+    println!("These are exposed as context.params.* in your workflow");
+
+    let mut parameters = Vec::new();
+    let mut seen_params = HashSet::new();
+    if Confirm::with_theme(&theme)
+        .with_prompt("Add parameters?")
+        .default(false)
+        .interact()
+        .cli_result()?
+    {
+        while Confirm::with_theme(&theme)
+            .with_prompt("Add a parameter?")
+            .default(parameters.is_empty())
+            .interact()
+            .cli_result()?
+        {
+            let name = prompt_non_empty(
+                "Parameter identifier (key name, e.g. 'use_cache')",
+                None,
+                &mut seen_params,
+            )?;
+            let param_type_options = vec!["String", "Bool", "Enum"];
+            let choice = Select::with_theme(&theme)
+                .with_prompt("Parameter type")
+                .items(&param_type_options)
+                .default(0)
+                .interact()
+                .cli_result()?;
+            let raw_type = param_type_options[choice].to_string();
+
+            let description = prompt_optional_string("Description (optional)")?;
+
+            let mut default_value: Option<Value> = None;
+            let mut choices_list: Option<Vec<String>> = None;
+
+            match raw_type.as_str() {
+                "String" => {
+                    if let Some(def) = prompt_optional_string("Default value (optional)")? {
+                        default_value = Some(Value::String(def));
+                    }
+                }
+                "Bool" => {
+                    let default_bool = Confirm::with_theme(&theme)
+                        .with_prompt("Default to true?")
+                        .default(false)
+                        .interact()
+                        .cli_result()?;
+                    default_value = Some(Value::Bool(default_bool));
+                }
+                "Enum" => {
+                    let choices_input: String = Input::with_theme(&theme)
+                        .with_prompt("Comma separated choices (e.g. a,b,c)")
+                        .interact_text()
+                        .cli_result()?;
+                    let mut parsed: Vec<String> = choices_input
+                        .split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                    parsed.sort();
+                    parsed.dedup();
+                    if parsed.is_empty() {
+                        return Err(crate::error::Error::Anyhow(anyhow::anyhow!(
+                            "Enum parameter must have at least one choice"
+                        )));
+                    }
+                    let default_choice =
+                        prompt_optional_string("Default choice (leave blank to skip)")?;
+                    if let Some(ref def) = default_choice {
+                        if !parsed.contains(def) {
+                            return Err(crate::error::Error::Anyhow(anyhow::anyhow!(
+                                "Default '{}' not one of {:?}",
+                                def,
+                                parsed
+                            )));
+                        }
+                        default_value = Some(Value::String(def.clone()));
+                    }
+                    choices_list = Some(parsed);
+                }
+                _ => {}
+            }
+
+            let advanced_flag = if Confirm::with_theme(&theme)
+                .with_prompt("Mark as advanced (hide from simple wizards)?")
+                .default(false)
+                .interact()
+                .cli_result()?
+            {
+                Some(true)
+            } else {
+                None
+            };
+
+            parameters.push(ParameterSpec {
+                name,
+                raw_type,
+                description,
+                default: default_value,
+                choices: choices_list,
+                advanced: advanced_flag,
+            });
+        }
+    }
+
+    println!("\n📁 Assets are static files bundled with your workflow (optional)");
+
+    let mut assets = Vec::new();
+    if Confirm::with_theme(&theme)
+        .with_prompt("Add asset files?")
+        .default(false)
+        .interact()
+        .cli_result()?
+    {
+        loop {
+            let asset: String = Input::with_theme(&theme)
+                .with_prompt("Asset filepath (relative to assets/, blank to finish)")
+                .allow_empty(true)
+                .interact_text()
+                .cli_result()?;
+            let trimmed = asset.trim();
+            if trimmed.is_empty() {
+                break;
+            }
+            assets.push(trimmed.to_string());
+        }
+    }
+
+    Ok(ProjectSpec {
+        name,
+        author,
+        workflow,
+        template: Some("dynamic-nextflow".to_string()),
+        version,
+        assets,
+        parameters,
+        inputs,
+        outputs,
+    })
 }
 
 fn display_concise_list(submissions: &[(String, InboxSubmission, PathBuf, String)]) {
@@ -1250,17 +1937,26 @@ status: {}
         let proj_dir = tmp.path().join("myproj");
         // Provide email via env var to avoid requiring a real config
         std::env::set_var("SYFTBOX_EMAIL", "scaffold@example.com");
+        // Force non-interactive mode
+        std::env::set_var("BIOVAULT_NON_INTERACTIVE", "1");
+
         super::create(
             Some("myproj".into()),
             Some(proj_dir.to_string_lossy().to_string()),
             None,
+            None,
+            None,
+            None,
         )
         .await
         .unwrap();
+
         assert!(proj_dir.join("project.yaml").exists());
         assert!(proj_dir.join("workflow.nf").exists());
         assert!(proj_dir.join("assets").is_dir());
+
         std::env::remove_var("SYFTBOX_EMAIL");
+        std::env::remove_var("BIOVAULT_NON_INTERACTIVE");
     }
 
     #[test]

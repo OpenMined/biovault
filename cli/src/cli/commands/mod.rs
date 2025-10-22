@@ -16,6 +16,7 @@ pub mod project;
 pub mod project_management;
 pub mod python;
 pub mod run;
+pub mod run_dynamic;
 pub mod sample_data;
 pub mod samplesheet;
 pub mod setup;
