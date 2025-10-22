@@ -1,0 +1,23 @@
+name: pipeline-filter-samples
+author: madhava@openmined.org
+workflow: workflow.nf
+template: dynamic-nextflow
+version: 0.1.0
+assets:
+  - filter_samples.py
+parameters:
+  - name: extension
+    type: String
+    default: ".txt"
+    description: File extension to retain (e.g., .txt, .tsv)
+inputs:
+  - name: samplesheet
+    type: File
+    format: csv
+    description: Samplesheet CSV listing per-participant file paths
+outputs:
+  - name: filtered_sheet
+    type: File
+    format: csv
+    path: filtered_samplesheet.csv
+    description: Samplesheet filtered to rows matching the extension

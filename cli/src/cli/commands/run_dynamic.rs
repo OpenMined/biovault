@@ -45,7 +45,16 @@ pub async fn execute_dynamic(
     validate_no_clashes(&spec, &parsed_args)?;
 
     let inputs_json = build_inputs_json(&spec, &parsed_args, project_path)?;
-    let params_json = build_params_json(&spec, &parsed_args)?;
+    let mut params_json = build_params_json(&spec, &parsed_args)?;
+
+    let assets_dir_path = project_path.join("assets");
+    let assets_dir_abs = assets_dir_path
+        .canonicalize()
+        .unwrap_or_else(|_| assets_dir_path.clone());
+
+    params_json
+        .entry("assets_dir".to_string())
+        .or_insert_with(|| json!(assets_dir_abs.to_string_lossy().to_string()));
 
     let runtime_spec = json!({
         "inputs": inputs_json,
@@ -84,6 +93,12 @@ pub async fn execute_dynamic(
     let template_name = spec.template.as_deref().unwrap_or("dynamic-nextflow");
     let env_dir = biovault_home.join("env").join(template_name);
     let template_path = env_dir.join("template.nf");
+
+    if !template_path.exists() {
+        if template_name == "dynamic-nextflow" {
+            install_dynamic_template(&biovault_home)?;
+        }
+    }
 
     if !template_path.exists() {
         return Err(anyhow::anyhow!(
@@ -186,6 +201,13 @@ fn parse_cli_args(args: &[String]) -> Result<ParsedArgs> {
                 anyhow::anyhow!("Inline mapping overrides not yet supported: {}", key).into(),
             );
         } else {
+            match key {
+                "results-dir" | "results_dir" => {
+                    i += 2;
+                    continue;
+                }
+                _ => {}
+            }
             inputs.insert(
                 key.to_string(),
                 InputArg {
@@ -332,4 +354,30 @@ fn detect_format(path: &Path) -> Option<&'static str> {
             "vcf" | "vcf.gz" => Some("vcf"),
             _ => None,
         })
+}
+
+fn install_dynamic_template(biovault_home: &Path) -> Result<()> {
+    let env_dir = biovault_home.join("env").join("dynamic-nextflow");
+    if !env_dir.exists() {
+        fs::create_dir_all(&env_dir).context("Failed to create dynamic template directory")?;
+    }
+
+    let template_path = env_dir.join("template.nf");
+    if !template_path.exists() {
+        let template_contents = include_str!("../../templates/dynamic/template.nf");
+        fs::write(&template_path, template_contents)
+            .context("Failed to install dynamic template.nf")?;
+        println!(
+            "📦 Installed dynamic template at {}",
+            template_path.display()
+        );
+    }
+
+    let config_path = env_dir.join("nextflow.config");
+    if !config_path.exists() {
+        fs::write(&config_path, "process.executor = 'local'\n")
+            .context("Failed to install dynamic nextflow.config")?;
+    }
+
+    Ok(())
 }
