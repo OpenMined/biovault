@@ -14,6 +14,8 @@ pub struct DevEnv {
     pub jupyter_installed: bool,
     pub jupyter_port: Option<i32>,
     pub jupyter_pid: Option<i32>,
+    pub jupyter_url: Option<String>,
+    pub jupyter_token: Option<String>,
     pub created_at: String,
     pub last_used_at: String,
 }
@@ -58,7 +60,7 @@ impl BioVaultDb {
     /// Get dev environment by project path
     pub fn get_dev_env(&self, project_path: &str) -> Result<Option<DevEnv>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, project_path, python_version, env_type, jupyter_installed, jupyter_port, jupyter_pid, created_at, last_used_at
+            "SELECT id, project_path, python_version, env_type, jupyter_installed, jupyter_port, jupyter_pid, jupyter_url, jupyter_token, created_at, last_used_at
              FROM dev_envs
              WHERE project_path = ?1",
         )?;
@@ -73,8 +75,10 @@ impl BioVaultDb {
                     jupyter_installed: row.get::<_, i32>(4)? != 0,
                     jupyter_port: row.get(5)?,
                     jupyter_pid: row.get(6)?,
-                    created_at: row.get(7)?,
-                    last_used_at: row.get(8)?,
+                    jupyter_url: row.get(7)?,
+                    jupyter_token: row.get(8)?,
+                    created_at: row.get(9)?,
+                    last_used_at: row.get(10)?,
                 })
             })
             .optional()?;
@@ -85,7 +89,7 @@ impl BioVaultDb {
     /// List all development environments
     pub fn list_dev_envs(&self) -> Result<Vec<DevEnv>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, project_path, python_version, env_type, jupyter_installed, jupyter_port, jupyter_pid, created_at, last_used_at
+            "SELECT id, project_path, python_version, env_type, jupyter_installed, jupyter_port, jupyter_pid, jupyter_url, jupyter_token, created_at, last_used_at
              FROM dev_envs
              ORDER BY last_used_at DESC",
         )?;
@@ -100,8 +104,10 @@ impl BioVaultDb {
                     jupyter_installed: row.get::<_, i32>(4)? != 0,
                     jupyter_port: row.get(5)?,
                     jupyter_pid: row.get(6)?,
-                    created_at: row.get(7)?,
-                    last_used_at: row.get(8)?,
+                    jupyter_url: row.get(7)?,
+                    jupyter_token: row.get(8)?,
+                    created_at: row.get(9)?,
+                    last_used_at: row.get(10)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -124,12 +130,14 @@ impl BioVaultDb {
         Ok(())
     }
 
-    /// Update Jupyter session info (port and PID)
+    /// Update Jupyter session info (port, PID, URL, token)
     pub fn update_jupyter_session(
         &self,
         project_path: &Path,
         port: Option<i32>,
         pid: Option<i32>,
+        url: Option<&str>,
+        token: Option<&str>,
     ) -> Result<()> {
         let canonical_path = project_path.canonicalize()?;
         let path_str = canonical_path
@@ -137,8 +145,8 @@ impl BioVaultDb {
             .ok_or_else(|| anyhow::anyhow!("Invalid project path"))?;
 
         self.conn.execute(
-            "UPDATE dev_envs SET jupyter_port = ?1, jupyter_pid = ?2, last_used_at = CURRENT_TIMESTAMP WHERE project_path = ?3",
-            params![port, pid, path_str],
+            "UPDATE dev_envs SET jupyter_port = ?1, jupyter_pid = ?2, jupyter_url = ?3, jupyter_token = ?4, last_used_at = CURRENT_TIMESTAMP WHERE project_path = ?5",
+            params![port, pid, url, token, path_str],
         )?;
 
         Ok(())

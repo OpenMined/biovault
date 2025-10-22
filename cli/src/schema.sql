@@ -113,6 +113,8 @@ CREATE TABLE IF NOT EXISTS dev_envs (
     jupyter_installed INTEGER DEFAULT 0,
     jupyter_port INTEGER,
     jupyter_pid INTEGER,
+    jupyter_url TEXT,
+    jupyter_token TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     last_used_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );

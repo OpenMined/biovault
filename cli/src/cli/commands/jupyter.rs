@@ -4,6 +4,12 @@ use anyhow::anyhow;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use serde_json::Value;
+use std::env;
+use std::fs;
+use std::time::{Duration, SystemTime};
+use tokio::net::TcpStream;
+
 fn ensure_virtualenv(project_dir: &Path, python_version: &str) -> Result<()> {
     let venv_path = project_dir.join(".venv");
 
@@ -53,6 +59,126 @@ fn ensure_virtualenv(project_dir: &Path, python_version: &str) -> Result<()> {
     Ok(())
 }
 
+#[derive(Clone, Debug)]
+struct JupyterRuntimeInfo {
+    port: Option<i32>,
+    url: Option<String>,
+    token: Option<String>,
+}
+
+fn candidate_runtime_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+
+    if let Ok(dir) = env::var("JUPYTER_RUNTIME_DIR") {
+        if !dir.is_empty() {
+            dirs.push(PathBuf::from(dir));
+        }
+    }
+
+    if let Some(home) = dirs::home_dir() {
+        dirs.push(home.join(".local/share/jupyter/runtime"));
+        dirs.push(home.join("Library/Jupyter/runtime"));
+    }
+
+    if cfg!(target_os = "windows") {
+        if let Ok(appdata) = env::var("APPDATA") {
+            dirs.push(PathBuf::from(appdata).join("jupyter/runtime"));
+        }
+    }
+
+    dirs.push(std::env::temp_dir());
+    dirs.push(PathBuf::from("/tmp"));
+
+    dirs.sort();
+    dirs.dedup();
+    dirs
+}
+
+fn parse_runtime_file(path: &Path) -> Option<(JupyterRuntimeInfo, Option<i32>)> {
+    let content = fs::read_to_string(path).ok()?;
+    let value: Value = serde_json::from_str(&content).ok()?;
+    let port = value.get("port").and_then(|v| v.as_i64()).map(|v| v as i32);
+    let url = value
+        .get("url")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let token = value
+        .get("token")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let pid = value.get("pid").and_then(|v| v.as_i64()).map(|v| v as i32);
+    Some((JupyterRuntimeInfo { port, url, token }, pid))
+}
+
+fn find_runtime_info(pid: u32) -> Option<JupyterRuntimeInfo> {
+    let mut latest: Option<(SystemTime, JupyterRuntimeInfo)> = None;
+
+    for dir in candidate_runtime_dirs() {
+        if !dir.exists() {
+            continue;
+        }
+
+        if let Ok(entries) = fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+                    continue;
+                }
+
+                if let Some(file_name) = path.file_name().and_then(|name| name.to_str()) {
+                    if !file_name.starts_with("jpserver-") {
+                        continue;
+                    }
+                } else {
+                    continue;
+                }
+
+                let (info, info_pid) = match parse_runtime_file(&path) {
+                    Some(result) => result,
+                    None => continue,
+                };
+
+                if let Some(info_pid) = info_pid {
+                    if info_pid as u32 == pid {
+                        return Some(info);
+                    }
+                }
+
+                if let Ok(metadata) = entry.metadata() {
+                    if let Ok(modified) = metadata.modified() {
+                        if let Ok(elapsed) = modified.elapsed() {
+                            if elapsed.as_secs() > 120 {
+                                continue;
+                            }
+                        }
+
+                        match &latest {
+                            Some((best_time, _)) if modified <= *best_time => {}
+                            _ => latest = Some((modified, info.clone())),
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    latest.map(|(_, info)| info)
+}
+
+async fn wait_for_server_ready(port: i32) -> Result<()> {
+    let port_u16 = u16::try_from(port).map_err(|_| anyhow!("Invalid Jupyter port: {}", port))?;
+
+    for _ in 0..60 {
+        if TcpStream::connect(("127.0.0.1", port_u16)).await.is_ok() {
+            return Ok(());
+        }
+
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+
+    Err(anyhow!("Timed out waiting for Jupyter to start on port {}", port).into())
+}
+
 pub async fn start(project_path: &str, python_version: &str) -> Result<()> {
     // Check if project_path is a number (list index)
     let project_dir = if let Ok(index) = project_path.parse::<usize>() {
@@ -99,7 +225,7 @@ pub async fn start(project_path: &str, python_version: &str) -> Result<()> {
     // Check if Jupyter is already running for this project
     let canonical_path = project_dir.canonicalize()?;
     if let Some(env) = db.get_dev_env(canonical_path.to_str().unwrap())? {
-        if let (Some(pid), Some(port)) = (env.jupyter_pid, env.jupyter_port) {
+        if let Some(pid) = env.jupyter_pid {
             // Check if process is still alive
             let is_alive = std::process::Command::new("kill")
                 .args(["-0", &pid.to_string()])
@@ -109,12 +235,18 @@ pub async fn start(project_path: &str, python_version: &str) -> Result<()> {
 
             if is_alive {
                 println!("✅ Jupyter Lab already running (PID: {})", pid);
-                println!("   Access at: http://localhost:{}", port);
+                if let Some(url) = env.jupyter_url.as_ref() {
+                    println!("   Access at: {}", url);
+                } else if let Some(port) = env.jupyter_port {
+                    println!("   Access at: http://localhost:{}", port);
+                } else {
+                    println!("   Access at: <unknown>");
+                }
                 println!("   Use 'bv jupyter stop' with project path or index to stop it first");
                 return Ok(());
             } else {
                 // Clear stale session info
-                db.update_jupyter_session(&project_dir, None, None)?;
+                db.update_jupyter_session(&project_dir, None, None, None, None)?;
             }
         }
     }
@@ -140,7 +272,7 @@ pub async fn start(project_path: &str, python_version: &str) -> Result<()> {
     use std::process::Stdio;
 
     let mut child = Command::new("uv")
-        .args(["run", "--python", ".venv", "jupyter", "lab"])
+        .args(["run", "--python", ".venv", "jupyter", "lab", "--no-browser"])
         .current_dir(&project_dir)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -150,67 +282,44 @@ pub async fn start(project_path: &str, python_version: &str) -> Result<()> {
     println!("✅ Jupyter Lab started (PID: {})", pid);
     println!("   Waiting for server to start...");
 
-    // Wait for Jupyter to start and capture port
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    let mut runtime_info: Option<JupyterRuntimeInfo> = None;
+    for _ in 0..60 {
+        if let Some(info) = find_runtime_info(pid) {
+            runtime_info = Some(info);
+            break;
+        }
 
-    // Check if process is still running
-    match child.try_wait()? {
-        Some(status) => {
+        if let Some(status) = child.try_wait()? {
             return Err(anyhow!("Jupyter Lab exited immediately with status: {}", status).into());
         }
-        None => {
-            // Try to find the port from Jupyter runtime files
-            let runtime_dir = std::env::var("HOME")
-                .map(|h| std::path::PathBuf::from(h).join(".local/share/jupyter/runtime"))
-                .unwrap_or_else(|_| std::path::PathBuf::from("/tmp"));
 
-            let mut port = 8888; // Default port
-
-            // Look for runtime files matching our PID
-            if runtime_dir.exists() {
-                if let Ok(entries) = std::fs::read_dir(&runtime_dir) {
-                    for entry in entries.flatten() {
-                        let filename = entry.file_name();
-                        let filename_str = filename.to_string_lossy();
-
-                        if filename_str.starts_with("jpserver-") && filename_str.ends_with(".json")
-                        {
-                            if let Ok(content) = std::fs::read_to_string(entry.path()) {
-                                // Simple regex-free parsing - look for "port": <number>
-                                if let Some(port_start) = content.find("\"port\":") {
-                                    let after_colon = &content[port_start + 7..];
-                                    if let Some(port_end) = after_colon.find([',', '}']) {
-                                        if let Ok(parsed_port) =
-                                            after_colon[..port_end].trim().parse::<i32>()
-                                        {
-                                            // Check if this runtime file was recently modified (within last 5 seconds)
-                                            if let Ok(metadata) = entry.metadata() {
-                                                if let Ok(modified) = metadata.modified() {
-                                                    if let Ok(elapsed) = modified.elapsed() {
-                                                        if elapsed.as_secs() < 5 {
-                                                            port = parsed_port;
-                                                            break;
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Store session info in database
-            db.update_jupyter_session(&project_dir, Some(port), Some(pid as i32))?;
-
-            println!("   Access at: http://localhost:{}", port);
-            println!("   Press Ctrl+C in the terminal running Jupyter to stop");
-            println!("\n💡 Tip: Jupyter Lab is running in the background");
-        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
     }
+
+    let runtime_info =
+        runtime_info.ok_or_else(|| anyhow!("Timed out waiting for Jupyter runtime information"))?;
+
+    if let Some(port) = runtime_info.port {
+        wait_for_server_ready(port).await?;
+    }
+
+    db.update_jupyter_session(
+        &project_dir,
+        runtime_info.port,
+        Some(pid as i32),
+        runtime_info.url.as_deref(),
+        runtime_info.token.as_deref(),
+    )?;
+
+    if let Some(url) = runtime_info.url.as_ref() {
+        println!("   Access at: {}", url);
+    } else if let Some(port) = runtime_info.port {
+        println!("   Access at: http://localhost:{}", port);
+    } else {
+        println!("   Access at: <unknown>");
+    }
+    println!("   Press Ctrl+C in the terminal running Jupyter to stop");
+    println!("\n💡 Tip: Jupyter Lab is running in the background");
 
     Ok(())
 }
@@ -267,7 +376,7 @@ pub async fn stop(project_path: &str) -> Result<()> {
 
     // Clear session info from database
     let db = BioVaultDb::new()?;
-    db.update_jupyter_session(&project_dir, None, None)?;
+    db.update_jupyter_session(&project_dir, None, None, None, None)?;
 
     Ok(())
 }
@@ -324,7 +433,7 @@ pub async fn reset(project_path: &str, python_version: &str) -> Result<()> {
     ensure_virtualenv(&project_dir, python_version)?;
 
     db.register_dev_env(&project_dir, python_version, "jupyter", true)?;
-    db.update_jupyter_session(&project_dir, None, None)?;
+    db.update_jupyter_session(&project_dir, None, None, None, None)?;
 
     println!("✅ Virtualenv rebuilt. Jupyter server is stopped.");
     Ok(())
