@@ -310,6 +310,38 @@ impl BioVaultDb {
             info!("Migration complete: added jupyter_pid column");
         }
 
+        // Add jupyter_url column to dev_envs if it doesn't exist
+        let url_exists = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('dev_envs') WHERE name='jupyter_url'",
+                [],
+                |row| row.get(0),
+            )
+            .map(|count: i32| count > 0)
+            .unwrap_or(false);
+
+        if !url_exists {
+            info!("Adding jupyter_url column to dev_envs table");
+            conn.execute("ALTER TABLE dev_envs ADD COLUMN jupyter_url TEXT", [])?;
+            info!("Migration complete: added jupyter_url column");
+        }
+
+        // Add jupyter_token column to dev_envs if it doesn't exist
+        let token_exists = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('dev_envs') WHERE name='jupyter_token'",
+                [],
+                |row| row.get(0),
+            )
+            .map(|count: i32| count > 0)
+            .unwrap_or(false);
+
+        if !token_exists {
+            info!("Adding jupyter_token column to dev_envs table");
+            conn.execute("ALTER TABLE dev_envs ADD COLUMN jupyter_token TEXT", [])?;
+            info!("Migration complete: added jupyter_token column");
+        }
+
         Ok(())
     }
 
