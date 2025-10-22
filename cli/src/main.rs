@@ -96,72 +96,58 @@ mod tests {
 
     #[test]
     fn clap_parses_run_command_defaults() {
+        // Flags must come BEFORE trailing args due to trailing_var_arg = true
         let cli = Cli::parse_from([
             "bv",
             "run",
-            "project-dir",
-            "participant.yaml",
             "--dry-run",
             "--results-dir",
             "out",
+            "project-dir",
+            "--rows",
+            "data.csv",
         ]);
         match cli.command {
             Commands::Run {
                 project_folder,
-                participant_source,
-                test,
-                download,
+                args,
                 dry_run,
-                with_docker,
-                work_dir,
                 resume,
-                template,
                 results_dir,
-                nextflow_args,
             } => {
                 assert_eq!(project_folder, "project-dir");
-                assert_eq!(participant_source, "participant.yaml");
-                assert!(!test);
-                assert!(!download);
+                assert_eq!(args, vec!["--rows", "data.csv"]);
                 assert!(dry_run);
-                assert!(with_docker); // default true
-                assert!(work_dir.is_none());
                 assert!(!resume);
-                assert!(template.is_none());
                 assert_eq!(results_dir.as_deref(), Some("out"));
-                assert!(nextflow_args.is_empty());
             }
             _ => panic!("unexpected command variant"),
         }
     }
 
     #[test]
-    fn clap_parses_run_command_with_nextflow_args() {
+    fn clap_parses_run_command_with_args() {
         let cli = Cli::parse_from([
             "bv",
             "run",
             "project-dir",
-            "participant.yaml",
-            "-with-docker",
-            "ghcr.io/openmined/bioscript:latest",
-            "-with-trace",
+            "--rows",
+            "data.csv",
+            "--param.threshold",
+            "0.05",
         ]);
         match cli.command {
             Commands::Run {
                 project_folder,
-                participant_source,
-                nextflow_args,
-                with_docker,
+                args,
                 ..
             } => {
                 assert_eq!(project_folder, "project-dir");
-                assert_eq!(participant_source, "participant.yaml");
-                assert_eq!(nextflow_args.len(), 3);
-                assert_eq!(nextflow_args[0], "-with-docker");
-                assert_eq!(nextflow_args[1], "ghcr.io/openmined/bioscript:latest");
-                assert_eq!(nextflow_args[2], "-with-trace");
-                // with_docker should still be true (default), but will be overridden in execution
-                assert!(with_docker);
+                assert_eq!(args.len(), 4);
+                assert_eq!(args[0], "--rows");
+                assert_eq!(args[1], "data.csv");
+                assert_eq!(args[2], "--param.threshold");
+                assert_eq!(args[3], "0.05");
             }
             _ => panic!("unexpected command variant"),
         }
@@ -343,6 +329,9 @@ mod tests {
                     name: Some("test_project".to_string()),
                     folder: None,
                     example: None,
+                    spec: None,
+                    input_to: None,
+                    output_from: None,
                 },
             },
             verbose: false,
@@ -449,44 +438,20 @@ enum Commands {
         project_folder: String,
 
         #[arg(
-            help = "Participant source: local file path, Syft URL, or HTTP URL (with optional #fragment)"
+            trailing_var_arg = true,
+            allow_hyphen_values = true,
+            help = "Input values, parameters, and Nextflow args (e.g., --rows data.csv --param.threshold 0.05)"
         )]
-        participant_source: String,
-
-        #[arg(long, help = "Use mock data if available")]
-        test: bool,
-
-        #[arg(long, help = "Auto-confirm file downloads")]
-        download: bool,
+        args: Vec<String>,
 
         #[arg(long, help = "Show commands without executing")]
         dry_run: bool,
 
-        #[arg(
-            long,
-            default_value = "true",
-            help = "Run with Docker (can be overridden by providing -with-docker in nextflow args)"
-        )]
-        with_docker: bool,
-
-        #[arg(long, help = "Nextflow work directory")]
-        work_dir: Option<String>,
-
         #[arg(long, help = "Resume from previous run")]
         resume: bool,
 
-        #[arg(long, help = "Template to use (default, snp, etc.)")]
-        template: Option<String>,
-
         #[arg(long, help = "Custom results directory name")]
         results_dir: Option<String>,
-
-        #[arg(
-            trailing_var_arg = true,
-            allow_hyphen_values = true,
-            help = "Additional Nextflow arguments (e.g., -with-singularity, -with-trace, etc.)"
-        )]
-        nextflow_args: Vec<String>,
     },
 
     #[command(name = "sample-data", about = "Manage sample data")]
@@ -703,10 +668,31 @@ enum ProjectCommands {
 
         #[arg(long, value_parser = validate_example_name, help = "Use example template (use 'bv project examples' to list available)")]
         example: Option<String>,
+
+        #[arg(long, help = "Scaffold from a project spec YAML file")]
+        spec: Option<String>,
+
+        #[arg(
+            long,
+            help = "Prepopulate outputs to feed into another project's inputs (pipeline composition)"
+        )]
+        input_to: Option<String>,
+
+        #[arg(
+            long,
+            help = "Prepopulate inputs from another project's outputs (pipeline composition)"
+        )]
+        output_from: Option<String>,
     },
 
     #[command(about = "List available example templates")]
     Examples,
+
+    #[command(about = "View project spec with ASCII diagram")]
+    View {
+        #[arg(help = "Project directory path (defaults to current directory)")]
+        path: Option<String>,
+    },
 
     #[command(about = "Import a project from URL or register a local project")]
     Import {
@@ -1464,11 +1450,18 @@ async fn async_main_with(cli: Cli) -> Result<()> {
                 name,
                 folder,
                 example,
+                spec,
+                input_to,
+                output_from,
             } => {
-                commands::project::create(name, folder, example).await?;
+                commands::project::create(name, folder, example, spec, input_to, output_from)
+                    .await?;
             }
             ProjectCommands::Examples => {
                 commands::project::list_examples()?;
+            }
+            ProjectCommands::View { path } => {
+                commands::project::view(path)?;
             }
             ProjectCommands::Import {
                 source,
@@ -1514,30 +1507,18 @@ async fn async_main_with(cli: Cli) -> Result<()> {
         },
         Commands::Run {
             project_folder,
-            participant_source,
-            test,
-            download,
+            args,
             dry_run,
-            with_docker,
-            work_dir,
             resume,
-            template,
             results_dir,
-            nextflow_args,
         } => {
-            commands::run::execute(commands::run::RunParams {
-                project_folder,
-                participant_source,
-                test,
-                download,
+            commands::run_dynamic::execute_dynamic(
+                &project_folder,
+                args,
                 dry_run,
-                with_docker,
-                work_dir,
                 resume,
-                template,
                 results_dir,
-                nextflow_args,
-            })
+            )
             .await?;
         }
         Commands::SampleData { command } => match command {
