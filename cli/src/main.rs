@@ -540,6 +540,12 @@ enum Commands {
         command: FilesCommands,
     },
 
+    #[command(about = "SQL database operations")]
+    Sql {
+        #[command(subcommand)]
+        command: SqlCommands,
+    },
+
     #[command(about = "Submit a project to another biobank via SyftBox")]
     Submit {
         #[arg(help = "Path to project directory (use '.' for current directory)")]
@@ -1332,6 +1338,82 @@ enum PythonCommands {
 }
 
 #[derive(Subcommand)]
+enum SqlCommands {
+    #[command(about = "List all database tables")]
+    Tables,
+
+    #[command(about = "Show table structure/schema")]
+    Structure {
+        #[arg(help = "Table name (shows all tables if not specified)")]
+        table: Option<String>,
+
+        #[arg(long, help = "Output as JSON")]
+        json: bool,
+    },
+
+    #[command(about = "Execute SQL query")]
+    Run {
+        #[arg(help = "SQL query to execute")]
+        query: String,
+
+        #[arg(short = 'o', long, help = "Export results to file")]
+        output: Option<String>,
+
+        #[arg(long, default_value = "csv", help = "Output format (csv|tsv|json)")]
+        format: String,
+
+        #[arg(long, help = "Allow write operations (INSERT, UPDATE, DELETE)")]
+        allow_write: bool,
+
+        #[arg(long, help = "Allow DDL operations (CREATE, DROP, ALTER)")]
+        allow_ddl: bool,
+    },
+
+    #[command(about = "Import CSV/TSV data into database")]
+    Import {
+        #[arg(help = "Path to CSV/TSV file")]
+        file_path: String,
+
+        #[arg(long, help = "Target table name (will be prefixed with 'user_')")]
+        table: String,
+
+        #[arg(
+            long,
+            help = "Column containing participant_id (default: participant_id)"
+        )]
+        participant_col: Option<String>,
+
+        #[arg(long, help = "Column mapping (e.g., 'old:new,foo:bar')")]
+        map: Option<String>,
+
+        #[arg(long, default_value = "csv", help = "File format (csv|tsv)")]
+        format: String,
+
+        #[arg(
+            long,
+            default_value = "error",
+            help = "How to handle participant mismatches (error|skip|create)"
+        )]
+        on_mismatch: String,
+
+        #[arg(long, help = "Dry run - validate without importing")]
+        dry_run: bool,
+
+        #[arg(long, help = "Allow overwriting existing user table")]
+        allow_overwrite: bool,
+    },
+
+    #[command(about = "Drop a user table")]
+    Drop {
+        #[arg(help = "Table name to drop (must start with 'user_')")]
+        table: String,
+
+        #[arg(long, help = "Skip confirmation prompt")]
+        confirm: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum JupyterCommands {
     #[command(about = "Start Jupyter Lab for a project")]
     Start {
@@ -1661,6 +1743,48 @@ async fn async_main_with(cli: Cli) -> Result<()> {
                     Some(stats_format),
                 )
                 .await?;
+            }
+        },
+        Commands::Sql { command } => match command {
+            SqlCommands::Tables => {
+                commands::sql::tables().await?;
+            }
+            SqlCommands::Structure { table, json } => {
+                commands::sql::structure(table, json).await?;
+            }
+            SqlCommands::Run {
+                query,
+                output,
+                format,
+                allow_write,
+                allow_ddl,
+            } => {
+                commands::sql::run(query, output, format, allow_write, allow_ddl).await?;
+            }
+            SqlCommands::Import {
+                file_path,
+                table,
+                participant_col,
+                map,
+                format,
+                on_mismatch,
+                dry_run,
+                allow_overwrite,
+            } => {
+                commands::sql::import(commands::sql::ImportParams {
+                    file_path,
+                    table,
+                    participant_col,
+                    map,
+                    format,
+                    on_mismatch,
+                    dry_run,
+                    allow_overwrite,
+                })
+                .await?;
+            }
+            SqlCommands::Drop { table, confirm } => {
+                commands::sql::drop(table, confirm).await?;
             }
         },
         Commands::Files { command } => match command {
