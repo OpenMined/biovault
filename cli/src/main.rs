@@ -1594,14 +1594,123 @@ async fn async_main_with(cli: Cli) -> Result<()> {
             resume,
             results_dir,
         } => {
-            commands::run_dynamic::execute_dynamic(
-                &project_folder,
-                args,
-                dry_run,
-                resume,
-                results_dir,
-            )
-            .await?;
+            // Check project template to determine which run system to use
+            use std::path::Path;
+            let project_path = Path::new(&project_folder);
+            let project_yaml_path = project_path.join("project.yaml");
+
+            if project_yaml_path.exists() {
+                // Read project.yaml to check template
+                if let Ok(content) = std::fs::read_to_string(&project_yaml_path) {
+                    #[derive(serde::Deserialize)]
+                    struct ProjectYaml {
+                        #[serde(default)]
+                        template: Option<String>,
+                    }
+
+                    if let Ok(project) = serde_yaml::from_str::<ProjectYaml>(&content) {
+                        let template = project.template.as_deref().unwrap_or("default");
+
+                        // Use dynamic run system for dynamic-nextflow template
+                        if template == "dynamic-nextflow" {
+                            commands::run_dynamic::execute_dynamic(
+                                &project_folder,
+                                args,
+                                dry_run,
+                                resume,
+                                results_dir,
+                            )
+                            .await?;
+                        } else {
+                            // Use old run system for legacy templates (snp, sheet, default)
+                            // Parse args in old format: [participant_source, flags...]
+                            let mut participant_source = String::new();
+                            let mut test = false;
+                            let mut download = false;
+                            let mut with_docker = true; // default to true for backward compatibility
+                            let mut work_dir = None;
+                            let mut nextflow_args = Vec::new();
+                            let template_override = None;
+
+                            // Parse args: first arg is participant_source, rest are flags
+                            let mut i = 0;
+                            while i < args.len() {
+                                let arg = &args[i];
+                                if arg.starts_with("--") {
+                                    match arg.as_str() {
+                                        "--test" => test = true,
+                                        "--download" => download = true,
+                                        "--with-docker" => with_docker = true,
+                                        "--no-docker" => with_docker = false,
+                                        "--work-dir" => {
+                                            if i + 1 < args.len() {
+                                                work_dir = Some(args[i + 1].clone());
+                                                i += 1;
+                                            }
+                                        }
+                                        _ => {
+                                            // Nextflow args
+                                            nextflow_args.push(arg.clone());
+                                            if !arg.starts_with("--") && i + 1 < args.len() {
+                                                nextflow_args.push(args[i + 1].clone());
+                                                i += 1;
+                                            }
+                                        }
+                                    }
+                                } else if participant_source.is_empty() {
+                                    participant_source = arg.clone();
+                                }
+                                i += 1;
+                            }
+
+                            commands::run::execute(commands::run::RunParams {
+                                project_folder: project_folder.clone(),
+                                participant_source,
+                                test,
+                                download,
+                                dry_run,
+                                with_docker,
+                                work_dir,
+                                resume,
+                                template: template_override,
+                                results_dir,
+                                nextflow_args,
+                            })
+                            .await?;
+                        }
+                    } else {
+                        // Couldn't parse project.yaml, default to dynamic
+                        commands::run_dynamic::execute_dynamic(
+                            &project_folder,
+                            args,
+                            dry_run,
+                            resume,
+                            results_dir,
+                        )
+                        .await?;
+                    }
+                } else {
+                    // Couldn't read project.yaml, default to dynamic
+                    commands::run_dynamic::execute_dynamic(
+                        &project_folder,
+                        args,
+                        dry_run,
+                        resume,
+                        results_dir,
+                    )
+                    .await?;
+                }
+            } else {
+                // No project.yaml, use dynamic
+                commands::run_dynamic::execute_dynamic(
+                    &project_folder,
+                    args,
+                    dry_run,
+                    resume,
+                    results_dir,
+                )
+                .await?;
+            }
         }
         Commands::SampleData { command } => match command {
             SampleDataCommands::Fetch {
