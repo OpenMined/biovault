@@ -262,8 +262,7 @@ pub fn validate_type_expr(raw: &str) -> Result<()> {
     parse_type_expr(raw).map(|_| ())
 }
 
-#[allow(dead_code)]
-fn generate_template_nf(spec: &ProjectSpec) -> Result<String> {
+pub fn generate_template_nf(spec: &ProjectSpec) -> Result<String> {
     let mut buf = String::new();
 
     wln!(&mut buf, "nextflow.enable.dsl=2");

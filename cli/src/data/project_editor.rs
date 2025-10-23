@@ -1,8 +1,10 @@
 use anyhow::{Context, Result};
+use blake3::Hasher;
 use serde::{Deserialize, Serialize};
-use serde_yaml::{Mapping, Value};
 use std::fs;
 use std::path::Path;
+
+use crate::project_spec::{InputSpec, OutputSpec, ParameterSpec, ProjectSpec};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectMetadata {
@@ -10,7 +12,15 @@ pub struct ProjectMetadata {
     pub author: String,
     pub workflow: String,
     pub template: Option<String>,
+    #[serde(default)]
+    pub version: Option<String>,
     pub assets: Vec<String>,
+    #[serde(default)]
+    pub parameters: Vec<ParameterSpec>,
+    #[serde(default)]
+    pub inputs: Vec<InputSpec>,
+    #[serde(default)]
+    pub outputs: Vec<OutputSpec>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -28,87 +38,24 @@ pub fn load_project_metadata(project_root: &Path) -> Result<Option<ProjectMetada
         return Ok(None);
     }
 
-    let content = fs::read_to_string(&yaml_path)
-        .with_context(|| format!("Failed to read {}", yaml_path.display()))?;
-    let value: Value = serde_yaml::from_str(&content)
-        .with_context(|| format!("Invalid YAML in {}", yaml_path.display()))?;
-
-    let mapping = value.as_mapping().cloned().unwrap_or_else(Mapping::new);
+    let spec = ProjectSpec::load(&yaml_path)
+        .with_context(|| format!("Invalid project spec in {}", yaml_path.display()))?;
 
     Ok(Some(ProjectMetadata {
-        name: mapping
-            .get(Value::String("name".into()))
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string(),
-        author: mapping
-            .get(Value::String("author".into()))
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string(),
-        workflow: mapping
-            .get(Value::String("workflow".into()))
-            .and_then(Value::as_str)
-            .unwrap_or("workflow.nf")
-            .to_string(),
-        template: mapping
-            .get(Value::String("template".into()))
-            .and_then(Value::as_str)
-            .map(|s| s.to_string()),
-        assets: mapping
-            .get(Value::String("assets".into()))
-            .and_then(Value::as_sequence)
-            .map(|seq| {
-                seq.iter()
-                    .filter_map(Value::as_str)
-                    .map(|s| s.replace('\\', "/"))
-                    .collect()
-            })
-            .unwrap_or_default(),
+        name: spec.name,
+        author: spec.author,
+        workflow: spec.workflow,
+        template: spec.template,
+        version: Some(spec.version.unwrap_or_else(|| "1.0.0".to_string())),
+        assets: spec.assets,
+        parameters: spec.parameters,
+        inputs: spec.inputs,
+        outputs: spec.outputs,
     }))
 }
 
 pub fn save_project_metadata(project_root: &Path, metadata: &ProjectMetadata) -> Result<()> {
     let yaml_path = project_root.join("project.yaml");
-    let mut value = if yaml_path.exists() {
-        let content = fs::read_to_string(&yaml_path)
-            .with_context(|| format!("Failed to read {}", yaml_path.display()))?;
-        serde_yaml::from_str::<Value>(&content)
-            .with_context(|| format!("Invalid YAML in {}", yaml_path.display()))?
-    } else {
-        Value::Mapping(Mapping::new())
-    };
-
-    let map = value
-        .as_mapping_mut()
-        .ok_or_else(|| anyhow::anyhow!("project.yaml must be a mapping"))?;
-
-    map.insert(
-        Value::String("name".into()),
-        Value::String(metadata.name.clone()),
-    );
-    map.insert(
-        Value::String("author".into()),
-        Value::String(metadata.author.clone()),
-    );
-    map.insert(
-        Value::String("workflow".into()),
-        Value::String(metadata.workflow.clone()),
-    );
-
-    if let Some(template) = metadata.template.as_ref().and_then(|t| {
-        let trimmed = t.trim();
-        if trimmed.is_empty() {
-            None
-        } else {
-            Some(trimmed.to_string())
-        }
-    }) {
-        map.insert(Value::String("template".into()), Value::String(template));
-    } else {
-        map.remove(Value::String("template".into()));
-    }
-
     let mut assets: Vec<String> = metadata
         .assets
         .iter()
@@ -117,17 +64,42 @@ pub fn save_project_metadata(project_root: &Path, metadata: &ProjectMetadata) ->
     assets.sort();
     assets.dedup();
 
-    map.insert(
-        Value::String("assets".into()),
-        Value::Sequence(assets.into_iter().map(Value::String).collect()),
-    );
+    let spec = ProjectSpec {
+        name: metadata.name.clone(),
+        author: metadata.author.clone(),
+        workflow: metadata.workflow.clone(),
+        template: metadata.template.clone(),
+        version: Some(
+            metadata
+                .version
+                .clone()
+                .unwrap_or_else(|| "1.0.0".to_string()),
+        ),
+        assets,
+        parameters: metadata.parameters.clone(),
+        inputs: metadata.inputs.clone(),
+        outputs: metadata.outputs.clone(),
+    };
 
-    let yaml_str = serde_yaml::to_string(&value)
+    let yaml_str = serde_yaml::to_string(&spec)
         .with_context(|| format!("Failed to serialize {}", yaml_path.display()))?;
     fs::write(&yaml_path, yaml_str)
         .with_context(|| format!("Failed to write {}", yaml_path.display()))?;
 
     Ok(())
+}
+
+pub fn project_yaml_hash(project_root: &Path) -> Result<Option<String>> {
+    let yaml_path = project_root.join("project.yaml");
+    if !yaml_path.exists() {
+        return Ok(None);
+    }
+
+    let bytes =
+        fs::read(&yaml_path).with_context(|| format!("Failed to read {}", yaml_path.display()))?;
+    let mut hasher = Hasher::new();
+    hasher.update(&bytes);
+    Ok(Some(hasher.finalize().to_hex().to_string()))
 }
 
 pub fn build_project_file_tree(project_root: &Path) -> Result<Vec<ProjectFileNode>> {
@@ -204,7 +176,31 @@ mod tests {
             author: "test@example.com".into(),
             workflow: "workflow.nf".into(),
             template: Some("sheet".into()),
+            version: Some("1.2.3".into()),
             assets: vec!["schema.yaml".into(), "src/main.py".into()],
+            parameters: vec![crate::project_spec::ParameterSpec {
+                name: "flag".into(),
+                raw_type: "Bool".into(),
+                description: None,
+                default: None,
+                choices: None,
+                advanced: None,
+            }],
+            inputs: vec![crate::project_spec::InputSpec {
+                name: "rows".into(),
+                raw_type: "List[GenotypeRecord]".into(),
+                description: None,
+                format: None,
+                path: None,
+                mapping: None,
+            }],
+            outputs: vec![crate::project_spec::OutputSpec {
+                name: "sheet".into(),
+                raw_type: "ParticipantSheet".into(),
+                description: None,
+                format: None,
+                path: Some("results/sheet.csv".into()),
+            }],
         };
 
         save_project_metadata(root, &metadata).unwrap();
@@ -214,6 +210,23 @@ mod tests {
         assert_eq!(loaded.workflow, "workflow.nf");
         assert_eq!(loaded.template.as_deref(), Some("sheet"));
         assert_eq!(loaded.assets.len(), 2);
+        assert_eq!(loaded.version.as_deref(), Some("1.2.3"));
+        assert_eq!(loaded.parameters.len(), 1);
+        assert_eq!(loaded.inputs.len(), 1);
+        assert_eq!(loaded.outputs.len(), 1);
+
+        let digest = project_yaml_hash(root).unwrap().unwrap();
+        assert_eq!(digest.len(), 64);
+
+        // Modify file to ensure hash changes
+        let yaml_path = root.join("project.yaml");
+        let mut yaml = std::fs::read_to_string(&yaml_path).unwrap();
+        yaml.push_str("# comment\n");
+        std::fs::write(&yaml_path, yaml).unwrap();
+
+        let new_digest = project_yaml_hash(root).unwrap().unwrap();
+        assert_eq!(new_digest.len(), 64);
+        assert_ne!(digest, new_digest);
     }
 
     #[test]
