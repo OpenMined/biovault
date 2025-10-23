@@ -12,6 +12,7 @@ pub mod jupyter;
 pub mod messages;
 pub mod participant;
 pub mod participants;
+pub mod pipeline;
 pub mod project;
 pub mod project_management;
 pub mod python;

@@ -164,25 +164,33 @@ pub fn create_project_record(
                 },
             )?;
         } else {
-            let project_template = include_str!("../../templates/project.yaml");
-            let workflow_template = include_str!("../../templates/workflow.nf");
+            use crate::project_spec::{self, ProjectSpec};
 
             let author_placeholder = if email_trimmed.is_empty() {
-                "user@example.com"
+                "user@example.com".to_string()
             } else {
-                email_trimmed.as_str()
+                email_trimmed.clone()
             };
 
-            let project_yaml = project_template
-                .replace("{project_name}", project_name)
-                .replace("{email}", author_placeholder);
+            // Remove the directory we just created so scaffold_from_spec can create it
+            if cleanup_on_error {
+                fs::remove_dir_all(&project_dir)?;
+            }
 
-            fs::write(project_dir.join("project.yaml"), project_yaml)
-                .context("Failed to write project.yaml")?;
-            fs::write(project_dir.join("workflow.nf"), workflow_template)
-                .context("Failed to write workflow.nf")?;
-            fs::create_dir_all(project_dir.join("assets"))
-                .context("Failed to create assets directory")?;
+            let minimal_spec = ProjectSpec {
+                name: project_name_owned.clone(),
+                author: author_placeholder,
+                workflow: "workflow.nf".to_string(),
+                template: Some("dynamic-nextflow".to_string()),
+                version: Some("1.0.0".to_string()),
+                assets: vec![],
+                parameters: vec![],
+                inputs: vec![],
+                outputs: vec![],
+            };
+
+            project_spec::scaffold_from_spec(minimal_spec, &project_dir)
+                .context("Failed to scaffold dynamic-nextflow project")?;
         }
 
         let yaml_path = project_dir.join("project.yaml");
@@ -193,7 +201,9 @@ pub fn create_project_record(
 
         let mut author_field = email_trimmed.clone();
         let mut workflow_field = "workflow.nf".to_string();
-        let mut template_field = example.clone().unwrap_or_else(|| "custom".to_string());
+        let mut template_field = example
+            .clone()
+            .unwrap_or_else(|| "dynamic-nextflow".to_string());
 
         if let serde_yaml::Value::Mapping(ref mut map) = yaml_value {
             let name_key = serde_yaml::Value::String("name".to_string());
