@@ -23,6 +23,10 @@ type StepOverrides = HashMap<(String, String), String>;
 type PipelineOverrides = HashMap<String, String>;
 type ParseOverridesResult = (StepOverrides, PipelineOverrides, Option<String>);
 
+const RESULTS_TABLE_PREFIX: &str = "z_results_";
+const DEFAULT_COLUMN_PREFIX: &str = "col";
+const DEFAULT_TABLE_FALLBACK: &str = "t";
+
 trait DialoguerResultExt<T> {
     fn cli_result(self) -> Result<T>;
 }
@@ -1063,10 +1067,10 @@ fn sanitize_identifier(name: &str) -> String {
     }
     let mut trimmed = result.trim_matches('_').to_string();
     if trimmed.is_empty() {
-        trimmed = "t".to_string();
+        trimmed = DEFAULT_TABLE_FALLBACK.to_string();
     }
     if trimmed.chars().next().unwrap().is_ascii_digit() {
-        trimmed = format!("t_{}", trimmed);
+        trimmed = format!("{}_{}", DEFAULT_TABLE_FALLBACK, trimmed);
     }
     trimmed
 }
@@ -1077,7 +1081,7 @@ fn detect_table_name(store_name: &str, spec: &PipelineSqlStoreSpec, run_id: &str
         .clone()
         .unwrap_or_else(|| format!("{}_{}", store_name, run_id));
     let table_name = template.replace("{run_id}", run_id);
-    format!("z_results_{}", table_name)
+    format!("{}{}", RESULTS_TABLE_PREFIX, table_name)
 }
 
 fn detect_format(spec: &PipelineSqlStoreSpec, output_path: &Path) -> String {
@@ -1089,6 +1093,13 @@ fn detect_format(spec: &PipelineSqlStoreSpec, output_path: &Path) -> String {
         .and_then(|ext| ext.to_str())
         .map(|s| s.to_ascii_lowercase())
         .unwrap_or_else(|| "csv".to_string())
+}
+
+fn get_delimiter_for_format(format: &str) -> u8 {
+    match format {
+        "tsv" => b'\t',
+        _ => b',',
+    }
 }
 
 fn parse_sql_destination(target: Option<&str>) -> Result<Option<String>> {
@@ -1172,10 +1183,7 @@ fn store_sql_output(
     }
 
     let format = detect_format(spec, output_path);
-    let delimiter = match format.as_str() {
-        "tsv" => b'\t',
-        _ => b',',
-    };
+    let delimiter = get_delimiter_for_format(&format);
 
     let mut reader = ReaderBuilder::new()
         .has_headers(true)
@@ -1200,7 +1208,7 @@ fn store_sql_output(
     for (idx, header) in headers.iter().enumerate() {
         let mut base = sanitize_identifier(header);
         if base.is_empty() {
-            base = format!("col{}", idx + 1);
+            base = format!("{}{}", DEFAULT_COLUMN_PREFIX, idx + 1);
         }
         let mut candidate = base.clone();
         let mut counter = 2;
@@ -1863,4 +1871,332 @@ fn types_compatible(expected: &str, actual: &str) -> bool {
 
 fn normalize_type(value: &str) -> String {
     value.trim().trim_end_matches('?').to_ascii_lowercase()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn test_detect_table_name_default() {
+        let spec = PipelineSqlStoreSpec {
+            target: None,
+            source: "output".to_string(),
+            table: None,
+            key_column: None,
+            overwrite: None,
+            format: None,
+        };
+        let result = detect_table_name("my_store", &spec, "20251023120000");
+        assert_eq!(result, "z_results_my_store_20251023120000");
+    }
+
+    #[test]
+    fn test_detect_table_name_custom_template() {
+        let spec = PipelineSqlStoreSpec {
+            target: None,
+            source: "output".to_string(),
+            table: Some("custom_table_{run_id}".to_string()),
+            key_column: None,
+            overwrite: None,
+            format: None,
+        };
+        let result = detect_table_name("my_store", &spec, "20251023120000");
+        assert_eq!(result, "z_results_custom_table_20251023120000");
+    }
+
+    #[test]
+    fn test_detect_table_name_no_run_id_substitution() {
+        let spec = PipelineSqlStoreSpec {
+            target: None,
+            source: "output".to_string(),
+            table: Some("static_table".to_string()),
+            key_column: None,
+            overwrite: None,
+            format: None,
+        };
+        let result = detect_table_name("my_store", &spec, "20251023120000");
+        assert_eq!(result, "z_results_static_table");
+    }
+
+    #[test]
+    fn test_detect_table_name_multiple_run_id() {
+        let spec = PipelineSqlStoreSpec {
+            target: None,
+            source: "output".to_string(),
+            table: Some("tbl_{run_id}_v2_{run_id}".to_string()),
+            key_column: None,
+            overwrite: None,
+            format: None,
+        };
+        let result = detect_table_name("my_store", &spec, "123");
+        assert_eq!(result, "z_results_tbl_123_v2_123");
+    }
+
+    #[test]
+    fn test_parse_sql_destination_empty() {
+        let result = parse_sql_destination(None).unwrap();
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_parse_sql_destination_biovault() {
+        let result = parse_sql_destination(Some("biovault")).unwrap();
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_parse_sql_destination_sql_empty() {
+        let result = parse_sql_destination(Some("SQL()")).unwrap();
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_parse_sql_destination_sql_case_insensitive() {
+        let result = parse_sql_destination(Some("sql()")).unwrap();
+        assert_eq!(result, None);
+        let result2 = parse_sql_destination(Some("Sql()")).unwrap();
+        assert_eq!(result2, None);
+    }
+
+    #[test]
+    fn test_parse_sql_destination_with_quotes() {
+        let result = parse_sql_destination(Some("'SQL()'")).unwrap();
+        assert_eq!(result, None);
+        let result2 = parse_sql_destination(Some("\"biovault\"")).unwrap();
+        assert_eq!(result2, None);
+    }
+
+    #[test]
+    fn test_parse_sql_destination_url() {
+        let result = parse_sql_destination(Some("SQL(url:postgres://localhost/db)")).unwrap();
+        assert_eq!(result, Some("postgres://localhost/db".to_string()));
+    }
+
+    #[test]
+    fn test_parse_sql_destination_url_with_equals() {
+        let result = parse_sql_destination(Some("SQL(url=sqlite:///tmp/test.db)")).unwrap();
+        assert_eq!(result, Some("sqlite:///tmp/test.db".to_string()));
+    }
+
+    #[test]
+    fn test_parse_sql_destination_url_with_quotes() {
+        let result = parse_sql_destination(Some("SQL(url:'postgres://localhost/db')")).unwrap();
+        assert_eq!(result, Some("postgres://localhost/db".to_string()));
+    }
+
+    #[test]
+    fn test_parse_sql_destination_invalid_syntax() {
+        let result = parse_sql_destination(Some("SQL(invalid)"));
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Unsupported SQL destination syntax"));
+    }
+
+    #[test]
+    fn test_parse_sql_destination_empty_url() {
+        let result = parse_sql_destination(Some("SQL(url:)"));
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("url cannot be empty"));
+    }
+
+    #[test]
+    fn test_parse_sql_destination_unsupported_prefix() {
+        let result = parse_sql_destination(Some("POSTGRES()"));
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Unsupported SQL destination"));
+    }
+
+    #[test]
+    fn test_sanitize_identifier_simple() {
+        assert_eq!(sanitize_identifier("my_table"), "my_table");
+    }
+
+    #[test]
+    fn test_sanitize_identifier_uppercase() {
+        assert_eq!(sanitize_identifier("MyTable"), "mytable");
+    }
+
+    #[test]
+    fn test_sanitize_identifier_spaces() {
+        assert_eq!(sanitize_identifier("my table name"), "my_table_name");
+    }
+
+    #[test]
+    fn test_sanitize_identifier_special_chars() {
+        assert_eq!(sanitize_identifier("my-table@name!"), "my_table_name");
+    }
+
+    #[test]
+    fn test_sanitize_identifier_multiple_underscores() {
+        assert_eq!(sanitize_identifier("my___table"), "my_table");
+    }
+
+    #[test]
+    fn test_sanitize_identifier_leading_trailing_underscores() {
+        assert_eq!(sanitize_identifier("_table_"), "table");
+    }
+
+    #[test]
+    fn test_sanitize_identifier_starts_with_number() {
+        assert_eq!(sanitize_identifier("123table"), "t_123table");
+    }
+
+    #[test]
+    fn test_sanitize_identifier_empty() {
+        assert_eq!(sanitize_identifier(""), "t");
+    }
+
+    #[test]
+    fn test_sanitize_identifier_only_special_chars() {
+        assert_eq!(sanitize_identifier("@#$%"), "t");
+    }
+
+    #[test]
+    fn test_sanitize_identifier_unicode() {
+        assert_eq!(sanitize_identifier("my_tåble"), "my_t_ble");
+    }
+
+    #[test]
+    fn test_detect_format_csv_extension() {
+        let spec = PipelineSqlStoreSpec {
+            target: None,
+            source: "output".to_string(),
+            table: None,
+            key_column: None,
+            overwrite: None,
+            format: None,
+        };
+        let path = PathBuf::from("output.csv");
+        assert_eq!(detect_format(&spec, &path), "csv");
+    }
+
+    #[test]
+    fn test_detect_format_tsv_extension() {
+        let spec = PipelineSqlStoreSpec {
+            target: None,
+            source: "output".to_string(),
+            table: None,
+            key_column: None,
+            overwrite: None,
+            format: None,
+        };
+        let path = PathBuf::from("output.tsv");
+        assert_eq!(detect_format(&spec, &path), "tsv");
+    }
+
+    #[test]
+    fn test_detect_format_uppercase_extension() {
+        let spec = PipelineSqlStoreSpec {
+            target: None,
+            source: "output".to_string(),
+            table: None,
+            key_column: None,
+            overwrite: None,
+            format: None,
+        };
+        let path = PathBuf::from("output.CSV");
+        assert_eq!(detect_format(&spec, &path), "csv");
+    }
+
+    #[test]
+    fn test_detect_format_explicit_format() {
+        let spec = PipelineSqlStoreSpec {
+            target: None,
+            source: "output".to_string(),
+            table: None,
+            key_column: None,
+            overwrite: None,
+            format: Some("TSV".to_string()),
+        };
+        let path = PathBuf::from("output.csv");
+        assert_eq!(detect_format(&spec, &path), "tsv");
+    }
+
+    #[test]
+    fn test_detect_format_no_extension() {
+        let spec = PipelineSqlStoreSpec {
+            target: None,
+            source: "output".to_string(),
+            table: None,
+            key_column: None,
+            overwrite: None,
+            format: None,
+        };
+        let path = PathBuf::from("output");
+        assert_eq!(detect_format(&spec, &path), "csv");
+    }
+
+    #[test]
+    fn test_normalize_type_simple() {
+        assert_eq!(normalize_type("File"), "file");
+    }
+
+    #[test]
+    fn test_normalize_type_optional() {
+        assert_eq!(normalize_type("File?"), "file");
+    }
+
+    #[test]
+    fn test_normalize_type_with_whitespace() {
+        assert_eq!(normalize_type("  File?  "), "file");
+    }
+
+    #[test]
+    fn test_types_compatible_same() {
+        assert!(types_compatible("File", "File"));
+    }
+
+    #[test]
+    fn test_types_compatible_case_insensitive() {
+        assert!(types_compatible("File", "file"));
+    }
+
+    #[test]
+    fn test_types_compatible_optional() {
+        assert!(types_compatible("File?", "File"));
+        assert!(types_compatible("File", "File?"));
+    }
+
+    #[test]
+    fn test_types_compatible_different() {
+        assert!(!types_compatible("File", "Directory"));
+    }
+
+    #[test]
+    fn test_resolve_pipeline_path_default() {
+        assert_eq!(resolve_pipeline_path(None), PathBuf::from("pipeline.yaml"));
+    }
+
+    #[test]
+    fn test_resolve_pipeline_path_custom() {
+        assert_eq!(
+            resolve_pipeline_path(Some("custom.yaml".to_string())),
+            PathBuf::from("custom.yaml")
+        );
+    }
+
+    #[test]
+    fn test_get_delimiter_for_tsv() {
+        assert_eq!(get_delimiter_for_format("tsv"), b'\t');
+    }
+
+    #[test]
+    fn test_get_delimiter_for_csv() {
+        assert_eq!(get_delimiter_for_format("csv"), b',');
+    }
+
+    #[test]
+    fn test_get_delimiter_for_unknown() {
+        assert_eq!(get_delimiter_for_format("unknown"), b',');
+    }
 }
