@@ -443,28 +443,69 @@ pub fn generate_workflow_stub(spec: &ProjectSpec) -> Result<String> {
         &mut buf,
         "        println \"[bv] context keys: ${{context.keySet()}}\""
     );
-    for (name, ty) in &preview_inputs {
-        for line in generate_preview_lines(name, ty, "        ") {
-            wln!(&mut buf, "{}", line);
+    
+    // If there are Python assets, generate example usage
+    let python_assets: Vec<&String> = spec.assets.iter().filter(|a| a.ends_with(".py")).collect();
+    if !python_assets.is_empty() && !preview_inputs.is_empty() && !spec.outputs.is_empty() {
+        let script_name = python_assets[0];
+        let first_input = &preview_inputs[0].0;
+        let first_output = &spec.outputs[0].name;
+        
+        wln!(&mut buf);
+        wln!(&mut buf, "        // Example: Use your Python script");
+        wln!(&mut buf, "        def assetsDir = file(context.params.assets_dir)");
+        wln!(&mut buf, "        def script = file(\"${{assetsDir}}/{}\") ", script_name);
+        wln!(&mut buf, "        def result_ch = process_data({}, Channel.value(script))", first_input);
+        wln!(&mut buf);
+        wln!(&mut buf, "    emit:");
+        wln!(&mut buf, "        {} = result_ch", first_output);
+        for output in spec.outputs.iter().skip(1) {
+            wln!(&mut buf, "        {} = null // TODO: wire this output", output.name);
         }
-    }
-    if spec.outputs.is_empty() {
-        wln!(
-            &mut buf,
-            "        // Emit outputs using 'emit' block when ready"
-        );
+        wln!(&mut buf, "}}");
+        wln!(&mut buf);
+        wln!(&mut buf, "process process_data {{");
+        wln!(&mut buf, "    publishDir params.results_dir, mode: 'copy'");
+        wln!(&mut buf);
+        wln!(&mut buf, "    input:");
+        wln!(&mut buf, "        val input_data");
+        wln!(&mut buf, "        path script");
+        wln!(&mut buf);
+        wln!(&mut buf, "    output:");
+        wln!(&mut buf, "        path 'output.txt'");
+        wln!(&mut buf);
+        wln!(&mut buf, "    script:");
+        wln!(&mut buf, "    \"\"\"");
+        wln!(&mut buf, "    python3 ${{script}} \\");
+        wln!(&mut buf, "        --input \"${{input_data}}\" \\");
+        wln!(&mut buf, "        --output output.txt");
+        wln!(&mut buf, "    \"\"\"");
+        wln!(&mut buf, "}}");
     } else {
-        wln!(&mut buf, "        // Emit declared outputs once produced");
-        for output in &spec.outputs {
+        // Original preview-only code
+        for (name, ty) in &preview_inputs {
+            for line in generate_preview_lines(name, ty, "        ") {
+                wln!(&mut buf, "{}", line);
+            }
+        }
+        if spec.outputs.is_empty() {
             wln!(
                 &mut buf,
-                "        // - {} ({})",
-                output.name,
-                output.raw_type
+                "        // Emit outputs using 'emit' block when ready"
             );
+        } else {
+            wln!(&mut buf, "        // Emit declared outputs once produced");
+            for output in &spec.outputs {
+                wln!(
+                    &mut buf,
+                    "        // - {} ({})",
+                    output.name,
+                    output.raw_type
+                );
+            }
         }
+        wln!(&mut buf, "}}");
     }
-    wln!(&mut buf, "}}");
 
     Ok(buf)
 }
@@ -582,4 +623,173 @@ fn is_context_type(ty: &TypeExpr) -> bool {
         TypeExpr::Optional(inner) => is_context_type(inner),
         _ => false,
     }
+}
+
+// Type info for UI
+#[derive(Debug, Clone, Serialize)]
+pub struct TypeInfo {
+    pub base_types: Vec<String>,
+    pub common_types: Vec<String>,
+}
+
+impl TypeExpr {
+    /// Returns all primitive type names
+    fn all_primitives() -> Vec<&'static str> {
+        vec![
+            "String",
+            "Bool",
+            "File",
+            "Directory",
+            "ParticipantSheet",
+            "GenotypeRecord",
+            "BiovaultContext",
+        ]
+    }
+
+    /// Returns common composite types for inputs
+    fn common_input_composites() -> Vec<&'static str> {
+        vec!["List[File]", "List[Directory]"]
+    }
+}
+
+pub fn get_supported_input_types() -> TypeInfo {
+    let mut base_types: Vec<String> = TypeExpr::all_primitives()
+        .into_iter()
+        .map(|s| s.to_string())
+        .collect();
+    
+    // Add common composites to base types for inputs
+    base_types.extend(
+        TypeExpr::common_input_composites()
+            .into_iter()
+            .map(|s| s.to_string()),
+    );
+
+    TypeInfo {
+        base_types,
+        common_types: vec![
+            "File".to_string(),
+            "Directory".to_string(),
+            "String".to_string(),
+            "List[File]".to_string(),
+        ],
+    }
+}
+
+pub fn get_supported_output_types() -> TypeInfo {
+    // Outputs don't support BiovaultContext
+    let base_types: Vec<String> = TypeExpr::all_primitives()
+        .into_iter()
+        .filter(|&t| t != "BiovaultContext")
+        .map(|s| s.to_string())
+        .collect();
+
+    TypeInfo {
+        base_types,
+        common_types: vec!["File".to_string(), "Directory".to_string()],
+    }
+}
+
+pub fn get_supported_parameter_types() -> Vec<String> {
+    // Parameters only support String, Bool, and Enum
+    vec![
+        "String".to_string(),
+        "Bool".to_string(),
+        "Enum[...]".to_string(),
+    ]
+}
+
+pub fn get_common_formats() -> Vec<String> {
+    vec![
+        "csv".to_string(),
+        "tsv".to_string(),
+        "txt".to_string(),
+        "json".to_string(),
+        "vcf".to_string(),
+        "fasta".to_string(),
+        "fastq".to_string(),
+    ]
+}
+
+/// Generate a starter Python script for processing data
+pub fn generate_python_script_template(script_name: &str) -> String {
+    format!(
+        r#"#!/usr/bin/env python3
+"""
+{script_name}
+
+Starter script for data processing.
+Add your custom logic here.
+"""
+
+import argparse
+from pathlib import Path
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--input", required=True, help="Input file path")
+    parser.add_argument("--output", required=True, help="Output file path")
+    args = parser.parse_args()
+
+    print("🔄 Processing data...")
+    print(f"   Input: {{args.input}}")
+    print(f"   Output: {{args.output}}")
+
+    # Your processing logic here
+    # Example: Read, process, and write data
+    with open(args.input) as f_in:
+        data = f_in.read()
+        # TODO: Add your processing logic
+        processed = data  # Passthrough for now
+
+    with open(args.output, 'w') as f_out:
+        f_out.write(processed)
+
+    print("✅ Processing complete!")
+
+
+if __name__ == "__main__":
+    main()
+"#,
+        script_name = script_name
+    )
+}
+
+/// Scaffold a blank project with optional script generation
+pub fn scaffold_blank_project(
+    spec: ProjectSpec,
+    target_dir: &Path,
+    create_python_script: bool,
+    script_name: Option<&str>,
+) -> Result<ProjectSpec> {
+    let mut updated_spec = spec.clone();
+    
+    // Scaffold base project structure
+    scaffold_from_spec(spec, target_dir)?;
+    
+    // Add Python script if requested
+    if create_python_script {
+        let assets_dir = target_dir.join("assets");
+        fs::create_dir_all(&assets_dir).context("Failed to create assets directory")?;
+        
+        let script_filename = script_name.unwrap_or("process.py");
+        let script_path = assets_dir.join(script_filename);
+        let script_content = generate_python_script_template(script_filename);
+        
+        fs::write(&script_path, script_content)
+            .with_context(|| format!("Failed to write {}", script_path.display()))?;
+        
+        // Add to assets list
+        updated_spec.assets = vec![script_filename.to_string()];
+        
+        // Update project.yaml with assets
+        let project_yaml_path = target_dir.join("project.yaml");
+        let yaml = serde_yaml::to_string(&updated_spec)
+            .context("Failed to serialize updated project spec")?;
+        fs::write(&project_yaml_path, yaml)
+            .context("Failed to update project.yaml with assets")?;
+    }
+    
+    Ok(updated_spec)
 }
