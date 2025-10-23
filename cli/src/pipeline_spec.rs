@@ -34,6 +34,8 @@ pub struct PipelineSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<PipelineContextSpec>,
     #[serde(default)]
+    pub inputs: BTreeMap<String, PipelineInputSpec>,
+    #[serde(default)]
     pub steps: Vec<PipelineStepSpec>,
 }
 
@@ -78,5 +80,37 @@ pub fn value_to_string(value: &YamlValue) -> Option<String> {
         YamlValue::Bool(b) => Some(b.to_string()),
         YamlValue::Null => None,
         _ => None,
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum PipelineInputSpec {
+    Simple(String),
+    Detailed {
+        #[serde(rename = "type")]
+        raw_type: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        default: Option<String>,
+    },
+}
+
+impl PipelineInputSpec {
+    pub fn from_type(raw_type: &str) -> Self {
+        PipelineInputSpec::Simple(raw_type.to_string())
+    }
+
+    pub fn raw_type(&self) -> &str {
+        match self {
+            PipelineInputSpec::Simple(s) => s,
+            PipelineInputSpec::Detailed { raw_type, .. } => raw_type,
+        }
+    }
+
+    pub fn default_literal(&self) -> Option<&str> {
+        match self {
+            PipelineInputSpec::Simple(_) => None,
+            PipelineInputSpec::Detailed { default, .. } => default.as_deref(),
+        }
     }
 }

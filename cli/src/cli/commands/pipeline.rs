@@ -1,6 +1,6 @@
 use crate::data::BioVaultDb;
 use crate::error::Result;
-use crate::pipeline_spec::{value_to_string, PipelineSpec, PipelineStepSpec};
+use crate::pipeline_spec::{value_to_string, PipelineInputSpec, PipelineSpec, PipelineStepSpec};
 use crate::project_spec::{InputSpec, OutputSpec, ProjectSpec};
 use anyhow::anyhow;
 use colored::Colorize;
@@ -12,6 +12,10 @@ use std::path::{Path, PathBuf};
 use tokio::fs;
 
 use super::run_dynamic;
+
+type StepOverrides = HashMap<(String, String), String>;
+type PipelineOverrides = HashMap<String, String>;
+type ParseOverridesResult = (StepOverrides, PipelineOverrides, Option<String>);
 
 trait DialoguerResultExt<T> {
     fn cli_result(self) -> Result<T>;
@@ -67,7 +71,11 @@ pub async fn create(
 
         let mut with_map = BTreeMap::new();
         for input in &project.spec.inputs {
-            with_map.insert(input.name.clone(), pending_binding(&input.raw_type));
+            let key = ensure_pipeline_input(&mut spec, &step_id_value, input);
+            with_map.insert(
+                input.name.clone(),
+                YamlValue::String(format!("inputs.{}", key)),
+            );
         }
 
         let publish_map = default_publish_map(&project.spec.outputs);
@@ -144,16 +152,13 @@ pub async fn run_pipeline(
     resume: bool,
     results_dir_override: Option<String>,
 ) -> Result<()> {
-    if !extra_args.is_empty() {
-        return Err(
-            anyhow!("Pipeline runs currently do not accept additional CLI arguments.").into(),
-        );
-    }
-
     let path = Path::new(pipeline_path);
     if !path.exists() {
         return Err(anyhow!("Pipeline file not found: {}", pipeline_path).into());
     }
+
+    let (step_overrides, pipeline_overrides, explicit_results_dir) =
+        parse_overrides(&extra_args, results_dir_override.clone())?;
 
     let spec = PipelineSpec::load(path)?;
     let db = BioVaultDb::new().ok();
@@ -171,25 +176,27 @@ pub async fn run_pipeline(
         .into());
     }
 
-    if validation
-        .bindings
-        .iter()
-        .any(|binding| matches!(binding.state, BindingState::Pending))
-    {
-        return Err(anyhow!(
-            "Pipeline has pending inputs. Replace placeholders like 'File' with Type(value) before running."
-        )
-        .into());
-    }
-
     let pipeline_dir = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
 
+    let mut resolved_inputs: HashMap<String, String> = HashMap::new();
+    for (name, input_spec) in &spec.inputs {
+        if let Some(value) = pipeline_overrides.get(name) {
+            let resolved = literal_to_value(value, input_spec.raw_type())?;
+            resolved_inputs.insert(name.clone(), resolved);
+        } else if let Some(default_literal) = input_spec.default_literal() {
+            let resolved = literal_to_value(default_literal, input_spec.raw_type())?;
+            resolved_inputs.insert(name.clone(), resolved);
+        }
+    }
+
     let mut step_outputs: HashMap<String, HashMap<String, String>> = HashMap::new();
 
-    let base_results_dir = match results_dir_override {
+    let requested_results_dir = explicit_results_dir.or(results_dir_override);
+
+    let base_results_dir = match requested_results_dir {
         Some(dir) => PathBuf::from(dir),
         None => {
             let mut base = PathBuf::from("results/pipelines");
@@ -224,8 +231,20 @@ pub async fn run_pipeline(
                     )
                 })?;
 
-            let resolved_value =
-                resolve_binding(&binding, &input.raw_type, &step_outputs, &step.id)?;
+            let override_key = (step.id.clone(), input.name.clone());
+            let resolved_binding = step_overrides
+                .get(&override_key)
+                .cloned()
+                .unwrap_or(binding);
+
+            let resolved_value = resolve_binding(
+                &resolved_binding,
+                &input.raw_type,
+                &spec.inputs,
+                &resolved_inputs,
+                &step_outputs,
+                &step.id,
+            )?;
 
             step_args.push(format!("--{}", input.name));
             step_args.push(resolved_value);
@@ -404,15 +423,14 @@ impl<'a> PipelineWizard<'a> {
 
         if let Some(project) = &loaded_project {
             for input in &project.spec.inputs {
+                let input_key = ensure_pipeline_input(&mut spec, &step_id, input);
+                let default_binding = YamlValue::String(format!("inputs.{}", input_key));
+
                 if let Some(binding) = self.prompt_input_binding(input, &available_outputs)? {
                     with_map.insert(input.name.clone(), binding);
+                } else {
+                    with_map.insert(input.name.clone(), default_binding);
                 }
-            }
-
-            for input in &project.spec.inputs {
-                with_map
-                    .entry(input.name.clone())
-                    .or_insert_with(|| pending_binding(&input.raw_type));
             }
 
             publish_map = prompt_publish_map(&self.theme, &project.spec.outputs)?;
@@ -472,7 +490,7 @@ impl<'a> PipelineWizard<'a> {
             .collect();
 
         options.push("Enter literal / path".to_string());
-        options.push("Leave unbound".to_string());
+        options.push("Use pipeline input".to_string());
 
         let selection = Select::with_theme(&self.theme)
             .with_prompt("Binding")
@@ -696,8 +714,34 @@ fn collect_available_outputs(resolved_steps: &[ResolvedStep]) -> Vec<CandidateOu
     outputs
 }
 
-fn pending_binding(raw_type: &str) -> YamlValue {
-    YamlValue::String(raw_type.to_string())
+fn ensure_pipeline_input(spec: &mut PipelineSpec, step_id: &str, input: &InputSpec) -> String {
+    if let Some(existing) = spec.inputs.get(&input.name) {
+        if existing.raw_type() == input.raw_type {
+            return input.name.clone();
+        }
+    }
+
+    let mut key = input.name.clone();
+    let mut suffix = 2;
+    while let Some(existing) = spec.inputs.get(&key) {
+        if existing.raw_type() == input.raw_type {
+            return key;
+        }
+        key = format!("{}-{}", input.name, suffix);
+        suffix += 1;
+    }
+
+    // If we had to rename due to type conflict, inform user via console.
+    if key != input.name {
+        println!(
+            "⚠️  Input '{}' on step '{}' conflicts with existing pipeline input; recorded as '{}'.",
+            input.name, step_id, key
+        );
+    }
+
+    spec.inputs
+        .insert(key.clone(), PipelineInputSpec::from_type(&input.raw_type));
+    key
 }
 
 fn is_pending_binding_literal(value: &str) -> bool {
@@ -752,12 +796,97 @@ fn default_publish_map(outputs: &[OutputSpec]) -> BTreeMap<String, String> {
     map
 }
 
+fn parse_overrides(
+    extra_args: &[String],
+    initial_results_dir: Option<String>,
+) -> Result<ParseOverridesResult> {
+    let mut step_overrides = HashMap::new();
+    let mut pipeline_overrides = HashMap::new();
+    let mut results_dir = initial_results_dir;
+    let mut i = 0;
+    while i < extra_args.len() {
+        let arg = &extra_args[i];
+        if arg == "--set" {
+            if i + 1 >= extra_args.len() {
+                return Err(anyhow!("--set requires an argument like step.input=value").into());
+            }
+            parse_override_pair(
+                &extra_args[i + 1],
+                &mut step_overrides,
+                &mut pipeline_overrides,
+            )?;
+            i += 2;
+        } else if let Some(kv) = arg.strip_prefix("--set=") {
+            parse_override_pair(kv, &mut step_overrides, &mut pipeline_overrides)?;
+            i += 1;
+        } else if arg == "--results-dir" {
+            if i + 1 >= extra_args.len() {
+                return Err(anyhow!("--results-dir requires a value").into());
+            }
+            results_dir = Some(extra_args[i + 1].clone());
+            i += 2;
+        } else if let Some(dir) = arg.strip_prefix("--results-dir=") {
+            results_dir = Some(dir.to_string());
+            i += 1;
+        } else {
+            return Err(anyhow!("Unknown pipeline run argument: {}", arg).into());
+        }
+    }
+    Ok((step_overrides, pipeline_overrides, results_dir))
+}
+
+fn parse_override_pair(
+    pair: &str,
+    step_overrides: &mut HashMap<(String, String), String>,
+    pipeline_overrides: &mut HashMap<String, String>,
+) -> Result<()> {
+    let (key, value) = pair
+        .split_once('=')
+        .ok_or_else(|| anyhow!("Override must be in the form step.input=value"))?;
+    let (step, input) = key
+        .split_once('.')
+        .ok_or_else(|| anyhow!("Override key must be step.input"))?;
+    if step.trim().is_empty() || input.trim().is_empty() {
+        return Err(anyhow!("Override key must include both step and input names").into());
+    }
+    let value = value.trim().to_string();
+    if step.trim() == "inputs" {
+        pipeline_overrides.insert(input.trim().to_string(), value);
+    } else {
+        step_overrides.insert((step.trim().to_string(), input.trim().to_string()), value);
+    }
+    Ok(())
+}
+
 fn resolve_binding(
     binding: &str,
     expected_type: &str,
+    pipeline_inputs: &BTreeMap<String, PipelineInputSpec>,
+    resolved_inputs: &HashMap<String, String>,
     step_outputs: &HashMap<String, HashMap<String, String>>,
     current_step_id: &str,
 ) -> Result<String> {
+    if let Some(input_name) = binding.strip_prefix("inputs.") {
+        if let Some(value) = resolved_inputs.get(input_name) {
+            return Ok(value.clone());
+        }
+        if let Some(_spec) = pipeline_inputs.get(input_name) {
+            return Err(anyhow!(
+                "Pipeline input '{}' is not set. Provide a value with --set inputs.{}=<value>.",
+                input_name,
+                input_name
+            )
+            .into());
+        } else {
+            return Err(anyhow!(
+                "Pipeline input '{}' referenced in step '{}' is not declared",
+                input_name,
+                current_step_id
+            )
+            .into());
+        }
+    }
+
     if binding.starts_with("step.") {
         let parts: Vec<&str> = binding.split('.').collect();
         if parts.len() != 4 || parts[2] != "outputs" {
@@ -787,12 +916,24 @@ fn resolve_binding(
         return Ok(value.clone());
     }
 
-    if let Some((literal_type, literal_value)) = parse_typed_literal(binding) {
+    if is_type_placeholder(binding, expected_type) {
+        return Err(anyhow!(
+            "Input '{}' is still a placeholder. Provide a value like {}(<value>).",
+            expected_type,
+            expected_type
+        )
+        .into());
+    }
+
+    literal_to_value(binding, expected_type)
+}
+
+fn literal_to_value(literal: &str, expected_type: &str) -> Result<String> {
+    if let Some((literal_type, literal_value)) = parse_typed_literal(literal) {
         if literal_value.is_empty() {
             return Err(anyhow!(
-                "Input '{}' expects a value. Replace '{}' with {}(<value>).",
+                "Value for {} cannot be empty. Use {}(<value>).",
                 expected_type,
-                binding,
                 literal_type
             )
             .into());
@@ -806,19 +947,10 @@ fn resolve_binding(
             )
             .into());
         }
-        return Ok(literal_value);
+        Ok(literal_value)
+    } else {
+        Ok(literal.to_string())
     }
-
-    if is_type_placeholder(binding, expected_type) {
-        return Err(anyhow!(
-            "Input '{}' is still a placeholder. Provide a value like {}(<value>).",
-            expected_type,
-            expected_type
-        )
-        .into());
-    }
-
-    Ok(binding.to_string())
 }
 
 struct ResolvedStep {
@@ -930,6 +1062,7 @@ struct PipelineValidationResult {
     bindings: Vec<BindingStatus>,
     errors: Vec<String>,
     warnings: Vec<String>,
+    pipeline_inputs: BTreeMap<String, PipelineInputSpec>,
 }
 
 impl PipelineValidationResult {
@@ -1024,7 +1157,58 @@ fn validate_internal(
                             continue;
                         }
 
-                        if binding_value.starts_with("step.") {
+                        if let Some(input_name) = binding_value.strip_prefix("inputs.") {
+                            if let Some(spec_input) = spec.inputs.get(input_name) {
+                                if !types_compatible(&input.raw_type, spec_input.raw_type()) {
+                                    let msg = format!(
+                                        "Type mismatch: expected {} but pipeline input '{}' declares {}",
+                                        input.raw_type,
+                                        input_name,
+                                        spec_input.raw_type()
+                                    );
+                                    errors.push(msg.clone());
+                                    bindings.push(BindingStatus {
+                                        step_id: resolved_step.step_id.clone(),
+                                        input: input.name.clone(),
+                                        binding: Some(binding_value.clone()),
+                                        expected: input.raw_type.clone(),
+                                        actual: Some(spec_input.raw_type().to_string()),
+                                        state: BindingState::Error,
+                                        message: Some(msg),
+                                    });
+                                } else {
+                                    bindings.push(BindingStatus {
+                                        step_id: resolved_step.step_id.clone(),
+                                        input: input.name.clone(),
+                                        binding: Some(binding_value.clone()),
+                                        expected: input.raw_type.clone(),
+                                        actual: None,
+                                        state: BindingState::Pending,
+                                        message: Some(format!(
+                                            "Depends on pipeline input '{}'. Set it via --set inputs.{}=<value>.",
+                                            input_name,
+                                            input_name
+                                        )),
+                                    });
+                                }
+                            } else {
+                                errors.push(format!(
+                                    "Binding '{}' for step '{}' input '{}' references unknown pipeline input",
+                                    binding_value,
+                                    resolved_step.step_id,
+                                    input.name
+                                ));
+                                bindings.push(BindingStatus {
+                                    step_id: resolved_step.step_id.clone(),
+                                    input: input.name.clone(),
+                                    binding: Some(binding_value.clone()),
+                                    expected: input.raw_type.clone(),
+                                    actual: None,
+                                    state: BindingState::Error,
+                                    message: Some("Unknown pipeline input".to_string()),
+                                });
+                            }
+                        } else if binding_value.starts_with("step.") {
                             errors.push(format!(
                                 "Binding '{}' for step '{}' input '{}' references an unknown output",
                                 binding_value, resolved_step.step_id, input.name
@@ -1162,6 +1346,7 @@ fn validate_internal(
         bindings,
         errors,
         warnings,
+        pipeline_inputs: spec.inputs.clone(),
     })
 }
 
@@ -1177,6 +1362,13 @@ fn print_validation(result: &PipelineValidationResult, diagram: bool) {
         println!("\n⚠️  Warnings:");
         for warn in &result.warnings {
             println!("  - {}", warn.yellow());
+        }
+    }
+
+    if !result.pipeline_inputs.is_empty() {
+        println!("\n🔑 Pipeline inputs:");
+        for (name, spec_input) in &result.pipeline_inputs {
+            println!("  - {} : {}", name.bold(), spec_input.raw_type());
         }
     }
 
@@ -1224,9 +1416,24 @@ fn print_steps(result: &PipelineValidationResult) {
                 BindingState::Error => "error".red(),
                 BindingState::Pending => "pending".cyan(),
             };
-            let binding_str = binding
+            let binding_display = binding
                 .binding
-                .clone()
+                .as_deref()
+                .map(|b| {
+                    if let Some(name) = b.strip_prefix("inputs.") {
+                        format!("inputs.{}", name)
+                    } else if is_type_placeholder(b, &binding.expected) {
+                        "(pending)".to_string()
+                    } else if let Some((_, value)) = parse_typed_literal(b) {
+                        if value.is_empty() {
+                            b.to_string()
+                        } else {
+                            value
+                        }
+                    } else {
+                        b.to_string()
+                    }
+                })
                 .unwrap_or_else(|| "(unbound)".to_string());
             let type_info = match &binding.actual {
                 Some(actual) => format!("{} → {}", actual, binding.expected.clone()),
@@ -1235,7 +1442,7 @@ fn print_steps(result: &PipelineValidationResult) {
             println!(
                 "      {} ← {} [{}] {}",
                 binding.input,
-                binding_str.dimmed(),
+                binding_display.dimmed(),
                 status,
                 type_info.as_str().dimmed()
             );
