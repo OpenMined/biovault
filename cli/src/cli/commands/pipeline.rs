@@ -1,12 +1,18 @@
 use crate::data::BioVaultDb;
 use crate::error::Result;
-use crate::pipeline_spec::{value_to_string, PipelineInputSpec, PipelineSpec, PipelineStepSpec};
+use crate::pipeline_spec::{
+    value_to_string, PipelineInputSpec, PipelineSpec, PipelineSqlStoreSpec, PipelineStepSpec,
+    PipelineStoreSpec,
+};
 use crate::project_spec::{InputSpec, OutputSpec, ProjectSpec};
-use anyhow::anyhow;
+use anyhow::{anyhow, Context};
+use chrono::Utc;
 use colored::Colorize;
+use csv::ReaderBuilder;
 use dialoguer::{theme::ColorfulTheme, Confirm, Input, Select};
+use rusqlite::params_from_iter;
 use serde_yaml::Value as YamlValue;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::env;
 use std::path::{Path, PathBuf};
 use tokio::fs;
@@ -86,7 +92,7 @@ pub async fn create(
             where_exec: None,
             with: with_map,
             publish: publish_map,
-            store: None,
+            store: BTreeMap::new(),
         });
 
         spec.save(&pipeline_path)?;
@@ -161,7 +167,7 @@ pub async fn run_pipeline(
         parse_overrides(&extra_args, results_dir_override.clone())?;
 
     let spec = PipelineSpec::load(path)?;
-    let db = BioVaultDb::new().ok();
+    let mut db = BioVaultDb::new().ok();
     let validation = validate_internal(path, &spec, db.as_ref())?;
 
     if validation.has_errors() {
@@ -180,6 +186,15 @@ pub async fn run_pipeline(
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
+
+    let run_id = Utc::now().format("%Y%m%d%H%M%S").to_string();
+    println!("🆔 Pipeline run {}", run_id);
+
+    for key in pipeline_overrides.keys() {
+        if !spec.inputs.contains_key(key) {
+            return Err(anyhow!("Unknown pipeline input '{}' in --set", key).into());
+        }
+    }
 
     let mut resolved_inputs: HashMap<String, String> = HashMap::new();
     for (name, input_spec) in &spec.inputs {
@@ -278,16 +293,50 @@ pub async fn run_pipeline(
             outputs.insert(output.name.clone(), path.to_string_lossy().to_string());
         }
 
-        // Keep aliases equal to publish keys pointing to same paths when names match
-        for (alias, value) in &step.publish {
-            if alias == value {
-                if let Some(path) = outputs.get(value) {
-                    outputs.insert(alias.clone(), path.clone());
-                }
+        // Ensure publish aliases reference concrete paths
+        for alias in step.publish.keys() {
+            if let Some(path) = outputs.get(alias) {
+                outputs.insert(alias.clone(), path.clone());
             }
         }
 
         step_outputs.insert(step.id.clone(), outputs);
+
+        if !step.store.is_empty() {
+            let db_conn = db
+                .as_mut()
+                .ok_or_else(|| anyhow!("BioVault database not available for store operations"))?;
+            let step_outputs_ref = step_outputs.get(&step.id).unwrap();
+            for (store_name, store_spec) in &step.store {
+                match store_spec {
+                    PipelineStoreSpec::Sql(sql) => {
+                        if let Some(url) = parse_sql_destination(sql.target.as_deref())? {
+                            return Err(anyhow!(
+                                "SQL store '{}' destination '{}' not supported yet (only built-in biovault is available)",
+                                store_name,
+                                url
+                            )
+                            .into());
+                        }
+                        let source_path = step_outputs_ref.get(&sql.source).ok_or_else(|| {
+                            anyhow!(
+                                "Store '{}' in step '{}' references unknown output '{}'",
+                                store_name,
+                                step.id,
+                                sql.source
+                            )
+                        })?;
+                        store_sql_output(
+                            db_conn,
+                            store_name,
+                            sql,
+                            Path::new(source_path),
+                            &run_id,
+                        )?;
+                    }
+                }
+            }
+        }
     }
 
     println!("\n✅ Pipeline run completed successfully");
@@ -423,14 +472,18 @@ impl<'a> PipelineWizard<'a> {
 
         if let Some(project) = &loaded_project {
             for input in &project.spec.inputs {
-                let input_key = ensure_pipeline_input(&mut spec, &step_id, input);
-                let default_binding = YamlValue::String(format!("inputs.{}", input_key));
-
-                if let Some(binding) = self.prompt_input_binding(input, &available_outputs)? {
+                if let Some(binding) =
+                    self.prompt_input_binding(&mut spec, &step_id, input, &available_outputs)?
+                {
                     with_map.insert(input.name.clone(), binding);
-                } else {
-                    with_map.insert(input.name.clone(), default_binding);
                 }
+            }
+
+            for input in &project.spec.inputs {
+                with_map.entry(input.name.clone()).or_insert_with(|| {
+                    let key = ensure_pipeline_input(&mut spec, &step_id, input);
+                    YamlValue::String(format!("inputs.{}", key))
+                });
             }
 
             publish_map = prompt_publish_map(&self.theme, &project.spec.outputs)?;
@@ -442,7 +495,7 @@ impl<'a> PipelineWizard<'a> {
             where_exec: None,
             with: with_map,
             publish: publish_map,
-            store: None,
+            store: BTreeMap::new(),
         };
 
         spec.steps.push(step);
@@ -479,6 +532,8 @@ impl<'a> PipelineWizard<'a> {
 
     fn prompt_input_binding(
         &self,
+        spec: &mut PipelineSpec,
+        step_id: &str,
         input: &InputSpec,
         available_outputs: &[CandidateOutput],
     ) -> Result<Option<YamlValue>> {
@@ -489,7 +544,9 @@ impl<'a> PipelineWizard<'a> {
             .map(|candidate| candidate.display_for(input))
             .collect();
 
+        let literal_index = options.len();
         options.push("Enter literal / path".to_string());
+        let pipeline_index = options.len();
         options.push("Use pipeline input".to_string());
 
         let selection = Select::with_theme(&self.theme)
@@ -505,12 +562,51 @@ impl<'a> PipelineWizard<'a> {
             return Ok(Some(YamlValue::String(chosen.binding.clone())));
         }
 
-        if selection == available_outputs.len() {
+        if selection == literal_index {
             let value = Input::with_theme(&self.theme)
                 .with_prompt("Enter literal value")
                 .interact_text()
                 .cli_result()?;
             return Ok(Some(YamlValue::String(value)));
+        }
+
+        if selection == pipeline_index {
+            let matching_inputs: Vec<String> = spec
+                .inputs
+                .iter()
+                .filter_map(|(name, existing)| {
+                    if types_compatible(existing.raw_type(), &input.raw_type) {
+                        Some(name.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            let chosen_key = if matching_inputs.is_empty() {
+                ensure_pipeline_input(spec, step_id, input)
+            } else {
+                let mut pipeline_options = matching_inputs
+                    .iter()
+                    .map(|name| format!("Existing: {}", name))
+                    .collect::<Vec<_>>();
+                pipeline_options.push(format!("Create new input for '{}'", input.name));
+
+                let selected = Select::with_theme(&self.theme)
+                    .with_prompt("Pipeline input")
+                    .items(&pipeline_options)
+                    .default(0)
+                    .interact()
+                    .cli_result()?;
+
+                if selected < matching_inputs.len() {
+                    matching_inputs[selected].clone()
+                } else {
+                    ensure_pipeline_input(spec, step_id, input)
+                }
+            };
+
+            return Ok(Some(YamlValue::String(format!("inputs.{}", chosen_key))));
         }
 
         Ok(None)
@@ -953,9 +1049,260 @@ fn literal_to_value(literal: &str, expected_type: &str) -> Result<String> {
     }
 }
 
+fn sanitize_identifier(name: &str) -> String {
+    let mut result = String::new();
+    for c in name.chars() {
+        if c.is_ascii_alphanumeric() {
+            result.push(c.to_ascii_lowercase());
+        } else {
+            result.push('_');
+        }
+    }
+    while result.contains("__") {
+        result = result.replace("__", "_");
+    }
+    let mut trimmed = result.trim_matches('_').to_string();
+    if trimmed.is_empty() {
+        trimmed = "t".to_string();
+    }
+    if trimmed.chars().next().unwrap().is_ascii_digit() {
+        trimmed = format!("t_{}", trimmed);
+    }
+    trimmed
+}
+
+fn detect_table_name(store_name: &str, spec: &PipelineSqlStoreSpec, run_id: &str) -> String {
+    let template = spec
+        .table
+        .clone()
+        .unwrap_or_else(|| format!("{}_{}", store_name, run_id));
+    let table_name = template.replace("{run_id}", run_id);
+    format!("z_results_{}", table_name)
+}
+
+fn detect_format(spec: &PipelineSqlStoreSpec, output_path: &Path) -> String {
+    if let Some(fmt) = spec.format.as_deref() {
+        return fmt.to_ascii_lowercase();
+    }
+    output_path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|s| s.to_ascii_lowercase())
+        .unwrap_or_else(|| "csv".to_string())
+}
+
+fn parse_sql_destination(target: Option<&str>) -> Result<Option<String>> {
+    let Some(raw) = target.map(|t| t.trim()) else {
+        return Ok(None);
+    };
+    let raw = raw.trim_matches(|c| c == '\'' || c == '"');
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    let upper = raw.to_ascii_uppercase();
+    if upper == "BIOVAULT" || upper == "SQL" || upper == "SQL()" {
+        return Ok(None);
+    }
+    if upper.starts_with("SQL") {
+        let inner = raw
+            .strip_prefix("SQL")
+            .and_then(|s| s.strip_prefix('('))
+            .map(|s| s.trim_end_matches(')'))
+            .unwrap_or("")
+            .trim();
+        if inner.is_empty() {
+            return Ok(None);
+        }
+        if let Some(url_spec) = inner
+            .strip_prefix("url:")
+            .or_else(|| inner.strip_prefix("url="))
+        {
+            let url = url_spec.trim().trim_matches(|c| c == '"' || c == '\'');
+            if url.is_empty() {
+                return Err(anyhow!("SQL destination url cannot be empty").into());
+            }
+            return Ok(Some(url.to_string()));
+        }
+        return Err(anyhow!(
+            "Unsupported SQL destination syntax '{}'. Use SQL() or SQL(url:<connection>)",
+            raw
+        )
+        .into());
+    }
+    Err(anyhow!(
+        "Unsupported SQL destination '{}'. Use SQL() or SQL(url:<connection>)",
+        raw
+    )
+    .into())
+}
+
+fn store_sql_output(
+    db: &mut BioVaultDb,
+    store_name: &str,
+    spec: &PipelineSqlStoreSpec,
+    output_path: &Path,
+    run_id: &str,
+) -> Result<()> {
+    if !output_path.exists() {
+        return Err(anyhow!(
+            "Store '{}' refers to missing output file {}",
+            store_name,
+            output_path.display()
+        )
+        .into());
+    }
+
+    if let Some(url) = parse_sql_destination(spec.target.as_deref())? {
+        return Err(anyhow!(
+            "SQL store '{}' destination '{}' not supported yet (only built-in biovault is available)",
+            store_name,
+            url
+        )
+        .into());
+    }
+
+    let table_template = detect_table_name(store_name, spec, run_id);
+    let table_identifier = sanitize_identifier(&table_template);
+    if table_identifier.is_empty() {
+        return Err(anyhow!(
+            "Unable to derive a valid table name from '{}'",
+            table_template
+        )
+        .into());
+    }
+
+    let format = detect_format(spec, output_path);
+    let delimiter = match format.as_str() {
+        "tsv" => b'\t',
+        _ => b',',
+    };
+
+    let mut reader = ReaderBuilder::new()
+        .has_headers(true)
+        .delimiter(delimiter)
+        .from_path(output_path)
+        .with_context(|| format!("Failed to open {}", output_path.display()))?;
+
+    let headers = reader
+        .headers()
+        .with_context(|| format!("Failed to read headers from {}", output_path.display()))?
+        .clone();
+    if headers.is_empty() {
+        return Err(anyhow!(
+            "CSV {} has no headers; cannot create SQL table",
+            output_path.display()
+        )
+        .into());
+    }
+
+    let mut used_columns = HashSet::new();
+    let mut columns = Vec::new();
+    for (idx, header) in headers.iter().enumerate() {
+        let mut base = sanitize_identifier(header);
+        if base.is_empty() {
+            base = format!("col{}", idx + 1);
+        }
+        let mut candidate = base.clone();
+        let mut counter = 2;
+        while !used_columns.insert(candidate.clone()) {
+            candidate = format!("{}_{}", base, counter);
+            counter += 1;
+        }
+        columns.push((candidate, header.to_string(), idx));
+    }
+
+    let key_column = spec.key_column.as_deref();
+    let mut create_defs = Vec::new();
+    let mut primary_assigned = false;
+    for (sanitized, original, _) in &columns {
+        let mut col_def = format!("\"{}\" TEXT", sanitized);
+        if let Some(key) = key_column {
+            if original.eq_ignore_ascii_case(key) {
+                col_def = format!("\"{}\" TEXT PRIMARY KEY", sanitized);
+                primary_assigned = true;
+            }
+        }
+        create_defs.push(col_def);
+    }
+    if key_column.is_some() && !primary_assigned {
+        return Err(anyhow!(
+            "key_column '{}' not found in output '{}'",
+            key_column.unwrap(),
+            output_path.display()
+        )
+        .into());
+    }
+
+    let total_columns = columns.len();
+    let tx = db
+        .conn
+        .transaction()
+        .with_context(|| format!("Failed to start SQL transaction for store '{}'", store_name))?;
+    if spec.overwrite.unwrap_or(true) {
+        tx.execute(
+            &format!("DROP TABLE IF EXISTS \"{}\"", table_identifier),
+            [],
+        )
+        .with_context(|| format!("Failed to drop existing table {}", table_identifier))?;
+    }
+    tx.execute(
+        &format!(
+            "CREATE TABLE IF NOT EXISTS \"{}\" ({})",
+            table_identifier,
+            create_defs.join(", ")
+        ),
+        [],
+    )
+    .with_context(|| format!("Failed to create table {}", table_identifier))?;
+
+    let column_list = columns
+        .iter()
+        .map(|(sanitized, _, _)| format!("\"{}\"", sanitized))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let placeholders = (0..total_columns)
+        .map(|_| "?")
+        .collect::<Vec<_>>()
+        .join(", ");
+    let insert_sql = format!(
+        "INSERT OR REPLACE INTO \"{}\" ({}) VALUES ({})",
+        table_identifier, column_list, placeholders
+    );
+
+    let mut stmt = tx
+        .prepare(&insert_sql)
+        .with_context(|| format!("Failed to prepare insert for table {}", table_identifier))?;
+    let mut row_count = 0usize;
+    for record in reader.records() {
+        let record =
+            record.with_context(|| format!("Failed to read row from {}", output_path.display()))?;
+        let mut values = Vec::with_capacity(total_columns);
+        for (_, _, idx) in &columns {
+            values.push(record.get(*idx).unwrap_or("").to_string());
+        }
+        stmt.execute(params_from_iter(values.iter()))
+            .with_context(|| format!("Failed to insert row into table {}", table_identifier))?;
+        row_count += 1;
+    }
+    drop(stmt);
+    tx.commit()
+        .with_context(|| format!("Failed to commit SQL store for table {}", table_identifier))?;
+
+    let db_path = crate::config::get_biovault_home()?.join("biovault.db");
+    println!(
+        "💾 Stored '{}' output '{}' into table {} (rows: {}).",
+        store_name, spec.source, table_identifier, row_count
+    );
+    println!("    source: {}", output_path.display());
+    println!("    database: {}", db_path.display());
+
+    Ok(())
+}
+
 struct ResolvedStep {
     step_id: String,
     project: LoadedProject,
+    store: BTreeMap<String, PipelineStoreSpec>,
 }
 
 fn resolve_existing_steps(
@@ -969,6 +1316,7 @@ fn resolve_existing_steps(
             resolved.push(ResolvedStep {
                 step_id: step.id.clone(),
                 project,
+                store: step.store.clone(),
             });
         }
     }
@@ -1117,6 +1465,7 @@ fn validate_internal(
                 let resolved_step = ResolvedStep {
                     step_id: step_spec.id.clone(),
                     project,
+                    store: step_spec.store.clone(),
                 };
 
                 let project_spec = &resolved_step.project.spec;
@@ -1325,6 +1674,27 @@ fn validate_internal(
                     available.insert(key, (resolved_step.step_id.clone(), output.clone()));
                 }
 
+                let mut known_outputs: HashSet<String> = project_spec
+                    .outputs
+                    .iter()
+                    .map(|o| o.name.clone())
+                    .collect();
+                for alias in step_spec.publish.keys() {
+                    known_outputs.insert(alias.clone());
+                }
+                for (store_name, store_spec) in &step_spec.store {
+                    match store_spec {
+                        PipelineStoreSpec::Sql(sql) => {
+                            if !known_outputs.contains(&sql.source) {
+                                errors.push(format!(
+                                    "Store '{}' in step '{}' references unknown output '{}'",
+                                    store_name, step_spec.id, sql.source
+                                ));
+                            }
+                        }
+                    }
+                }
+
                 resolved_steps.push(resolved_step);
             }
             Ok(None) => {
@@ -1368,7 +1738,11 @@ fn print_validation(result: &PipelineValidationResult, diagram: bool) {
     if !result.pipeline_inputs.is_empty() {
         println!("\n🔑 Pipeline inputs:");
         for (name, spec_input) in &result.pipeline_inputs {
-            println!("  - {} : {}", name.bold(), spec_input.raw_type());
+            let mut descriptor = spec_input.raw_type().to_string();
+            if let Some(default) = spec_input.default_literal() {
+                descriptor.push_str(&format!(" (default: {})", default));
+            }
+            println!("  - {} : {}", name.bold(), descriptor);
         }
     }
 
@@ -1449,6 +1823,20 @@ fn print_steps(result: &PipelineValidationResult) {
             if !matches!(binding.state, BindingState::Ok) {
                 if let Some(msg) = &binding.message {
                     println!("        {}", msg.as_str().dimmed());
+                }
+            }
+        }
+        if !step.store.is_empty() {
+            println!("      store:");
+            for (name, spec) in &step.store {
+                match spec {
+                    PipelineStoreSpec::Sql(sql) => {
+                        let table_display = sql.table.as_deref().unwrap_or("(auto)");
+                        println!(
+                            "        {} → sql(table: {}, source: {})",
+                            name, table_display, sql.source
+                        );
+                    }
                 }
             }
         }
