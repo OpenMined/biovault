@@ -1,0 +1,18 @@
+name: pipeline-count-lines
+author: madhava@openmined.org
+workflow: workflow.nf
+template: dynamic-nextflow
+version: 0.1.0
+assets:
+  - count_lines.py
+inputs:
+  - name: samplesheet
+    type: File
+    format: csv
+    description: Samplesheet CSV with file paths to measure
+outputs:
+  - name: counted_sheet
+    type: File
+    format: csv
+    path: line_counts.csv
+    description: Samplesheet annotated with per-file line counts

@@ -1,0 +1,18 @@
+name: pipeline-sum-total
+author: madhava@openmined.org
+workflow: workflow.nf
+template: dynamic-nextflow
+version: 0.1.0
+assets:
+  - sum_counts.py
+inputs:
+  - name: samplesheet
+    type: File
+    format: csv
+    description: Samplesheet with aggregated columns to summarize
+outputs:
+  - name: result_summary
+    type: File
+    format: txt
+    path: results.txt
+    description: Text file with the total of all line counts

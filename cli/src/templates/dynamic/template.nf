@@ -1,8 +1,11 @@
+import groovy.yaml.YamlSlurper
 nextflow.enable.dsl=2
 
 params.results_dir = params.results_dir ?: 'results'
 params.work_flow_file = params.work_flow_file ?: 'workflow.nf'
-params.dynamic_spec_json = params.dynamic_spec_json ?: null
+params.project_spec = params.project_spec ?: null
+params.inputs_json = params.inputs_json ?: null
+params.params_json = params.params_json ?: null
 
 // Optional context parameters (provided by BioVault daemon in production)
 params.run_id = null
@@ -16,14 +19,27 @@ def workflowPath = params.work_flow_file.startsWith('/') ? params.work_flow_file
 include { USER } from "${workflowPath}"
 
 workflow {
-    if (!params.dynamic_spec_json) {
-        throw new IllegalArgumentException("dynamic template requires --dynamic_spec_json path")
+    if (!params.project_spec) {
+        throw new IllegalArgumentException("dynamic template requires --project_spec path")
+    }
+    if (!params.inputs_json) {
+        throw new IllegalArgumentException("dynamic template requires --inputs_json payload")
+    }
+    if (!params.params_json) {
+        throw new IllegalArgumentException("dynamic template requires --params_json payload")
     }
 
-    def spec = new groovy.json.JsonSlurper().parse(new File(params.dynamic_spec_json))
+    def yamlSlurper = new YamlSlurper()
+    def specFile = new File(params.project_spec)
+    if (!specFile.exists()) {
+        throw new IllegalArgumentException("Project spec not found at: ${specFile}")
+    }
+    def spec = yamlSlurper.parse(specFile) ?: [:]
+    def inputsPayload = new groovy.json.JsonSlurper().parseText(params.inputs_json ?: '{}')
+    def paramsPayload = new groovy.json.JsonSlurper().parseText(params.params_json ?: '{}')
 
     // Build context from parameters
-    def contextParams = spec.parameters ?: [:]
+    def contextParams = paramsPayload ?: [:]
     def rawContext = [
         run_id      : params.run_id,
         datasite    : params.datasite,
@@ -34,16 +50,21 @@ workflow {
     def context = __bvDeepFreeze(rawContext)
 
     // Load inputs from runtime spec
-    def inputs = spec.inputs ?: [:]
+    def inputsMap = inputsPayload ?: [:]
 
-    println "[bv] Loaded ${inputs.size()} input(s)"
-    inputs.each { name, meta ->
+    println "[bv] Loaded ${inputsMap.size()} input(s)"
+    inputsMap.each { name, meta ->
         println "[bv] Input '${name}': type=${meta.type}, format=${meta.format}, path=${meta.path}"
     }
 
-    def boundInputs = inputs.collect { name, meta ->
-        def binding = __bvBindInput(name, meta)
-        [name, binding]
+    def specInputs = (spec.inputs ?: []) as List
+    def boundInputs = specInputs.collect { specInput ->
+        def name = specInput.name
+        def meta = inputsMap[name]
+        if (!meta) {
+            throw new IllegalArgumentException("Missing runtime payload for input '${name}'")
+        }
+        [name, __bvBindInput(name, meta)]
     }
 
     file(params.results_dir).mkdirs()
@@ -95,8 +116,9 @@ def __bvBindInput(name, meta) {
             return path
 
         case 'File':
-        case 'Directory':
             return Channel.fromPath(path)
+        case 'Directory':
+            return Channel.value(path)
 
         case 'List':
             def innerType = typeInfo.inner
