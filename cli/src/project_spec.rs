@@ -414,7 +414,7 @@ pub fn generate_template_nf(spec: &ProjectSpec) -> Result<String> {
     Ok(buf)
 }
 
-fn generate_workflow_stub(spec: &ProjectSpec) -> Result<String> {
+pub fn generate_workflow_stub(spec: &ProjectSpec) -> Result<String> {
     let mut buf = String::new();
 
     wln!(&mut buf, "nextflow.enable.dsl=2");
