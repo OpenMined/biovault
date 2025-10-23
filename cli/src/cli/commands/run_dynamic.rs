@@ -366,3 +366,104 @@ fn install_dynamic_template(biovault_home: &Path) -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::project_spec::{InputSpec, ProjectSpec};
+    use tempfile::TempDir;
+
+    fn sample_project_spec() -> ProjectSpec {
+        ProjectSpec {
+            name: "test".to_string(),
+            author: "author".to_string(),
+            workflow: "workflow.nf".to_string(),
+            template: Some("dynamic-nextflow".to_string()),
+            version: None,
+            assets: vec![],
+            parameters: vec![],
+            inputs: vec![
+                InputSpec {
+                    name: "samplesheet".to_string(),
+                    raw_type: "File".to_string(),
+                    description: None,
+                    format: Some("csv".to_string()),
+                    path: None,
+                    mapping: None,
+                },
+                InputSpec {
+                    name: "data_dir".to_string(),
+                    raw_type: "Directory".to_string(),
+                    description: None,
+                    format: None,
+                    path: None,
+                    mapping: None,
+                },
+            ],
+            outputs: vec![],
+        }
+    }
+
+    #[test]
+    fn build_inputs_json_handles_file_and_directory() {
+        let tmp = TempDir::new().unwrap();
+        let file_path = tmp.path().join("participants.csv");
+        std::fs::write(&file_path, "id,path\n1,a.txt\n").unwrap();
+        let dir_path = tmp.path().join("data");
+        std::fs::create_dir_all(&dir_path).unwrap();
+
+        let parsed = ParsedArgs {
+            inputs: HashMap::from([
+                (
+                    "samplesheet".to_string(),
+                    InputArg {
+                        value: file_path.to_string_lossy().to_string(),
+                        format_override: None,
+                    },
+                ),
+                (
+                    "data_dir".to_string(),
+                    InputArg {
+                        value: dir_path.to_string_lossy().to_string(),
+                        format_override: None,
+                    },
+                ),
+            ]),
+            params: HashMap::new(),
+        };
+
+        let project_spec = sample_project_spec();
+        let inputs = build_inputs_json(&project_spec, &parsed, tmp.path()).unwrap();
+
+        let sheet_entry = inputs.get("samplesheet").expect("samplesheet entry");
+        assert_eq!(sheet_entry["type"], json!("File"));
+        assert_eq!(sheet_entry["format"], json!("csv"));
+        let sheet_path = sheet_entry["path"].as_str().unwrap();
+        assert_eq!(
+            sheet_path,
+            file_path.canonicalize().unwrap().to_string_lossy()
+        );
+
+        let dir_entry = inputs.get("data_dir").expect("data_dir entry");
+        assert_eq!(dir_entry["type"], json!("Directory"));
+        let dir_json_path = dir_entry["path"].as_str().unwrap();
+        assert_eq!(
+            dir_json_path,
+            dir_path.canonicalize().unwrap().to_string_lossy()
+        );
+    }
+
+    #[test]
+    fn parse_cli_args_ignores_results_dir() {
+        let args = vec![
+            "--results-dir".to_string(),
+            "custom_results".to_string(),
+            "--samplesheet".to_string(),
+            "/tmp/sheet.csv".to_string(),
+        ];
+
+        let parsed = parse_cli_args(&args).unwrap();
+        assert!(parsed.inputs.contains_key("samplesheet"));
+        assert!(!parsed.inputs.contains_key("results-dir"));
+    }
+}
