@@ -7,7 +7,7 @@ use std::process::Command;
 use serde_json::Value;
 use std::env;
 use std::fs;
-use std::io::{BufRead, BufReader};
+use std::io::{self, BufRead, BufReader};
 use std::time::{Duration, SystemTime};
 use tokio::net::TcpStream;
 
@@ -506,11 +506,30 @@ pub async fn status() -> Result<()> {
 
     // Try to find running Jupyter processes
     let output = if cfg!(windows) {
-        Command::new("tasklist")
+        match Command::new("tasklist")
             .args(["/FI", "IMAGENAME eq jupyter.exe"])
-            .output()?
+            .output()
+        {
+            Ok(out) => out,
+            Err(err) => {
+                if err.kind() == io::ErrorKind::NotFound {
+                    println!("⚪ 'tasklist' not available; skipping process check");
+                    return Ok(());
+                }
+                return Err(err.into());
+            }
+        }
     } else {
-        Command::new("pgrep").args(["-f", "jupyter-lab"]).output()?
+        match Command::new("pgrep").args(["-f", "jupyter-lab"]).output() {
+            Ok(out) => out,
+            Err(err) => {
+                if err.kind() == io::ErrorKind::NotFound {
+                    println!("⚪ 'pgrep' not available; skipping process check");
+                    return Ok(());
+                }
+                return Err(err.into());
+            }
+        }
     };
 
     if output.status.success() {

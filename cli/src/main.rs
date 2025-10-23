@@ -432,6 +432,12 @@ enum Commands {
         command: ProjectCommands,
     },
 
+    #[command(about = "Pipeline authoring commands")]
+    Pipeline {
+        #[command(subcommand)]
+        command: PipelineCommands,
+    },
+
     #[command(about = "Run a project workflow with Nextflow")]
     Run {
         #[arg(help = "Path to project directory")]
@@ -740,6 +746,48 @@ enum ProjectCommands {
 
         #[arg(long, help = "Output format (json|table)", default_value = "table")]
         format: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum PipelineCommands {
+    #[command(about = "Create a new pipeline interactively")]
+    Create {
+        #[arg(long, help = "Pipeline YAML file path (defaults to pipeline.yaml)")]
+        file: Option<String>,
+
+        #[arg(long, help = "Pipeline name (non-interactive mode)")]
+        name: Option<String>,
+
+        #[arg(
+            long = "use-project",
+            help = "Project path or project.yaml to add as the first step (non-interactive)"
+        )]
+        uses: Option<String>,
+
+        #[arg(long = "step-id", help = "Override the generated step id")]
+        step_id: Option<String>,
+    },
+
+    #[command(about = "Add a step to an existing pipeline")]
+    AddStep {
+        #[arg(long, help = "Pipeline YAML file path (defaults to pipeline.yaml)")]
+        file: Option<String>,
+    },
+
+    #[command(about = "Validate a pipeline spec")]
+    Validate {
+        #[arg(help = "Pipeline YAML file path")]
+        file: String,
+
+        #[arg(long, help = "Render step diagram after validation")]
+        diagram: bool,
+    },
+
+    #[command(about = "Print pipeline steps and bindings")]
+    Inspect {
+        #[arg(help = "Pipeline YAML file path")]
+        file: String,
     },
 }
 
@@ -1587,6 +1635,25 @@ async fn async_main_with(cli: Cli) -> Result<()> {
                 commands::project_management::delete(identifier, keep_files, fmt)?;
             }
         },
+        Commands::Pipeline { command } => match command {
+            PipelineCommands::Create {
+                file,
+                name,
+                uses,
+                step_id,
+            } => {
+                commands::pipeline::create(file, name, uses, step_id).await?;
+            }
+            PipelineCommands::AddStep { file } => {
+                commands::pipeline::add_step(file).await?;
+            }
+            PipelineCommands::Validate { file, diagram } => {
+                commands::pipeline::validate(&file, diagram)?;
+            }
+            PipelineCommands::Inspect { file } => {
+                commands::pipeline::inspect(&file)?;
+            }
+        },
         Commands::Run {
             project_folder,
             args,
@@ -1594,6 +1661,17 @@ async fn async_main_with(cli: Cli) -> Result<()> {
             resume,
             results_dir,
         } => {
+            if project_folder.ends_with(".yaml") || project_folder.ends_with(".yml") {
+                commands::pipeline::run_pipeline(
+                    &project_folder,
+                    args,
+                    dry_run,
+                    resume,
+                    results_dir,
+                )
+                .await?;
+                return Ok(());
+            }
             // Check project template to determine which run system to use
             use std::path::Path;
             let project_path = Path::new(&project_folder);
