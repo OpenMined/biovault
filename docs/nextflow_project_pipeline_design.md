@@ -186,6 +186,10 @@ Each referenced project input is bound by name. The shared `BiovaultContext` arr
 name: apol1-with-stats
 workdir: work/pipelines/apol1
 
+inputs:
+  rows: File
+  data_root: Directory
+
 context:
   literal:
     run_mode: production
@@ -206,6 +210,7 @@ steps:
     uses: apol1-sheet
     with:
       rows: step.preprocess.outputs.sheet
+      data_dir: inputs.data_root
     publish:
       scored: scored_sheet
 
@@ -216,12 +221,12 @@ steps:
     publish:
       stats: stats_txt
     store:
-      sql_export:
+      stats_sql:
         kind: sql
-        location: biovault.sqlite
-        table: stats_{run_id}
-        key_from: stats.participant_id
+        destination: SQL()
         source: stats
+        table_name: stats_{run_id}
+        key_column: participant_id
 
 complete:
   expect:
@@ -230,10 +235,13 @@ complete:
 
 `context.literal` holds an inline YAML map of extra arguments merged into the Biovault context, while `context.from_json` (optional) points at a file that will be parsed and merged on top (JSON or YAML). CLI-provided values win last, so runs can override pipeline defaults without editing the spec.
 
-`store` entries describe side-effects to perform once a step succeeds. In the example above, the `stats` output is written to a local SQLite database managed by Biovault, with `key_from` pointing to the participant column used for upserts. Stores can target other connectors (object storage, APIs) in future revisions.
+`store` entries describe side-effects to perform once a step succeeds. In the example above, the `stats` output is written to a local SQLite database managed by Biovault, with `key_column` pointing to the participant column used for upserts. Stores can target other connectors (object storage, APIs) in future revisions.
+
+The CLI now supports the `sql` store kind for local BioVault data. During `bv run pipeline.yaml`, CSV/TSV outputs referenced by a `sql` store are loaded and written into the BioVault SQLite database (default table name supports `{run_id}` substitution). Pipelines can pass overrides such as `--set inputs.samplesheet=/path` and the runner handles ingestion automatically.
 
 ### Pipeline schema highlights
 - `context`: optional block providing defaults for the shared `BiovaultContext` via `literal` maps or `from_json` file references.
+- `inputs`: optional block declaring reusable bindings (`File`, `Directory`, etc.) that steps can reference as `inputs.<name>`.
 - `steps[].id`: unique handle for wiring.
 - `steps[].uses`: reference to a project directory or registry entry.
 - `steps[].with`: map of input bindings. Values can be literals, references (`step.<id>.outputs.<name>`), or helper constructors (`FileGlob`, `StaticPipe`, `Literal`).
@@ -255,7 +263,7 @@ Validation ensures:
 ## Biovault SQL Integration (Planned)
 - Introduce an `SQL` loader that can hydrate `ParticipantSheet` or `List[GenotypeRecord]` inputs directly from the Biovault database (e.g., `SQL(location: biovault.sqlite, query: "select * from genotype_view")`).
 - Query results stream through channels the same way filesystem-backed inputs do; large result sets remain back-pressure-friendly.
-- Companion `store` handlers persist outputs back to SQL. `key_from` identifies which column becomes the primary key (defaults to `participant_id` when present); additional columns come from the emitted sheet/records.
+- Companion `store` handlers persist outputs back to SQL. `key_column` identifies which column becomes the primary key (defaults to `participant_id` when present); additional columns come from the emitted sheet/records.
 - Runs write into run-scoped tables (e.g., `stats_{run_id}`) while also supporting merging into canonical tables via configuration.
 - The CLI will manage schema creation/migration and capture metadata so downstream steps (or external consumers) can look up exactly which run produced a dataset.
 
@@ -273,7 +281,7 @@ Validation ensures:
 - `bv project inspect <dir>`: show inputs/outputs/types rendered nicely.
 - `bv project build <dir>`: regenerate `template.nf` after manual edits to spec.
 - `bv pipeline validate <pipeline.yaml>`: type-check bindings, ensure referenced outputs exist.
-- `bv pipeline run <pipeline.yaml>`: synthesise outer Nextflow driver that executes each project in order, respecting `where` placements.
+- `bv run <pipeline.yaml> --set inputs.<name>=<value>`: run pipelines sequentially, wiring shared inputs and optional `store` targets (e.g., SQL exports) automatically.
 
 ## Implementation Phases
 1. **Registry groundwork**: define Rust structs for types, loaders, compatibility rules; port sheet loader helpers into reusable module.

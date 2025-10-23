@@ -24,8 +24,8 @@ pub struct PipelineStepSpec {
     pub with: BTreeMap<String, YamlValue>,
     #[serde(default)]
     pub publish: BTreeMap<String, String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub store: Option<YamlValue>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub store: BTreeMap<String, PipelineStoreSpec>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -113,4 +113,26 @@ impl PipelineInputSpec {
             PipelineInputSpec::Detailed { default, .. } => default.as_deref(),
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind")]
+pub enum PipelineStoreSpec {
+    #[serde(rename = "sql")]
+    Sql(PipelineSqlStoreSpec),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PipelineSqlStoreSpec {
+    #[serde(default, alias = "destination")]
+    pub target: Option<String>,
+    pub source: String,
+    #[serde(default, alias = "table_name")]
+    pub table: Option<String>,
+    #[serde(default, alias = "key_column")]
+    pub key_column: Option<String>,
+    #[serde(default)]
+    pub overwrite: Option<bool>,
+    #[serde(default)]
+    pub format: Option<String>,
 }
