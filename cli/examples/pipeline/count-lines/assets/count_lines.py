@@ -13,6 +13,11 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", required=True, help="Path to the input samplesheet CSV")
     parser.add_argument("--output", required=True, help="Path to write the annotated CSV")
+    parser.add_argument(
+        "--assets-dir",
+        required=True,
+        help="Directory containing files referenced by the samplesheet",
+    )
     return parser.parse_args()
 
 
@@ -37,7 +42,17 @@ def count_lines(path: Path) -> int:
         return sum(1 for _ in handle)
 
 
-def annotate_counts(input_path: Path, output_path: Path) -> None:
+def resolve_path(raw_value: str, assets_dir: Path, fallback_dir: Path) -> Path:
+    candidate = Path(raw_value)
+    if candidate.is_absolute():
+        return candidate
+    resolved = (assets_dir / candidate).resolve()
+    if resolved.exists():
+        return resolved
+    return (fallback_dir / candidate).resolve()
+
+
+def annotate_counts(input_path: Path, output_path: Path, assets_dir: Path) -> None:
     with input_path.open("r", newline="") as handle:
         reader = csv.DictReader(handle)
         fieldnames: List[str] = reader.fieldnames or []
@@ -52,9 +67,7 @@ def annotate_counts(input_path: Path, output_path: Path) -> None:
                 row["line_count"] = "0"
                 rows.append(row)
                 continue
-            candidate = Path(value)
-            if not candidate.is_absolute():
-                candidate = (base_dir / candidate).resolve()
+            candidate = resolve_path(value, assets_dir, base_dir)
             if candidate.exists():
                 row["line_count"] = str(count_lines(candidate))
             else:
@@ -77,7 +90,8 @@ def main() -> None:
     args = parse_args()
     input_path = Path(args.input).resolve()
     output_path = Path(args.output)
-    annotate_counts(input_path, output_path)
+    assets_dir = Path(args.assets_dir).resolve()
+    annotate_counts(input_path, output_path, assets_dir)
 
 
 if __name__ == "__main__":

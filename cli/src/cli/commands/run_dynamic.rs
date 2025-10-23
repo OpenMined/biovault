@@ -56,25 +56,6 @@ pub async fn execute_dynamic(
         .entry("assets_dir".to_string())
         .or_insert_with(|| json!(assets_dir_abs.to_string_lossy().to_string()));
 
-    let runtime_spec = json!({
-        "inputs": inputs_json,
-        "parameters": params_json,
-    });
-
-    let runtime_json_path = project_path.join(".bv_runtime.json");
-    fs::write(
-        &runtime_json_path,
-        serde_json::to_string_pretty(&runtime_spec)?,
-    )
-    .context("Failed to write runtime spec JSON")?;
-
-    // Canonicalize runtime JSON path for Nextflow
-    let runtime_json_abs = runtime_json_path
-        .canonicalize()
-        .context("Failed to resolve runtime JSON path")?;
-
-    println!("📋 Runtime spec written to: {}", runtime_json_abs.display());
-
     let results_path = results_dir.as_deref().unwrap_or("results");
 
     // Check user workflow exists
@@ -94,10 +75,8 @@ pub async fn execute_dynamic(
     let env_dir = biovault_home.join("env").join(template_name);
     let template_path = env_dir.join("template.nf");
 
-    if !template_path.exists() {
-        if template_name == "dynamic-nextflow" {
-            install_dynamic_template(&biovault_home)?;
-        }
+    if template_name == "dynamic-nextflow" {
+        install_dynamic_template(&biovault_home)?;
     }
 
     if !template_path.exists() {
@@ -108,23 +87,35 @@ pub async fn execute_dynamic(
         .into());
     }
 
-    // Canonicalize template path for Nextflow
+    // Canonicalize paths for Nextflow
     let template_abs = template_path
         .canonicalize()
         .context("Failed to resolve template path")?;
 
-    // Also canonicalize workflow path for --work_flow_file parameter
     let workflow_abs = workflow_path
         .canonicalize()
         .context("Failed to resolve workflow path")?;
 
+    let project_spec_abs = spec_path
+        .canonicalize()
+        .context("Failed to resolve project spec path")?;
+
+    let inputs_json_str =
+        serde_json::to_string(&inputs_json).context("Failed to encode inputs metadata to JSON")?;
+    let params_json_str = serde_json::to_string(&params_json)
+        .context("Failed to encode parameters metadata to JSON")?;
+
     let mut cmd = Command::new("nextflow");
     cmd.arg("run")
         .arg(&template_abs)
-        .arg("--dynamic_spec_json")
-        .arg(&runtime_json_abs)
         .arg("--work_flow_file")
         .arg(&workflow_abs)
+        .arg("--project_spec")
+        .arg(&project_spec_abs)
+        .arg("--inputs_json")
+        .arg(inputs_json_str)
+        .arg("--params_json")
+        .arg(params_json_str)
         .arg("--results_dir")
         .arg(results_path);
 
@@ -363,21 +354,15 @@ fn install_dynamic_template(biovault_home: &Path) -> Result<()> {
     }
 
     let template_path = env_dir.join("template.nf");
-    if !template_path.exists() {
-        let template_contents = include_str!("../../templates/dynamic/template.nf");
-        fs::write(&template_path, template_contents)
-            .context("Failed to install dynamic template.nf")?;
-        println!(
-            "📦 Installed dynamic template at {}",
-            template_path.display()
-        );
-    }
+    let template_contents = include_str!("../../templates/dynamic/template.nf");
+    fs::write(&template_path, template_contents)
+        .context("Failed to install dynamic template.nf")?;
+
+    println!("📦 Dynamic template ready at {}", template_path.display());
 
     let config_path = env_dir.join("nextflow.config");
-    if !config_path.exists() {
-        fs::write(&config_path, "process.executor = 'local'\n")
-            .context("Failed to install dynamic nextflow.config")?;
-    }
+    fs::write(&config_path, "process.executor = 'local'\n")
+        .context("Failed to install dynamic nextflow.config")?;
 
     Ok(())
 }

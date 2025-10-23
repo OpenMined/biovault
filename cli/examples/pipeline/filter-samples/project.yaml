@@ -15,9 +15,15 @@ inputs:
   type: File
   description: Samplesheet CSV listing per-participant file paths
   format: csv
+- name: data_dir
+  type: Directory
+  description: Base directory containing files referenced by the samplesheet
 outputs:
 - name: filtered_sheet
   type: File
   description: Samplesheet filtered to rows matching the extension
   format: csv
   path: filtered_samplesheet.csv
+- name: filtered_data_dir
+  type: Directory
+  description: Forwarded data directory for downstream steps

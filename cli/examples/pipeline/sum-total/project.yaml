@@ -11,6 +11,9 @@ inputs:
   type: File
   description: Samplesheet with aggregated columns to summarize
   format: csv
+- name: data_dir
+  type: Directory?
+  description: Optional data directory (unused in this step)
 outputs:
 - name: result_summary
   type: File

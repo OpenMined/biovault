@@ -4,6 +4,7 @@ workflow USER {
     take:
         context       // BiovaultContext
         samplesheet   // File (CSV with line_count)
+        data_dir      // Directory (optional payload)
 
     main:
         def assetsDir = file(context.params.assets_dir)

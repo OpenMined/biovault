@@ -11,9 +11,15 @@ inputs:
   type: File
   description: Samplesheet CSV with file paths to measure
   format: csv
+- name: data_dir
+  type: Directory
+  description: Base directory containing sample files
 outputs:
 - name: counted_sheet
   type: File
   description: Samplesheet annotated with per-file line counts
   format: csv
   path: line_counts.csv
+- name: data_dir
+  type: Directory
+  description: Forwarded data directory for downstream steps
