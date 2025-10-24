@@ -519,12 +519,13 @@ fn get_schema_version(conn: &Connection) -> Result<Option<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config;
     use tempfile::TempDir;
 
     #[test]
     fn test_db_creation() {
         let temp = TempDir::new().unwrap();
-        std::env::set_var("BIOVAULT_HOME", temp.path());
+        config::set_test_biovault_home(temp.path());
 
         let db = BioVaultDb::new().unwrap();
 
@@ -538,12 +539,14 @@ mod tests {
 
         assert!(version.is_some());
         assert_eq!(version.unwrap(), "2.0.0");
+
+        config::clear_test_biovault_home();
     }
 
     #[test]
     fn test_tables_created() {
         let temp = TempDir::new().unwrap();
-        std::env::set_var("BIOVAULT_HOME", temp.path());
+        config::set_test_biovault_home(temp.path());
 
         let db = BioVaultDb::new().unwrap();
 
@@ -564,5 +567,7 @@ mod tests {
         assert!(tables.contains(&"projects".to_string()));
         assert!(tables.contains(&"runs".to_string()));
         assert!(tables.contains(&"run_participants".to_string()));
+
+        config::clear_test_biovault_home();
     }
 }
