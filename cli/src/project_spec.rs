@@ -443,24 +443,39 @@ pub fn generate_workflow_stub(spec: &ProjectSpec) -> Result<String> {
         &mut buf,
         "        println \"[bv] context keys: ${{context.keySet()}}\""
     );
-    
+
     // If there are Python assets, generate example usage
     let python_assets: Vec<&String> = spec.assets.iter().filter(|a| a.ends_with(".py")).collect();
     if !python_assets.is_empty() && !preview_inputs.is_empty() && !spec.outputs.is_empty() {
         let script_name = python_assets[0];
         let first_input = &preview_inputs[0].0;
         let first_output = &spec.outputs[0].name;
-        
+
         wln!(&mut buf);
         wln!(&mut buf, "        // Example: Use your Python script");
-        wln!(&mut buf, "        def assetsDir = file(context.params.assets_dir)");
-        wln!(&mut buf, "        def script = file(\"${{assetsDir}}/{}\") ", script_name);
-        wln!(&mut buf, "        def result_ch = process_data({}, Channel.value(script))", first_input);
+        wln!(
+            &mut buf,
+            "        def assetsDir = file(context.params.assets_dir)"
+        );
+        wln!(
+            &mut buf,
+            "        def script = file(\"${{assetsDir}}/{}\") ",
+            script_name
+        );
+        wln!(
+            &mut buf,
+            "        def result_ch = process_data({}, Channel.value(script))",
+            first_input
+        );
         wln!(&mut buf);
         wln!(&mut buf, "    emit:");
         wln!(&mut buf, "        {} = result_ch", first_output);
         for output in spec.outputs.iter().skip(1) {
-            wln!(&mut buf, "        {} = null // TODO: wire this output", output.name);
+            wln!(
+                &mut buf,
+                "        {} = null // TODO: wire this output",
+                output.name
+            );
         }
         wln!(&mut buf, "}}");
         wln!(&mut buf);
@@ -657,7 +672,7 @@ pub fn get_supported_input_types() -> TypeInfo {
         .into_iter()
         .map(|s| s.to_string())
         .collect();
-    
+
     // Add common composites to base types for inputs
     base_types.extend(
         TypeExpr::common_input_composites()
@@ -764,32 +779,31 @@ pub fn scaffold_blank_project(
     script_name: Option<&str>,
 ) -> Result<ProjectSpec> {
     let mut updated_spec = spec.clone();
-    
+
     // Scaffold base project structure
     scaffold_from_spec(spec, target_dir)?;
-    
+
     // Add Python script if requested
     if create_python_script {
         let assets_dir = target_dir.join("assets");
         fs::create_dir_all(&assets_dir).context("Failed to create assets directory")?;
-        
+
         let script_filename = script_name.unwrap_or("process.py");
         let script_path = assets_dir.join(script_filename);
         let script_content = generate_python_script_template(script_filename);
-        
+
         fs::write(&script_path, script_content)
             .with_context(|| format!("Failed to write {}", script_path.display()))?;
-        
+
         // Add to assets list
         updated_spec.assets = vec![script_filename.to_string()];
-        
+
         // Update project.yaml with assets
         let project_yaml_path = target_dir.join("project.yaml");
         let yaml = serde_yaml::to_string(&updated_spec)
             .context("Failed to serialize updated project spec")?;
-        fs::write(&project_yaml_path, yaml)
-            .context("Failed to update project.yaml with assets")?;
+        fs::write(&project_yaml_path, yaml).context("Failed to update project.yaml with assets")?;
     }
-    
+
     Ok(updated_spec)
 }
