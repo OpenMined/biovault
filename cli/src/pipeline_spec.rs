@@ -22,7 +22,7 @@ pub struct PipelineStepSpec {
     pub where_exec: Option<String>,
     #[serde(default)]
     pub with: BTreeMap<String, YamlValue>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub publish: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub store: BTreeMap<String, PipelineStoreSpec>,

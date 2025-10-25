@@ -47,8 +47,18 @@ impl BioVaultDb {
                 ["2.0.0"],
             )?;
             info!("Initialized schema version 2.0.0");
+        } else {
+            // Run additional migrations if needed
+            Self::run_post_migrations(conn, &current_version.unwrap())?;
         }
 
+        Ok(())
+    }
+
+    /// Run post-setup migrations (for version updates)
+    fn run_post_migrations(_conn: &Connection, _current_version: &str) -> Result<()> {
+        // Pipeline tables are now in base schema.sql
+        // Future migrations can be added here
         Ok(())
     }
 
@@ -491,6 +501,8 @@ fn migrate_from_messages_db(target_path: &Path) -> Result<()> {
         [],
     )?;
 
+    // Note: Pipeline tables are now in schema.sql (base schema)
+
     // Mark schema version
     conn.execute(
         "INSERT INTO schema_version (version) VALUES (?1)",
@@ -514,6 +526,46 @@ fn get_schema_version(conn: &Connection) -> Result<Option<String>> {
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
         Err(_) => Ok(None), // Table doesn't exist yet
     }
+}
+
+// Run migrations after initial setup (for version updates)
+fn run_post_migrations(conn: &Connection, current_version: &str) -> Result<()> {
+    // Migrate from 2.0.0 to 2.1.0 - Add pipeline tables
+    if current_version == "2.0.0" {
+        println!("🔄 Migrating schema from 2.0.0 to 2.1.0 (adding pipeline tables)...");
+        
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS pipelines (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                pipeline_path TEXT NOT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )",
+            [],
+        )?;
+
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS pipeline_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                pipeline_id INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                work_dir TEXT NOT NULL,
+                results_dir TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                completed_at DATETIME,
+                FOREIGN KEY (pipeline_id) REFERENCES pipelines(id) ON DELETE CASCADE
+            )",
+            [],
+        )?;
+
+        // Update schema version
+        conn.execute("UPDATE schema_version SET version = '2.1.0'", [])?;
+        
+        println!("✅ Migrated to schema version 2.1.0");
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

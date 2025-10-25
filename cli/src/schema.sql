@@ -144,3 +144,27 @@ CREATE TABLE IF NOT EXISTS run_participants (
     FOREIGN KEY (participant_id) REFERENCES participants(id) ON DELETE CASCADE,
     PRIMARY KEY (run_id, participant_id)
 );
+
+-- NEW: Pipelines (shared CLI/Desktop)
+CREATE TABLE IF NOT EXISTS pipelines (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    pipeline_path TEXT NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+-- NEW: Pipeline Runs (shared CLI/Desktop)
+CREATE TABLE IF NOT EXISTS pipeline_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    pipeline_id INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    work_dir TEXT NOT NULL,
+    results_dir TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    completed_at DATETIME,
+    FOREIGN KEY (pipeline_id) REFERENCES pipelines(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_pipeline_runs_pipeline_id ON pipeline_runs(pipeline_id);
+CREATE INDEX IF NOT EXISTS idx_pipeline_runs_status ON pipeline_runs(status);
