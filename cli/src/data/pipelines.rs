@@ -19,15 +19,20 @@ pub struct Pipeline {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct PipelineRun {
+pub struct Run {
     pub id: i64,
-    pub pipeline_id: i64,
+    pub pipeline_id: Option<i64>,      // NULL for standalone step runs
+    pub step_id: Option<i64>,          // NULL for pipeline runs  
     pub status: String,
     pub work_dir: String,
     pub results_dir: Option<String>,
+    pub participant_count: Option<i32>, // Only for step runs
     pub created_at: String,
     pub completed_at: Option<String>,
 }
+
+// Backwards compat alias
+pub type PipelineRun = Run;
 
 impl BioVaultDb {
     /// List all pipelines
