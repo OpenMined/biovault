@@ -157,24 +157,26 @@ impl BioVaultDb {
         Ok(())
     }
 
-    /// List all pipeline runs
-    pub fn list_pipeline_runs(&self) -> Result<Vec<PipelineRun>> {
+    /// List all runs (both pipeline and standalone step runs)
+    pub fn list_runs(&self) -> Result<Vec<Run>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, pipeline_id, status, work_dir, results_dir, created_at, completed_at
-             FROM pipeline_runs
+            "SELECT id, pipeline_id, step_id, status, work_dir, results_dir, participant_count, created_at, completed_at
+             FROM runs
              ORDER BY created_at DESC",
         )?;
 
         let runs = stmt
             .query_map([], |row| {
-                Ok(PipelineRun {
+                Ok(Run {
                     id: row.get(0)?,
                     pipeline_id: row.get(1)?,
-                    status: row.get(2)?,
-                    work_dir: row.get(3)?,
-                    results_dir: row.get(4)?,
-                    created_at: row.get(5)?,
-                    completed_at: row.get(6)?,
+                    step_id: row.get(2)?,
+                    status: row.get(3)?,
+                    work_dir: row.get(4)?,
+                    results_dir: row.get(5)?,
+                    participant_count: row.get(6)?,
+                    created_at: row.get(7)?,
+                    completed_at: row.get(8)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -182,29 +184,64 @@ impl BioVaultDb {
         Ok(runs)
     }
 
-    /// Get a specific pipeline run
-    pub fn get_pipeline_run(&self, run_id: i64) -> Result<Option<PipelineRun>> {
+    /// List only pipeline runs
+    pub fn list_pipeline_runs(&self) -> Result<Vec<Run>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, pipeline_id, status, work_dir, results_dir, created_at, completed_at
-             FROM pipeline_runs
+            "SELECT id, pipeline_id, step_id, status, work_dir, results_dir, participant_count, created_at, completed_at
+             FROM runs
+             WHERE pipeline_id IS NOT NULL
+             ORDER BY created_at DESC",
+        )?;
+
+        let runs = stmt
+            .query_map([], |row| {
+                Ok(Run {
+                    id: row.get(0)?,
+                    pipeline_id: row.get(1)?,
+                    step_id: row.get(2)?,
+                    status: row.get(3)?,
+                    work_dir: row.get(4)?,
+                    results_dir: row.get(5)?,
+                    participant_count: row.get(6)?,
+                    created_at: row.get(7)?,
+                    completed_at: row.get(8)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(runs)
+    }
+
+    /// Get a specific run
+    pub fn get_run(&self, run_id: i64) -> Result<Option<Run>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, pipeline_id, step_id, status, work_dir, results_dir, participant_count, created_at, completed_at
+             FROM runs
              WHERE id = ?1",
         )?;
 
         let run = stmt
             .query_row([run_id], |row| {
-                Ok(PipelineRun {
+                Ok(Run {
                     id: row.get(0)?,
                     pipeline_id: row.get(1)?,
-                    status: row.get(2)?,
-                    work_dir: row.get(3)?,
-                    results_dir: row.get(4)?,
-                    created_at: row.get(5)?,
-                    completed_at: row.get(6)?,
+                    step_id: row.get(2)?,
+                    status: row.get(3)?,
+                    work_dir: row.get(4)?,
+                    results_dir: row.get(5)?,
+                    participant_count: row.get(6)?,
+                    created_at: row.get(7)?,
+                    completed_at: row.get(8)?,
                 })
             })
             .optional()?;
 
         Ok(run)
+    }
+
+    /// Backwards compat alias
+    pub fn get_pipeline_run(&self, run_id: i64) -> Result<Option<Run>> {
+        self.get_run(run_id)
     }
 
     /// Create a pipeline run record
@@ -215,16 +252,32 @@ impl BioVaultDb {
         results_dir: Option<&str>,
     ) -> Result<i64> {
         self.conn.execute(
-            "INSERT INTO pipeline_runs (pipeline_id, status, work_dir, results_dir, created_at)
-             VALUES (?1, 'running', ?2, ?3, datetime('now'))",
+            "INSERT INTO runs (pipeline_id, step_id, status, work_dir, results_dir, created_at)
+             VALUES (?1, NULL, 'running', ?2, ?3, datetime('now'))",
             params![pipeline_id, work_dir, results_dir],
         )?;
 
         Ok(self.conn.last_insert_rowid())
     }
 
-    /// Update pipeline run status
-    pub fn update_pipeline_run_status(
+    /// Create a standalone step run record
+    pub fn create_step_run(
+        &self,
+        step_id: i64,
+        work_dir: &str,
+        participant_count: i32,
+    ) -> Result<i64> {
+        self.conn.execute(
+            "INSERT INTO runs (pipeline_id, step_id, status, work_dir, participant_count, created_at)
+             VALUES (NULL, ?1, 'running', ?2, ?3, datetime('now'))",
+            params![step_id, work_dir, participant_count],
+        )?;
+
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Update run status (works for both pipeline and step runs)
+    pub fn update_run_status(
         &self,
         run_id: i64,
         status: &str,
@@ -232,23 +285,38 @@ impl BioVaultDb {
     ) -> Result<()> {
         if completed {
             self.conn.execute(
-                "UPDATE pipeline_runs SET status = ?1, completed_at = datetime('now') WHERE id = ?2",
+                "UPDATE runs SET status = ?1, completed_at = datetime('now') WHERE id = ?2",
                 params![status, run_id],
             )?;
         } else {
             self.conn.execute(
-                "UPDATE pipeline_runs SET status = ?1 WHERE id = ?2",
+                "UPDATE runs SET status = ?1 WHERE id = ?2",
                 params![status, run_id],
             )?;
         }
         Ok(())
     }
 
-    /// Delete a pipeline run
-    pub fn delete_pipeline_run(&self, run_id: i64) -> Result<()> {
+    /// Backwards compat alias
+    pub fn update_pipeline_run_status(
+        &self,
+        run_id: i64,
+        status: &str,
+        completed: bool,
+    ) -> Result<()> {
+        self.update_run_status(run_id, status, completed)
+    }
+
+    /// Delete a run (pipeline or step)
+    pub fn delete_run(&self, run_id: i64) -> Result<()> {
         self.conn
-            .execute("DELETE FROM pipeline_runs WHERE id = ?1", params![run_id])?;
+            .execute("DELETE FROM runs WHERE id = ?1", params![run_id])?;
         Ok(())
+    }
+
+    /// Backwards compat alias
+    pub fn delete_pipeline_run(&self, run_id: i64) -> Result<()> {
+        self.delete_run(run_id)
     }
 }
 
