@@ -52,7 +52,6 @@ impl BioVaultDb {
         Ok(())
     }
 
-
     /// Run migrations for existing databases
     fn run_migrations(conn: &Connection) -> Result<()> {
         // Check if data_type column exists in files table

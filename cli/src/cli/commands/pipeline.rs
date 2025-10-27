@@ -1409,7 +1409,6 @@ fn resolve_project_by_uses(
                 path: PathBuf::from(project.project_path),
             });
         }
-        
     }
 
     Err(anyhow!("Unable to resolve project reference '{}'", uses).into())

@@ -21,13 +21,13 @@ pub struct Pipeline {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Run {
     pub id: i64,
-    pub pipeline_id: Option<i64>,      // NULL for standalone step runs
-    pub step_id: Option<i64>,          // NULL for pipeline runs  
+    pub pipeline_id: Option<i64>, // NULL for standalone step runs
+    pub step_id: Option<i64>,     // NULL for pipeline runs
     pub status: String,
     pub work_dir: String,
     pub results_dir: Option<String>,
     pub participant_count: Option<i32>, // Only for step runs
-    pub metadata: Option<String>,      // JSON: { "input_overrides": {...}, "parameter_overrides": {...} }
+    pub metadata: Option<String>, // JSON: { "input_overrides": {...}, "parameter_overrides": {...} }
     pub created_at: String,
     pub completed_at: Option<String>,
 }
@@ -72,19 +72,23 @@ impl BioVaultDb {
             let yaml_path = PathBuf::from(&pipeline.pipeline_path).join("pipeline.yaml");
             if yaml_path.exists() {
                 match fs::read_to_string(&yaml_path) {
-                    Ok(content) => {
-                        match serde_yaml::from_str::<PipelineSpec>(&content) {
-                            Ok(spec) => {
-                                pipeline.spec = Some(spec);
-                            }
-                            Err(e) => {
-                                eprintln!("Warning: Failed to parse pipeline.yaml for '{}': {}", pipeline.name, e);
-                                eprintln!("  Path: {}", yaml_path.display());
-                            }
+                    Ok(content) => match serde_yaml::from_str::<PipelineSpec>(&content) {
+                        Ok(spec) => {
+                            pipeline.spec = Some(spec);
                         }
-                    }
+                        Err(e) => {
+                            eprintln!(
+                                "Warning: Failed to parse pipeline.yaml for '{}': {}",
+                                pipeline.name, e
+                            );
+                            eprintln!("  Path: {}", yaml_path.display());
+                        }
+                    },
                     Err(e) => {
-                        eprintln!("Warning: Failed to read pipeline.yaml for '{}': {}", pipeline.name, e);
+                        eprintln!(
+                            "Warning: Failed to read pipeline.yaml for '{}': {}",
+                            pipeline.name, e
+                        );
                     }
                 }
             }
@@ -119,17 +123,15 @@ impl BioVaultDb {
             let yaml_path = PathBuf::from(&p.pipeline_path).join("pipeline.yaml");
             if yaml_path.exists() {
                 match fs::read_to_string(&yaml_path) {
-                    Ok(content) => {
-                        match serde_yaml::from_str::<PipelineSpec>(&content) {
-                            Ok(spec) => {
-                                p.spec = Some(spec);
-                            }
-                            Err(e) => {
-                                eprintln!("Warning: Failed to parse pipeline.yaml: {}", e);
-                                eprintln!("  Path: {}", yaml_path.display());
-                            }
+                    Ok(content) => match serde_yaml::from_str::<PipelineSpec>(&content) {
+                        Ok(spec) => {
+                            p.spec = Some(spec);
                         }
-                    }
+                        Err(e) => {
+                            eprintln!("Warning: Failed to parse pipeline.yaml: {}", e);
+                            eprintln!("  Path: {}", yaml_path.display());
+                        }
+                    },
                     Err(e) => {
                         eprintln!("Warning: Failed to read pipeline.yaml: {}", e);
                     }
@@ -302,12 +304,7 @@ impl BioVaultDb {
     }
 
     /// Update run status (works for both pipeline and step runs)
-    pub fn update_run_status(
-        &self,
-        run_id: i64,
-        status: &str,
-        completed: bool,
-    ) -> Result<()> {
+    pub fn update_run_status(&self, run_id: i64, status: &str, completed: bool) -> Result<()> {
         if completed {
             self.conn.execute(
                 "UPDATE runs SET status = ?1, completed_at = datetime('now') WHERE id = ?2",
@@ -356,7 +353,7 @@ impl BioVaultDb {
         config_data: &serde_json::Value,
     ) -> Result<i64> {
         let config_json = serde_json::to_string(config_data)?;
-        
+
         self.conn.execute(
             "INSERT INTO run_configs (pipeline_id, name, config_data, created_at, updated_at)
              VALUES (?1, ?2, ?3, datetime('now'), datetime('now'))",
@@ -373,14 +370,14 @@ impl BioVaultDb {
              FROM run_configs
              WHERE pipeline_id = ?1
              ORDER BY created_at DESC
-             LIMIT 10",  // Keep last 10
+             LIMIT 10", // Keep last 10
         )?;
 
         let configs = stmt
             .query_map([pipeline_id], |row| {
                 let config_json: String = row.get(3)?;
-                let config_data = serde_json::from_str(&config_json)
-                    .unwrap_or(serde_json::json!({}));
+                let config_data =
+                    serde_json::from_str(&config_json).unwrap_or(serde_json::json!({}));
 
                 Ok(RunConfig {
                     id: row.get(0)?,
@@ -407,8 +404,8 @@ impl BioVaultDb {
         let config = stmt
             .query_row([config_id], |row| {
                 let config_json: String = row.get(3)?;
-                let config_data = serde_json::from_str(&config_json)
-                    .unwrap_or(serde_json::json!({}));
+                let config_data =
+                    serde_json::from_str(&config_json).unwrap_or(serde_json::json!({}));
 
                 Ok(RunConfig {
                     id: row.get(0)?,
@@ -426,11 +423,8 @@ impl BioVaultDb {
 
     /// Delete a run configuration
     pub fn delete_run_config(&self, config_id: i64) -> Result<()> {
-        self.conn.execute(
-            "DELETE FROM run_configs WHERE id = ?1",
-            params![config_id],
-        )?;
+        self.conn
+            .execute("DELETE FROM run_configs WHERE id = ?1", params![config_id])?;
         Ok(())
     }
 }
-
