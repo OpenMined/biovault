@@ -207,6 +207,29 @@ impl BioVaultDb {
         Ok(())
     }
 
+    fn runs_project_reference_column(&self) -> Result<Option<&'static str>> {
+        if self.table_has_column("runs", "project_id")? {
+            Ok(Some("project_id"))
+        } else if self.table_has_column("runs", "step_id")? {
+            Ok(Some("step_id"))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn table_has_column(&self, table: &str, column: &str) -> Result<bool> {
+        // table/column names are controlled internally, so simple escaping is sufficient
+        let table = table.replace('\'', "''");
+        let column = column.replace('\'', "''");
+        let sql = format!(
+            "SELECT COUNT(*) FROM pragma_table_info('{}') WHERE name='{}'",
+            table, column
+        );
+
+        let count: i64 = self.conn.query_row(&sql, [], |row| row.get(0))?;
+        Ok(count > 0)
+    }
+
     /// Delete a project from the database
     pub fn delete_project(&self, identifier: &str) -> Result<Project> {
         // Get the project first
@@ -214,19 +237,19 @@ impl BioVaultDb {
             .get_project(identifier)?
             .ok_or_else(|| anyhow::anyhow!("Project '{}' not found", identifier))?;
 
-        // Check for associated runs
-        let run_count: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM runs WHERE project_id = ?1",
-            params![project.id],
-            |row| row.get(0),
-        )?;
+        if let Some(column) = self.runs_project_reference_column()? {
+            let query = format!("SELECT COUNT(*) FROM runs WHERE {} = ?1", column);
+            let run_count: i64 = self
+                .conn
+                .query_row(&query, params![project.id], |row| row.get(0))?;
 
-        if run_count > 0 {
-            anyhow::bail!(
-                "Cannot delete project '{}': {} associated run(s) exist. Delete runs first.",
-                project.name,
-                run_count
-            );
+            if run_count > 0 {
+                anyhow::bail!(
+                    "Cannot delete project '{}': {} associated run(s) exist. Delete runs first.",
+                    project.name,
+                    run_count
+                );
+            }
         }
 
         // Delete the project
@@ -238,13 +261,15 @@ impl BioVaultDb {
 
     /// Count runs for a project
     pub fn count_project_runs(&self, project_id: i64) -> Result<i64> {
-        let count: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM runs WHERE project_id = ?1",
-            params![project_id],
-            |row| row.get(0),
-        )?;
-
-        Ok(count)
+        if let Some(column) = self.runs_project_reference_column()? {
+            let query = format!("SELECT COUNT(*) FROM runs WHERE {} = ?1", column);
+            let count: i64 = self
+                .conn
+                .query_row(&query, params![project_id], |row| row.get(0))?;
+            Ok(count)
+        } else {
+            Ok(0)
+        }
     }
 }
 
