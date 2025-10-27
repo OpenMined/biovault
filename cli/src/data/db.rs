@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use rusqlite::Connection;
+use rusqlite::{params, Connection};
 use std::fs;
 use std::path::{Path, PathBuf};
 use tracing::info;
@@ -34,7 +34,19 @@ impl BioVaultDb {
     /// Initialize schema from SQL file
     fn init_schema(conn: &Connection) -> Result<()> {
         let schema = include_str!("../schema.sql");
-        conn.execute_batch(schema)?;
+
+        if let Err(err) = conn.execute_batch(schema) {
+            let err_msg = err.to_string();
+
+            // Older databases might be missing newly introduced columns (e.g. runs.pipeline_id).
+            // Attempt to migrate the legacy table layout and retry once before bailing out.
+            if err_msg.contains("no such column") {
+                migrate_runs_table(conn)?;
+                conn.execute_batch(schema)?;
+            } else {
+                return Err(err.into());
+            }
+        }
 
         // Run migrations for existing databases
         Self::run_migrations(conn)?;
@@ -55,120 +67,64 @@ impl BioVaultDb {
     /// Run migrations for existing databases
     fn run_migrations(conn: &Connection) -> Result<()> {
         // Check if data_type column exists in files table
-        let column_exists: bool = conn
-            .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('files') WHERE name='data_type'",
-                [],
-                |row| row.get(0),
-            )
-            .map(|count: i32| count > 0)
-            .unwrap_or(false);
+        if table_exists(conn, "files")? {
+            if !column_exists(conn, "files", "data_type")? {
+                info!("Adding data_type column to files table");
+                conn.execute(
+                    "ALTER TABLE files ADD COLUMN data_type TEXT DEFAULT 'Unknown'",
+                    [],
+                )?;
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_files_data_type ON files(data_type)",
+                    [],
+                )?;
+                info!("Migration complete: added data_type column and index");
+            }
 
-        if !column_exists {
-            info!("Adding data_type column to files table");
-            conn.execute(
-                "ALTER TABLE files ADD COLUMN data_type TEXT DEFAULT 'Unknown'",
-                [],
-            )?;
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_files_data_type ON files(data_type)",
-                [],
-            )?;
-            info!("Migration complete: added data_type column and index");
+            // Add status column to files if it doesn't exist
+            if !column_exists(conn, "files", "status")? {
+                info!("Adding status column to files table");
+                conn.execute(
+                    "ALTER TABLE files ADD COLUMN status TEXT DEFAULT 'complete'",
+                    [],
+                )?;
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_files_status ON files(status)",
+                    [],
+                )?;
+                info!("Migration complete: added status column and index");
+            }
+
+            // Add processing_error column to files if it doesn't exist
+            if !column_exists(conn, "files", "processing_error")? {
+                info!("Adding processing_error column to files table");
+                conn.execute("ALTER TABLE files ADD COLUMN processing_error TEXT", [])?;
+                info!("Migration complete: added processing_error column");
+            }
+
+            // Add queue_added_at column to files if it doesn't exist
+            if !column_exists(conn, "files", "queue_added_at")? {
+                info!("Adding queue_added_at column to files table");
+                conn.execute("ALTER TABLE files ADD COLUMN queue_added_at DATETIME", [])?;
+                info!("Migration complete: added queue_added_at column");
+            }
         }
 
         // Add inferred_sex to participants if it doesn't exist
-        let sex_exists = conn
-            .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('participants') WHERE name='inferred_sex'",
-                [],
-                |row| row.get(0),
-            )
-            .map(|count: i32| count > 0)
-            .unwrap_or(false);
-
-        if !sex_exists {
+        if table_exists(conn, "participants")?
+            && !column_exists(conn, "participants", "inferred_sex")?
+        {
             info!("Adding inferred_sex column to participants table");
             conn.execute("ALTER TABLE participants ADD COLUMN inferred_sex TEXT", [])?;
             info!("Migration complete: added inferred_sex to participants");
         }
 
-        // Add status column to files if it doesn't exist
-        let status_exists = conn
-            .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('files') WHERE name='status'",
-                [],
-                |row| row.get(0),
-            )
-            .map(|count: i32| count > 0)
-            .unwrap_or(false);
-
-        if !status_exists {
-            info!("Adding status column to files table");
-            conn.execute(
-                "ALTER TABLE files ADD COLUMN status TEXT DEFAULT 'complete'",
-                [],
-            )?;
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_files_status ON files(status)",
-                [],
-            )?;
-            info!("Migration complete: added status column and index");
-        }
-
-        // Add processing_error column to files if it doesn't exist
-        let error_exists = conn
-            .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('files') WHERE name='processing_error'",
-                [],
-                |row| row.get(0),
-            )
-            .map(|count: i32| count > 0)
-            .unwrap_or(false);
-
-        if !error_exists {
-            info!("Adding processing_error column to files table");
-            conn.execute("ALTER TABLE files ADD COLUMN processing_error TEXT", [])?;
-            info!("Migration complete: added processing_error column");
-        }
-
-        // Add queue_added_at column to files if it doesn't exist
-        let queue_added_exists = conn
-            .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('files') WHERE name='queue_added_at'",
-                [],
-                |row| row.get(0),
-            )
-            .map(|count: i32| count > 0)
-            .unwrap_or(false);
-
-        if !queue_added_exists {
-            info!("Adding queue_added_at column to files table");
-            conn.execute("ALTER TABLE files ADD COLUMN queue_added_at DATETIME", [])?;
-            info!("Migration complete: added queue_added_at column");
-        }
-
         // Drop source and grch_version columns from files table if they exist
         // (these should only be in genotype_metadata table)
-        let source_exists = conn
-            .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('files') WHERE name='source'",
-                [],
-                |row| row.get(0),
-            )
-            .map(|count: i32| count > 0)
-            .unwrap_or(false);
+        let source_exists = column_exists(conn, "files", "source")?;
+        let grch_exists = column_exists(conn, "files", "grch_version")?;
 
-        let grch_exists = conn
-            .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('files') WHERE name='grch_version'",
-                [],
-                |row| row.get(0),
-            )
-            .map(|count: i32| count > 0)
-            .unwrap_or(false);
-
-        if source_exists || grch_exists {
+        if table_exists(conn, "files")? && (source_exists || grch_exists) {
             info!("Dropping source and grch_version columns from files table");
 
             // SQLite doesn't support DROP COLUMN directly, need to recreate table
@@ -260,16 +216,7 @@ impl BioVaultDb {
         )?;
 
         // Add inferred_sex column to genotype_metadata if it doesn't exist
-        let inferred_sex_exists = conn
-            .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('genotype_metadata') WHERE name='inferred_sex'",
-                [],
-                |row| row.get(0),
-            )
-            .map(|count: i32| count > 0)
-            .unwrap_or(false);
-
-        if !inferred_sex_exists {
+        if !column_exists(conn, "genotype_metadata", "inferred_sex")? {
             info!("Adding inferred_sex column to genotype_metadata table");
             conn.execute(
                 "ALTER TABLE genotype_metadata ADD COLUMN inferred_sex TEXT",
@@ -279,84 +226,35 @@ impl BioVaultDb {
         }
 
         // Add jupyter_port column to dev_envs if it doesn't exist
-        let port_exists = conn
-            .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('dev_envs') WHERE name='jupyter_port'",
-                [],
-                |row| row.get(0),
-            )
-            .map(|count: i32| count > 0)
-            .unwrap_or(false);
-
-        if !port_exists {
+        if table_exists(conn, "dev_envs")? && !column_exists(conn, "dev_envs", "jupyter_port")? {
             info!("Adding jupyter_port column to dev_envs table");
             conn.execute("ALTER TABLE dev_envs ADD COLUMN jupyter_port INTEGER", [])?;
             info!("Migration complete: added jupyter_port column");
         }
 
         // Add jupyter_pid column to dev_envs if it doesn't exist
-        let pid_exists = conn
-            .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('dev_envs') WHERE name='jupyter_pid'",
-                [],
-                |row| row.get(0),
-            )
-            .map(|count: i32| count > 0)
-            .unwrap_or(false);
-
-        if !pid_exists {
+        if table_exists(conn, "dev_envs")? && !column_exists(conn, "dev_envs", "jupyter_pid")? {
             info!("Adding jupyter_pid column to dev_envs table");
             conn.execute("ALTER TABLE dev_envs ADD COLUMN jupyter_pid INTEGER", [])?;
             info!("Migration complete: added jupyter_pid column");
         }
 
         // Add jupyter_url column to dev_envs if it doesn't exist
-        let url_exists = conn
-            .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('dev_envs') WHERE name='jupyter_url'",
-                [],
-                |row| row.get(0),
-            )
-            .map(|count: i32| count > 0)
-            .unwrap_or(false);
-
-        if !url_exists {
+        if table_exists(conn, "dev_envs")? && !column_exists(conn, "dev_envs", "jupyter_url")? {
             info!("Adding jupyter_url column to dev_envs table");
             conn.execute("ALTER TABLE dev_envs ADD COLUMN jupyter_url TEXT", [])?;
             info!("Migration complete: added jupyter_url column");
         }
 
         // Add jupyter_token column to dev_envs if it doesn't exist
-        let token_exists = conn
-            .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('dev_envs') WHERE name='jupyter_token'",
-                [],
-                |row| row.get(0),
-            )
-            .map(|count: i32| count > 0)
-            .unwrap_or(false);
-
-        if !token_exists {
+        if table_exists(conn, "dev_envs")? && !column_exists(conn, "dev_envs", "jupyter_token")? {
             info!("Adding jupyter_token column to dev_envs table");
             conn.execute("ALTER TABLE dev_envs ADD COLUMN jupyter_token TEXT", [])?;
             info!("Migration complete: added jupyter_token column");
         }
 
         // Add metadata column to runs if it doesn't exist
-        let metadata_exists = conn
-            .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('runs') WHERE name='metadata'",
-                [],
-                |row| row.get(0),
-            )
-            .map(|count: i32| count > 0)
-            .unwrap_or(false);
-
-        if !metadata_exists {
-            info!("Adding metadata column to runs table");
-            conn.execute("ALTER TABLE runs ADD COLUMN metadata TEXT", [])?;
-            info!("Migration complete: added metadata column to runs");
-        }
+        migrate_runs_table(conn)?;
 
         Ok(())
     }
@@ -520,6 +418,127 @@ fn migrate_from_messages_db(target_path: &Path) -> Result<()> {
     info!("Migration complete - schema version 2.0.0");
 
     Ok(())
+}
+
+fn migrate_runs_table(conn: &Connection) -> Result<()> {
+    if !table_exists(conn, "runs")? {
+        return Ok(());
+    }
+
+    add_column_if_missing(conn, "runs", "pipeline_id", "INTEGER")?;
+    add_column_if_missing(conn, "runs", "step_id", "INTEGER")?;
+    add_column_if_missing(conn, "runs", "results_dir", "TEXT")?;
+    add_column_if_missing(conn, "runs", "participant_count", "INTEGER")?;
+    add_column_if_missing(conn, "runs", "metadata", "TEXT")?;
+    add_column_if_missing(conn, "runs", "completed_at", "DATETIME")?;
+
+    if column_exists(conn, "runs", "pipeline_id")? {
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_runs_pipeline_id ON runs(pipeline_id)",
+            [],
+        )?;
+    }
+
+    if column_exists(conn, "runs", "step_id")? {
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_runs_step_id ON runs(step_id)",
+            [],
+        )?;
+    }
+
+    if column_exists(conn, "runs", "status")? {
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_runs_status ON runs(status)",
+            [],
+        )?;
+    }
+
+    Ok(())
+}
+
+fn table_exists(conn: &Connection, table: &str) -> Result<bool> {
+    conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+        params![table],
+        |row| row.get::<_, i32>(0),
+    )
+    .map(|count| count > 0)
+    .map_err(Into::into)
+}
+
+fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool> {
+    // Table names are trusted (internal constants) but still escape single quotes defensively.
+    let escaped_table = table.replace('\'', "''");
+    let sql = format!(
+        "SELECT COUNT(*) FROM pragma_table_info('{}') WHERE name=?1",
+        escaped_table
+    );
+
+    conn.query_row(&sql, params![column], |row| row.get::<_, i32>(0))
+        .map(|count| count > 0)
+        .map_err(Into::into)
+}
+
+fn add_column_if_missing(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    definition: &str,
+) -> Result<bool> {
+    if !table_exists(conn, table)? || column_exists(conn, table, column)? {
+        return Ok(false);
+    }
+
+    // Handle legacy bug where the column was added using only the type name
+    if let Some(legacy_name) = legacy_column_name(definition) {
+        if column_exists(conn, table, legacy_name)? {
+            rename_column(conn, table, legacy_name, column)?;
+            return Ok(true);
+        }
+    }
+
+    let sql = format!(
+        "ALTER TABLE {} ADD COLUMN {} {}",
+        quote_ident(table),
+        quote_ident(column),
+        definition
+    );
+    conn.execute(&sql, [])?;
+    Ok(true)
+}
+
+fn legacy_column_name(definition: &str) -> Option<&str> {
+    definition.split_whitespace().next()
+}
+
+fn rename_column(conn: &Connection, table: &str, from: &str, to: &str) -> Result<()> {
+    if !column_exists(conn, table, from)? {
+        return Ok(());
+    }
+
+    let sql = format!(
+        "ALTER TABLE {} RENAME COLUMN {} TO {}",
+        quote_ident(table),
+        quote_ident(from),
+        quote_ident(to)
+    );
+    conn.execute(&sql, [])?;
+    Ok(())
+}
+
+fn quote_ident(name: &str) -> String {
+    let mut quoted = String::with_capacity(name.len() + 2);
+    quoted.push('"');
+    for ch in name.chars() {
+        if ch == '"' {
+            quoted.push('"');
+            quoted.push('"');
+        } else {
+            quoted.push(ch);
+        }
+    }
+    quoted.push('"');
+    quoted
 }
 
 fn get_schema_version(conn: &Connection) -> Result<Option<String>> {
