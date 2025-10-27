@@ -343,6 +343,22 @@ impl BioVaultDb {
             info!("Migration complete: added jupyter_token column");
         }
 
+        // Add metadata column to runs if it doesn't exist
+        let metadata_exists = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('runs') WHERE name='metadata'",
+                [],
+                |row| row.get(0),
+            )
+            .map(|count: i32| count > 0)
+            .unwrap_or(false);
+
+        if !metadata_exists {
+            info!("Adding metadata column to runs table");
+            conn.execute("ALTER TABLE runs ADD COLUMN metadata TEXT", [])?;
+            info!("Migration complete: added metadata column to runs");
+        }
+
         Ok(())
     }
 

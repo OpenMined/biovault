@@ -140,6 +140,7 @@ CREATE TABLE IF NOT EXISTS runs (
     work_dir TEXT NOT NULL,
     results_dir TEXT,
     participant_count INTEGER,          -- Only for standalone step runs
+    metadata TEXT,                      -- JSON: { "input_overrides": {...}, "parameter_overrides": {...} }
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     completed_at DATETIME,
     FOREIGN KEY (pipeline_id) REFERENCES pipelines(id) ON DELETE CASCADE,
@@ -159,3 +160,16 @@ CREATE TABLE IF NOT EXISTS run_participants (
     FOREIGN KEY (participant_id) REFERENCES participants(id) ON DELETE CASCADE,
     PRIMARY KEY (run_id, participant_id)
 );
+
+-- NEW: Run Configurations (saved pipeline input configurations)
+CREATE TABLE IF NOT EXISTS run_configs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    pipeline_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    config_data TEXT NOT NULL,  -- JSON: { "inputs": {...}, "parameters": {...} }
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (pipeline_id) REFERENCES pipelines(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_run_configs_pipeline_id ON run_configs(pipeline_id);

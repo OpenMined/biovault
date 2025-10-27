@@ -27,12 +27,23 @@ pub struct Run {
     pub work_dir: String,
     pub results_dir: Option<String>,
     pub participant_count: Option<i32>, // Only for step runs
+    pub metadata: Option<String>,      // JSON: { "input_overrides": {...}, "parameter_overrides": {...} }
     pub created_at: String,
     pub completed_at: Option<String>,
 }
 
 // Backwards compat alias
 pub type PipelineRun = Run;
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct RunConfig {
+    pub id: i64,
+    pub pipeline_id: i64,
+    pub name: String,
+    pub config_data: serde_json::Value, // { "inputs": {...}, "parameters": {...} }
+    pub created_at: String,
+    pub updated_at: String,
+}
 
 impl BioVaultDb {
     /// List all pipelines
@@ -160,7 +171,7 @@ impl BioVaultDb {
     /// List all runs (both pipeline and standalone step runs)
     pub fn list_runs(&self) -> Result<Vec<Run>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, pipeline_id, step_id, status, work_dir, results_dir, participant_count, created_at, completed_at
+            "SELECT id, pipeline_id, step_id, status, work_dir, results_dir, participant_count, metadata, created_at, completed_at
              FROM runs
              ORDER BY created_at DESC",
         )?;
@@ -175,8 +186,9 @@ impl BioVaultDb {
                     work_dir: row.get(4)?,
                     results_dir: row.get(5)?,
                     participant_count: row.get(6)?,
-                    created_at: row.get(7)?,
-                    completed_at: row.get(8)?,
+                    metadata: row.get(7)?,
+                    created_at: row.get(8)?,
+                    completed_at: row.get(9)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -187,7 +199,7 @@ impl BioVaultDb {
     /// List only pipeline runs
     pub fn list_pipeline_runs(&self) -> Result<Vec<Run>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, pipeline_id, step_id, status, work_dir, results_dir, participant_count, created_at, completed_at
+            "SELECT id, pipeline_id, step_id, status, work_dir, results_dir, participant_count, metadata, created_at, completed_at
              FROM runs
              WHERE pipeline_id IS NOT NULL
              ORDER BY created_at DESC",
@@ -203,8 +215,9 @@ impl BioVaultDb {
                     work_dir: row.get(4)?,
                     results_dir: row.get(5)?,
                     participant_count: row.get(6)?,
-                    created_at: row.get(7)?,
-                    completed_at: row.get(8)?,
+                    metadata: row.get(7)?,
+                    created_at: row.get(8)?,
+                    completed_at: row.get(9)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -215,7 +228,7 @@ impl BioVaultDb {
     /// Get a specific run
     pub fn get_run(&self, run_id: i64) -> Result<Option<Run>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, pipeline_id, step_id, status, work_dir, results_dir, participant_count, created_at, completed_at
+            "SELECT id, pipeline_id, step_id, status, work_dir, results_dir, participant_count, metadata, created_at, completed_at
              FROM runs
              WHERE id = ?1",
         )?;
@@ -230,8 +243,9 @@ impl BioVaultDb {
                     work_dir: row.get(4)?,
                     results_dir: row.get(5)?,
                     participant_count: row.get(6)?,
-                    created_at: row.get(7)?,
-                    completed_at: row.get(8)?,
+                    metadata: row.get(7)?,
+                    created_at: row.get(8)?,
+                    completed_at: row.get(9)?,
                 })
             })
             .optional()?;
@@ -251,10 +265,21 @@ impl BioVaultDb {
         work_dir: &str,
         results_dir: Option<&str>,
     ) -> Result<i64> {
+        self.create_pipeline_run_with_metadata(pipeline_id, work_dir, results_dir, None)
+    }
+
+    /// Create a pipeline run record with metadata
+    pub fn create_pipeline_run_with_metadata(
+        &self,
+        pipeline_id: i64,
+        work_dir: &str,
+        results_dir: Option<&str>,
+        metadata: Option<&str>,
+    ) -> Result<i64> {
         self.conn.execute(
-            "INSERT INTO runs (pipeline_id, step_id, status, work_dir, results_dir, created_at)
-             VALUES (?1, NULL, 'running', ?2, ?3, datetime('now'))",
-            params![pipeline_id, work_dir, results_dir],
+            "INSERT INTO runs (pipeline_id, step_id, status, work_dir, results_dir, metadata, created_at)
+             VALUES (?1, NULL, 'running', ?2, ?3, ?4, datetime('now'))",
+            params![pipeline_id, work_dir, results_dir, metadata],
         )?;
 
         Ok(self.conn.last_insert_rowid())
@@ -317,6 +342,95 @@ impl BioVaultDb {
     /// Backwards compat alias
     pub fn delete_pipeline_run(&self, run_id: i64) -> Result<()> {
         self.delete_run(run_id)
+    }
+
+    // =========================================================================
+    // Run Configurations
+    // =========================================================================
+
+    /// Save a run configuration for a pipeline
+    pub fn save_run_config(
+        &self,
+        pipeline_id: i64,
+        name: &str,
+        config_data: &serde_json::Value,
+    ) -> Result<i64> {
+        let config_json = serde_json::to_string(config_data)?;
+        
+        self.conn.execute(
+            "INSERT INTO run_configs (pipeline_id, name, config_data, created_at, updated_at)
+             VALUES (?1, ?2, ?3, datetime('now'), datetime('now'))",
+            params![pipeline_id, name, config_json],
+        )?;
+
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// List run configurations for a pipeline
+    pub fn list_run_configs(&self, pipeline_id: i64) -> Result<Vec<RunConfig>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, pipeline_id, name, config_data, created_at, updated_at
+             FROM run_configs
+             WHERE pipeline_id = ?1
+             ORDER BY created_at DESC
+             LIMIT 10",  // Keep last 10
+        )?;
+
+        let configs = stmt
+            .query_map([pipeline_id], |row| {
+                let config_json: String = row.get(3)?;
+                let config_data = serde_json::from_str(&config_json)
+                    .unwrap_or(serde_json::json!({}));
+
+                Ok(RunConfig {
+                    id: row.get(0)?,
+                    pipeline_id: row.get(1)?,
+                    name: row.get(2)?,
+                    config_data,
+                    created_at: row.get(4)?,
+                    updated_at: row.get(5)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(configs)
+    }
+
+    /// Get a specific run configuration
+    pub fn get_run_config(&self, config_id: i64) -> Result<Option<RunConfig>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, pipeline_id, name, config_data, created_at, updated_at
+             FROM run_configs
+             WHERE id = ?1",
+        )?;
+
+        let config = stmt
+            .query_row([config_id], |row| {
+                let config_json: String = row.get(3)?;
+                let config_data = serde_json::from_str(&config_json)
+                    .unwrap_or(serde_json::json!({}));
+
+                Ok(RunConfig {
+                    id: row.get(0)?,
+                    pipeline_id: row.get(1)?,
+                    name: row.get(2)?,
+                    config_data,
+                    created_at: row.get(4)?,
+                    updated_at: row.get(5)?,
+                })
+            })
+            .optional()?;
+
+        Ok(config)
+    }
+
+    /// Delete a run configuration
+    pub fn delete_run_config(&self, config_id: i64) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM run_configs WHERE id = ?1",
+            params![config_id],
+        )?;
+        Ok(())
     }
 }
 
