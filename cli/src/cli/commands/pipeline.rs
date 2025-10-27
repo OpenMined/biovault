@@ -216,9 +216,20 @@ pub async fn run_pipeline(
     let requested_results_dir = explicit_results_dir.or(results_dir_override);
 
     let base_results_dir = match requested_results_dir {
-        Some(dir) => PathBuf::from(dir),
+        Some(dir) => {
+            let path = PathBuf::from(dir);
+            // Convert to absolute path if relative
+            if path.is_absolute() {
+                path
+            } else {
+                env::current_dir()
+                    .unwrap_or_else(|_| PathBuf::from("."))
+                    .join(path)
+            }
+        }
         None => {
-            let mut base = PathBuf::from("results/pipelines");
+            let mut base = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            base.push("results/pipelines");
             base.push(&spec.name);
             base
         }
