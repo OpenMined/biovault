@@ -1396,10 +1396,12 @@ fn resolve_project_by_uses(
     pipeline_dir: &Path,
     db: Option<&BioVaultDb>,
 ) -> Result<LoadedProject> {
+    // Try 1: Resolve as path (relative or absolute)
     if let Ok((reference, root)) = normalize_project_reference(uses, pipeline_dir) {
         return load_project_spec(&ProjectChoice::Path { reference, root });
     }
 
+    // Try 2: Database lookup with exact name
     if let Some(db) = db {
         if let Ok(Some(project)) = db.get_project(uses) {
             return load_project_spec(&ProjectChoice::Registered {

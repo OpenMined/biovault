@@ -647,6 +647,162 @@ pub fn delete(identifier: String, keep_files: bool, format: Option<String>) -> R
     Ok(())
 }
 
+/// Import a pipeline from URL with all its step dependencies
+pub async fn import_pipeline_with_deps(
+    url: &str,
+    name_override: Option<String>,
+    overwrite: bool,
+) -> Result<String> {
+    use crate::pipeline_spec::PipelineSpec;
+    use colored::Colorize;
+
+    // Convert GitHub URL to raw URL
+    let raw_url = url
+        .replace("github.com", "raw.githubusercontent.com")
+        .replace("/blob/", "/");
+
+    println!("{} Downloading pipeline from {}", "📥".cyan(), url.cyan());
+
+    // Download pipeline YAML
+    let yaml_content = download_file(&raw_url).await?;
+    let yaml_str = String::from_utf8(yaml_content).context("Invalid UTF-8 in pipeline.yaml")?;
+
+    // Parse pipeline spec
+    let spec: PipelineSpec =
+        serde_yaml::from_str(&yaml_str).context("Failed to parse pipeline.yaml")?;
+
+    let pipeline_name = name_override.unwrap_or_else(|| spec.name.clone());
+
+    println!("{} Pipeline: {}", "📦".cyan(), pipeline_name.bold());
+    println!("   Steps: {}", spec.steps.len());
+
+    // Create pipeline directory
+    let biovault_home = crate::config::get_biovault_home()?;
+    let pipelines_dir = biovault_home.join("pipelines");
+    fs::create_dir_all(&pipelines_dir)?;
+
+    let pipeline_dir = pipelines_dir.join(&pipeline_name);
+
+    if pipeline_dir.exists() {
+        if overwrite {
+            fs::remove_dir_all(&pipeline_dir)?;
+        } else {
+            return Err(anyhow::anyhow!(
+                "Pipeline directory already exists: {}. Use --overwrite to replace.",
+                pipeline_dir.display()
+            )
+            .into());
+        }
+    }
+
+    fs::create_dir_all(&pipeline_dir)?;
+
+    // Save pipeline.yaml
+    let pipeline_yaml_path = pipeline_dir.join("pipeline.yaml");
+    fs::write(&pipeline_yaml_path, &yaml_str)?;
+    println!("{} Saved pipeline.yaml", "✓".green());
+
+    // Extract base URL for resolving relative project paths
+    let base_url = if let Some(idx) = url.rfind('/') {
+        &url[..idx]
+    } else {
+        url
+    };
+
+    // Import each step's project and rewrite YAML to use registered names
+    let db = BioVaultDb::new()?;
+    let mut updated_spec = spec.clone();
+    let mut any_rewritten = false;
+
+    if !spec.steps.is_empty() {
+        println!(
+            "\n{} Importing dependencies ({} steps):",
+            "📦".cyan(),
+            spec.steps.len()
+        );
+
+        for (index, step) in spec.steps.iter().enumerate() {
+            if let Some(uses) = &step.uses {
+                // Skip absolute local paths
+                if uses.starts_with('/') {
+                    println!(
+                        "   {} Step '{}' uses absolute path (keeping as-is)",
+                        "ℹ️ ".cyan(),
+                        step.id.dimmed()
+                    );
+                    continue;
+                }
+
+                // Skip if already a simple name
+                if !uses.contains('/') && !uses.starts_with("http") {
+                    println!(
+                        "   {} Step '{}' already uses name (keeping as-is)",
+                        "ℹ️ ".cyan(),
+                        step.id.dimmed()
+                    );
+                    continue;
+                }
+
+                // Construct URL to project.yaml
+                let project_url = if uses.starts_with("http://") || uses.starts_with("https://") {
+                    format!("{}/project.yaml", uses)
+                } else {
+                    // Relative path from pipeline location on GitHub
+                    format!("{}/{}/project.yaml", base_url, uses)
+                };
+
+                print!("   {} {} ", "•".cyan(), step.id.bold());
+
+                // Import the project (registers in DB automatically)
+                match import_from_url(&db, &project_url, None, overwrite, true).await {
+                    Ok(project) => {
+                        println!("{} → {}", "✓ imported".green(), project.name.green());
+                        // Rewrite YAML to use the registered name
+                        if let Some(updated_step) = updated_spec.steps.get_mut(index) {
+                            updated_step.uses = Some(project.name.clone());
+                        }
+                        any_rewritten = true;
+                    }
+                    Err(e) => {
+                        println!("{}: {}", "⚠️  failed".yellow(), e.to_string().dimmed());
+                    }
+                }
+            }
+        }
+
+        // Save updated pipeline.yaml with project names
+        if any_rewritten {
+            println!(
+                "\n{} Updating pipeline.yaml to use registered names...",
+                "🔧".cyan()
+            );
+            let updated_yaml =
+                serde_yaml::to_string(&updated_spec).context("Failed to serialize updated spec")?;
+            fs::write(&pipeline_yaml_path, updated_yaml)?;
+            println!(
+                "{} Pipeline YAML updated with registered names!",
+                "✓".green()
+            );
+        }
+    }
+
+    // Register pipeline in database
+    let pipeline_id = db.register_pipeline(&pipeline_name, &pipeline_dir.to_string_lossy())?;
+
+    println!(
+        "\n{} Pipeline '{}' imported successfully!",
+        "✅".green().bold(),
+        pipeline_name.bold()
+    );
+    println!(
+        "   Location: {}",
+        pipeline_dir.display().to_string().dimmed()
+    );
+    println!("   ID: {}", pipeline_id);
+
+    Ok(pipeline_dir.to_string_lossy().to_string())
+}
+
 // Helper function to download files
 async fn download_file(url: &str) -> Result<Vec<u8>> {
     let response = reqwest::get(url)

@@ -122,29 +122,6 @@ CREATE TABLE IF NOT EXISTS dev_envs (
 CREATE INDEX IF NOT EXISTS idx_dev_envs_project_path ON dev_envs(project_path);
 CREATE INDEX IF NOT EXISTS idx_dev_envs_env_type ON dev_envs(env_type);
 
--- NEW: Runs (Desktop-only)
-CREATE TABLE IF NOT EXISTS runs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    project_id INTEGER NOT NULL,
-    work_dir TEXT NOT NULL,
-    participant_count INTEGER NOT NULL,
-    status TEXT NOT NULL,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
-);
-
-CREATE INDEX IF NOT EXISTS idx_runs_project_id ON runs(project_id);
-CREATE INDEX IF NOT EXISTS idx_runs_status ON runs(status);
-
--- NEW: Run Participants (Desktop-only, but can join with files)
-CREATE TABLE IF NOT EXISTS run_participants (
-    run_id INTEGER NOT NULL,
-    participant_id INTEGER NOT NULL,
-    FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE,
-    FOREIGN KEY (participant_id) REFERENCES participants(id) ON DELETE CASCADE,
-    PRIMARY KEY (run_id, participant_id)
-);
-
 -- NEW: Pipelines (shared CLI/Desktop)
 CREATE TABLE IF NOT EXISTS pipelines (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -154,17 +131,45 @@ CREATE TABLE IF NOT EXISTS pipelines (
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
--- NEW: Pipeline Runs (shared CLI/Desktop)
-CREATE TABLE IF NOT EXISTS pipeline_runs (
+-- NEW: Unified Runs Table (handles both pipeline and standalone step runs)
+CREATE TABLE IF NOT EXISTS runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    pipeline_id INTEGER NOT NULL,
+    pipeline_id INTEGER,                -- NULL for standalone step runs
+    step_id INTEGER,                    -- NULL for pipeline runs (references projects table)
     status TEXT NOT NULL,
     work_dir TEXT NOT NULL,
     results_dir TEXT,
+    participant_count INTEGER,          -- Only for standalone step runs
+    metadata TEXT,                      -- JSON: { "input_overrides": {...}, "parameter_overrides": {...} }
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     completed_at DATETIME,
+    FOREIGN KEY (pipeline_id) REFERENCES pipelines(id) ON DELETE CASCADE,
+    FOREIGN KEY (step_id) REFERENCES projects(id) ON DELETE SET NULL,
+    CHECK ((pipeline_id IS NULL) != (step_id IS NULL))  -- Exactly one must be set
+);
+
+CREATE INDEX IF NOT EXISTS idx_runs_pipeline_id ON runs(pipeline_id);
+CREATE INDEX IF NOT EXISTS idx_runs_step_id ON runs(step_id);
+CREATE INDEX IF NOT EXISTS idx_runs_status ON runs(status);
+
+-- NEW: Run Participants (for standalone step runs only)
+CREATE TABLE IF NOT EXISTS run_participants (
+    run_id INTEGER NOT NULL,
+    participant_id INTEGER NOT NULL,
+    FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE,
+    FOREIGN KEY (participant_id) REFERENCES participants(id) ON DELETE CASCADE,
+    PRIMARY KEY (run_id, participant_id)
+);
+
+-- NEW: Run Configurations (saved pipeline input configurations)
+CREATE TABLE IF NOT EXISTS run_configs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    pipeline_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    config_data TEXT NOT NULL,  -- JSON: { "inputs": {...}, "parameters": {...} }
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (pipeline_id) REFERENCES pipelines(id) ON DELETE CASCADE
 );
 
-CREATE INDEX IF NOT EXISTS idx_pipeline_runs_pipeline_id ON pipeline_runs(pipeline_id);
-CREATE INDEX IF NOT EXISTS idx_pipeline_runs_status ON pipeline_runs(status);
+CREATE INDEX IF NOT EXISTS idx_run_configs_pipeline_id ON run_configs(pipeline_id);
