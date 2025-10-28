@@ -204,6 +204,7 @@ pub fn create_project_record(
         let mut template_field = example
             .clone()
             .unwrap_or_else(|| "dynamic-nextflow".to_string());
+        let mut version_field = "1.0.0".to_string();
 
         if let serde_yaml::Value::Mapping(ref mut map) = yaml_value {
             let name_key = serde_yaml::Value::String("name".to_string());
@@ -244,6 +245,13 @@ pub fn create_project_record(
                     template_field = existing.clone();
                 }
             }
+
+            let version_key = serde_yaml::Value::String("version".to_string());
+            if let Some(serde_yaml::Value::String(existing)) = map.get(&version_key) {
+                if !existing.trim().is_empty() {
+                    version_field = existing.clone();
+                }
+            }
         } else {
             return Err(anyhow::anyhow!("project.yaml has unexpected structure").into());
         }
@@ -254,6 +262,7 @@ pub fn create_project_record(
 
         db.register_project(
             &project_name_owned,
+            &version_field,
             &author_field,
             &workflow_field,
             &template_field,
@@ -308,33 +317,101 @@ async fn import_from_url(
 
     let project_name = name_override.unwrap_or(project_yaml.name.clone());
 
-    // Check if project exists
-    if !overwrite {
-        if let Some(existing) = db.get_project(&project_name)? {
-            return Err(anyhow::anyhow!(
-                "Project '{}' already exists (id: {}). Use --overwrite to replace.",
-                project_name,
-                existing.id
-            )
-            .into());
-        }
-    }
-
-    // Create project directory in BIOVAULT_HOME/projects/
+    // Create project directory path (including version to allow multiple versions)
     let biovault_home = config::get_biovault_home()?;
     let projects_dir = biovault_home.join("projects");
     fs::create_dir_all(&projects_dir)?;
+    let dir_name = format!("{}-{}", project_name, project_yaml.version);
+    let project_dir = projects_dir.join(&dir_name);
 
-    let project_dir = projects_dir.join(&project_name);
+    // Check if project already exists in DB (with this exact version)
+    if !overwrite {
+        let identifier = format!("{}@{}", project_name, project_yaml.version);
+        if let Some(mut existing) = db.get_project(&identifier)? {
+            // Project with this version exists in DB - check if files are valid
+            let existing_path = PathBuf::from(&existing.project_path);
+            let existing_yaml = existing_path.join("project.yaml");
+
+            if existing_yaml.exists() && existing_path.is_dir() {
+                // Valid project exists - check if path needs updating to new convention
+                let expected_dir_name = format!("{}-{}", project_name, project_yaml.version);
+                let expected_path = projects_dir.join(&expected_dir_name);
+
+                if existing_path != expected_path && !existing_path.ends_with(&expected_dir_name) {
+                    // Path is in old format (without version) - migrate to new format
+                    if !quiet {
+                        println!(
+                            "   🔄 Migrating project '{}' to versioned path format",
+                            project_name.dimmed()
+                        );
+                    }
+
+                    // Move directory to new location if needed
+                    if !expected_path.exists() {
+                        fs::rename(&existing_path, &expected_path).with_context(|| {
+                            format!(
+                                "Failed to migrate project directory from {} to {}",
+                                existing_path.display(),
+                                expected_path.display()
+                            )
+                        })?;
+                    } else {
+                        // New path already exists - remove old one
+                        fs::remove_dir_all(&existing_path).ok();
+                    }
+
+                    // Update DB with new path
+                    db.update_project(
+                        &project_name,
+                        &project_yaml.version,
+                        &project_yaml.author,
+                        &project_yaml.workflow,
+                        &project_yaml.template,
+                        &expected_path,
+                    )?;
+
+                    // Update existing struct
+                    existing.project_path = expected_path.to_string_lossy().to_string();
+                }
+
+                // Reuse existing valid project (idempotent)
+                if !quiet {
+                    println!(
+                        "   ℹ️  Project '{}' version {} already registered, reusing (id: {})",
+                        project_name.dimmed(),
+                        project_yaml.version.dimmed(),
+                        existing.id
+                    );
+                }
+                return Ok(existing);
+            } else {
+                // Project DB record exists but files are missing/invalid - clean it up
+                if !quiet {
+                    println!(
+                        "   🧹 Cleaning up orphaned project record for '{}@{}'",
+                        project_name.dimmed(),
+                        project_yaml.version.dimmed()
+                    );
+                }
+                db.delete_project(&identifier)?;
+                // Continue with fresh import below
+            }
+        }
+    }
+
+    // Handle directory conflicts
     if project_dir.exists() {
         if overwrite {
             fs::remove_dir_all(&project_dir)?;
         } else {
-            return Err(anyhow::anyhow!(
-                "Project directory already exists: {}",
-                project_dir.display()
-            )
-            .into());
+            // Directory exists but not in DB (orphaned) - clean it up
+            if !quiet {
+                println!(
+                    "   🧹 Removing orphaned project directory: {}",
+                    project_dir.display().to_string().dimmed()
+                );
+            }
+            fs::remove_dir_all(&project_dir)?;
         }
     }
 
@@ -404,9 +481,12 @@ async fn import_from_url(
 
     // Register in database
     if overwrite {
-        if db.get_project(&project_name)?.is_some() {
+        // Check if this exact version exists
+        let identifier = format!("{}@{}", project_name, project_yaml.version);
+        if db.get_project(&identifier)?.is_some() {
             db.update_project(
                 &project_name,
+                &project_yaml.version,
                 &project_yaml.author,
                 &project_yaml.workflow,
                 &project_yaml.template,
@@ -415,6 +495,7 @@ async fn import_from_url(
         } else {
             db.register_project(
                 &project_name,
+                &project_yaml.version,
                 &project_yaml.author,
                 &project_yaml.workflow,
                 &project_yaml.template,
@@ -424,6 +505,7 @@ async fn import_from_url(
     } else {
         db.register_project(
             &project_name,
+            &project_yaml.version,
             &project_yaml.author,
             &project_yaml.workflow,
             &project_yaml.template,
@@ -474,23 +556,44 @@ fn import_from_local(
 
     let project_name = name_override.unwrap_or(project_yaml.name.clone());
 
-    // Check if project exists
+    // Check if project already exists in DB
     if !overwrite {
         if let Some(existing) = db.get_project(&project_name)? {
-            return Err(anyhow::anyhow!(
-                "Project '{}' already exists (id: {}). Use --overwrite to replace.",
-                project_name,
-                existing.id
-            )
-            .into());
+            // Check if existing project points to the same path
+            let existing_path = PathBuf::from(&existing.project_path);
+            let canonical_existing = existing_path.canonicalize().ok();
+            let canonical_new = project_path.canonicalize().ok();
+
+            if canonical_existing == canonical_new && canonical_existing.is_some() {
+                // Same project, already registered - reuse it (idempotent)
+                if !quiet {
+                    println!(
+                        "   ℹ️  Project '{}' already registered at this path (id: {})",
+                        project_name.dimmed(),
+                        existing.id
+                    );
+                }
+                return Ok(existing);
+            } else {
+                // Different path - this is a conflict
+                return Err(anyhow::anyhow!(
+                    "Project '{}' already exists (id: {}) at different path: {}. Use --overwrite to replace.",
+                    project_name,
+                    existing.id,
+                    existing.project_path
+                )
+                .into());
+            }
         }
     }
 
     // Register in database (using original path, not copied)
     if overwrite {
-        if db.get_project(&project_name)?.is_some() {
+        let identifier = format!("{}@{}", project_name, project_yaml.version);
+        if db.get_project(&identifier)?.is_some() {
             db.update_project(
                 &project_name,
+                &project_yaml.version,
                 &project_yaml.author,
                 &project_yaml.workflow,
                 &project_yaml.template,
@@ -499,6 +602,7 @@ fn import_from_local(
         } else {
             db.register_project(
                 &project_name,
+                &project_yaml.version,
                 &project_yaml.author,
                 &project_yaml.workflow,
                 &project_yaml.template,
@@ -508,6 +612,7 @@ fn import_from_local(
     } else {
         db.register_project(
             &project_name,
+            &project_yaml.version,
             &project_yaml.author,
             &project_yaml.workflow,
             &project_yaml.template,
@@ -786,8 +891,19 @@ pub async fn import_pipeline_with_deps(
         }
     }
 
-    // Register pipeline in database
-    let pipeline_id = db.register_pipeline(&pipeline_name, &pipeline_dir.to_string_lossy())?;
+    // Register pipeline in database (check for existing if overwrite)
+    let pipeline_id = if overwrite {
+        // Check if pipeline with this name already exists
+        let existing_pipelines = db.list_pipelines()?;
+        if let Some(existing) = existing_pipelines.iter().find(|p| p.name == pipeline_name) {
+            // Delete existing pipeline from DB
+            db.delete_pipeline(existing.id)?;
+        }
+        // Register the new pipeline
+        db.register_pipeline(&pipeline_name, &pipeline_dir.to_string_lossy())?
+    } else {
+        db.register_pipeline(&pipeline_name, &pipeline_dir.to_string_lossy())?
+    };
 
     println!(
         "\n{} Pipeline '{}' imported successfully!",
@@ -895,6 +1011,7 @@ assets: []
         fs::create_dir_all(&project_path).unwrap();
         db.register_project(
             "project1",
+            "1.0.0",
             "author@example.com",
             "workflow.nf",
             "default",

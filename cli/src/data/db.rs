@@ -148,6 +148,57 @@ impl BioVaultDb {
             info!("Migration complete: added queue_added_at column");
         }
 
+        // Migrate projects table to add version column and update unique constraint
+        let projects_version_exists = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('projects') WHERE name='version'",
+                [],
+                |row| row.get(0),
+            )
+            .map(|count: i32| count > 0)
+            .unwrap_or(false);
+
+        if !projects_version_exists {
+            info!("Migrating projects table to add version support");
+
+            // SQLite doesn't support DROP COLUMN or modifying constraints
+            // We need to recreate the table
+            conn.execute("BEGIN TRANSACTION", [])?;
+
+            // Create new projects table with version
+            conn.execute(
+                "CREATE TABLE projects_new (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    version TEXT NOT NULL DEFAULT '1.0.0',
+                    author TEXT NOT NULL,
+                    workflow TEXT NOT NULL,
+                    template TEXT NOT NULL,
+                    project_path TEXT UNIQUE NOT NULL,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(name, version)
+                )",
+                [],
+            )?;
+
+            // Copy data from old table, setting version to 1.0.0 for existing projects
+            conn.execute(
+                "INSERT INTO projects_new (id, name, version, author, workflow, template, project_path, created_at)
+                 SELECT id, name, '1.0.0', author, workflow, template, project_path, created_at
+                 FROM projects",
+                [],
+            )?;
+
+            // Drop old table
+            conn.execute("DROP TABLE projects", [])?;
+
+            // Rename new table
+            conn.execute("ALTER TABLE projects_new RENAME TO projects", [])?;
+
+            conn.execute("COMMIT", [])?;
+            info!("Migration complete: projects table now supports versions");
+        }
+
         // Drop source and grch_version columns from files table if they exist
         // (these should only be in genotype_metadata table)
         let source_exists = conn
@@ -463,12 +514,14 @@ fn migrate_from_messages_db(target_path: &Path) -> Result<()> {
     conn.execute(
         "CREATE TABLE IF NOT EXISTS projects (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT UNIQUE NOT NULL,
+            name TEXT NOT NULL,
+            version TEXT NOT NULL DEFAULT '1.0.0',
             author TEXT NOT NULL,
             workflow TEXT NOT NULL,
             template TEXT NOT NULL,
-            project_path TEXT NOT NULL,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            project_path TEXT UNIQUE NOT NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(name, version)
         )",
         [],
     )?;
