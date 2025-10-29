@@ -25,6 +25,14 @@ pub struct ProjectYaml {
     pub assets: Vec<String>,
 }
 
+pub struct UpdateProjectParams<'a> {
+    pub name: &'a str,
+    pub author: &'a str,
+    pub workflow: &'a str,
+    pub template: &'a str,
+    pub project_path: &'a Path,
+}
+
 impl BioVaultDb {
     /// List all projects
     pub fn list_projects(&self) -> Result<Vec<Project>> {
@@ -164,12 +172,13 @@ impl BioVaultDb {
     pub fn update_project_by_id(
         &self,
         project_id: i64,
-        name: &str,
-        author: &str,
-        workflow: &str,
-        template: &str,
-        project_path: &Path,
+        params: UpdateProjectParams<'_>,
     ) -> Result<()> {
+        let name = params.name;
+        let author = params.author;
+        let workflow = params.workflow;
+        let template = params.template;
+        let project_path = params.project_path;
         let path_str = project_path
             .to_str()
             .ok_or_else(|| anyhow::anyhow!("Invalid project path"))?;
