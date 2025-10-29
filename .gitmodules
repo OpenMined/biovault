@@ -4,3 +4,6 @@
 [submodule "sbenv"]
 	path = sbenv
 	url = https://github.com/openmined/sbenv
+[submodule "bioscript"]
+	path = bioscript
+	url = https://github.com/OpenMined/bioscript

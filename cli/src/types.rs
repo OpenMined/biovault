@@ -1,3 +1,4 @@
+use crate::project_spec::{InputSpec, OutputSpec};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -67,6 +68,10 @@ pub struct ProjectYaml {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub assets: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub inputs: Option<Vec<InputSpec>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outputs: Option<Vec<OutputSpec>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub b3_hashes: Option<HashMap<String, String>>,
 }
 
@@ -134,6 +139,8 @@ mod tests {
             workflow: "wf".into(),
             template: None,
             assets: Some(vec!["a".into()]),
+            inputs: None,
+            outputs: None,
             b3_hashes: None,
         };
         proj.save(&p).unwrap();

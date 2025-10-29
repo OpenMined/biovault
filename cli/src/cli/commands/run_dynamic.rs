@@ -191,6 +191,33 @@ fn parse_cli_args(args: &[String]) -> Result<ParsedArgs> {
             return Err(
                 anyhow::anyhow!("Inline mapping overrides not yet supported: {}", key).into(),
             );
+        } else if key == "set" {
+            let (target, val) = value.split_once('=').ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Invalid --set assignment '{}'. Use inputs.name=value or params.name=value.",
+                    value
+                )
+            })?;
+
+            if let Some(input_name) = target.strip_prefix("inputs.") {
+                inputs.insert(
+                    input_name.to_string(),
+                    InputArg {
+                        value: val.to_string(),
+                        format_override: None,
+                    },
+                );
+            } else if let Some(param_name) = target.strip_prefix("params.") {
+                params.insert(param_name.to_string(), val.to_string());
+            } else if let Some(param_name) = target.strip_prefix("param.") {
+                params.insert(param_name.to_string(), val.to_string());
+            } else {
+                return Err(anyhow::anyhow!(
+                    "Unsupported --set target '{}'. Expected inputs.<name> or params.<name>.",
+                    target
+                )
+                .into());
+            }
         } else {
             match key {
                 "results-dir" | "results_dir" => {
@@ -361,7 +388,11 @@ fn install_dynamic_template(biovault_home: &Path) -> Result<()> {
     println!("📦 Dynamic template ready at {}", template_path.display());
 
     let config_path = env_dir.join("nextflow.config");
-    fs::write(&config_path, "process.executor = 'local'\n")
+    let config_contents = r#"process.executor = 'local'
+docker.enabled = true
+docker.runOptions = '-u $(id -u):$(id -g)'
+"#;
+    fs::write(&config_path, config_contents)
         .context("Failed to install dynamic nextflow.config")?;
 
     Ok(())
@@ -451,6 +482,30 @@ mod tests {
             dir_json_path,
             dir_path.canonicalize().unwrap().to_string_lossy()
         );
+    }
+
+    #[test]
+    fn parse_cli_args_supports_set_inputs_and_params() {
+        let args = vec![
+            "--set".to_string(),
+            "inputs.samplesheet=/tmp/sheet.csv".to_string(),
+            "--set".to_string(),
+            "params.threshold=0.5".to_string(),
+        ];
+
+        let parsed = parse_cli_args(&args).expect("parse --set inputs");
+
+        let sheet = parsed
+            .inputs
+            .get("samplesheet")
+            .expect("samplesheet input parsed");
+        assert_eq!(sheet.value, "/tmp/sheet.csv");
+
+        let threshold = parsed
+            .params
+            .get("threshold")
+            .expect("param threshold parsed");
+        assert_eq!(threshold, "0.5");
     }
 
     #[test]

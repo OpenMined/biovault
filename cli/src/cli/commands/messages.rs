@@ -1,11 +1,15 @@
 use crate::cli::commands::run::{execute as run_execute, RunParams};
+use crate::cli::commands::run_dynamic;
 use crate::cli::syft_url::SyftURL;
 use crate::config::Config;
+use crate::data::{self, BioVaultDb};
 use crate::messages::{Message, MessageDb, MessageSync};
+use crate::project_spec::ProjectSpec;
 use crate::types::ProjectYaml;
 use crate::types::SyftPermissions;
 use anyhow::Result;
 use colored::Colorize;
+use csv::Writer;
 use dialoguer::{Confirm, Input, Select};
 use serde_json::json;
 use std::fs;
@@ -62,7 +66,13 @@ pub fn get_message_db_path(config: &Config) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests_fast_helpers {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
     use tempfile::TempDir;
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     #[test]
     fn get_message_db_path_creates_parent_dir() {
@@ -84,6 +94,7 @@ mod tests_fast_helpers {
 
     #[test]
     fn test_expand_env_vars_in_text_with_syftbox() {
+        let _guard = env_lock().lock().unwrap();
         std::env::set_var("SYFTBOX_DATA_DIR", "/test/data");
         let result = expand_env_vars_in_text("Path: $SYFTBOX_DATA_DIR/file").unwrap();
         assert_eq!(result, "Path: /test/data/file");
@@ -92,6 +103,7 @@ mod tests_fast_helpers {
 
     #[test]
     fn test_expand_env_vars_in_text_no_env() {
+        let _guard = env_lock().lock().unwrap();
         std::env::remove_var("SYFTBOX_DATA_DIR");
         let result = expand_env_vars_in_text("Plain text").unwrap();
         assert_eq!(result, "Plain text");
@@ -234,12 +246,17 @@ pub fn list_messages(
     unread_only: bool,
     sent_only: bool,
     projects_only: bool,
+    json_output: bool,
 ) -> Result<()> {
-    let (db, sync) = init_message_system(config)?;
+    let (db, sync) = if json_output {
+        init_message_system_quiet(config)?
+    } else {
+        init_message_system(config)?
+    };
 
     // Quietly sync to get latest messages and show notification if new
     let (_new_msg_ids, count) = sync.sync_quiet()?;
-    if count > 0 {
+    if count > 0 && !json_output {
         println!("🆕 {} new message(s) received", count);
     }
 
@@ -259,6 +276,26 @@ pub fn list_messages(
                 crate::messages::MessageType::Project { .. }
             )
         });
+    }
+
+    if json_output {
+        let json_messages: Vec<_> = messages
+            .into_iter()
+            .map(|msg| {
+                serde_json::json!({
+                    "id": msg.id,
+                    "from": msg.from,
+                    "to": msg.to,
+                    "subject": msg.display_subject(),
+                    "status": msg.status.to_string(),
+                    "message_type": msg.message_type.to_string(),
+                    "created_at": msg.created_at.to_rfc3339(),
+                })
+            })
+            .collect();
+
+        println!("{}", serde_json::to_string_pretty(&json_messages)?);
+        return Ok(());
     }
 
     if messages.is_empty() {
@@ -319,7 +356,7 @@ pub fn list_messages(
 }
 
 /// Read a specific message
-pub async fn read_message(config: &Config, message_id: &str) -> Result<()> {
+pub async fn read_message(config: &Config, message_id: &str, non_interactive: bool) -> Result<()> {
     let (db, sync) = init_message_system(config)?;
 
     // Quietly sync first in case there are new messages
@@ -432,7 +469,7 @@ pub async fn read_message(config: &Config, message_id: &str) -> Result<()> {
             }
 
             // Offer actions to the recipient (show regardless of read status)
-            if msg.to == config.email {
+            if msg.to == config.email && !non_interactive {
                 println!("\nActions:");
                 println!("────────");
                 let actions = vec![
@@ -462,7 +499,7 @@ pub async fn read_message(config: &Config, message_id: &str) -> Result<()> {
             }
 
             // Sender-side archive action after approval to revoke write and mark done
-            if msg.from == config.email {
+            if msg.from == config.email && !non_interactive {
                 println!("\nSender Actions:");
                 println!("───────────────");
                 let actions = vec!["Archive (finalize and revoke write)", "Back"];
@@ -564,6 +601,22 @@ pub async fn process_project_message(
 
     // Build the project copy in private directory
     let dest = build_run_project_copy(config, &msg)?;
+
+    // Load spec to determine runtime handling (dynamic vs legacy)
+    let project_spec_path = dest.join("project.yaml");
+    let spec = ProjectSpec::load(&project_spec_path)?;
+
+    if spec.template.as_deref() == Some("dynamic-nextflow") {
+        return process_dynamic_project_message(
+            config,
+            &msg,
+            &dest,
+            participant.clone(),
+            test,
+            approve,
+        )
+        .await;
+    }
 
     // Determine participant source
     let participant_source = if let Some(ref p) = participant {
@@ -878,10 +931,25 @@ fn review_project(config: &Config, msg: &Message) -> anyhow::Result<()> {
 
 async fn run_project_test(config: &Config, msg: &Message) -> anyhow::Result<()> {
     let dest = build_run_project_copy(config, msg)?;
+    let run_dir = prepare_run_directory(config, &dest, &msg.id)?;
+
+    if let Some(invocation) = try_prepare_dynamic_run(config, &run_dir, true)? {
+        run_dynamic::execute_dynamic(
+            run_dir.to_string_lossy().as_ref(),
+            invocation.args.clone(),
+            false,
+            false,
+            Some(invocation.results_dir.clone()),
+        )
+        .await?;
+        print_dynamic_results(&run_dir, &invocation.results_dir)?;
+        return Ok(());
+    }
+
     let source = prompt_participant_source("NA06985")?;
     let source_for_run = source.clone();
     run_execute(RunParams {
-        project_folder: dest.to_string_lossy().to_string(),
+        project_folder: run_dir.to_string_lossy().to_string(),
         participant_source: source_for_run,
         test: true,
         download: true,
@@ -895,13 +963,33 @@ async fn run_project_test(config: &Config, msg: &Message) -> anyhow::Result<()> 
     })
     .await?;
     println!("{}", "Test run completed.".green());
-    // Show results directory and a tree of contents
-    print_results_location_and_tree(&dest, &source, true)?;
+    print_results_location_and_tree(&run_dir, &source, true)?;
     Ok(())
 }
 
 async fn run_project_real(config: &Config, msg: &Message) -> anyhow::Result<()> {
     let dest = build_run_project_copy(config, msg)?;
+    let run_dir = prepare_run_directory(config, &dest, &msg.id)?;
+
+    if let Some(invocation) = try_prepare_dynamic_run(config, &run_dir, false)? {
+        run_dynamic::execute_dynamic(
+            run_dir.to_string_lossy().as_ref(),
+            invocation.args.clone(),
+            false,
+            false,
+            Some(invocation.results_dir.clone()),
+        )
+        .await?;
+        print_dynamic_results(&run_dir, &invocation.results_dir)?;
+
+        let source_results = run_dir.join(&invocation.results_dir);
+        let dest_results = dest.join(&invocation.results_dir);
+        if source_results.exists() {
+            copy_dir_recursive(&source_results, &dest_results)?;
+        }
+        return Ok(());
+    }
+
     let biovault_home = crate::config::get_biovault_home()?;
     let participants_file = biovault_home.join("participants.yaml");
     let default_source = if participants_file.exists() {
@@ -913,7 +1001,7 @@ async fn run_project_real(config: &Config, msg: &Message) -> anyhow::Result<()> 
     let source = normalize_participant_source_for_real(&raw)?;
     let source_for_run = source.clone();
     run_execute(RunParams {
-        project_folder: dest.to_string_lossy().to_string(),
+        project_folder: run_dir.to_string_lossy().to_string(),
         participant_source: source_for_run,
         test: false,
         download: false,
@@ -927,9 +1015,265 @@ async fn run_project_real(config: &Config, msg: &Message) -> anyhow::Result<()> 
     })
     .await?;
     println!("{}", "Real data run completed.".green());
-    // Show results directory and a tree of contents
-    print_results_location_and_tree(&dest, &source, false)?;
+    print_results_location_and_tree(&run_dir, &source, false)?;
+
+    let results_dir = run_dir.join("results-real");
+    let dest_results = dest.join("results-real");
+    if results_dir.exists() {
+        copy_dir_recursive(&results_dir, &dest_results)?;
+    }
     Ok(())
+}
+
+async fn process_dynamic_project_message(
+    config: &Config,
+    msg: &Message,
+    dest: &Path,
+    participant: Option<String>,
+    test: bool,
+    approve: bool,
+) -> anyhow::Result<()> {
+    let participant_hint = participant
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("ALL");
+
+    let run_dir = prepare_run_directory(config, dest, &msg.id)?;
+    let invocation = prepare_dynamic_run_non_interactive(config, &run_dir, participant_hint, test)?;
+
+    run_dynamic::execute_dynamic(
+        run_dir.to_string_lossy().as_ref(),
+        invocation.args.clone(),
+        false,
+        false,
+        Some(invocation.results_dir.clone()),
+    )
+    .await?;
+
+    let source_results = run_dir.join(&invocation.results_dir);
+    let dest_results = dest.join(&invocation.results_dir);
+    if source_results.exists() {
+        copy_dir_recursive(&source_results, &dest_results)?;
+    }
+
+    let participant_label = Path::new(&invocation.results_dir)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(participant_hint);
+
+    println!(
+        "✓ Project processed successfully with participant: {}",
+        participant_label
+    );
+    let results_path = dest.join(&invocation.results_dir);
+    if results_path.exists() {
+        println!("Results saved to: {}", results_path.display());
+    }
+
+    if approve {
+        approve_project_non_interactive(config, msg).await?;
+        println!("✓ Project approved and results sent to sender");
+    }
+
+    Ok(())
+}
+
+fn prepare_dynamic_run_non_interactive(
+    config: &Config,
+    project_dir: &Path,
+    participant_hint: &str,
+    test: bool,
+) -> anyhow::Result<DynamicRunInvocation> {
+    let spec_path = project_dir.join("project.yaml");
+    let spec = ProjectSpec::load(&spec_path)?;
+
+    if participant_hint.eq_ignore_ascii_case("ALL") || participant_hint.eq_ignore_ascii_case("AUTO")
+    {
+        ensure_catalog_ready_for_all(config)?;
+    }
+
+    let mut args = Vec::new();
+    let mut samplesheet_value: Option<String> = None;
+    let mut needs_data_dir = false;
+
+    for input in &spec.inputs {
+        match input.name.as_str() {
+            "samplesheet" => {
+                let path = resolve_samplesheet_path(config, project_dir, participant_hint)?;
+                args.push("--set".to_string());
+                args.push(format!("inputs.{}={}", input.name, path));
+                samplesheet_value = Some(path);
+            }
+            "data_dir" => {
+                needs_data_dir = true;
+            }
+            other => {
+                let is_optional = input.raw_type.trim_end().ends_with('?');
+                if !is_optional {
+                    return Err(anyhow::anyhow!(
+                        "No automatic binding available for required input '{}'",
+                        other
+                    ));
+                }
+            }
+        }
+    }
+
+    let samplesheet_path = samplesheet_value.ok_or_else(|| {
+        anyhow::anyhow!("Dynamic project requires a 'samplesheet' input but none could be inferred")
+    })?;
+
+    if needs_data_dir {
+        let data_dir = infer_data_dir_path(config, &samplesheet_path)?;
+        args.push("--set".to_string());
+        args.push(format!("inputs.data_dir={}", data_dir.to_string_lossy()));
+    }
+
+    let participant_label = derive_participant_label(participant_hint, &samplesheet_path);
+    let results_dir = if test {
+        format!("results-test/{}", participant_label)
+    } else {
+        format!("results-real/{}", participant_label)
+    };
+
+    Ok(DynamicRunInvocation { args, results_dir })
+}
+
+fn resolve_samplesheet_path(
+    config: &Config,
+    project_dir: &Path,
+    participant_hint: &str,
+) -> anyhow::Result<String> {
+    if participant_hint.eq_ignore_ascii_case("ALL") || participant_hint.eq_ignore_ascii_case("AUTO")
+    {
+        let generated = auto_generate_samplesheet(config, project_dir)?;
+        return Ok(canonicalize_string(PathBuf::from(generated)));
+    }
+
+    if participant_hint.starts_with("syft://") {
+        let path = resolve_syft_url_to_path(config, participant_hint)?;
+        if !path.exists() {
+            return Err(anyhow::anyhow!(
+                "Resolved samplesheet not found at {}",
+                path.display()
+            ));
+        }
+        return Ok(canonicalize_string(path));
+    }
+
+    let direct = PathBuf::from(participant_hint);
+    let candidate = if direct.is_absolute() && direct.exists() {
+        direct
+    } else {
+        let project_candidate = project_dir.join(&direct);
+        if project_candidate.exists() {
+            project_candidate
+        } else {
+            let data_root = config.get_syftbox_data_dir()?;
+            let data_candidate = data_root.join(&direct);
+            if data_candidate.exists() {
+                data_candidate
+            } else {
+                direct
+            }
+        }
+    };
+
+    if !candidate.exists() {
+        return Err(anyhow::anyhow!(
+            "Samplesheet not found: {}",
+            participant_hint
+        ));
+    }
+
+    Ok(canonicalize_string(candidate))
+}
+
+fn infer_data_dir_path(config: &Config, samplesheet_path: &str) -> anyhow::Result<PathBuf> {
+    let sheet_path = PathBuf::from(samplesheet_path);
+    if let Some(inferred) = infer_data_dir_from_samplesheet(&sheet_path) {
+        return Ok(canonicalize_pathbuf(inferred));
+    }
+
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Some(parent) = sheet_path.parent() {
+        candidates.push(parent.to_path_buf());
+    }
+    let data_root = config.get_syftbox_data_dir()?;
+    let fixtures = data_root.join("genotype_fixtures");
+    candidates.push(fixtures);
+    candidates.push(data_root);
+
+    for candidate in candidates {
+        if candidate.exists() {
+            return Ok(canonicalize_pathbuf(candidate));
+        }
+    }
+
+    Ok(sheet_path
+        .parent()
+        .map(|p| canonicalize_pathbuf(p.to_path_buf()))
+        .unwrap_or_else(|| PathBuf::from(samplesheet_path)))
+}
+
+fn infer_data_dir_from_samplesheet(path: &Path) -> Option<PathBuf> {
+    let mut reader = csv::Reader::from_path(path).ok()?;
+    let headers = reader.headers().ok()?.clone();
+    let mut column_index: Option<usize> = None;
+    for candidate in ["genotype_file_path", "genotype_file", "file_path", "path"] {
+        if let Some(idx) = headers.iter().position(|h| h == candidate) {
+            column_index = Some(idx);
+            break;
+        }
+    }
+    let col_idx = column_index?;
+
+    for result in reader.records() {
+        let record = result.ok()?;
+        let value = record.get(col_idx)?.trim();
+        if value.is_empty() {
+            continue;
+        }
+        let candidate = PathBuf::from(value);
+        if candidate.is_absolute() {
+            return candidate.parent().map(|p| p.to_path_buf());
+        }
+    }
+    None
+}
+
+fn derive_participant_label(participant_hint: &str, samplesheet_path: &str) -> String {
+    if participant_hint.eq_ignore_ascii_case("ALL") || participant_hint.eq_ignore_ascii_case("AUTO")
+    {
+        return "ALL".to_string();
+    }
+    if let Some(id) = extract_participant_id(participant_hint) {
+        return id;
+    }
+    Path::new(samplesheet_path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("run")
+        .to_string()
+}
+
+fn canonicalize_string(path: PathBuf) -> String {
+    canonicalize_pathbuf(path).to_string_lossy().to_string()
+}
+
+fn canonicalize_pathbuf(path: PathBuf) -> PathBuf {
+    path.canonicalize().unwrap_or(path)
+}
+
+fn ensure_catalog_ready_for_all(_config: &Config) -> anyhow::Result<()> {
+    let db = BioVaultDb::new()?;
+    if !data::list_files(&db, None, None, false, Some(1))?.is_empty() {
+        return Ok(());
+    }
+    Err(anyhow::anyhow!(
+        "No cataloged files found. Import genotype data first with 'bv files import'."
+    ))
 }
 
 /// Non-interactive version of approve_project for automated testing
@@ -1118,6 +1462,192 @@ fn extract_participant_id(source: &str) -> Option<String> {
     None
 }
 
+struct DynamicRunInvocation {
+    args: Vec<String>,
+    results_dir: String,
+}
+
+fn try_prepare_dynamic_run(
+    config: &Config,
+    project_dir: &Path,
+    is_test: bool,
+) -> anyhow::Result<Option<DynamicRunInvocation>> {
+    let spec_path = project_dir.join("project.yaml");
+    if !spec_path.exists() {
+        return Ok(None);
+    }
+
+    let spec = match ProjectSpec::load(&spec_path) {
+        Ok(spec) => spec,
+        Err(err) => {
+            println!(
+                "⚠ Failed to load project spec at {}: {}",
+                spec_path.display(),
+                err
+            );
+            return Ok(None);
+        }
+    };
+
+    if spec.inputs.is_empty() {
+        return Ok(None);
+    }
+
+    println!(
+        "Project '{}' requires {} input(s).",
+        spec.name,
+        spec.inputs.len()
+    );
+
+    let mut args = Vec::new();
+    for input in &spec.inputs {
+        let mut prompt = format!("Enter value for input '{}'", input.name);
+        if let Some(desc) = &input.description {
+            if !desc.trim().is_empty() {
+                prompt.push_str(&format!(" ({})", desc.trim()));
+            }
+        }
+        prompt.push(':');
+
+        let input_value: String = Input::new().with_prompt(prompt).interact_text()?;
+        let trimmed = input_value.trim();
+
+        let resolved = if trimmed.is_empty() {
+            if input.name == "samplesheet" {
+                auto_generate_samplesheet(config, project_dir)?
+            } else {
+                trimmed.to_string()
+            }
+        } else if input.name == "samplesheet"
+            && matches!(trimmed.to_ascii_uppercase().as_str(), "ALL" | "AUTO")
+        {
+            auto_generate_samplesheet(config, project_dir)?
+        } else {
+            trimmed.to_string()
+        };
+
+        if resolved.is_empty() {
+            println!(
+                "⚠ Input '{}' left empty; skipping dynamic run fallback.",
+                input.name
+            );
+            return Ok(None);
+        }
+
+        println!("  • {} = {}", input.name, resolved);
+        args.push("--set".to_string());
+        args.push(format!("inputs.{}={}", input.name, resolved));
+    }
+
+    let results_dir = if is_test {
+        "results-test".to_string()
+    } else {
+        "results-real".to_string()
+    };
+
+    let preview = format_bv_run_command(project_dir, &results_dir, &args);
+    println!("Nextflow command:\n  {}", preview);
+
+    Ok(Some(DynamicRunInvocation { args, results_dir }))
+}
+
+fn format_bv_run_command(project_dir: &Path, results_dir: &str, args: &[String]) -> String {
+    let project_path = project_dir.to_string_lossy().into_owned();
+    let mut tokens = vec![
+        "bv".to_string(),
+        "run".to_string(),
+        shell_escape(&project_path),
+        "--results-dir".to_string(),
+        shell_escape(results_dir),
+    ];
+    for arg in args {
+        tokens.push(shell_escape(arg));
+    }
+    tokens.join(" ")
+}
+
+fn shell_escape(arg: &str) -> String {
+    if arg
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || "-._/@=+:".contains(c))
+    {
+        arg.to_string()
+    } else {
+        format!("'{}'", arg.replace('\'', "'\\''"))
+    }
+}
+
+fn print_dynamic_results(project_root: &Path, results_dir: &str) -> anyhow::Result<()> {
+    let results_path = project_root.join(results_dir);
+    println!("Results location: {}", results_path.display());
+    if results_path.exists() {
+        println!("Results tree:");
+        print_dir_tree(&results_path, 3)?;
+    } else {
+        println!("Results folder not found yet at {}", results_path.display());
+    }
+    Ok(())
+}
+
+fn prepare_run_directory(
+    config: &Config,
+    source: &Path,
+    message_id: &str,
+) -> anyhow::Result<PathBuf> {
+    let base = config.get_biovault_dir()?;
+    let run_root = base.join("runs");
+    fs::create_dir_all(&run_root)?;
+    let run_dir = run_root.join(message_id);
+    if run_dir.exists() {
+        fs::remove_dir_all(&run_dir)?;
+    }
+    copy_dir_recursive(source, &run_dir)?;
+    Ok(run_dir)
+}
+
+fn auto_generate_samplesheet(_config: &Config, project_dir: &Path) -> anyhow::Result<String> {
+    let db = BioVaultDb::new()?;
+    let mut stmt = db.conn.prepare(
+        "SELECT f.file_path, p.participant_id
+         FROM files f
+         LEFT JOIN participants p ON f.participant_id = p.id
+         ORDER BY f.file_path",
+    )?;
+    let mut rows = stmt.query([])?;
+    let mut entries: Vec<(String, String)> = Vec::new();
+    while let Some(row) = rows.next()? {
+        let path: String = row.get(0)?;
+        let participant: Option<String> = row.get(1)?;
+        entries.push((participant.unwrap_or_default(), path));
+    }
+    if entries.is_empty() {
+        anyhow::bail!(
+            "No cataloged files found. Import genotype data first with 'bv files import'."
+        );
+    }
+
+    let inputs_dir = project_dir.join("inputs");
+    fs::create_dir_all(&inputs_dir)?;
+    let sheet_path = inputs_dir.join("auto_samplesheet.csv");
+    let mut writer = Writer::from_path(&sheet_path)?;
+    writer.write_record(["participant_id", "genotype_file_path"])?;
+    for (participant, file_path) in entries {
+        let pid = if participant.trim().is_empty() {
+            Path::new(&file_path)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("unknown")
+                .to_string()
+        } else {
+            participant
+        };
+        writer.write_record([pid, file_path])?;
+    }
+    writer.flush()?;
+    println!("  ✓ Generated samplesheet at {}", sheet_path.display());
+    Ok(sheet_path.to_string_lossy().to_string())
+}
+
 fn print_results_location_and_tree(
     project_root: &Path,
     participant_source: &str,
@@ -1130,10 +1660,17 @@ fn print_results_location_and_tree(
         "results-real"
     };
     let results_dir = project_root.join(base).join(&id);
+    let base_dir = project_root.join(base);
     println!("Results location: {}", results_dir.display());
     if results_dir.exists() {
         println!("Results tree:");
         print_dir_tree(&results_dir, 3)?;
+    } else if base_dir.exists() {
+        println!(
+            "Results folder for participant not found; showing {} instead",
+            base_dir.display()
+        );
+        print_dir_tree(&base_dir, 3)?;
     } else {
         println!("Results folder not found yet at {}", results_dir.display());
     }
@@ -1533,7 +2070,7 @@ mod tests {
         );
         db.insert_message(&m)?;
         // Should render list without interacting
-        list_messages(&cfg, false, false, false)?;
+        list_messages(&cfg, false, false, false, false)?;
         Ok(())
     }
 
@@ -1560,7 +2097,7 @@ mod tests {
         m.status = crate::messages::MessageStatus::Received;
         db.insert_message(&m)?;
 
-        read_message(&cfg, &m.id).await?;
+        read_message(&cfg, &m.id, false).await?;
         let updated = db.get_message(&m.id)?.unwrap();
         assert_eq!(updated.status, crate::messages::MessageStatus::Read);
         Ok(())
@@ -1622,8 +2159,8 @@ mod tests {
         let cfg = create_test_config();
 
         // With empty DB
-        super::list_messages(&cfg, false, false, false)?;
-        super::list_messages(&cfg, true, false, false)?;
+        super::list_messages(&cfg, false, false, false, false)?;
+        super::list_messages(&cfg, true, false, false, false)?;
         Ok(())
     }
 

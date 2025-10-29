@@ -263,25 +263,6 @@ mod tests {
     }
 
     #[test]
-    fn async_main_with_project_examples_executes() {
-        let _home_guard = TestHomeGuard::new();
-        let _skip_guard = EnvVarGuard::set("BIOVAULT_SKIP_UPDATE_CHECK", "1");
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-
-        let cli = Cli {
-            command: Commands::Project {
-                command: ProjectCommands::Examples,
-            },
-            verbose: true,
-            config: None,
-        };
-
-        runtime
-            .block_on(async { super::async_main_with(cli).await })
-            .unwrap();
-    }
-
-    #[test]
     fn async_main_with_info_executes() {
         let _home_guard = TestHomeGuard::new();
         let _skip_guard = EnvVarGuard::set("BIOVAULT_SKIP_UPDATE_CHECK", "1");
@@ -318,28 +299,22 @@ mod tests {
     }
 
     #[test]
-    fn async_main_with_project_create_executes() {
+    fn async_main_with_project_examples_executes() {
         let _home_guard = TestHomeGuard::new();
         let _skip_guard = EnvVarGuard::set("BIOVAULT_SKIP_UPDATE_CHECK", "1");
         let runtime = tokio::runtime::Runtime::new().unwrap();
 
         let cli = Cli {
             command: Commands::Project {
-                command: ProjectCommands::Create {
-                    name: Some("test_project".to_string()),
-                    folder: None,
-                    example: None,
-                    spec: None,
-                    input_to: None,
-                    output_from: None,
-                },
+                command: ProjectCommands::Examples,
             },
             verbose: false,
             config: None,
         };
 
-        // This may fail due to missing setup, but that's OK for this test
-        let _ = runtime.block_on(async { super::async_main_with(cli).await });
+        runtime
+            .block_on(async { super::async_main_with(cli).await })
+            .unwrap();
     }
 
     #[test]
@@ -1290,6 +1265,9 @@ enum MessageCommands {
     Read {
         #[arg(help = "Message ID to read")]
         message_id: String,
+
+        #[arg(long, help = "Skip interactive prompts when reading message")]
+        non_interactive: bool,
     },
 
     #[command(about = "Delete a message")]
@@ -1308,6 +1286,9 @@ enum MessageCommands {
 
         #[arg(short = 'p', long = "projects", help = "Show only project messages")]
         projects: bool,
+
+        #[arg(long, help = "Output messages as JSON")]
+        json: bool,
     },
 
     #[command(about = "View a message thread")]
@@ -2126,9 +2107,12 @@ async fn async_main_with(cli: Cli) -> Result<()> {
                 let config = biovault::config::Config::load()?;
                 commands::messages::reply_message(&config, &message_id, &body)?;
             }
-            MessageCommands::Read { message_id } => {
+            MessageCommands::Read {
+                message_id,
+                non_interactive,
+            } => {
                 let config = biovault::config::Config::load()?;
-                commands::messages::read_message(&config, &message_id).await?;
+                commands::messages::read_message(&config, &message_id, non_interactive).await?;
             }
             MessageCommands::Delete { message_id } => {
                 let config = biovault::config::Config::load()?;
@@ -2138,9 +2122,10 @@ async fn async_main_with(cli: Cli) -> Result<()> {
                 unread,
                 sent,
                 projects,
+                json,
             } => {
                 let config = biovault::config::Config::load()?;
-                commands::messages::list_messages(&config, unread, sent, projects)?;
+                commands::messages::list_messages(&config, unread, sent, projects, json)?;
             }
             MessageCommands::Thread { thread_id } => {
                 let config = biovault::config::Config::load()?;

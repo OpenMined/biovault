@@ -1,0 +1,8 @@
+participant_id,genotype_file
+BROWN_AA_23andme,/Users/madhavajay/dev/biovault/workspace1/cli/tests/data/genotype_files/23andme_standard_4col.txt
+BLUE_GG_23andme37,/Users/madhavajay/dev/biovault/workspace1/cli/tests/data/genotype_files/23andme_grch37_standard_4col.txt
+BROWN_GA_23andme36,/Users/madhavajay/dev/biovault/workspace1/cli/tests/data/genotype_files/23andme_grch36_standard_4col.txt
+UNKNOWN_AC_dynamicdna,/Users/madhavajay/dev/biovault/workspace1/cli/tests/data/genotype_files/dynamicdna_grch38_extended_7col.txt
+BROWN_AG_genesforgood,/Users/madhavajay/dev/biovault/workspace1/cli/tests/data/genotype_files/genesforgood_standard_4col.txt
+BLUE_GG_livingdna,/Users/madhavajay/dev/biovault/workspace1/cli/tests/data/genotype_files/livingdna_grch37_standard_4col.txt
+BROWN_AA_unknown,/Users/madhavajay/dev/biovault/workspace1/cli/tests/data/genotype_files/unknown_standard_4col.txt
