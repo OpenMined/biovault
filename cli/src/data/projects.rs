@@ -9,6 +9,7 @@ use super::BioVaultDb;
 pub struct Project {
     pub id: i64,
     pub name: String,
+    pub version: String,
     pub author: String,
     pub workflow: String,
     pub template: String,
@@ -19,14 +20,21 @@ pub struct Project {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ProjectYaml {
     pub name: String,
+    #[serde(default = "default_version")]
+    pub version: String,
     pub author: String,
     pub workflow: String,
     pub template: String,
     pub assets: Vec<String>,
 }
 
+fn default_version() -> String {
+    "1.0.0".to_string()
+}
+
 pub struct UpdateProjectParams<'a> {
     pub name: &'a str,
+    pub version: &'a str,
     pub author: &'a str,
     pub workflow: &'a str,
     pub template: &'a str,
@@ -37,7 +45,7 @@ impl BioVaultDb {
     /// List all projects
     pub fn list_projects(&self) -> Result<Vec<Project>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, name, author, workflow, template, project_path, created_at
+            "SELECT id, name, version, author, workflow, template, project_path, created_at
              FROM projects
              ORDER BY created_at DESC",
         )?;
@@ -47,11 +55,12 @@ impl BioVaultDb {
                 Ok(Project {
                     id: row.get(0)?,
                     name: row.get(1)?,
-                    author: row.get(2)?,
-                    workflow: row.get(3)?,
-                    template: row.get(4)?,
-                    project_path: row.get(5)?,
-                    created_at: row.get(6)?,
+                    version: row.get(2)?,
+                    author: row.get(3)?,
+                    workflow: row.get(4)?,
+                    template: row.get(5)?,
+                    project_path: row.get(6)?,
+                    created_at: row.get(7)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -59,12 +68,12 @@ impl BioVaultDb {
         Ok(projects)
     }
 
-    /// Get project by name or ID
+    /// Get project by name, name@version, or ID
     pub fn get_project(&self, identifier: &str) -> Result<Option<Project>> {
         // Try parsing as ID first
         if let Ok(id) = identifier.parse::<i64>() {
             let mut stmt = self.conn.prepare(
-                "SELECT id, name, author, workflow, template, project_path, created_at
+                "SELECT id, name, version, author, workflow, template, project_path, created_at
                  FROM projects
                  WHERE id = ?1",
             )?;
@@ -74,11 +83,12 @@ impl BioVaultDb {
                     Ok(Project {
                         id: row.get(0)?,
                         name: row.get(1)?,
-                        author: row.get(2)?,
-                        workflow: row.get(3)?,
-                        template: row.get(4)?,
-                        project_path: row.get(5)?,
-                        created_at: row.get(6)?,
+                        version: row.get(2)?,
+                        author: row.get(3)?,
+                        workflow: row.get(4)?,
+                        template: row.get(5)?,
+                        project_path: row.get(6)?,
+                        created_at: row.get(7)?,
                     })
                 })
                 .optional()?;
@@ -86,11 +96,39 @@ impl BioVaultDb {
             return Ok(project);
         }
 
-        // Otherwise treat as name
+        // Check if identifier includes version (name@version)
+        if let Some((name, version)) = identifier.split_once('@') {
+            let mut stmt = self.conn.prepare(
+                "SELECT id, name, version, author, workflow, template, project_path, created_at
+                 FROM projects
+                 WHERE name = ?1 AND version = ?2",
+            )?;
+
+            let project = stmt
+                .query_row([name, version], |row| {
+                    Ok(Project {
+                        id: row.get(0)?,
+                        name: row.get(1)?,
+                        version: row.get(2)?,
+                        author: row.get(3)?,
+                        workflow: row.get(4)?,
+                        template: row.get(5)?,
+                        project_path: row.get(6)?,
+                        created_at: row.get(7)?,
+                    })
+                })
+                .optional()?;
+
+            return Ok(project);
+        }
+
+        // Otherwise treat as name, get latest version
         let mut stmt = self.conn.prepare(
-            "SELECT id, name, author, workflow, template, project_path, created_at
+            "SELECT id, name, version, author, workflow, template, project_path, created_at
              FROM projects
-             WHERE name = ?1",
+             WHERE name = ?1
+             ORDER BY created_at DESC
+             LIMIT 1",
         )?;
 
         let project = stmt
@@ -98,11 +136,12 @@ impl BioVaultDb {
                 Ok(Project {
                     id: row.get(0)?,
                     name: row.get(1)?,
-                    author: row.get(2)?,
-                    workflow: row.get(3)?,
-                    template: row.get(4)?,
-                    project_path: row.get(5)?,
-                    created_at: row.get(6)?,
+                    version: row.get(2)?,
+                    author: row.get(3)?,
+                    workflow: row.get(4)?,
+                    template: row.get(5)?,
+                    project_path: row.get(6)?,
+                    created_at: row.get(7)?,
                 })
             })
             .optional()?;
@@ -114,6 +153,7 @@ impl BioVaultDb {
     pub fn register_project(
         &self,
         name: &str,
+        version: &str,
         author: &str,
         workflow: &str,
         template: &str,
@@ -123,19 +163,21 @@ impl BioVaultDb {
             .to_str()
             .ok_or_else(|| anyhow::anyhow!("Invalid project path"))?;
 
-        // Check if project with this name already exists
-        if let Some(existing) = self.get_project(name)? {
+        // Check if project with this name and version already exists
+        let identifier = format!("{}@{}", name, version);
+        if let Some(existing) = self.get_project(&identifier)? {
             anyhow::bail!(
-                "Project '{}' already exists (id: {}). Use --overwrite to replace.",
+                "Project '{}' version {} already exists (id: {}). Use --overwrite to replace.",
                 name,
+                version,
                 existing.id
             );
         }
 
         self.conn.execute(
-            "INSERT INTO projects (name, author, workflow, template, project_path)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![name, author, workflow, template, path_str],
+            "INSERT INTO projects (name, version, author, workflow, template, project_path)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![name, version, author, workflow, template, path_str],
         )?;
 
         Ok(self.conn.last_insert_rowid())
@@ -145,6 +187,7 @@ impl BioVaultDb {
     pub fn update_project(
         &self,
         name: &str,
+        version: &str,
         author: &str,
         workflow: &str,
         template: &str,
@@ -157,12 +200,12 @@ impl BioVaultDb {
         let rows_affected = self.conn.execute(
             "UPDATE projects
              SET author = ?1, workflow = ?2, template = ?3, project_path = ?4
-             WHERE name = ?5",
-            params![author, workflow, template, path_str, name],
+             WHERE name = ?5 AND version = ?6",
+            params![author, workflow, template, path_str, name, version],
         )?;
 
         if rows_affected == 0 {
-            anyhow::bail!("Project '{}' not found", name);
+            anyhow::bail!("Project '{}' version {} not found", name, version);
         }
 
         Ok(())
@@ -175,6 +218,7 @@ impl BioVaultDb {
         params: UpdateProjectParams<'_>,
     ) -> Result<()> {
         let name = params.name;
+        let version = params.version;
         let author = params.author;
         let workflow = params.workflow;
         let template = params.template;
@@ -183,19 +227,23 @@ impl BioVaultDb {
             .to_str()
             .ok_or_else(|| anyhow::anyhow!("Invalid project path"))?;
 
+        // Check if another project has the same (name, version) combination
         let mut stmt = self
             .conn
-            .prepare("SELECT id FROM projects WHERE name = ?1 AND id != ?2")
+            .prepare("SELECT id FROM projects WHERE name = ?1 AND version = ?2 AND id != ?3")
             .context("Failed to prepare project uniqueness query")?;
 
         let conflict = stmt
-            .query_row(params![name, project_id], |row| row.get::<_, i64>(0))
+            .query_row(params![name, version, project_id], |row| {
+                row.get::<_, i64>(0)
+            })
             .optional()?;
 
         if conflict.is_some() {
             anyhow::bail!(
-                "Project name '{}' is already used by a different project",
-                name
+                "Project '{}' version {} is already used by a different project",
+                name,
+                version
             );
         }
 
@@ -203,9 +251,9 @@ impl BioVaultDb {
             .conn
             .execute(
                 "UPDATE projects
-                 SET name = ?1, author = ?2, workflow = ?3, template = ?4, project_path = ?5
-                 WHERE id = ?6",
-                params![name, author, workflow, template, path_str, project_id],
+                 SET name = ?1, version = ?2, author = ?3, workflow = ?4, template = ?5, project_path = ?6
+                 WHERE id = ?7",
+                params![name, version, author, workflow, template, path_str, project_id],
             )
             .context("Failed to update project record")?;
 
@@ -308,6 +356,7 @@ mod tests {
         let id = db
             .register_project(
                 "test",
+                "1.0.0",
                 "author@example.com",
                 "workflow.nf",
                 "default",
@@ -319,6 +368,7 @@ mod tests {
         let projects = db.list_projects().unwrap();
         assert_eq!(projects.len(), 1);
         assert_eq!(projects[0].name, "test");
+        assert_eq!(projects[0].version, "1.0.0");
         assert_eq!(projects[0].author, "author@example.com");
 
         teardown_test();
@@ -332,6 +382,7 @@ mod tests {
 
         db.register_project(
             "test",
+            "1.0.0",
             "author@example.com",
             "workflow.nf",
             "default",
@@ -341,7 +392,9 @@ mod tests {
 
         let project = db.get_project("test").unwrap();
         assert!(project.is_some());
-        assert_eq!(project.unwrap().name, "test");
+        let p = project.unwrap();
+        assert_eq!(p.name, "test");
+        assert_eq!(p.version, "1.0.0");
 
         teardown_test();
     }
@@ -355,6 +408,7 @@ mod tests {
         let id = db
             .register_project(
                 "test",
+                "1.0.0",
                 "author@example.com",
                 "workflow.nf",
                 "default",
@@ -377,6 +431,7 @@ mod tests {
 
         db.register_project(
             "test",
+            "1.0.0",
             "author@example.com",
             "workflow.nf",
             "default",
@@ -386,6 +441,7 @@ mod tests {
 
         let result = db.register_project(
             "test",
+            "1.0.0",
             "other@example.com",
             "workflow.nf",
             "default",
@@ -403,11 +459,25 @@ mod tests {
         let project_path = tmp.path().join("test-project");
         fs::create_dir_all(&project_path).unwrap();
 
-        db.register_project("test", "old@example.com", "old.nf", "old", &project_path)
-            .unwrap();
+        db.register_project(
+            "test",
+            "1.0.0",
+            "old@example.com",
+            "old.nf",
+            "old",
+            &project_path,
+        )
+        .unwrap();
 
-        db.update_project("test", "new@example.com", "new.nf", "new", &project_path)
-            .unwrap();
+        db.update_project(
+            "test",
+            "1.0.0",
+            "new@example.com",
+            "new.nf",
+            "new",
+            &project_path,
+        )
+        .unwrap();
 
         let project = db.get_project("test").unwrap().unwrap();
         assert_eq!(project.author, "new@example.com");
@@ -424,6 +494,7 @@ mod tests {
 
         db.register_project(
             "test",
+            "1.0.0",
             "author@example.com",
             "workflow.nf",
             "default",
@@ -433,6 +504,7 @@ mod tests {
 
         let deleted = db.delete_project("test").unwrap();
         assert_eq!(deleted.name, "test");
+        assert_eq!(deleted.version, "1.0.0");
 
         let project = db.get_project("test").unwrap();
         assert!(project.is_none());

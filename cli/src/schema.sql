@@ -96,12 +96,14 @@ CREATE INDEX IF NOT EXISTS idx_genotype_file_id ON genotype_metadata(file_id);
 -- NEW: Projects (Desktop-only but in shared DB)
 CREATE TABLE IF NOT EXISTS projects (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT UNIQUE NOT NULL,
+    name TEXT NOT NULL,
+    version TEXT NOT NULL DEFAULT '1.0.0',
     author TEXT NOT NULL,
     workflow TEXT NOT NULL,
     template TEXT NOT NULL,
-    project_path TEXT NOT NULL,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    project_path TEXT UNIQUE NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(name, version)
 );
 
 -- NEW: Development Environments (virtualenvs for Jupyter, etc.)
