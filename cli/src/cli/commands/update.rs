@@ -123,7 +123,7 @@ pub async fn check_and_notify_random() -> Result<()> {
 
     if rng.gen_bool(0.1) {
         if let Ok(Some(new_version)) = check_for_updates().await {
-            println!(
+            eprintln!(
                 "\n{} {} {} {}",
                 "📦".yellow(),
                 "New version".yellow().bold(),

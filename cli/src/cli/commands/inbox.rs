@@ -533,7 +533,7 @@ async fn message_actions(
     match selection {
         Some(0) => {
             // Read
-            super::messages::read_message(config, &msg.id).await?;
+            super::messages::read_message(config, &msg.id, false).await?;
             println!("\nPress Enter to continue...");
             let mut input = String::new();
             io::stdin().read_line(&mut input)?;
@@ -632,7 +632,7 @@ async fn message_actions(
             }
             if let Some(i) = idx_archive {
                 if idx == i {
-                    super::messages::read_message(config, &msg.id).await?; // Archive via read view
+                    super::messages::read_message(config, &msg.id, false).await?; // Archive via read view
                     println!("\nPress Enter to continue...");
                     let mut input = String::new();
                     io::stdin().read_line(&mut input)?;

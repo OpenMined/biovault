@@ -4,7 +4,7 @@ inputs:
   data_dir: Directory
 steps:
   - id: filter
-    uses: cli/examples/pipeline/filter-samples
+    uses: filter-samples
     with:
       samplesheet: inputs.samplesheet
       data_dir: inputs.data_dir
@@ -12,7 +12,7 @@ steps:
       filtered_sheet: File(filtered_samplesheet.csv)
 
   - id: count
-    uses: cli/examples/pipeline/count-lines
+    uses: count-lines
     with:
       samplesheet: step.filter.outputs.filtered_sheet
       data_dir: inputs.data_dir
@@ -27,7 +27,7 @@ steps:
         key_column: participant_id
 
   - id: sum
-    uses: cli/examples/pipeline/sum-total
+    uses: sum-total
     with:
       samplesheet: step.count.outputs.counted_sheet
       data_dir: inputs.data_dir

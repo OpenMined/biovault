@@ -587,6 +587,8 @@ mod tests {
             workflow: "workflow.nf".into(),
             template: None,
             assets: Some(vec!["assets/data.csv".into()]),
+            inputs: None,
+            outputs: None,
             b3_hashes: None,
         };
         project.save(&path.to_path_buf()).unwrap();
@@ -895,6 +897,8 @@ mod tests {
             workflow: "workflow.nf".into(),
             template: None,
             assets: Some(vec!["assets/data.csv".into()]),
+            inputs: None,
+            outputs: None,
             b3_hashes: Some(hashes),
         };
 
