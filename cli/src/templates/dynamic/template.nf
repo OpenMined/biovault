@@ -6,6 +6,7 @@ params.work_flow_file = params.work_flow_file ?: 'workflow.nf'
 params.project_spec = params.project_spec ?: null
 params.inputs_json = params.inputs_json ?: null
 params.params_json = params.params_json ?: null
+params.assets_dir = params.assets_dir ?: null
 
 // Optional context parameters (provided by BioVault daemon in production)
 params.run_id = null
@@ -40,13 +41,33 @@ workflow {
 
     // Build context from parameters
     def contextParams = paramsPayload ?: [:]
-    def rawContext = [
-        run_id      : params.run_id,
-        datasite    : params.datasite,
-        user        : params.user,
-        run_timestamp: params.run_timestamp,
-        params      : contextParams
-    ].findAll { it.value != null }
+    def assetsDirParam = contextParams.assets_dir ?: params.assets_dir
+    def assetsDirFile = assetsDirParam ? file(assetsDirParam) : null
+    def assetsDirChannel = assetsDirFile ? Channel.value(assetsDirFile) : null
+
+    def contextChannels = [:]
+    if (assetsDirChannel) {
+        contextChannels.assets_dir = assetsDirChannel
+    }
+
+    def rawContextEntries = [
+        run_id        : params.run_id,
+        datasite      : params.datasite,
+        user          : params.user,
+        run_timestamp : params.run_timestamp,
+        params        : contextParams,
+        assets_dir    : assetsDirFile,
+        assets_dir_ch : assetsDirChannel
+    ]
+    if (!contextChannels.isEmpty()) {
+        rawContextEntries.channels = contextChannels
+    }
+    def rawContext = rawContextEntries.findAll { key, value ->
+        if (key == 'channels') {
+            return !contextChannels.isEmpty()
+        }
+        return value != null
+    }
     def context = __bvDeepFreeze(rawContext)
 
     // Load inputs from runtime spec

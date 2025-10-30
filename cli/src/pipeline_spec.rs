@@ -130,7 +130,8 @@ pub struct PipelineSqlStoreSpec {
     #[serde(default, alias = "table_name")]
     pub table: Option<String>,
     #[serde(default, alias = "key_column")]
-    pub key_column: Option<String>,
+    #[serde(alias = "participant_id_column")]
+    pub participant_column: Option<String>,
     #[serde(default)]
     pub overwrite: Option<bool>,
     #[serde(default)]

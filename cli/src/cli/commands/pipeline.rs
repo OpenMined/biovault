@@ -1203,10 +1203,20 @@ fn store_sql_output(
         .into());
     }
 
+    let participant_column_raw = spec.participant_column.as_deref();
+    let participant_column = participant_column_raw.map(|s| s.to_ascii_lowercase());
+    let mut participant_column_found = participant_column.is_none();
+
     let mut used_columns = HashSet::new();
     let mut columns = Vec::new();
     for (idx, header) in headers.iter().enumerate() {
         let mut base = sanitize_identifier(header);
+        if let Some(ref target) = participant_column {
+            if header.eq_ignore_ascii_case(target) {
+                base = "participant_id".to_string();
+                participant_column_found = true;
+            }
+        }
         if base.is_empty() {
             base = format!("{}{}", DEFAULT_COLUMN_PREFIX, idx + 1);
         }
@@ -1219,26 +1229,21 @@ fn store_sql_output(
         columns.push((candidate, header.to_string(), idx));
     }
 
-    let key_column = spec.key_column.as_deref();
-    let mut create_defs = Vec::new();
-    let mut primary_assigned = false;
-    for (sanitized, original, _) in &columns {
-        let mut col_def = format!("\"{}\" TEXT", sanitized);
-        if let Some(key) = key_column {
-            if original.eq_ignore_ascii_case(key) {
-                col_def = format!("\"{}\" TEXT PRIMARY KEY", sanitized);
-                primary_assigned = true;
-            }
+    if let Some(raw) = participant_column_raw {
+        if !participant_column_found {
+            return Err(anyhow!(
+                "participant_column '{}' not found in output '{}'",
+                raw,
+                output_path.display()
+            )
+            .into());
         }
-        create_defs.push(col_def);
     }
-    if key_column.is_some() && !primary_assigned {
-        return Err(anyhow!(
-            "key_column '{}' not found in output '{}'",
-            key_column.unwrap(),
-            output_path.display()
-        )
-        .into());
+
+    let mut create_defs = Vec::new();
+    for (sanitized, _, _) in &columns {
+        let col_def = format!("\"{}\" TEXT", sanitized);
+        create_defs.push(col_def);
     }
 
     let total_columns = columns.len();
@@ -1886,7 +1891,7 @@ mod tests {
             target: None,
             source: "output".to_string(),
             table: None,
-            key_column: None,
+            participant_column: None,
             overwrite: None,
             format: None,
         };
@@ -1900,7 +1905,7 @@ mod tests {
             target: None,
             source: "output".to_string(),
             table: Some("custom_table_{run_id}".to_string()),
-            key_column: None,
+            participant_column: None,
             overwrite: None,
             format: None,
         };
@@ -1914,7 +1919,7 @@ mod tests {
             target: None,
             source: "output".to_string(),
             table: Some("static_table".to_string()),
-            key_column: None,
+            participant_column: None,
             overwrite: None,
             format: None,
         };
@@ -1928,7 +1933,7 @@ mod tests {
             target: None,
             source: "output".to_string(),
             table: Some("tbl_{run_id}_v2_{run_id}".to_string()),
-            key_column: None,
+            participant_column: None,
             overwrite: None,
             format: None,
         };
@@ -2074,7 +2079,7 @@ mod tests {
             target: None,
             source: "output".to_string(),
             table: None,
-            key_column: None,
+            participant_column: None,
             overwrite: None,
             format: None,
         };
@@ -2088,7 +2093,7 @@ mod tests {
             target: None,
             source: "output".to_string(),
             table: None,
-            key_column: None,
+            participant_column: None,
             overwrite: None,
             format: None,
         };
@@ -2102,7 +2107,7 @@ mod tests {
             target: None,
             source: "output".to_string(),
             table: None,
-            key_column: None,
+            participant_column: None,
             overwrite: None,
             format: None,
         };
@@ -2116,7 +2121,7 @@ mod tests {
             target: None,
             source: "output".to_string(),
             table: None,
-            key_column: None,
+            participant_column: None,
             overwrite: None,
             format: Some("TSV".to_string()),
         };
@@ -2130,7 +2135,7 @@ mod tests {
             target: None,
             source: "output".to_string(),
             table: None,
-            key_column: None,
+            participant_column: None,
             overwrite: None,
             format: None,
         };

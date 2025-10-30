@@ -24,7 +24,7 @@ steps:
         destination: SQL()
         source: counted_sheet
         table_name: pipeline_counts_{run_id}
-        key_column: participant_id
+        participant_column: participant_id
 
   - id: sum
     uses: sum-total
