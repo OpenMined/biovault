@@ -2,10 +2,15 @@ use crate::cli::examples;
 use crate::config;
 use crate::data::{BioVaultDb, Project, ProjectYaml};
 use crate::error::Result;
+use crate::pipeline_spec::PipelineSpec;
 use anyhow::Context;
 use colored::Colorize;
 use std::fs;
 use std::path::{Path, PathBuf};
+
+// Standard filenames - can be made configurable in the future
+const PROJECT_YAML_FILE: &str = "project.yaml";
+const PIPELINE_YAML_FILE: &str = "pipeline.yaml";
 
 /// Import a project from URL or register a local project directory
 pub async fn import(
@@ -116,7 +121,7 @@ pub fn create_project_record(
                 .into());
             }
 
-            let yaml_path = project_dir.join("project.yaml");
+            let yaml_path = project_dir.join(PROJECT_YAML_FILE);
             if yaml_path.exists() {
                 return Err(anyhow::anyhow!(
                     "A project.yaml already exists at {}",
@@ -193,7 +198,7 @@ pub fn create_project_record(
                 .context("Failed to scaffold dynamic-nextflow project")?;
         }
 
-        let yaml_path = project_dir.join("project.yaml");
+        let yaml_path = project_dir.join(PROJECT_YAML_FILE);
         let yaml_str = fs::read_to_string(&yaml_path).context("Failed to read project.yaml")?;
 
         let mut yaml_value: serde_yaml::Value =
@@ -330,7 +335,7 @@ async fn import_from_url(
         if let Some(mut existing) = db.get_project(&identifier)? {
             // Project with this version exists in DB - check if files are valid
             let existing_path = PathBuf::from(&existing.project_path);
-            let existing_yaml = existing_path.join("project.yaml");
+            let existing_yaml = existing_path.join(PROJECT_YAML_FILE);
 
             if existing_yaml.exists() && existing_path.is_dir() {
                 // Valid project exists - check if path needs updating to new convention
@@ -418,7 +423,7 @@ async fn import_from_url(
     fs::create_dir_all(&project_dir)?;
 
     // Save project.yaml
-    let yaml_path = project_dir.join("project.yaml");
+    let yaml_path = project_dir.join(PROJECT_YAML_FILE);
     fs::write(&yaml_path, yaml_str)?;
 
     if !quiet {
@@ -520,6 +525,192 @@ async fn import_from_url(
     Ok(project)
 }
 
+/// Copy a local project to the managed directory (~/.biovault/projects/)
+/// This mirrors the behavior of import_from_url but copies from local filesystem
+async fn copy_local_project_to_managed(
+    db: &BioVaultDb,
+    source_path: &Path,
+    overwrite: bool,
+    quiet: bool,
+) -> Result<Project> {
+    if !source_path.exists() {
+        return Err(anyhow::anyhow!("Source path does not exist: {}", source_path.display()).into());
+    }
+
+    if !source_path.is_dir() {
+        return Err(anyhow::anyhow!("Source path is not a directory: {}", source_path.display()).into());
+    }
+
+    // Look for project.yaml
+    let yaml_path = source_path.join(PROJECT_YAML_FILE);
+    if !yaml_path.exists() {
+        return Err(anyhow::anyhow!(
+            "No project.yaml found in directory: {}",
+            source_path.display()
+        )
+        .into());
+    }
+
+    // Read and parse project.yaml
+    let yaml_str = fs::read_to_string(&yaml_path)?;
+    let project_yaml: ProjectYaml = serde_yaml::from_str(&yaml_str)?;
+
+    let project_name = project_yaml.name.clone();
+
+    // Create project directory in managed location (like import_from_url does)
+    let biovault_home = config::get_biovault_home()?;
+    let projects_dir = biovault_home.join("projects");
+    fs::create_dir_all(&projects_dir)?;
+    let dir_name = format!("{}-{}", project_name, project_yaml.version);
+    let project_dir = projects_dir.join(&dir_name);
+
+    // Check if project already exists in DB (with this exact version)
+    if !overwrite {
+        let identifier = format!("{}@{}", project_name, project_yaml.version);
+        if let Some(existing) = db.get_project(&identifier)? {
+            let existing_path = PathBuf::from(&existing.project_path);
+            let existing_yaml = existing_path.join(PROJECT_YAML_FILE);
+
+            if existing_yaml.exists() && existing_path.is_dir() {
+                // Valid project exists - reuse it (idempotent)
+                if !quiet {
+                    println!(
+                        "   ℹ️  Project '{}' version {} already imported, reusing (id: {})",
+                        project_name,
+                        project_yaml.version,
+                        existing.id
+                    );
+                }
+                return Ok(existing);
+            } else {
+                // Project DB record exists but files are missing/invalid - clean it up
+                if !quiet {
+                    println!(
+                        "   🧹 Cleaning up orphaned project record for '{}@{}'",
+                        project_name,
+                        project_yaml.version
+                    );
+                }
+                db.delete_project(&identifier)?;
+            }
+        }
+    }
+
+    // Handle directory conflicts
+    if project_dir.exists() {
+        if overwrite {
+            fs::remove_dir_all(&project_dir)?;
+        } else {
+            // Directory exists but not in DB (orphaned) - clean it up
+            if !quiet {
+                println!(
+                    "   🧹 Removing orphaned project directory: {}",
+                    project_dir.display().to_string()
+                );
+            }
+            fs::remove_dir_all(&project_dir)?;
+        }
+    }
+
+    fs::create_dir_all(&project_dir)?;
+
+    // Copy project.yaml
+    let dest_yaml_path = project_dir.join(PROJECT_YAML_FILE);
+    fs::copy(&yaml_path, &dest_yaml_path)?;
+
+    if !quiet {
+        println!("✓ Copied project.yaml");
+    }
+
+    // Copy workflow file
+    let workflow_source = source_path.join(&project_yaml.workflow);
+    if workflow_source.exists() {
+        let workflow_dest = project_dir.join(&project_yaml.workflow);
+        if let Some(parent) = workflow_dest.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::copy(&workflow_source, &workflow_dest)?;
+        if !quiet {
+            println!("✓ Copied {}", project_yaml.workflow);
+        }
+    } else if !quiet {
+        println!("⚠️  Warning: workflow file '{}' not found in source", project_yaml.workflow);
+    }
+
+    // Copy assets
+    if !project_yaml.assets.is_empty() {
+        let assets_dir = project_dir.join("assets");
+        fs::create_dir_all(&assets_dir)?;
+
+        if !quiet {
+            println!("📦 Copying {} assets...", project_yaml.assets.len());
+        }
+
+        for asset in &project_yaml.assets {
+            let asset_source = source_path.join("assets").join(asset);
+            if asset_source.exists() {
+                let asset_dest = assets_dir.join(asset);
+
+                // Create parent directories if asset has a path
+                if let Some(parent) = asset_dest.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+
+                fs::copy(&asset_source, &asset_dest)?;
+
+                if !quiet {
+                    println!("  ✓ {}", asset);
+                }
+            } else if !quiet {
+                println!("  ⚠️  Warning: asset '{}' not found", asset);
+            }
+        }
+
+        if !quiet {
+            println!("✓ Copied all assets");
+        }
+    }
+
+    // Register in database
+    if overwrite {
+        let identifier = format!("{}@{}", project_name, project_yaml.version);
+        if db.get_project(&identifier)?.is_some() {
+            db.update_project(
+                &project_name,
+                &project_yaml.version,
+                &project_yaml.author,
+                &project_yaml.workflow,
+                &project_yaml.template,
+                &project_dir,
+            )?;
+        } else {
+            db.register_project(
+                &project_name,
+                &project_yaml.version,
+                &project_yaml.author,
+                &project_yaml.workflow,
+                &project_yaml.template,
+                &project_dir,
+            )?;
+        }
+    } else {
+        db.register_project(
+            &project_name,
+            &project_yaml.version,
+            &project_yaml.author,
+            &project_yaml.workflow,
+            &project_yaml.template,
+            &project_dir,
+        )?;
+    }
+
+    let project = db
+        .get_project(&project_name)?
+        .ok_or_else(|| anyhow::anyhow!("Project '{}' not found after import", project_name))?;
+
+    Ok(project)
+}
+
 fn import_from_local(
     db: &BioVaultDb,
     path: &str,
@@ -537,7 +728,7 @@ fn import_from_local(
     }
 
     // Look for project.yaml
-    let yaml_path = project_path.join("project.yaml");
+    let yaml_path = project_path.join(PROJECT_YAML_FILE);
     if !yaml_path.exists() {
         return Err(anyhow::anyhow!(
             "No project.yaml found in directory: {}",
@@ -702,7 +893,7 @@ pub fn show(identifier: String, format: Option<String>) -> Result<()> {
     println!();
 
     // Show project.yaml contents
-    let yaml_path = Path::new(&project.project_path).join("project.yaml");
+    let yaml_path = Path::new(&project.project_path).join(PROJECT_YAML_FILE);
     if yaml_path.exists() {
         println!("📄 project.yaml:");
         println!("{}", "─".repeat(80));
@@ -752,6 +943,258 @@ pub fn delete(identifier: String, keep_files: bool, format: Option<String>) -> R
     Ok(())
 }
 
+/// Context for resolving pipeline step dependencies
+#[derive(Debug, Clone)]
+pub enum DependencyContext {
+    /// Dependencies are resolved relative to a GitHub base URL
+    GitHub { base_url: String },
+    /// Dependencies are resolved relative to a local filesystem path
+    Local { base_path: PathBuf },
+}
+
+/// Resolve and import all pipeline step dependencies
+///
+/// This function handles importing project dependencies for pipeline steps,
+/// rewriting the pipeline spec to use registered project names.
+///
+/// Returns `true` if any dependencies were imported and the spec was updated.
+pub async fn resolve_pipeline_dependencies(
+    spec: &mut PipelineSpec,
+    dependency_context: &DependencyContext,
+    pipeline_yaml_path: &Path,
+    overwrite: bool,
+    quiet: bool,
+) -> Result<bool> {
+    use colored::Colorize;
+
+    let db = BioVaultDb::new()?;
+    let mut any_rewritten = false;
+
+    if spec.steps.is_empty() {
+        return Ok(false);
+    }
+
+    if !quiet {
+        println!(
+            "\n{} Importing dependencies ({} steps):",
+            "📦".cyan(),
+            spec.steps.len()
+        );
+    }
+
+    // Collect step updates to avoid borrow checker issues
+    let mut step_updates: Vec<(usize, String)> = Vec::new();
+
+    for (index, step) in spec.steps.iter().enumerate() {
+        if let Some(uses) = &step.uses {
+            // Skip absolute local paths
+            if uses.starts_with('/') {
+                if !quiet {
+                    println!(
+                        "   {} Step '{}' uses absolute path (keeping as-is)",
+                        "ℹ️ ".cyan(),
+                        step.id.dimmed()
+                    );
+                }
+                continue;
+            }
+
+            // Skip if already a simple name (already registered)
+            // BUT: in Local context, ALWAYS try to resolve as path first
+            let should_skip_as_registered = match dependency_context {
+                DependencyContext::GitHub { .. } => {
+                    // In GitHub context, no slashes + not http = registered name
+                    !uses.contains('/') && !uses.starts_with("http")
+                }
+                DependencyContext::Local { .. } => {
+                    // In Local context, never skip - always try to resolve as path first
+                    // This handles cases like "apol1-classifier" which could be a relative path
+                    false // Don't skip - let path resolution logic below handle it
+                }
+            };
+
+            if should_skip_as_registered {
+                if !quiet {
+                    println!(
+                        "   {} Step '{}' already uses name (keeping as-is)",
+                        "ℹ️ ".cyan(),
+                        step.id.dimmed()
+                    );
+                }
+                continue;
+            }
+
+            // Resolve project reference based on context
+            let (should_use_local, local_path_opt, url_opt) = if uses.starts_with("http://") || uses.starts_with("https://") {
+                // Absolute URL - use as-is
+                (false, None, Some(format!("{}/project.yaml", uses)))
+            } else {
+                // Relative path - resolve based on context
+                match dependency_context {
+                    DependencyContext::GitHub { base_url } => {
+                        (false, None, Some(format!("{}/{}/project.yaml", base_url, uses)))
+                    }
+                    DependencyContext::Local { base_path } => {
+                        // Resolve exactly like GitHub: base_path + uses = project location
+                        // GitHub does: base_url + "/" + uses + "/project.yaml"
+                        // Local does: base_path.join(uses) -> check for project.yaml there
+                        let project_path = base_path.join(uses);
+                        
+                        // Try to find project.yaml (same logic as GitHub URL resolution)
+                        let project_yaml_path = if project_path.is_dir() {
+                            project_path.join(PROJECT_YAML_FILE)
+                        } else if project_path.extension().map(|e| e == "yaml" || e == "yml").unwrap_or(false) {
+                            // Direct path to yaml file
+                            project_path.clone()
+                        } else {
+                            // Assume it's a directory path, look for project.yaml inside
+                            project_path.join(PROJECT_YAML_FILE)
+                        };
+
+                        // Check if the resolved path exists (mirrors GitHub's existence check)
+                        if project_yaml_path.exists() {
+                            // Path exists - import it (like GitHub downloads it)
+                            let project_dir = if project_path.is_dir() {
+                                project_path
+                            } else {
+                                project_yaml_path.parent().unwrap_or(&base_path).to_path_buf()
+                            };
+                            (true, Some(project_dir), None)
+                        } else {
+                            // Path doesn't exist - check if it's already a registered project name
+                            // If registered, skip this step (like GitHub does for registered names)
+                            let db_check = db.get_project(uses).ok().flatten();
+                            if db_check.is_some() {
+                                // It's registered - skip this dependency (already using registered name)
+                                if !quiet {
+                                    println!(
+                                        "   {} Step '{}' uses registered name '{}' (keeping as-is)",
+                                        "ℹ️ ".cyan(),
+                                        step.id.dimmed(),
+                                        uses
+                                    );
+                                }
+                                // Skip this step entirely - it's already using a registered project name
+                                continue;
+                            }
+                            // Not found as path or registered - will error later when we try to import
+                            (false, None, None)
+                        }
+                    }
+                }
+            };
+
+            if !quiet {
+                print!("   {} {} ", "•".cyan(), step.id.bold());
+            }
+
+            // Import the project (registers in DB automatically)
+            // Smart resolution: check if already registered first, then copy if needed
+            let import_result = if should_use_local {
+                if let Some(local_path) = local_path_opt {
+                    // Check if project at this path is already registered
+                    let existing_projects = db.list_projects().context("Failed to list projects")?;
+                    let already_registered = existing_projects.iter().any(|p| {
+                        PathBuf::from(&p.project_path).canonicalize().ok() == local_path.canonicalize().ok()
+                    });
+
+                    if already_registered {
+                        // Project already registered - parse local path to get project name and reuse
+                        let yaml_path = local_path.join(PROJECT_YAML_FILE);
+                        if yaml_path.exists() {
+                            let yaml_str = fs::read_to_string(&yaml_path)
+                                .context("Failed to read project.yaml")?;
+                            let project_yaml: ProjectYaml = serde_yaml::from_str(&yaml_str)
+                                .context("Failed to parse project.yaml")?;
+                            let identifier = format!("{}@{}", project_yaml.name, project_yaml.version);
+                            
+                            match db.get_project(&identifier) {
+                                Ok(Some(project)) => {
+                                    // Reuse existing registered project
+                                    Ok((project, true))
+                                }
+                                _ => {
+                                    // Not found by identifier, copy to managed for consistency
+                                    copy_local_project_to_managed(&db, &local_path, overwrite, true)
+                                        .await
+                                        .map(|p| (p, true))
+                                }
+                            }
+                        } else {
+                            return Err(anyhow::anyhow!("project.yaml not found at {}", local_path.display()).into());
+                        }
+                    } else {
+                        // Not registered - copy to managed directory (like GitHub imports)
+                        copy_local_project_to_managed(&db, &local_path, overwrite, true)
+                            .await
+                            .map(|p| (p, true))
+                    }
+                } else {
+                    return Err(anyhow::anyhow!("Local path not available for dependency '{}'", uses).into());
+                }
+            } else if let Some(url) = url_opt {
+                import_from_url(&db, &url, None, overwrite, true)
+                    .await
+                    .map(|p| (p, false))
+            } else {
+                // Fallback: try URL import as last resort for local context
+                if let DependencyContext::Local { base_path: _ } = dependency_context {
+                    // Could try to convert local path to URL, but this is unusual
+                    return Err(anyhow::anyhow!("Cannot resolve dependency '{}': local path doesn't exist and no URL available", uses).into());
+                } else {
+                    return Err(anyhow::anyhow!("Cannot resolve dependency '{}': no valid source", uses).into());
+                }
+            };
+
+            match import_result {
+                Ok((project, _is_local)) => {
+                    if !quiet {
+                        println!("{} → {}", "✓ imported".green(), project.name.green());
+                    }
+                    // Store update for later (avoid borrow checker issue)
+                    step_updates.push((index, project.name.clone()));
+                    any_rewritten = true;
+                }
+                Err(e) => {
+                    if !quiet {
+                        println!("{}: {}", "⚠️  failed".yellow(), e.to_string().dimmed());
+                    }
+                    // Continue to next step - don't fail entire import
+                }
+            }
+        }
+    }
+
+    // Apply step updates now that we're done iterating
+    for (index, project_name) in step_updates {
+        if let Some(updated_step) = spec.steps.get_mut(index) {
+            updated_step.uses = Some(project_name);
+        }
+    }
+
+    // Save updated pipeline.yaml if any dependencies were rewritten
+    if any_rewritten {
+        if !quiet {
+            println!(
+                "\n{} Updating pipeline.yaml to use registered names...",
+                "🔧".cyan()
+            );
+        }
+        let updated_yaml =
+            serde_yaml::to_string(spec).context("Failed to serialize updated spec")?;
+        fs::write(pipeline_yaml_path, updated_yaml)
+            .context("Failed to write updated pipeline.yaml")?;
+        if !quiet {
+            println!(
+                "{} Pipeline YAML updated with registered names!",
+                "✓".green()
+            );
+        }
+    }
+
+    Ok(any_rewritten)
+}
+
 /// Import a pipeline from URL with all its step dependencies
 pub async fn import_pipeline_with_deps(
     url: &str,
@@ -773,7 +1216,7 @@ pub async fn import_pipeline_with_deps(
     let yaml_str = String::from_utf8(yaml_content).context("Invalid UTF-8 in pipeline.yaml")?;
 
     // Parse pipeline spec
-    let spec: PipelineSpec =
+    let mut spec: PipelineSpec =
         serde_yaml::from_str(&yaml_str).context("Failed to parse pipeline.yaml")?;
 
     let pipeline_name = name_override.unwrap_or_else(|| spec.name.clone());
@@ -803,95 +1246,29 @@ pub async fn import_pipeline_with_deps(
     fs::create_dir_all(&pipeline_dir)?;
 
     // Save pipeline.yaml
-    let pipeline_yaml_path = pipeline_dir.join("pipeline.yaml");
+    let pipeline_yaml_path = pipeline_dir.join(PIPELINE_YAML_FILE);
     fs::write(&pipeline_yaml_path, &yaml_str)?;
     println!("{} Saved pipeline.yaml", "✓".green());
 
     // Extract base URL for resolving relative project paths
     let base_url = if let Some(idx) = url.rfind('/') {
-        &url[..idx]
+        url[..idx].to_string()
     } else {
-        url
+        url.to_string()
     };
 
     // Import each step's project and rewrite YAML to use registered names
-    let db = BioVaultDb::new()?;
-    let mut updated_spec = spec.clone();
-    let mut any_rewritten = false;
-
-    if !spec.steps.is_empty() {
-        println!(
-            "\n{} Importing dependencies ({} steps):",
-            "📦".cyan(),
-            spec.steps.len()
-        );
-
-        for (index, step) in spec.steps.iter().enumerate() {
-            if let Some(uses) = &step.uses {
-                // Skip absolute local paths
-                if uses.starts_with('/') {
-                    println!(
-                        "   {} Step '{}' uses absolute path (keeping as-is)",
-                        "ℹ️ ".cyan(),
-                        step.id.dimmed()
-                    );
-                    continue;
-                }
-
-                // Skip if already a simple name
-                if !uses.contains('/') && !uses.starts_with("http") {
-                    println!(
-                        "   {} Step '{}' already uses name (keeping as-is)",
-                        "ℹ️ ".cyan(),
-                        step.id.dimmed()
-                    );
-                    continue;
-                }
-
-                // Construct URL to project.yaml
-                let project_url = if uses.starts_with("http://") || uses.starts_with("https://") {
-                    format!("{}/project.yaml", uses)
-                } else {
-                    // Relative path from pipeline location on GitHub
-                    format!("{}/{}/project.yaml", base_url, uses)
-                };
-
-                print!("   {} {} ", "•".cyan(), step.id.bold());
-
-                // Import the project (registers in DB automatically)
-                match import_from_url(&db, &project_url, None, overwrite, true).await {
-                    Ok(project) => {
-                        println!("{} → {}", "✓ imported".green(), project.name.green());
-                        // Rewrite YAML to use the registered name
-                        if let Some(updated_step) = updated_spec.steps.get_mut(index) {
-                            updated_step.uses = Some(project.name.clone());
-                        }
-                        any_rewritten = true;
-                    }
-                    Err(e) => {
-                        println!("{}: {}", "⚠️  failed".yellow(), e.to_string().dimmed());
-                    }
-                }
-            }
-        }
-
-        // Save updated pipeline.yaml with project names
-        if any_rewritten {
-            println!(
-                "\n{} Updating pipeline.yaml to use registered names...",
-                "🔧".cyan()
-            );
-            let updated_yaml =
-                serde_yaml::to_string(&updated_spec).context("Failed to serialize updated spec")?;
-            fs::write(&pipeline_yaml_path, updated_yaml)?;
-            println!(
-                "{} Pipeline YAML updated with registered names!",
-                "✓".green()
-            );
-        }
-    }
+    resolve_pipeline_dependencies(
+        &mut spec,
+        &DependencyContext::GitHub { base_url },
+        &pipeline_yaml_path,
+        overwrite,
+        false, // quiet = false for CLI output
+    )
+    .await?;
 
     // Register pipeline in database (check for existing if overwrite)
+    let db = BioVaultDb::new()?;
     let pipeline_id = if overwrite {
         // Check if pipeline with this name already exists
         let existing_pipelines = db.list_pipelines()?;
@@ -979,7 +1356,7 @@ workflow: workflow.nf
 template: default
 assets: []
 "#;
-        fs::write(project_dir.join("project.yaml"), yaml_content).unwrap();
+        fs::write(project_dir.join(PROJECT_YAML_FILE), yaml_content).unwrap();
         fs::write(project_dir.join("workflow.nf"), "// workflow").unwrap();
 
         // Import the project
