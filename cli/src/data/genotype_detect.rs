@@ -286,15 +286,23 @@ fn is_valid_genotype(genotype: &str) -> bool {
 }
 
 fn split_fields(line: &str) -> Vec<String> {
-    let delimiter = if line.contains('\t') {
+    // Strip inline comments (anything after #)
+    let line_without_comment = if let Some(comment_pos) = line.find('#') {
+        &line[..comment_pos]
+    } else {
+        line
+    };
+
+    let delimiter = if line_without_comment.contains('\t') {
         '\t'
-    } else if line.contains(',') {
+    } else if line_without_comment.contains(',') {
         ','
     } else {
         '\t'
     };
 
-    line.split(delimiter)
+    line_without_comment
+        .split(delimiter)
         .map(|part| {
             part.trim()
                 .trim_matches('\"')
