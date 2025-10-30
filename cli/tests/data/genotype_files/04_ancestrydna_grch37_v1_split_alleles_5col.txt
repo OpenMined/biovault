@@ -27,3 +27,7 @@ rs6696281	1	903104	C	C
 rs6660139	1	916549	G	G
 rs13303118	1	918384	T	T
 rs2341365	1	948692	A	A
+rs73885319	22	36661906	A	G # APOL1 test entries (G1 het + G2 het)
+rs60910145	22	36662034	T	G # APOL1 test entries (G1 het + G2 het)
+rs71785313	22	36662046	I	D # APOL1 test entries (G1 het + G2 het)
+rs143830837	22	36662046	I	D # APOL1 test entries (G1 het + G2 het)

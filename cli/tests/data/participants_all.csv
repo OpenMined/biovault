@@ -1,0 +1,14 @@
+participant_id,genotype_file
+01,/Users/madhavajay/dev/biovault/workspace1/cli/tests/data/genotype_files/01_23andme_grch36_standard_4col.txt
+02,/Users/madhavajay/dev/biovault/workspace1/cli/tests/data/genotype_files/02_23andme_grch37_standard_4col.txt
+03,/Users/madhavajay/dev/biovault/workspace1/cli/tests/data/genotype_files/03_23andme_standard_4col.txt
+04,/Users/madhavajay/dev/biovault/workspace1/cli/tests/data/genotype_files/04_ancestrydna_grch37_v1_split_alleles_5col.txt
+05,/Users/madhavajay/dev/biovault/workspace1/cli/tests/data/genotype_files/05_ancestrydna_split_alleles_5col.txt
+06,/Users/madhavajay/dev/biovault/workspace1/cli/tests/data/genotype_files/06_decodeme_grch36_variation_6col.csv
+07,/Users/madhavajay/dev/biovault/workspace1/cli/tests/data/genotype_files/07_dynamicdna_grch38_extended_7col.txt
+08,/Users/madhavajay/dev/biovault/workspace1/cli/tests/data/genotype_files/08_familytreedna_grch37_standard_4col.csv
+09,/Users/madhavajay/dev/biovault/workspace1/cli/tests/data/genotype_files/09_genesforgood_standard_4col.txt
+10,/Users/madhavajay/dev/biovault/workspace1/cli/tests/data/genotype_files/10_livingdna_grch37_standard_4col.txt
+11,/Users/madhavajay/dev/biovault/workspace1/cli/tests/data/genotype_files/11_myheritage_grch37_standard_4col.csv
+12,/Users/madhavajay/dev/biovault/workspace1/cli/tests/data/genotype_files/12_unknown_no_header.txt
+13,/Users/madhavajay/dev/biovault/workspace1/cli/tests/data/genotype_files/13_unknown_standard_4col.txt
