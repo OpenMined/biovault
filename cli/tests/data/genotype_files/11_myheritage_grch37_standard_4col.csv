@@ -10,4 +10,8 @@ RSID,CHROMOSOME,POSITION,RESULT
 "rs3131972","1","752721","GG"
 "rs12562034","1","768448","--"
 "rs12124819","1","776546","--"
-"rs12913832","15","28365618","--"
+"rs12913832","15","28365618","--" # HERC2
+"rs73885319","22","36661906","AG" # APOL1 test entries (G1 het + G2 het)
+"rs60910145","22","36662034","TG" # APOL1 test entries (G1 het + G2 het)
+"rs71785313","22","36662046","ID" # APOL1 test entries (G1 het + G2 het)
+"rs143830837","22","36662046","ID" # APOL1 test entries (G1 het + G2 het)
