@@ -859,6 +859,8 @@ mod tests {
 
         let pf = ParticipantsFile::load().unwrap();
         assert!(pf.participants.is_empty());
+
+        std::env::remove_var("BIOVAULT_HOME");
     }
 
     #[test]
@@ -894,6 +896,8 @@ mod tests {
             loaded.participants["save_test"].ref_version,
             Some("GRCh38".to_string())
         );
+
+        std::env::remove_var("BIOVAULT_HOME");
     }
 
     #[test]
@@ -991,7 +995,8 @@ mod tests {
 
         let path = get_participants_file_path().unwrap();
         assert!(path.ends_with("participants.yaml"));
-        assert!(path.starts_with(home.join(".biovault")));
+        // BIOVAULT_TEST_HOME returns the path directly without .biovault suffix
+        assert!(path.starts_with(&home));
 
         std::env::remove_var("BIOVAULT_TEST_HOME");
     }
@@ -1020,6 +1025,8 @@ mod tests {
         // Should not error when no participants
         let result = list().await;
         assert!(result.is_ok());
+
+        std::env::remove_var("BIOVAULT_HOME");
     }
 
     #[tokio::test]
@@ -1045,6 +1052,8 @@ mod tests {
 
         let result = list().await;
         assert!(result.is_ok());
+
+        std::env::remove_var("BIOVAULT_HOME");
     }
 
     #[tokio::test]
@@ -1055,6 +1064,8 @@ mod tests {
         let result = delete("nonexistent".to_string()).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not found"));
+
+        std::env::remove_var("BIOVAULT_HOME");
     }
 
     #[test]
