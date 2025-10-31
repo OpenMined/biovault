@@ -8,7 +8,7 @@ BioVault provides an integrated SQL system for storing, querying, and managing t
 2. **Pipeline SQL Stores** - Automatic storage of pipeline outputs to database tables
 3. **SQL CLI Commands** - Tools for querying, importing, and managing data
 
-All data is stored in a local SQLite database at `~/.biovault/biovault.db` (or `BIOVAULT_HOME/.biovault/biovault.db`).
+All data is stored in a local SQLite database at `{BioVault home}/biovault.db` (default: `~/Desktop/BioVault/biovault.db`, or `BIOVAULT_HOME/biovault.db` if set).
 
 ---
 
@@ -170,11 +170,11 @@ bv run pipeline.yaml \
 ```
 💾 Stored 'variant_db' output 'variant_counts' into table z_results_variants_20251023120000 (rows: 150).
     source: /path/to/results/count_variants/counts.csv
-    database: /Users/user/.biovault/biovault.db
+    database: /Users/user/Desktop/BioVault/biovault.db
 
 💾 Stored 'quality_db' output 'quality_metrics' into table z_results_quality_metrics_20251023120000 (rows: 150).
     source: /path/to/results/quality_stats/metrics.csv
-    database: /Users/user/.biovault/biovault.db
+    database: /Users/user/Desktop/BioVault/biovault.db
 ```
 
 ---

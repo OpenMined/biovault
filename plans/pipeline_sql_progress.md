@@ -20,7 +20,7 @@
   ```text
   💾 Stored 'counts_sql' output 'counted_sheet' into table pipeline_counts_20251023050324 (rows: …).
       source: /…/results/demo-sql/count/line_counts.csv
-      database: /…/.biovault/biovault.db
+      database: /…/Desktop/BioVault/biovault.db
   ```
 
 - **Workflow Script**: `run_demo_sql.sh` demonstrates the end-to-end flow—validate and then run with hard-coded paths to the sample data.

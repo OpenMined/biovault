@@ -355,7 +355,7 @@ steps:
 ```
 💾 Stored 'line_counts_db' output 'counts' into table z_results_line_counts_20251023120000 (rows: 150).
     source: /path/to/results/count_lines/line_counts.csv
-    database: /path/to/.biovault/biovault.db
+    database: /path/to/Desktop/BioVault/biovault.db
 ```
 
 ---

@@ -96,15 +96,16 @@ fn persist_home_pointer(path: &Path) {
 fn detect_existing_home(home_dir: &Path) -> Option<PathBuf> {
     let desktop_root = resolve_desktop_dir(home_dir);
     let desktop_candidate = desktop_root.join("BioVault");
-    let legacy_candidate = home_dir.join(".biovault");
 
-    [desktop_candidate, legacy_candidate]
-        .into_iter()
-        .find(|candidate| {
-            candidate.join("config.yaml").exists()
-                || candidate.join("env").exists()
-                || candidate.join("data").exists()
-        })
+    // Only check Desktop/BioVault, not .biovault legacy folder
+    if desktop_candidate.join("config.yaml").exists()
+        || desktop_candidate.join("env").exists()
+        || desktop_candidate.join("data").exists()
+    {
+        Some(desktop_candidate)
+    } else {
+        None
+    }
 }
 
 fn resolve_desktop_dir(home_dir: &Path) -> PathBuf {
@@ -393,7 +394,8 @@ pub fn get_biovault_home() -> anyhow::Result<PathBuf> {
 
     // Check for test environment (must be before directory walk to prevent finding global config)
     if let Some(test_home) = get_env_var("BIOVAULT_TEST_HOME") {
-        let path = PathBuf::from(test_home).join(".biovault");
+        // Use the path directly without appending .biovault
+        let path = PathBuf::from(test_home);
         fs::create_dir_all(&path).with_context(|| {
             format!(
                 "Failed to create test biovault directory: {}",
@@ -432,7 +434,35 @@ pub fn get_biovault_home() -> anyhow::Result<PathBuf> {
         return Ok(persisted);
     }
 
+    // Check Desktop/BioVault BEFORE walking up directory tree
+    // This ensures desktop app uses Desktop/BioVault instead of finding legacy .biovault
+    if let Some(existing) = detect_existing_home(&home_dir) {
+        fs::create_dir_all(&existing).with_context(|| {
+            format!(
+                "Failed to create biovault directory: {}",
+                existing.display()
+            )
+        })?;
+        persist_home_pointer(&existing);
+        return Ok(existing);
+    }
+
+    let desktop_dir = resolve_desktop_dir(&home_dir);
+    let desktop_path = desktop_dir.join("BioVault");
+    if desktop_path.exists() {
+        // Desktop/BioVault folder exists, use it
+        fs::create_dir_all(&desktop_path).with_context(|| {
+            format!(
+                "Failed to create biovault directory: {}",
+                desktop_path.display()
+            )
+        })?;
+        persist_home_pointer(&desktop_path);
+        return Ok(desktop_path);
+    }
+
     // Walk up from current directory looking for .biovault/config.yaml (for sbenv)
+    // Only do this if Desktop/BioVault doesn't exist, to avoid finding legacy .biovault
     if let Ok(current_dir) = env::current_dir() {
         let mut dir = current_dir.as_path();
         loop {
@@ -449,38 +479,23 @@ pub fn get_biovault_home() -> anyhow::Result<PathBuf> {
         }
     }
 
-    if let Some(existing) = detect_existing_home(&home_dir) {
-        fs::create_dir_all(&existing).with_context(|| {
-            format!(
-                "Failed to create biovault directory: {}",
-                existing.display()
-            )
-        })?;
-        persist_home_pointer(&existing);
-        return Ok(existing);
-    }
-
-    // Default to Desktop/BioVault (user-friendly, visible location)
-    let desktop_dir = resolve_desktop_dir(&home_dir);
-    let default_path = desktop_dir.join("BioVault");
-
-    // Create the default directory if it doesn't exist
-    fs::create_dir_all(&default_path).with_context(|| {
+    // Create Desktop/BioVault as final default
+    fs::create_dir_all(&desktop_path).with_context(|| {
         format!(
             "Failed to create biovault directory: {}",
-            default_path.display()
+            desktop_path.display()
         )
     })?;
 
-    persist_home_pointer(&default_path);
+    persist_home_pointer(&desktop_path);
 
-    Ok(default_path)
+    Ok(desktop_path)
 }
 
 /// Get the shared cache directory
 /// Priority order:
 /// 1. BIOVAULT_CACHE_DIR env var
-/// 2. ~/.biovault/data/cache (default shared)
+/// 2. {BioVault home}/data/cache (default shared, e.g., ~/Desktop/BioVault/data/cache)
 pub fn get_cache_dir() -> anyhow::Result<PathBuf> {
     // Check for explicit cache directory
     if let Ok(cache_dir) = env::var("BIOVAULT_CACHE_DIR") {
