@@ -11,6 +11,45 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+fn append_desktop_log(message: &str) {
+    if let Ok(path) = std::env::var("BIOVAULT_DESKTOP_LOG_FILE") {
+        if path.is_empty() {
+            return;
+        }
+        let path = PathBuf::from(path);
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&path) {
+            let timestamp = Local::now().format("%Y-%m-%dT%H:%M:%S%:z");
+            let _ = writeln!(file, "[{}][INFO] {}", timestamp, message);
+        }
+    }
+}
+
+fn shell_quote(value: &OsStr) -> String {
+    let s = value.to_string_lossy();
+    if s.is_empty() {
+        return "''".to_string();
+    }
+    if s.chars()
+        .all(|c| c.is_ascii_alphanumeric() || "-_./:@".contains(c))
+    {
+        return s.into_owned();
+    }
+    let escaped = s.replace('\'', "'\"'\"'");
+    format!("'{}'", escaped)
+}
+
+fn format_command(cmd: &Command) -> String {
+    let mut parts = Vec::new();
+    parts.push(shell_quote(cmd.get_program()));
+    for arg in cmd.get_args() {
+        parts.push(shell_quote(arg));
+    }
+    parts.join(" ")
+}
+
 fn build_augmented_path(cfg: &crate::config::Config) -> Option<String> {
     let mut entries = BTreeSet::new();
     for key in ["nextflow", "java", "docker"] {
@@ -36,22 +75,6 @@ fn build_augmented_path(cfg: &crate::config::Config) -> Option<String> {
     std::env::join_paths(paths)
         .ok()
         .and_then(|joined| joined.into_string().ok())
-}
-
-fn append_desktop_log(message: &str) {
-    if let Ok(path) = std::env::var("BIOVAULT_DESKTOP_LOG_FILE") {
-        if path.is_empty() {
-            return;
-        }
-        let path = std::path::PathBuf::from(path);
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&path) {
-            let timestamp = Local::now().format("%Y-%m-%dT%H:%M:%S%:z");
-            let _ = writeln!(file, "[{}][INFO] {}", timestamp, message);
-        }
-    }
 }
 
 pub async fn execute_dynamic(
@@ -159,12 +182,48 @@ pub async fn execute_dynamic(
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "nextflow".to_string());
 
+    // Log environment details for debugging
+    append_desktop_log(&format!(
+        "[Pipeline] Using nextflow binary: {}",
+        nextflow_bin
+    ));
+
+    // Log original PATH from environment
+    if let Some(original_path) = std::env::var_os("PATH") {
+        append_desktop_log(&format!(
+            "[Pipeline] Original PATH from environment: {}",
+            original_path.to_string_lossy()
+        ));
+    } else {
+        append_desktop_log("[Pipeline] WARNING: No PATH environment variable found!");
+    }
+
     let mut cmd = Command::new(&nextflow_bin);
 
     if let Some(cfg) = &config {
-        if let Some(path_env) = build_augmented_path(cfg) {
-            cmd.env("PATH", path_env);
+        // Log configured binary paths
+        append_desktop_log("[Pipeline] Configured binary paths:");
+        for binary in ["nextflow", "java", "docker"] {
+            if let Some(path) = cfg.get_binary_path(binary) {
+                append_desktop_log(&format!("  {} = {}", binary, path));
+            } else {
+                append_desktop_log(&format!("  {} = <not configured>", binary));
+            }
         }
+
+        if let Some(path_env) = build_augmented_path(cfg) {
+            append_desktop_log(&format!(
+                "[Pipeline] Final augmented PATH for nextflow: {}",
+                path_env
+            ));
+            cmd.env("PATH", path_env);
+        } else {
+            append_desktop_log(
+                "[Pipeline] WARNING: Could not build augmented PATH, using system PATH",
+            );
+        }
+    } else {
+        append_desktop_log("[Pipeline] WARNING: No config found, using system PATH");
     }
 
     cmd.arg("run").arg(&template_abs);
@@ -487,29 +546,6 @@ fn detect_format(path: &Path) -> Option<&'static str> {
             "vcf" | "vcf.gz" => Some("vcf"),
             _ => None,
         })
-}
-
-fn format_command(cmd: &Command) -> String {
-    let program = shell_quote(cmd.get_program());
-    let args: Vec<String> = cmd.get_args().map(shell_quote).collect();
-    std::iter::once(program)
-        .chain(args)
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-fn shell_quote(value: &OsStr) -> String {
-    let s = value.to_string_lossy();
-    if s.is_empty() {
-        return "''".to_string();
-    }
-    if s.chars()
-        .all(|c| c.is_ascii_alphanumeric() || "-_./:@".contains(c))
-    {
-        return s.into_owned();
-    }
-    let escaped = s.replace('\'', "'\"'\"'");
-    format!("'{}'", escaped)
 }
 
 fn install_dynamic_template(biovault_home: &Path) -> Result<()> {
