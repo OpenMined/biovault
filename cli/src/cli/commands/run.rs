@@ -4,14 +4,17 @@ use crate::cli::download_cache::{
 use crate::cli::syft_url::SyftURL;
 use crate::error::Error;
 use anyhow::{anyhow, Context};
+use chrono::Local;
 use colored::Colorize;
 use dialoguer::Confirm;
 use serde::{Deserialize, Serialize};
 use serde_yaml::Value as YamlValue;
 use std::collections::HashMap;
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::thread;
 // use tempfile::TempDir; // no longer needed since we don't copy templates
 use tracing::{debug, info};
 
@@ -95,6 +98,81 @@ pub struct ParticipantData {
     pub snp_b3sum: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub uncompress: Option<bool>,
+}
+
+fn append_desktop_log_to_path(path: &str, level: &str, message: &str) -> std::io::Result<()> {
+    let timestamp = Local::now().format("%Y-%m-%dT%H:%M:%S%:z");
+    let line = format!("[{}][{}] {}\n", timestamp, level, message);
+
+    if let Some(parent) = std::path::Path::new(path).parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    file.write_all(line.as_bytes())
+}
+
+fn append_desktop_log(level: &str, message: &str) {
+    if let Ok(path) = std::env::var("BIOVAULT_DESKTOP_LOG_FILE") {
+        if path.is_empty() {
+            return;
+        }
+        if let Err(err) = append_desktop_log_to_path(&path, level, message) {
+            debug!("Failed to append to desktop log {}: {}", path, err);
+        }
+    }
+}
+
+fn execute_with_logging(mut cmd: Command) -> anyhow::Result<std::process::ExitStatus> {
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+
+    let mut child = cmd.spawn().context("Failed to execute Nextflow")?;
+
+    let log_path = std::env::var("BIOVAULT_DESKTOP_LOG_FILE").ok();
+
+    let stdout_handle = child.stdout.take().map(|stdout| {
+        let log_path = log_path.clone();
+        thread::spawn(move || {
+            let reader = BufReader::new(stdout);
+            for line in reader.lines().map_while(Result::ok) {
+                println!("{}", line);
+                if let Some(ref path) = log_path {
+                    let _ = append_desktop_log_to_path(path, "INFO", &line);
+                } else {
+                    append_desktop_log("INFO", &line);
+                }
+            }
+        })
+    });
+
+    let stderr_handle = child.stderr.take().map(|stderr| {
+        let log_path = log_path.clone();
+        thread::spawn(move || {
+            let reader = BufReader::new(stderr);
+            for line in reader.lines().map_while(Result::ok) {
+                eprintln!("{}", line);
+                if let Some(ref path) = log_path {
+                    let _ = append_desktop_log_to_path(path, "ERROR", &line);
+                } else {
+                    append_desktop_log("ERROR", &line);
+                }
+            }
+        })
+    });
+
+    let status = child
+        .wait()
+        .context("Failed to wait for Nextflow process")?;
+
+    if let Some(handle) = stdout_handle {
+        let _ = handle.join();
+    }
+    if let Some(handle) = stderr_handle {
+        let _ = handle.join();
+    }
+
+    Ok(status)
 }
 
 pub struct RunParams {
@@ -986,17 +1064,21 @@ async fn execute_sheet_workflow(params: &RunParams, config: &ProjectConfig) -> a
         }
     }
     println!("{}\n", cmd_str.cyan());
+    append_desktop_log("INFO", &format!("Nextflow command: {}", cmd_str));
 
     if params.dry_run {
         println!("{}", "[DRY RUN] Would execute the above command".yellow());
+        append_desktop_log("INFO", "[DRY RUN] Would execute the above command");
         return Ok(());
     }
 
     // Execute Nextflow
     println!("Executing Nextflow sheet workflow...");
-    let status = cmd.status().context("Failed to execute Nextflow")?;
+    append_desktop_log("INFO", "Executing Nextflow sheet workflow...");
+    let status = execute_with_logging(cmd).context("Failed to execute Nextflow")?;
 
     if !status.success() {
+        append_desktop_log("ERROR", "Nextflow execution failed");
         return Err(anyhow!("Nextflow execution failed"));
     }
 
@@ -1004,6 +1086,7 @@ async fn execute_sheet_workflow(params: &RunParams, config: &ProjectConfig) -> a
         "{}",
         "Sheet workflow completed successfully!".green().bold()
     );
+    append_desktop_log("INFO", "Sheet workflow completed successfully!");
     Ok(())
 }
 
@@ -1242,21 +1325,26 @@ pub async fn execute(params: RunParams) -> anyhow::Result<()> {
         }
     }
     println!("{}\n", cmd_str.cyan());
+    append_desktop_log("INFO", &format!("Nextflow command: {}", cmd_str));
 
     if params.dry_run {
         println!("{}", "[DRY RUN] Would execute the above command".yellow());
+        append_desktop_log("INFO", "[DRY RUN] Would execute the above command");
         return Ok(());
     }
 
     // Execute Nextflow
     println!("Executing Nextflow workflow...");
-    let status = cmd.status().context("Failed to execute Nextflow")?;
+    append_desktop_log("INFO", "Executing Nextflow workflow...");
+    let status = execute_with_logging(cmd).context("Failed to execute Nextflow")?;
 
     if !status.success() {
+        append_desktop_log("ERROR", "Nextflow execution failed");
         return Err(anyhow!("Nextflow execution failed"));
     }
 
     println!("{}", "Workflow completed successfully!".green().bold());
+    append_desktop_log("INFO", "Workflow completed successfully!");
     Ok(())
 }
 
