@@ -534,11 +534,15 @@ async fn copy_local_project_to_managed(
     quiet: bool,
 ) -> Result<Project> {
     if !source_path.exists() {
-        return Err(anyhow::anyhow!("Source path does not exist: {}", source_path.display()).into());
+        return Err(
+            anyhow::anyhow!("Source path does not exist: {}", source_path.display()).into(),
+        );
     }
 
     if !source_path.is_dir() {
-        return Err(anyhow::anyhow!("Source path is not a directory: {}", source_path.display()).into());
+        return Err(
+            anyhow::anyhow!("Source path is not a directory: {}", source_path.display()).into(),
+        );
     }
 
     // Look for project.yaml
@@ -576,9 +580,7 @@ async fn copy_local_project_to_managed(
                 if !quiet {
                     println!(
                         "   ℹ️  Project '{}' version {} already imported, reusing (id: {})",
-                        project_name,
-                        project_yaml.version,
-                        existing.id
+                        project_name, project_yaml.version, existing.id
                     );
                 }
                 return Ok(existing);
@@ -587,8 +589,7 @@ async fn copy_local_project_to_managed(
                 if !quiet {
                     println!(
                         "   🧹 Cleaning up orphaned project record for '{}@{}'",
-                        project_name,
-                        project_yaml.version
+                        project_name, project_yaml.version
                     );
                 }
                 db.delete_project(&identifier)?;
@@ -605,7 +606,7 @@ async fn copy_local_project_to_managed(
             if !quiet {
                 println!(
                     "   🧹 Removing orphaned project directory: {}",
-                    project_dir.display().to_string()
+                    project_dir.display()
                 );
             }
             fs::remove_dir_all(&project_dir)?;
@@ -634,7 +635,10 @@ async fn copy_local_project_to_managed(
             println!("✓ Copied {}", project_yaml.workflow);
         }
     } else if !quiet {
-        println!("⚠️  Warning: workflow file '{}' not found in source", project_yaml.workflow);
+        println!(
+            "⚠️  Warning: workflow file '{}' not found in source",
+            project_yaml.workflow
+        );
     }
 
     // Copy assets
@@ -1025,64 +1029,74 @@ pub async fn resolve_pipeline_dependencies(
             }
 
             // Resolve project reference based on context
-            let (should_use_local, local_path_opt, url_opt) = if uses.starts_with("http://") || uses.starts_with("https://") {
-                // Absolute URL - use as-is
-                (false, None, Some(format!("{}/project.yaml", uses)))
-            } else {
-                // Relative path - resolve based on context
-                match dependency_context {
-                    DependencyContext::GitHub { base_url } => {
-                        (false, None, Some(format!("{}/{}/project.yaml", base_url, uses)))
-                    }
-                    DependencyContext::Local { base_path } => {
-                        // Resolve exactly like GitHub: base_path + uses = project location
-                        // GitHub does: base_url + "/" + uses + "/project.yaml"
-                        // Local does: base_path.join(uses) -> check for project.yaml there
-                        let project_path = base_path.join(uses);
-                        
-                        // Try to find project.yaml (same logic as GitHub URL resolution)
-                        let project_yaml_path = if project_path.is_dir() {
-                            project_path.join(PROJECT_YAML_FILE)
-                        } else if project_path.extension().map(|e| e == "yaml" || e == "yml").unwrap_or(false) {
-                            // Direct path to yaml file
-                            project_path.clone()
-                        } else {
-                            // Assume it's a directory path, look for project.yaml inside
-                            project_path.join(PROJECT_YAML_FILE)
-                        };
+            let (should_use_local, local_path_opt, url_opt) =
+                if uses.starts_with("http://") || uses.starts_with("https://") {
+                    // Absolute URL - use as-is
+                    (false, None, Some(format!("{}/project.yaml", uses)))
+                } else {
+                    // Relative path - resolve based on context
+                    match dependency_context {
+                        DependencyContext::GitHub { base_url } => (
+                            false,
+                            None,
+                            Some(format!("{}/{}/project.yaml", base_url, uses)),
+                        ),
+                        DependencyContext::Local { base_path } => {
+                            // Resolve exactly like GitHub: base_path + uses = project location
+                            // GitHub does: base_url + "/" + uses + "/project.yaml"
+                            // Local does: base_path.join(uses) -> check for project.yaml there
+                            let project_path = base_path.join(uses);
 
-                        // Check if the resolved path exists (mirrors GitHub's existence check)
-                        if project_yaml_path.exists() {
-                            // Path exists - import it (like GitHub downloads it)
-                            let project_dir = if project_path.is_dir() {
-                                project_path
+                            // Try to find project.yaml (same logic as GitHub URL resolution)
+                            let project_yaml_path = if project_path.is_dir() {
+                                project_path.join(PROJECT_YAML_FILE)
+                            } else if project_path
+                                .extension()
+                                .map(|e| e == "yaml" || e == "yml")
+                                .unwrap_or(false)
+                            {
+                                // Direct path to yaml file
+                                project_path.clone()
                             } else {
-                                project_yaml_path.parent().unwrap_or(&base_path).to_path_buf()
+                                // Assume it's a directory path, look for project.yaml inside
+                                project_path.join(PROJECT_YAML_FILE)
                             };
-                            (true, Some(project_dir), None)
-                        } else {
-                            // Path doesn't exist - check if it's already a registered project name
-                            // If registered, skip this step (like GitHub does for registered names)
-                            let db_check = db.get_project(uses).ok().flatten();
-                            if db_check.is_some() {
-                                // It's registered - skip this dependency (already using registered name)
-                                if !quiet {
-                                    println!(
+
+                            // Check if the resolved path exists (mirrors GitHub's existence check)
+                            if project_yaml_path.exists() {
+                                // Path exists - import it (like GitHub downloads it)
+                                let project_dir = if project_path.is_dir() {
+                                    project_path
+                                } else {
+                                    project_yaml_path
+                                        .parent()
+                                        .unwrap_or(base_path)
+                                        .to_path_buf()
+                                };
+                                (true, Some(project_dir), None)
+                            } else {
+                                // Path doesn't exist - check if it's already a registered project name
+                                // If registered, skip this step (like GitHub does for registered names)
+                                let db_check = db.get_project(uses).ok().flatten();
+                                if db_check.is_some() {
+                                    // It's registered - skip this dependency (already using registered name)
+                                    if !quiet {
+                                        println!(
                                         "   {} Step '{}' uses registered name '{}' (keeping as-is)",
                                         "ℹ️ ".cyan(),
                                         step.id.dimmed(),
                                         uses
                                     );
+                                    }
+                                    // Skip this step entirely - it's already using a registered project name
+                                    continue;
                                 }
-                                // Skip this step entirely - it's already using a registered project name
-                                continue;
+                                // Not found as path or registered - will error later when we try to import
+                                (false, None, None)
                             }
-                            // Not found as path or registered - will error later when we try to import
-                            (false, None, None)
                         }
                     }
-                }
-            };
+                };
 
             if !quiet {
                 print!("   {} {} ", "•".cyan(), step.id.bold());
@@ -1093,9 +1107,11 @@ pub async fn resolve_pipeline_dependencies(
             let import_result = if should_use_local {
                 if let Some(local_path) = local_path_opt {
                     // Check if project at this path is already registered
-                    let existing_projects = db.list_projects().context("Failed to list projects")?;
+                    let existing_projects =
+                        db.list_projects().context("Failed to list projects")?;
                     let already_registered = existing_projects.iter().any(|p| {
-                        PathBuf::from(&p.project_path).canonicalize().ok() == local_path.canonicalize().ok()
+                        PathBuf::from(&p.project_path).canonicalize().ok()
+                            == local_path.canonicalize().ok()
                     });
 
                     if already_registered {
@@ -1106,8 +1122,9 @@ pub async fn resolve_pipeline_dependencies(
                                 .context("Failed to read project.yaml")?;
                             let project_yaml: ProjectYaml = serde_yaml::from_str(&yaml_str)
                                 .context("Failed to parse project.yaml")?;
-                            let identifier = format!("{}@{}", project_yaml.name, project_yaml.version);
-                            
+                            let identifier =
+                                format!("{}@{}", project_yaml.name, project_yaml.version);
+
                             match db.get_project(&identifier) {
                                 Ok(Some(project)) => {
                                     // Reuse existing registered project
@@ -1121,7 +1138,11 @@ pub async fn resolve_pipeline_dependencies(
                                 }
                             }
                         } else {
-                            return Err(anyhow::anyhow!("project.yaml not found at {}", local_path.display()).into());
+                            return Err(anyhow::anyhow!(
+                                "project.yaml not found at {}",
+                                local_path.display()
+                            )
+                            .into());
                         }
                     } else {
                         // Not registered - copy to managed directory (like GitHub imports)
@@ -1130,7 +1151,11 @@ pub async fn resolve_pipeline_dependencies(
                             .map(|p| (p, true))
                     }
                 } else {
-                    return Err(anyhow::anyhow!("Local path not available for dependency '{}'", uses).into());
+                    return Err(anyhow::anyhow!(
+                        "Local path not available for dependency '{}'",
+                        uses
+                    )
+                    .into());
                 }
             } else if let Some(url) = url_opt {
                 import_from_url(&db, &url, None, overwrite, true)
@@ -1142,7 +1167,11 @@ pub async fn resolve_pipeline_dependencies(
                     // Could try to convert local path to URL, but this is unusual
                     return Err(anyhow::anyhow!("Cannot resolve dependency '{}': local path doesn't exist and no URL available", uses).into());
                 } else {
-                    return Err(anyhow::anyhow!("Cannot resolve dependency '{}': no valid source", uses).into());
+                    return Err(anyhow::anyhow!(
+                        "Cannot resolve dependency '{}': no valid source",
+                        uses
+                    )
+                    .into());
                 }
             };
 
