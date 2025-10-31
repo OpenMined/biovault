@@ -1,13 +1,58 @@
 use crate::error::Result;
 use crate::project_spec::ProjectSpec;
 use anyhow::Context;
+use chrono::Local;
 use colored::Colorize;
 use serde_json::{json, Value as JsonValue};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::ffi::OsStr;
-use std::fs;
-use std::path::Path;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+
+fn build_augmented_path(cfg: &crate::config::Config) -> Option<String> {
+    let mut entries = BTreeSet::new();
+    for key in ["nextflow", "java", "docker"] {
+        if let Some(bin_path) = cfg.get_binary_path(key) {
+            if bin_path.is_empty() {
+                continue;
+            }
+            if let Some(parent) = Path::new(&bin_path).parent() {
+                entries.insert(parent.to_path_buf());
+            }
+        }
+    }
+
+    if entries.is_empty() {
+        return None;
+    }
+
+    let mut paths: Vec<PathBuf> = entries.into_iter().collect();
+    if let Some(existing) = std::env::var_os("PATH") {
+        paths.extend(std::env::split_paths(&existing));
+    }
+
+    std::env::join_paths(paths)
+        .ok()
+        .and_then(|joined| joined.into_string().ok())
+}
+
+fn append_desktop_log(message: &str) {
+    if let Ok(path) = std::env::var("BIOVAULT_DESKTOP_LOG_FILE") {
+        if path.is_empty() {
+            return;
+        }
+        let path = std::path::PathBuf::from(path);
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&path) {
+            let timestamp = Local::now().format("%Y-%m-%dT%H:%M:%S%:z");
+            let _ = writeln!(file, "[{}][INFO] {}", timestamp, message);
+        }
+    }
+}
 
 pub async fn execute_dynamic(
     project_folder: &str,
@@ -107,7 +152,21 @@ pub async fn execute_dynamic(
     let params_json_str = serde_json::to_string(&params_json)
         .context("Failed to encode parameters metadata to JSON")?;
 
-    let mut cmd = Command::new("nextflow");
+    let config = crate::config::get_config().ok();
+    let nextflow_bin = config
+        .as_ref()
+        .and_then(|cfg| cfg.get_binary_path("nextflow"))
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "nextflow".to_string());
+
+    let mut cmd = Command::new(&nextflow_bin);
+
+    if let Some(cfg) = &config {
+        if let Some(path_env) = build_augmented_path(cfg) {
+            cmd.env("PATH", path_env);
+        }
+    }
+
     cmd.arg("run").arg(&template_abs);
 
     if resume {
@@ -134,11 +193,16 @@ pub async fn execute_dynamic(
     if dry_run {
         println!("\n🔍 Dry run - would execute:");
         println!("  {}", display_cmd.dimmed());
+        append_desktop_log(&format!(
+            "[Pipeline] (dry-run) Nextflow command: {}",
+            display_cmd
+        ));
         return Ok(());
     }
 
     println!("\n▶️  Executing Nextflow...\n");
     println!("  {}", display_cmd.dimmed());
+    append_desktop_log(&format!("[Pipeline] Nextflow command: {}", display_cmd));
 
     let status = cmd
         .current_dir(project_path)
@@ -146,12 +210,17 @@ pub async fn execute_dynamic(
         .context("Failed to execute nextflow")?;
 
     if !status.success() {
+        append_desktop_log(&format!(
+            "[Pipeline] Nextflow exited with status: {:?}",
+            status.code()
+        ));
         return Err(
             anyhow::anyhow!("Nextflow execution failed with code: {:?}", status.code()).into(),
         );
     }
 
     println!("\n✅ Workflow completed successfully!");
+    append_desktop_log("[Pipeline] Workflow completed successfully!");
     Ok(())
 }
 
