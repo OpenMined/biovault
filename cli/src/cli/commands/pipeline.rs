@@ -1,3 +1,25 @@
+fn append_desktop_log(message: &str) {
+    if let Ok(path) = std::env::var("BIOVAULT_DESKTOP_LOG_FILE") {
+        if path.is_empty() {
+            return;
+        }
+        if let Some(parent) = std::path::Path::new(&path).parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let timestamp = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%:z");
+        let line = format!(
+            "[{}][INFO] {}
+",
+            timestamp, message
+        );
+        let _ = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .and_then(|mut file| std::io::Write::write_all(&mut file, line.as_bytes()));
+    }
+}
+
 use crate::data::BioVaultDb;
 use crate::error::Result;
 use crate::pipeline_spec::{
@@ -192,7 +214,9 @@ pub async fn run_pipeline(
         .unwrap_or_else(|| Path::new("."));
 
     let run_id = Utc::now().format("%Y%m%d%H%M%S").to_string();
-    println!("🆔 Pipeline run {}", run_id);
+    let run_msg = format!("🆔 Pipeline run {}", run_id);
+    println!("{}", run_msg);
+    append_desktop_log(&run_msg);
 
     for key in pipeline_overrides.keys() {
         if !spec.inputs.contains_key(key) {
@@ -278,14 +302,20 @@ pub async fn run_pipeline(
             project_root
         );
 
+        append_desktop_log(&format!(
+            "[Pipeline] Running step {} with args: {:?}",
+            step.id, step_args
+        ));
         run_dynamic::execute_dynamic(
             &project_root,
-            step_args,
+            step_args.clone(),
             dry_run,
             resume,
             Some(step_results_dir_str.clone()),
         )
         .await?;
+
+        append_desktop_log(&format!("[Pipeline] Completed step {}", step.id));
 
         let mut outputs = HashMap::new();
         for output in &project_spec.outputs {
