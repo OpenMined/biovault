@@ -43,7 +43,12 @@ use super::run_dynamic;
 
 type StepOverrides = HashMap<(String, String), String>;
 type PipelineOverrides = HashMap<String, String>;
-type ParseOverridesResult = (StepOverrides, PipelineOverrides, Option<String>);
+type ParseOverridesResult = (
+    StepOverrides,
+    PipelineOverrides,
+    Option<String>,
+    Vec<String>,
+);
 
 const RESULTS_TABLE_PREFIX: &str = "z_results_";
 const DEFAULT_COLUMN_PREFIX: &str = "col";
@@ -189,7 +194,7 @@ pub async fn run_pipeline(
         return Err(anyhow!("Pipeline file not found: {}", pipeline_path).into());
     }
 
-    let (step_overrides, pipeline_overrides, explicit_results_dir) =
+    let (step_overrides, pipeline_overrides, explicit_results_dir, nextflow_passthrough) =
         parse_overrides(&extra_args, results_dir_override.clone())?;
 
     let spec = PipelineSpec::load(path)?;
@@ -291,6 +296,10 @@ pub async fn run_pipeline(
 
             step_args.push(format!("--{}", input.name));
             step_args.push(resolved_value);
+        }
+
+        if !nextflow_passthrough.is_empty() {
+            step_args.extend(nextflow_passthrough.clone());
         }
 
         let step_results_dir = base_results_dir.join(&step.id);
@@ -933,6 +942,7 @@ fn parse_overrides(
     let mut step_overrides = HashMap::new();
     let mut pipeline_overrides = HashMap::new();
     let mut results_dir = initial_results_dir;
+    let mut nextflow_args = Vec::new();
     let mut i = 0;
     while i < extra_args.len() {
         let arg = &extra_args[i];
@@ -958,11 +968,20 @@ fn parse_overrides(
         } else if let Some(dir) = arg.strip_prefix("--results-dir=") {
             results_dir = Some(dir.to_string());
             i += 1;
+        } else if arg == "--" {
+            nextflow_args.extend(extra_args[i + 1..].iter().cloned());
+            break;
         } else {
-            return Err(anyhow!("Unknown pipeline run argument: {}", arg).into());
+            nextflow_args.push(arg.clone());
+            i += 1;
         }
     }
-    Ok((step_overrides, pipeline_overrides, results_dir))
+    Ok((
+        step_overrides,
+        pipeline_overrides,
+        results_dir,
+        nextflow_args,
+    ))
 }
 
 fn parse_override_pair(

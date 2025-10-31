@@ -4,6 +4,7 @@ use anyhow::Context;
 use colored::Colorize;
 use serde_json::{json, Value as JsonValue};
 use std::collections::HashMap;
+use std::ffi::OsStr;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -41,6 +42,7 @@ pub async fn execute_dynamic(
     println!("🚀 Running project: {}", spec.name.bold());
 
     let parsed_args = parse_cli_args(&args)?;
+    let nextflow_args = parsed_args.passthrough.clone();
 
     validate_no_clashes(&spec, &parsed_args)?;
 
@@ -106,9 +108,17 @@ pub async fn execute_dynamic(
         .context("Failed to encode parameters metadata to JSON")?;
 
     let mut cmd = Command::new("nextflow");
-    cmd.arg("run")
-        .arg(&template_abs)
-        .arg("--work_flow_file")
+    cmd.arg("run").arg(&template_abs);
+
+    if resume {
+        cmd.arg("-resume");
+    }
+
+    for extra in &nextflow_args {
+        cmd.arg(extra);
+    }
+
+    cmd.arg("--work_flow_file")
         .arg(&workflow_abs)
         .arg("--project_spec")
         .arg(&project_spec_abs)
@@ -119,17 +129,16 @@ pub async fn execute_dynamic(
         .arg("--results_dir")
         .arg(results_path);
 
-    if resume {
-        cmd.arg("-resume");
-    }
+    let display_cmd = format_command(&cmd);
 
     if dry_run {
         println!("\n🔍 Dry run - would execute:");
-        println!("  {}", format!("{:?}", cmd).dimmed());
+        println!("  {}", display_cmd.dimmed());
         return Ok(());
     }
 
     println!("\n▶️  Executing Nextflow...\n");
+    println!("  {}", display_cmd.dimmed());
 
     let status = cmd
         .current_dir(project_path)
@@ -150,6 +159,7 @@ pub async fn execute_dynamic(
 struct ParsedArgs {
     inputs: HashMap<String, InputArg>,
     params: HashMap<String, String>,
+    passthrough: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -162,36 +172,31 @@ fn parse_cli_args(args: &[String]) -> Result<ParsedArgs> {
     let mut inputs = HashMap::new();
     let mut params = HashMap::new();
     let mut format_overrides = HashMap::new();
+    let mut passthrough = Vec::new();
 
     let mut i = 0;
     while i < args.len() {
         let arg = &args[i];
 
+        if arg == "--" {
+            passthrough.extend(args[i + 1..].iter().cloned());
+            break;
+        }
+
         if !arg.starts_with("--") {
+            passthrough.push(arg.clone());
             i += 1;
             continue;
         }
 
         let key = arg.strip_prefix("--").unwrap();
 
-        if i + 1 >= args.len() {
-            return Err(anyhow::anyhow!("Missing value for argument: {}", arg).into());
-        }
+        if key == "set" {
+            if i + 1 >= args.len() {
+                return Err(anyhow::anyhow!("Missing value for argument: {}", arg).into());
+            }
+            let value = &args[i + 1];
 
-        let value = &args[i + 1];
-
-        if key.starts_with("param.") {
-            let param_name = key.strip_prefix("param.").unwrap();
-            params.insert(param_name.to_string(), value.clone());
-        } else if key.contains(".format") {
-            let input_name = key.strip_suffix(".format").unwrap();
-            format_overrides.insert(input_name.to_string(), value.clone());
-        } else if key.contains(".mapping.") {
-            // Future: support inline mapping overrides
-            return Err(
-                anyhow::anyhow!("Inline mapping overrides not yet supported: {}", key).into(),
-            );
-        } else if key == "set" {
             let (target, val) = value.split_once('=').ok_or_else(|| {
                 anyhow::anyhow!(
                     "Invalid --set assignment '{}'. Use inputs.name=value or params.name=value.",
@@ -218,22 +223,59 @@ fn parse_cli_args(args: &[String]) -> Result<ParsedArgs> {
                 )
                 .into());
             }
-        } else {
-            match key {
-                "results-dir" | "results_dir" => {
-                    i += 2;
-                    continue;
-                }
-                _ => {}
+            i += 2;
+            continue;
+        }
+
+        if key.starts_with("param.") {
+            if i + 1 >= args.len() {
+                return Err(anyhow::anyhow!("Missing value for argument: {}", arg).into());
             }
-            inputs.insert(
-                key.to_string(),
-                InputArg {
-                    value: value.clone(),
-                    format_override: None,
-                },
+            let value = &args[i + 1];
+            let param_name = key.strip_prefix("param.").unwrap();
+            params.insert(param_name.to_string(), value.clone());
+            i += 2;
+            continue;
+        }
+
+        if key.contains(".format") {
+            if i + 1 >= args.len() {
+                return Err(anyhow::anyhow!("Missing value for argument: {}", arg).into());
+            }
+            let value = &args[i + 1];
+            let input_name = key.strip_suffix(".format").unwrap();
+            format_overrides.insert(input_name.to_string(), value.clone());
+            i += 2;
+            continue;
+        }
+
+        if key.contains(".mapping.") {
+            // Future: support inline mapping overrides
+            return Err(
+                anyhow::anyhow!("Inline mapping overrides not yet supported: {}", key).into(),
             );
         }
+
+        match key {
+            "results-dir" | "results_dir" => {
+                i += 2;
+                continue;
+            }
+            _ => {}
+        }
+
+        if i + 1 >= args.len() {
+            return Err(anyhow::anyhow!("Missing value for argument: {}", arg).into());
+        }
+
+        let value = &args[i + 1];
+        inputs.insert(
+            key.to_string(),
+            InputArg {
+                value: value.clone(),
+                format_override: None,
+            },
+        );
 
         i += 2;
     }
@@ -244,7 +286,11 @@ fn parse_cli_args(args: &[String]) -> Result<ParsedArgs> {
         }
     }
 
-    Ok(ParsedArgs { inputs, params })
+    Ok(ParsedArgs {
+        inputs,
+        params,
+        passthrough,
+    })
 }
 
 fn validate_no_clashes(spec: &ProjectSpec, parsed: &ParsedArgs) -> Result<()> {
@@ -374,6 +420,29 @@ fn detect_format(path: &Path) -> Option<&'static str> {
         })
 }
 
+fn format_command(cmd: &Command) -> String {
+    let program = shell_quote(cmd.get_program());
+    let args: Vec<String> = cmd.get_args().map(shell_quote).collect();
+    std::iter::once(program)
+        .chain(args)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn shell_quote(value: &OsStr) -> String {
+    let s = value.to_string_lossy();
+    if s.is_empty() {
+        return "''".to_string();
+    }
+    if s.chars()
+        .all(|c| c.is_ascii_alphanumeric() || "-_./:@".contains(c))
+    {
+        return s.into_owned();
+    }
+    let escaped = s.replace('\'', "'\"'\"'");
+    format!("'{}'", escaped)
+}
+
 fn install_dynamic_template(biovault_home: &Path) -> Result<()> {
     let env_dir = biovault_home.join("env").join("dynamic-nextflow");
     if !env_dir.exists() {
@@ -461,6 +530,7 @@ mod tests {
                 ),
             ]),
             params: HashMap::new(),
+            passthrough: Vec::new(),
         };
 
         let project_spec = sample_project_spec();
@@ -506,6 +576,7 @@ mod tests {
             .get("threshold")
             .expect("param threshold parsed");
         assert_eq!(threshold, "0.5");
+        assert!(parsed.passthrough.is_empty());
     }
 
     #[test]
@@ -520,5 +591,27 @@ mod tests {
         let parsed = parse_cli_args(&args).unwrap();
         assert!(parsed.inputs.contains_key("samplesheet"));
         assert!(!parsed.inputs.contains_key("results-dir"));
+        assert!(parsed.passthrough.is_empty());
+    }
+
+    #[test]
+    fn parse_cli_args_captures_nextflow_flags() {
+        let args = vec![
+            "--samplesheet".to_string(),
+            "/tmp/sheet.csv".to_string(),
+            "-with-singularity".to_string(),
+            "-profile".to_string(),
+            "docker".to_string(),
+        ];
+
+        let parsed = parse_cli_args(&args).expect("parse passthrough flags");
+        assert_eq!(
+            parsed.passthrough,
+            vec![
+                "-with-singularity".to_string(),
+                "-profile".to_string(),
+                "docker".to_string()
+            ]
+        );
     }
 }

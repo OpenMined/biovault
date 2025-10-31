@@ -6,7 +6,9 @@ params.work_flow_file = params.work_flow_file ?: 'workflow.nf'
 params.project_spec = params.project_spec ?: null
 params.inputs_json = params.inputs_json ?: null
 params.params_json = params.params_json ?: null
-params.assets_dir = params.assets_dir ?: null
+if (!params.containsKey('assets_dir')) {
+    params.assets_dir = null
+}
 
 // Optional context parameters (provided by BioVault daemon in production)
 params.run_id = null
