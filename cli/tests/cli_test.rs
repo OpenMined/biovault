@@ -43,7 +43,8 @@ fn test_init_command() {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
 
     let temp_dir = TempDir::new().unwrap();
-    let config_dir = temp_dir.path().join(".biovault");
+    // BIOVAULT_TEST_HOME uses the path directly without .biovault suffix
+    let config_file = temp_dir.path().join("config.yaml");
 
     // Save original HOME/USERPROFILE and set temporary one
     let original_home = if cfg!(windows) {
@@ -78,7 +79,6 @@ fn test_init_command() {
         ));
 
     // Check that config file was created
-    let config_file = config_dir.join("config.yaml");
     assert!(
         config_file.exists(),
         "Config file should exist at: {}",
@@ -110,11 +110,10 @@ fn test_init_command_existing_config() {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
 
     let temp_dir = TempDir::new().unwrap();
-    let config_dir = temp_dir.path().join(".biovault");
-    fs::create_dir_all(&config_dir).unwrap();
+    // BIOVAULT_TEST_HOME uses the path directly without .biovault suffix
+    let config_file = temp_dir.path().join("config.yaml");
 
     // Create existing config
-    let config_file = config_dir.join("config.yaml");
     fs::write(&config_file, "email: existing@example.com\n").unwrap();
 
     // Save original HOME/USERPROFILE and set temporary one
