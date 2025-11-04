@@ -1250,7 +1250,8 @@ fn suggest_directory_candidates(entries: &[FileEntry]) -> Vec<PatternCandidate> 
 
 fn suggest_leading_numeric_candidates(entries: &[FileEntry]) -> Vec<PatternCandidate> {
     let mut records = Vec::new();
-    let re = Regex::new(r"^(\d{3,})").unwrap();
+    // Match 1-4 digits at the start of the filename (to catch 01, 02, 001, etc.)
+    let re = Regex::new(r"^(\d{1,4})").unwrap();
 
     for entry in entries {
         if let Some(stem) = &entry.stem {
@@ -1267,7 +1268,8 @@ fn suggest_leading_numeric_candidates(entries: &[FileEntry]) -> Vec<PatternCandi
         }
     }
 
-    if records.len() < 3 {
+    // Lower threshold to 2 files instead of 3 to be more permissive
+    if records.len() < 2 {
         return Vec::new();
     }
 
@@ -1285,7 +1287,8 @@ fn suggest_leading_numeric_candidates(entries: &[FileEntry]) -> Vec<PatternCandi
         return Vec::new();
     }
 
-    if dominant_count * 100 / records.len() < 70 {
+    // Lower coverage threshold to 60% to be more permissive
+    if dominant_count * 100 / records.len() < 60 {
         return Vec::new();
     }
 
@@ -1698,7 +1701,15 @@ pub fn delete_participants_bulk(db: &BioVaultDb, ids: &[i64]) -> Result<usize> {
 }
 
 /// Delete a file record from the catalog
+/// Also deletes participants that have no files left after deletion
 pub fn delete_file(db: &BioVaultDb, file_id: i64) -> Result<()> {
+    // First, get the participant ID for this file before deletion
+    let participant_id: Option<i64> = db.conn.query_row(
+        "SELECT participant_id FROM files WHERE id = ?1",
+        params![file_id],
+        |row| row.get(0),
+    ).ok();
+
     let rows = db
         .conn
         .execute("DELETE FROM files WHERE id = ?1", params![file_id])?;
@@ -1707,20 +1718,85 @@ pub fn delete_file(db: &BioVaultDb, file_id: i64) -> Result<()> {
         anyhow::bail!("File with id {} not found", file_id);
     }
 
+    // Clean up orphaned participant if this file had one and it now has no files
+    if let Some(pid) = participant_id {
+        let file_count: i64 = db.conn.query_row(
+            "SELECT COUNT(*) FROM files WHERE participant_id = ?1",
+            params![pid],
+            |row| row.get(0),
+        )?;
+        
+        if file_count == 0 {
+            let deleted = db.conn.execute(
+                "DELETE FROM participants WHERE id = ?1",
+                params![pid],
+            )?;
+            
+            if deleted > 0 {
+                eprintln!("🧹 Cleaned up orphaned participant (id: {}) after deleting file", pid);
+            }
+        }
+    }
+
     Ok(())
 }
 
 /// Delete multiple file records from the catalog
+/// Also deletes participants that have no files left after deletion
 pub fn delete_files_bulk(db: &BioVaultDb, ids: &[i64]) -> Result<usize> {
     if ids.is_empty() {
         return Ok(0);
     }
 
+    // First, get the participant IDs that will be affected before deletion
+    let mut affected_participant_ids = Vec::new();
+    {
+        let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let select_query = format!(
+            "SELECT DISTINCT participant_id FROM files WHERE id IN ({}) AND participant_id IS NOT NULL",
+            placeholders
+        );
+        let mut stmt = db.conn.prepare(&select_query)?;
+        let participant_iter = stmt.query_map(rusqlite::params_from_iter(ids.iter()), |row| {
+            Ok(row.get::<_, i64>(0)?)
+        })?;
+        
+        for result in participant_iter {
+            if let Ok(pid) = result {
+                affected_participant_ids.push(pid);
+            }
+        }
+    }
+
+    // Delete the files
     let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
     let delete_query = format!("DELETE FROM files WHERE id IN ({})", placeholders);
     let rows = db
         .conn
         .execute(&delete_query, rusqlite::params_from_iter(ids.iter()))?;
+
+    // Clean up orphaned participants (participants with no files left)
+    // Check each affected participant to see if they still have files
+    let mut deleted_participants = 0;
+    for participant_id in affected_participant_ids {
+        let file_count: i64 = db.conn.query_row(
+            "SELECT COUNT(*) FROM files WHERE participant_id = ?1",
+            params![participant_id],
+            |row| row.get(0),
+        )?;
+        
+        if file_count == 0 {
+            let deleted = db.conn.execute(
+                "DELETE FROM participants WHERE id = ?1",
+                params![participant_id],
+            )?;
+            deleted_participants += deleted;
+        }
+    }
+    
+    if deleted_participants > 0 {
+        eprintln!("🧹 Cleaned up {} orphaned participant(s) after deleting files", deleted_participants);
+    }
 
     Ok(rows)
 }
