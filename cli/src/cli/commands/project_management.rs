@@ -1201,22 +1201,16 @@ pub async fn resolve_pipeline_dependencies(
         }
     }
 
-    // Save updated pipeline.yaml if any dependencies were rewritten
+    // Always save the spec (with description preserved) after dependency resolution
+    // This ensures description is preserved even if dependencies weren't rewritten
+    spec.save(pipeline_yaml_path)
+        .context("Failed to save pipeline.yaml with description")?;
+
     if any_rewritten {
         if !quiet {
             println!(
-                "\n{} Updating pipeline.yaml to use registered names...",
+                "\n{} Updated pipeline.yaml to use registered names...",
                 "🔧".cyan()
-            );
-        }
-        let updated_yaml =
-            serde_yaml::to_string(spec).context("Failed to serialize updated spec")?;
-        fs::write(pipeline_yaml_path, updated_yaml)
-            .context("Failed to write updated pipeline.yaml")?;
-        if !quiet {
-            println!(
-                "{} Pipeline YAML updated with registered names!",
-                "✓".green()
             );
         }
     }
@@ -1274,10 +1268,7 @@ pub async fn import_pipeline_with_deps(
 
     fs::create_dir_all(&pipeline_dir)?;
 
-    // Save pipeline.yaml
     let pipeline_yaml_path = pipeline_dir.join(PIPELINE_YAML_FILE);
-    fs::write(&pipeline_yaml_path, &yaml_str)?;
-    println!("{} Saved pipeline.yaml", "✓".green());
 
     // Extract base URL for resolving relative project paths
     let base_url = if let Some(idx) = url.rfind('/') {
