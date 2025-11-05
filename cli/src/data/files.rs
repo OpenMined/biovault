@@ -1250,8 +1250,8 @@ fn suggest_directory_candidates(entries: &[FileEntry]) -> Vec<PatternCandidate> 
 
 fn suggest_leading_numeric_candidates(entries: &[FileEntry]) -> Vec<PatternCandidate> {
     let mut records = Vec::new();
-    // Match 1-4 digits at the start of the filename (to catch 01, 02, 001, etc.)
-    let re = Regex::new(r"^(\d{1,4})").unwrap();
+    // Match 1-8 digits at the start of the filename (to catch 01, 02, 001, 000000, 12345678, etc.)
+    let re = Regex::new(r"^(\d{1,8})").unwrap();
 
     for entry in entries {
         if let Some(stem) = &entry.stem {
@@ -1704,11 +1704,14 @@ pub fn delete_participants_bulk(db: &BioVaultDb, ids: &[i64]) -> Result<usize> {
 /// Also deletes participants that have no files left after deletion
 pub fn delete_file(db: &BioVaultDb, file_id: i64) -> Result<()> {
     // First, get the participant ID for this file before deletion
-    let participant_id: Option<i64> = db.conn.query_row(
-        "SELECT participant_id FROM files WHERE id = ?1",
-        params![file_id],
-        |row| row.get(0),
-    ).ok();
+    let participant_id: Option<i64> = db
+        .conn
+        .query_row(
+            "SELECT participant_id FROM files WHERE id = ?1",
+            params![file_id],
+            |row| row.get(0),
+        )
+        .ok();
 
     let rows = db
         .conn
@@ -1725,15 +1728,17 @@ pub fn delete_file(db: &BioVaultDb, file_id: i64) -> Result<()> {
             params![pid],
             |row| row.get(0),
         )?;
-        
+
         if file_count == 0 {
-            let deleted = db.conn.execute(
-                "DELETE FROM participants WHERE id = ?1",
-                params![pid],
-            )?;
-            
+            let deleted = db
+                .conn
+                .execute("DELETE FROM participants WHERE id = ?1", params![pid])?;
+
             if deleted > 0 {
-                eprintln!("🧹 Cleaned up orphaned participant (id: {}) after deleting file", pid);
+                eprintln!(
+                    "🧹 Cleaned up orphaned participant (id: {}) after deleting file",
+                    pid
+                );
             }
         }
     }
@@ -1760,7 +1765,7 @@ pub fn delete_files_bulk(db: &BioVaultDb, ids: &[i64]) -> Result<usize> {
         let participant_iter = stmt.query_map(rusqlite::params_from_iter(ids.iter()), |row| {
             Ok(row.get::<_, i64>(0)?)
         })?;
-        
+
         for result in participant_iter {
             if let Ok(pid) = result {
                 affected_participant_ids.push(pid);
@@ -1784,7 +1789,7 @@ pub fn delete_files_bulk(db: &BioVaultDb, ids: &[i64]) -> Result<usize> {
             params![participant_id],
             |row| row.get(0),
         )?;
-        
+
         if file_count == 0 {
             let deleted = db.conn.execute(
                 "DELETE FROM participants WHERE id = ?1",
@@ -1793,9 +1798,12 @@ pub fn delete_files_bulk(db: &BioVaultDb, ids: &[i64]) -> Result<usize> {
             deleted_participants += deleted;
         }
     }
-    
+
     if deleted_participants > 0 {
-        eprintln!("🧹 Cleaned up {} orphaned participant(s) after deleting files", deleted_participants);
+        eprintln!(
+            "🧹 Cleaned up {} orphaned participant(s) after deleting files",
+            deleted_participants
+        );
     }
 
     Ok(rows)
@@ -2047,6 +2055,158 @@ pub fn update_file_status(
     )?;
 
     Ok(())
+}
+
+// Queue information support
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct QueueInfo {
+    pub total_pending: usize,
+    pub processing_count: usize,
+    pub queue_position: Option<usize>, // Position of specific file if file_id provided
+    pub currently_processing: Option<QueueFileInfo>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct QueueFileInfo {
+    pub id: i64,
+    pub file_path: String,
+}
+
+/// Get queue information - total pending count, processing count, and optionally queue position for a specific file
+pub fn get_queue_info(db: &BioVaultDb, file_id: Option<i64>) -> Result<QueueInfo> {
+    let conn = db.connection();
+
+    // Get total pending count
+    let total_pending: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM files WHERE status = 'pending'",
+        [],
+        |row| row.get::<_, i64>(0),
+    )?;
+
+    // Get processing count
+    let processing_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM files WHERE status = 'processing'",
+        [],
+        |row| row.get::<_, i64>(0),
+    )?;
+
+    // Get currently processing file (if any)
+    let currently_processing = conn
+        .query_row(
+            "SELECT id, file_path FROM files WHERE status = 'processing' ORDER BY updated_at ASC LIMIT 1",
+            [],
+            |row| {
+                Ok(QueueFileInfo {
+                    id: row.get(0)?,
+                    file_path: row.get(1)?,
+                })
+            },
+        )
+        .ok();
+
+    // Get queue position for specific file if provided
+    let queue_position = if let Some(fid) = file_id {
+        // First check if file is currently processing
+        let is_processing: Result<i64, rusqlite::Error> = conn.query_row(
+            "SELECT COUNT(*) FROM files WHERE status = 'processing' AND id = ?1",
+            [fid],
+            |row| row.get::<_, i64>(0),
+        );
+
+        if let Ok(count) = is_processing {
+            if count > 0 {
+                // Currently processing = position 0
+                Some(0)
+            } else {
+                // Count how many files are ahead of this one in the queue
+                let position: Result<i64, rusqlite::Error> = conn.query_row(
+                    "SELECT COUNT(*) FROM files 
+                     WHERE status = 'pending' 
+                     AND queue_added_at < (
+                         SELECT queue_added_at FROM files WHERE id = ?1 AND status = 'pending'
+                     )",
+                    [fid],
+                    |row| row.get::<_, i64>(0),
+                );
+
+                position.ok().map(|p| (p + 1) as usize) // Add 1 since position is 1-indexed
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    Ok(QueueInfo {
+        total_pending: total_pending as usize,
+        processing_count: processing_count as usize,
+        queue_position,
+        currently_processing,
+    })
+}
+
+/// Clear all pending and processing files from the queue (delete them)
+/// This stops any ongoing imports and clears the queue
+/// Returns the number of files deleted
+pub fn clear_pending_queue(db: &BioVaultDb) -> Result<usize> {
+    let conn = db.connection();
+
+    // Get all pending and processing file IDs first to track what will be deleted
+    let queue_ids: Vec<i64> = conn
+        .prepare("SELECT id FROM files WHERE status IN ('pending', 'processing')")?
+        .query_map([], |row| row.get::<_, i64>(0))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+
+    if queue_ids.is_empty() {
+        return Ok(0);
+    }
+
+    // Get participant IDs that will be affected
+    let mut affected_participant_ids = Vec::new();
+    {
+        let placeholders = queue_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let select_query = format!(
+            "SELECT DISTINCT participant_id FROM files WHERE id IN ({}) AND participant_id IS NOT NULL",
+            placeholders
+        );
+        let mut stmt = conn.prepare(&select_query)?;
+        let participant_iter = stmt
+            .query_map(rusqlite::params_from_iter(queue_ids.iter()), |row| {
+                Ok(row.get::<_, i64>(0)?)
+            })?;
+
+        for result in participant_iter {
+            if let Ok(pid) = result {
+                affected_participant_ids.push(pid);
+            }
+        }
+    }
+
+    // Delete all pending and processing files
+    let deleted = conn.execute(
+        "DELETE FROM files WHERE status IN ('pending', 'processing')",
+        [],
+    )?;
+
+    // Clean up orphaned participants (participants with no files left)
+    for participant_id in affected_participant_ids {
+        let file_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM files WHERE participant_id = ?1",
+            params![participant_id],
+            |row| row.get(0),
+        )?;
+
+        if file_count == 0 {
+            let _ = conn.execute(
+                "DELETE FROM participants WHERE id = ?1",
+                params![participant_id],
+            )?;
+        }
+    }
+
+    Ok(deleted)
 }
 
 pub fn get_genotype_metadata(db: &BioVaultDb, file_id: i64) -> Result<Option<GenotypeMetadata>> {
