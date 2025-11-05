@@ -32,6 +32,8 @@ pub struct PipelineStepSpec {
 pub struct PipelineSpec {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<PipelineContextSpec>,
     #[serde(default)]
     pub inputs: BTreeMap<String, PipelineInputSpec>,
