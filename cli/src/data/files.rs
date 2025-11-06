@@ -1763,13 +1763,11 @@ pub fn delete_files_bulk(db: &BioVaultDb, ids: &[i64]) -> Result<usize> {
         );
         let mut stmt = db.conn.prepare(&select_query)?;
         let participant_iter = stmt.query_map(rusqlite::params_from_iter(ids.iter()), |row| {
-            Ok(row.get::<_, i64>(0)?)
+            row.get::<_, i64>(0)
         })?;
 
-        for result in participant_iter {
-            if let Ok(pid) = result {
-                affected_participant_ids.push(pid);
-            }
+        for pid in participant_iter.flatten() {
+            affected_participant_ids.push(pid);
         }
     }
 
@@ -2215,7 +2213,7 @@ pub fn get_queue_info(db: &BioVaultDb, file_id: Option<i64>) -> Result<QueueInfo
 
     // Calculate estimated time remaining: simple and accurate
     let estimated_time_remaining = if total_pending_usize > 0 || processing_count_usize > 0 {
-        let median_seconds = calculate_median_processing_time(&conn)?.unwrap_or(60.0); // Default 60s if no historical data
+        let median_seconds = calculate_median_processing_time(conn)?.unwrap_or(60.0); // Default 60s if no historical data
 
         // Get elapsed time on oldest processing file (if any)
         let elapsed: Option<f64> = conn
@@ -2292,13 +2290,11 @@ pub fn clear_pending_queue(db: &BioVaultDb) -> Result<usize> {
         let mut stmt = conn.prepare(&select_query)?;
         let participant_iter = stmt
             .query_map(rusqlite::params_from_iter(queue_ids.iter()), |row| {
-                Ok(row.get::<_, i64>(0)?)
+                row.get::<_, i64>(0)
             })?;
 
-        for result in participant_iter {
-            if let Ok(pid) = result {
-                affected_participant_ids.push(pid);
-            }
+        for pid in participant_iter.flatten() {
+            affected_participant_ids.push(pid);
         }
     }
 
