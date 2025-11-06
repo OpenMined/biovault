@@ -148,6 +148,31 @@ impl BioVaultDb {
             info!("Migration complete: added queue_added_at column");
         }
 
+        // Add processing_started_at and processing_completed_at columns to files if they don't exist
+        let processing_started_exists = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('files') WHERE name='processing_started_at'",
+                [],
+                |row| row.get(0),
+            )
+            .map(|count: i32| count > 0)
+            .unwrap_or(false);
+
+        if !processing_started_exists {
+            info!(
+                "Adding processing_started_at and processing_completed_at columns to files table"
+            );
+            conn.execute(
+                "ALTER TABLE files ADD COLUMN processing_started_at DATETIME",
+                [],
+            )?;
+            conn.execute(
+                "ALTER TABLE files ADD COLUMN processing_completed_at DATETIME",
+                [],
+            )?;
+            info!("Migration complete: added processing timing columns");
+        }
+
         // Migrate projects table to add version column and update unique constraint
         let projects_version_exists = conn
             .query_row(

@@ -2045,14 +2045,38 @@ pub fn update_file_status(
 ) -> Result<()> {
     let conn = db.connection();
 
-    conn.execute(
-        "UPDATE files
-         SET status = ?1,
-             processing_error = ?2,
-             updated_at = CURRENT_TIMESTAMP
-         WHERE id = ?3",
-        rusqlite::params![status, error, file_id],
-    )?;
+    // Track processing start time when status changes to "processing"
+    // Track processing completion time when status changes to "complete"
+    if status == "processing" {
+        conn.execute(
+            "UPDATE files
+             SET status = ?1,
+                 processing_error = ?2,
+                 processing_started_at = CURRENT_TIMESTAMP,
+                 updated_at = CURRENT_TIMESTAMP
+             WHERE id = ?3",
+            rusqlite::params![status, error, file_id],
+        )?;
+    } else if status == "complete" {
+        conn.execute(
+            "UPDATE files
+             SET status = ?1,
+                 processing_error = ?2,
+                 processing_completed_at = CURRENT_TIMESTAMP,
+                 updated_at = CURRENT_TIMESTAMP
+             WHERE id = ?3",
+            rusqlite::params![status, error, file_id],
+        )?;
+    } else {
+        conn.execute(
+            "UPDATE files
+             SET status = ?1,
+                 processing_error = ?2,
+                 updated_at = CURRENT_TIMESTAMP
+             WHERE id = ?3",
+            rusqlite::params![status, error, file_id],
+        )?;
+    }
 
     Ok(())
 }
@@ -2065,12 +2089,42 @@ pub struct QueueInfo {
     pub processing_count: usize,
     pub queue_position: Option<usize>, // Position of specific file if file_id provided
     pub currently_processing: Option<QueueFileInfo>,
+    pub estimated_time_remaining_seconds: Option<f64>, // Estimated seconds remaining for queue
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct QueueFileInfo {
     pub id: i64,
     pub file_path: String,
+}
+
+/// Calculate median processing time from recently completed files
+/// Returns None if no data available, otherwise returns median in seconds
+fn calculate_median_processing_time(conn: &rusqlite::Connection) -> Result<Option<f64>> {
+    let mut times: Vec<f64> = conn
+        .prepare(
+            "SELECT (julianday(processing_completed_at) - julianday(processing_started_at)) * 86400.0
+         FROM files
+             WHERE status = 'complete' AND processing_started_at IS NOT NULL AND processing_completed_at IS NOT NULL
+             ORDER BY processing_completed_at DESC LIMIT 100",
+        )?
+        .query_map([], |row| row.get::<_, Option<f64>>(0))?
+        .filter_map(|r| r.ok().flatten())
+        .filter(|&t| t > 0.0)
+        .collect();
+
+    if times.is_empty() {
+        return Ok(None);
+    }
+
+    times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let median = if times.len() % 2 == 0 {
+        (times[times.len() / 2 - 1] + times[times.len() / 2]) / 2.0
+    } else {
+        times[times.len() / 2]
+    };
+
+    Ok(Some(median))
 }
 
 /// Get queue information - total pending count, processing count, and optionally queue position for a specific file
@@ -2091,6 +2145,9 @@ pub fn get_queue_info(db: &BioVaultDb, file_id: Option<i64>) -> Result<QueueInfo
         |row| row.get::<_, i64>(0),
     )?;
 
+    let total_pending_usize = total_pending as usize;
+    let processing_count_usize = processing_count as usize;
+
     // Get currently processing file (if any)
     let currently_processing = conn
         .query_row(
@@ -2106,7 +2163,7 @@ pub fn get_queue_info(db: &BioVaultDb, file_id: Option<i64>) -> Result<QueueInfo
         .ok();
 
     // Get queue position for specific file if provided
-    let queue_position = if let Some(fid) = file_id {
+    let queue_position: Option<usize> = if let Some(fid) = file_id {
         // First check if file is currently processing
         let is_processing: Result<i64, rusqlite::Error> = conn.query_row(
             "SELECT COUNT(*) FROM files WHERE status = 'processing' AND id = ?1",
@@ -2117,14 +2174,31 @@ pub fn get_queue_info(db: &BioVaultDb, file_id: Option<i64>) -> Result<QueueInfo
         if let Ok(count) = is_processing {
             if count > 0 {
                 // Currently processing = position 0
-                Some(0)
+                Some(0usize)
             } else {
                 // Count how many files are ahead of this one in the queue
+                // Use id as tiebreaker when queue_added_at is the same (or NULL)
                 let position: Result<i64, rusqlite::Error> = conn.query_row(
                     "SELECT COUNT(*) FROM files 
                      WHERE status = 'pending' 
-                     AND queue_added_at < (
-                         SELECT queue_added_at FROM files WHERE id = ?1 AND status = 'pending'
+                     AND (
+                         (queue_added_at < (
+                             SELECT queue_added_at FROM files WHERE id = ?1 AND status = 'pending'
+                         ))
+                         OR (queue_added_at IS NULL AND (
+                             SELECT queue_added_at FROM files WHERE id = ?1 AND status = 'pending'
+                         ) IS NOT NULL)
+                         OR (
+                             (
+                                 (queue_added_at = (
+                                     SELECT queue_added_at FROM files WHERE id = ?1 AND status = 'pending'
+                                 ))
+                                 OR (queue_added_at IS NULL AND (
+                                     SELECT queue_added_at FROM files WHERE id = ?1 AND status = 'pending'
+                                 ) IS NULL)
+                             )
+                             AND id < ?1
+                         )
                      )",
                     [fid],
                     |row| row.get::<_, i64>(0),
@@ -2139,11 +2213,55 @@ pub fn get_queue_info(db: &BioVaultDb, file_id: Option<i64>) -> Result<QueueInfo
         None
     };
 
+    // Calculate estimated time remaining: simple and accurate
+    let estimated_time_remaining = if total_pending_usize > 0 || processing_count_usize > 0 {
+        let median_seconds = calculate_median_processing_time(&conn)?.unwrap_or(60.0); // Default 60s if no historical data
+
+        // Get elapsed time on oldest processing file (if any)
+        let elapsed: Option<f64> = conn
+            .query_row(
+                "SELECT (julianday('now') - julianday(processing_started_at)) * 86400.0
+             FROM files
+             WHERE status = 'processing' AND processing_started_at IS NOT NULL
+             ORDER BY processing_started_at ASC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .ok();
+
+        // Remaining time for current processing file
+        let remaining_for_current = match elapsed {
+            Some(e) => (median_seconds - e).max(median_seconds * 0.1), // At least 10% if over median
+            None => 0.0,
+        };
+
+        // Calculate estimate: for specific file or entire queue
+        let estimate = if let Some(position) = queue_position {
+            // Per-file estimate: files ahead + this file
+            let files_ahead = if position == 0 {
+                processing_count_usize.saturating_sub(1) // Already processing, count others
+            } else {
+                processing_count_usize + (position - 1) // All processing + pending ahead
+            };
+            remaining_for_current + (files_ahead as f64 * median_seconds)
+        } else {
+            // Entire queue estimate
+            remaining_for_current
+                + ((processing_count_usize.saturating_sub(1) + total_pending_usize) as f64
+                    * median_seconds)
+        };
+
+        Some(estimate.max(0.0))
+    } else {
+        None
+    };
+
     Ok(QueueInfo {
-        total_pending: total_pending as usize,
-        processing_count: processing_count as usize,
+        total_pending: total_pending_usize,
+        processing_count: processing_count_usize,
         queue_position,
         currently_processing,
+        estimated_time_remaining_seconds: estimated_time_remaining,
     })
 }
 
@@ -2244,13 +2362,14 @@ pub fn update_file_from_queue(
 ) -> Result<()> {
     let conn = db.connection();
 
-    // Update file hash and data type
+    // Update file hash and data type, and record processing completion time
     if let Some(meta) = metadata {
         conn.execute(
             "UPDATE files
              SET file_hash = ?1,
                  data_type = ?2,
                  status = 'complete',
+                 processing_completed_at = CURRENT_TIMESTAMP,
                  updated_at = CURRENT_TIMESTAMP
              WHERE id = ?3",
             rusqlite::params![hash, meta.data_type, file_id],
@@ -2284,11 +2403,12 @@ pub fn update_file_from_queue(
             }
         }
     } else {
-        // Just update the hash and mark as complete
+        // Just update the hash and mark as complete, record processing completion time
         conn.execute(
             "UPDATE files
              SET file_hash = ?1,
                  status = 'complete',
+                 processing_completed_at = CURRENT_TIMESTAMP,
                  updated_at = CURRENT_TIMESTAMP
              WHERE id = ?2",
             rusqlite::params![hash, file_id],
