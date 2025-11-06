@@ -64,14 +64,14 @@ fn strip_ansi_codes(input: &str) -> String {
         if c == '\u{1b}' {
             match chars.next() {
                 Some('[') => {
-                    while let Some(next) = chars.next() {
+                    for next in chars.by_ref() {
                         if ('@'..='~').contains(&next) {
                             break;
                         }
                     }
                 }
                 Some(']') => {
-                    while let Some(next) = chars.next() {
+                    for next in chars.by_ref() {
                         if next == '\u{07}' {
                             break;
                         }
@@ -110,7 +110,11 @@ fn parse_json_output<T: DeserializeOwned>(stdout: &str, context: &str) -> Result
                     )
                 })
             } else {
-                Err(anyhow!("{}: failed to parse JSON: {}", context, primary_err))
+                Err(anyhow!(
+                    "{}: failed to parse JSON: {}",
+                    context,
+                    primary_err
+                ))
             }
         }
     }
@@ -457,10 +461,7 @@ fn test_import_genotype_data(
     let list_stdout = String::from_utf8_lossy(&list_output.stdout);
     let files_data: FilesListData =
         parse_json_output(&list_stdout, "Failed to parse files list JSON output")?;
-    println!(
-        "  Catalog now tracks {} genotype files",
-        files_data.total
-    );
+    println!("  Catalog now tracks {} genotype files", files_data.total);
     assert!(
         !files_data.files.is_empty(),
         "Catalog should contain imported genotype files"
