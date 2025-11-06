@@ -1206,13 +1206,12 @@ pub async fn resolve_pipeline_dependencies(
     spec.save(pipeline_yaml_path)
         .context("Failed to save pipeline.yaml with description")?;
 
-    if any_rewritten
-        && !quiet {
-            println!(
-                "\n{} Updated pipeline.yaml to use registered names...",
-                "🔧".cyan()
-            );
-        }
+    if any_rewritten && !quiet {
+        println!(
+            "\n{} Updated pipeline.yaml to use registered names...",
+            "🔧".cyan()
+        );
+    }
 
     Ok(any_rewritten)
 }
