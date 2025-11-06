@@ -56,24 +56,69 @@ fn pause_between_steps(step_number: usize, step_label: &str) {
     let _ = io::stdin().read_line(&mut buffer);
 }
 
+fn strip_ansi_codes(input: &str) -> String {
+    let mut result = String::with_capacity(input.len());
+    let mut chars = input.chars();
+
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            match chars.next() {
+                Some('[') => {
+                    while let Some(next) = chars.next() {
+                        if ('@'..='~').contains(&next) {
+                            break;
+                        }
+                    }
+                }
+                Some(']') => {
+                    while let Some(next) = chars.next() {
+                        if next == '\u{07}' {
+                            break;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        } else {
+            result.push(c);
+        }
+    }
+
+    result
+}
+
 fn parse_json_output<T: DeserializeOwned>(stdout: &str, context: &str) -> Result<T> {
-    let trimmed = stdout.trim_start();
+    let cleaned = strip_ansi_codes(stdout);
+    let trimmed = cleaned.trim_start();
     let start = trimmed
         .find(['{', '['])
         .ok_or_else(|| anyhow!("{}: no JSON payload found", context))?;
     let json_slice = &trimmed[start..];
-    serde_json::from_str(json_slice)
-        .map_err(|e| anyhow!("{}: failed to parse JSON: {}", context, e))
+    let value: serde_json::Value = serde_json::from_str(json_slice)
+        .map_err(|e| anyhow!("{}: failed to parse JSON: {}", context, e))?;
+
+    match serde_json::from_value::<T>(value.clone()) {
+        Ok(parsed) => Ok(parsed),
+        Err(primary_err) => {
+            if let Some(data_value) = value.get("data") {
+                serde_json::from_value::<T>(data_value.clone()).map_err(|data_err| {
+                    anyhow!(
+                        "{}: failed to parse response data: {}; original error: {}",
+                        context,
+                        data_err,
+                        primary_err
+                    )
+                })
+            } else {
+                Err(anyhow!("{}: failed to parse JSON: {}", context, primary_err))
+            }
+        }
+    }
 }
 
 struct ProcessOutcome {
     run_results: PathBuf,
     submission_folder: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct FilesListResponse {
-    pub data: FilesListData,
 }
 
 #[derive(Debug, Deserialize)]
@@ -410,18 +455,18 @@ fn test_import_genotype_data(
         return Err(anyhow!("bv files list failed"));
     }
     let list_stdout = String::from_utf8_lossy(&list_output.stdout);
-    let files_response: FilesListResponse =
+    let files_data: FilesListData =
         parse_json_output(&list_stdout, "Failed to parse files list JSON output")?;
     println!(
         "  Catalog now tracks {} genotype files",
-        files_response.data.total
+        files_data.total
     );
     assert!(
-        !files_response.data.files.is_empty(),
+        !files_data.files.is_empty(),
         "Catalog should contain imported genotype files"
     );
 
-    Ok(files_response.data.total)
+    Ok(files_data.total)
 }
 
 fn test_prepare_dynamic_project(client_base: &Path, _test_mode: &str) -> Result<()> {
@@ -1057,10 +1102,10 @@ fn generate_samplesheet_from_db(
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let response: FilesListResponse = serde_json::from_str(&stdout)
-        .map_err(|e| anyhow!("Failed to parse files list JSON output: {}", e))?;
+    let response: FilesListData =
+        parse_json_output(&stdout, "Failed to parse files list JSON output")?;
 
-    if response.data.files.is_empty() {
+    if response.files.is_empty() {
         println!("⚠ Catalog returned no files");
     }
 
@@ -1071,7 +1116,7 @@ fn generate_samplesheet_from_db(
     writeln!(file, "participant_id,genotype_file_path")?;
 
     let mut rows = Vec::new();
-    for entry in &response.data.files {
+    for entry in &response.files {
         let participant = entry
             .participant_name
             .as_ref()
