@@ -117,7 +117,9 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.91.0
 
       - name: Install BioVault CLI
         run: |
@@ -153,7 +155,9 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.91.0
 
       - name: Install BioVault CLI
         run: |
@@ -189,7 +193,9 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.91.0
 
       - name: Install BioVault CLI
         shell: bash
@@ -223,5 +229,4 @@ jobs:
     with:
       cleanup_after_success: true
       update_submodules: true
-
 
