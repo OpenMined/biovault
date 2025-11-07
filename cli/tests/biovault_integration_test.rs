@@ -20,6 +20,8 @@ const COUNT_LINES_PROJECT_YAML: &str =
 const COUNT_LINES_WORKFLOW: &str = include_str!("../examples/pipeline/count-lines/workflow.nf");
 const COUNT_LINES_SCRIPT: &str =
     include_str!("../examples/pipeline/count-lines/assets/count_lines.py");
+const MESSAGE_WAIT_ATTEMPTS: usize = 10;
+const MESSAGE_WAIT_DELAY_SECS: u64 = 2;
 
 fn wait_threshold() -> Option<usize> {
     match env::var("TEST_WAIT_FOR_STEPS") {
@@ -56,24 +58,73 @@ fn pause_between_steps(step_number: usize, step_label: &str) {
     let _ = io::stdin().read_line(&mut buffer);
 }
 
+fn strip_ansi_codes(input: &str) -> String {
+    let mut result = String::with_capacity(input.len());
+    let mut chars = input.chars();
+
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            match chars.next() {
+                Some('[') => {
+                    for next in chars.by_ref() {
+                        if ('@'..='~').contains(&next) {
+                            break;
+                        }
+                    }
+                }
+                Some(']') => {
+                    for next in chars.by_ref() {
+                        if next == '\u{07}' {
+                            break;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        } else {
+            result.push(c);
+        }
+    }
+
+    result
+}
+
 fn parse_json_output<T: DeserializeOwned>(stdout: &str, context: &str) -> Result<T> {
-    let trimmed = stdout.trim_start();
+    let cleaned = strip_ansi_codes(stdout);
+    let trimmed = cleaned.trim_start();
     let start = trimmed
         .find(['{', '['])
         .ok_or_else(|| anyhow!("{}: no JSON payload found", context))?;
     let json_slice = &trimmed[start..];
-    serde_json::from_str(json_slice)
-        .map_err(|e| anyhow!("{}: failed to parse JSON: {}", context, e))
+    let value: serde_json::Value = serde_json::from_str(json_slice)
+        .map_err(|e| anyhow!("{}: failed to parse JSON: {}", context, e))?;
+
+    match serde_json::from_value::<T>(value.clone()) {
+        Ok(parsed) => Ok(parsed),
+        Err(primary_err) => {
+            if let Some(data_value) = value.get("data") {
+                serde_json::from_value::<T>(data_value.clone()).map_err(|data_err| {
+                    anyhow!(
+                        "{}: failed to parse response data: {}; original error: {}",
+                        context,
+                        data_err,
+                        primary_err
+                    )
+                })
+            } else {
+                Err(anyhow!(
+                    "{}: failed to parse JSON: {}",
+                    context,
+                    primary_err
+                ))
+            }
+        }
+    }
 }
 
 struct ProcessOutcome {
     run_results: PathBuf,
     submission_folder: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct FilesListResponse {
-    pub data: FilesListData,
 }
 
 #[derive(Debug, Deserialize)]
@@ -410,18 +461,15 @@ fn test_import_genotype_data(
         return Err(anyhow!("bv files list failed"));
     }
     let list_stdout = String::from_utf8_lossy(&list_output.stdout);
-    let files_response: FilesListResponse =
+    let files_data: FilesListData =
         parse_json_output(&list_stdout, "Failed to parse files list JSON output")?;
-    println!(
-        "  Catalog now tracks {} genotype files",
-        files_response.data.total
-    );
+    println!("  Catalog now tracks {} genotype files", files_data.total);
     assert!(
-        !files_response.data.files.is_empty(),
+        !files_data.files.is_empty(),
         "Catalog should contain imported genotype files"
     );
 
-    Ok(files_response.data.total)
+    Ok(files_data.total)
 }
 
 fn test_prepare_dynamic_project(client_base: &Path, _test_mode: &str) -> Result<()> {
@@ -597,22 +645,23 @@ fn test_check_submission(client_base: &Path, sender_email: &str, test_mode: &str
     }
 
     println!("\n  Checking message state via CLI...");
-    let list_output = run_bv_command(
+    let (maybe_message_id, list_stdout) = match wait_for_project_message_id(
         client_base,
         test_mode,
-        &["message", "list", "--projects", "--unread", "--json"],
-    )?;
+        sender_email,
+        true,
+        MESSAGE_WAIT_ATTEMPTS,
+        Duration::from_secs(MESSAGE_WAIT_DELAY_SECS),
+        "check_submission_message",
+    ) {
+        Ok(result) => result,
+        Err(err) => {
+            println!("  ⚠ Unable to query unread project messages: {}", err);
+            return Ok(());
+        }
+    };
 
-    if !list_output.status.success() {
-        println!(
-            "  ⚠ Unable to list unread project messages: {}",
-            String::from_utf8_lossy(&list_output.stderr)
-        );
-        return Ok(());
-    }
-
-    let list_stdout = String::from_utf8_lossy(&list_output.stdout);
-    if let Some(message_id) = find_project_message_id(&list_stdout, sender_email) {
+    if let Some(message_id) = maybe_message_id {
         println!(
             "  Found unread project message [{}] from {}",
             message_id, sender_email
@@ -738,19 +787,16 @@ fn test_process_request(
     submissions.sort_by(|a, b| a.0.cmp(&b.0));
     let (submission_name, _submission_dir) = submissions.pop().unwrap();
     println!("Using submission directory: {}", submission_name);
-    let list_output = run_bv_command(
+    let (maybe_message_id, list_stdout) = wait_for_project_message_id(
         client_base,
         test_mode,
-        &["message", "list", "--projects", "--json"],
+        sender_email,
+        false,
+        MESSAGE_WAIT_ATTEMPTS,
+        Duration::from_secs(MESSAGE_WAIT_DELAY_SECS),
+        "process_request",
     )?;
-    if !list_output.status.success() {
-        return Err(anyhow!(
-            "Unable to list project messages: {}",
-            String::from_utf8_lossy(&list_output.stderr)
-        ));
-    }
-    let list_stdout = String::from_utf8_lossy(&list_output.stdout);
-    let message_id = find_project_message_id(&list_stdout, sender_email).ok_or_else(|| {
+    let message_id = maybe_message_id.ok_or_else(|| {
         anyhow!(
             "Could not locate project message for {} in CLI output:\n{}",
             sender_email,
@@ -800,6 +846,95 @@ fn test_process_request(
         run_results,
         submission_folder: submission_name,
     })
+}
+
+fn wait_for_project_message_id(
+    client_base: &Path,
+    test_mode: &str,
+    sender_email: &str,
+    unread_only: bool,
+    attempts: usize,
+    delay: Duration,
+    context: &str,
+) -> Result<(Option<String>, String)> {
+    let mut last_stdout = String::new();
+    for attempt in 1..=attempts {
+        println!(
+            "  [message-wait:{context}] Attempt {}/{} (unread_only={})",
+            attempt, attempts, unread_only
+        );
+
+        let sync_output = run_bv_command(client_base, test_mode, &["message", "sync"])?;
+        if !sync_output.status.success() {
+            println!(
+                "  [message-wait:{context}] 'bv message sync' exited with {}",
+                sync_output.status
+            );
+            let sync_stderr = String::from_utf8_lossy(&sync_output.stderr);
+            if !sync_stderr.trim().is_empty() {
+                println!("  [message-wait:{context}] sync stderr:\n{}", sync_stderr);
+            }
+        }
+
+        let mut args = vec!["message", "list", "--projects", "--json"];
+        if unread_only {
+            args.insert(3, "--unread");
+        }
+        let list_output = run_bv_command(client_base, test_mode, &args)?;
+        let list_stdout = String::from_utf8_lossy(&list_output.stdout).to_string();
+        last_stdout = list_stdout.clone();
+        let list_stderr = String::from_utf8_lossy(&list_output.stderr);
+        println!(
+            "  [message-wait:{context}] 'bv {}' exited with {}",
+            args.join(" "),
+            list_output.status
+        );
+        if !list_stderr.trim().is_empty() {
+            println!("  [message-wait:{context}] list stderr:\n{}", list_stderr);
+        }
+
+        if !list_output.status.success() {
+            return Err(anyhow!(
+                "'bv {}' failed with status {}. Stdout:\n{}\nStderr:\n{}",
+                args.join(" "),
+                list_output.status,
+                list_stdout,
+                list_stderr
+            ));
+        }
+
+        let entry_count = serde_json::from_str::<serde_json::Value>(list_stdout.trim())
+            .ok()
+            .and_then(|value| value.as_array().map(|arr| arr.len()))
+            .unwrap_or(0);
+        println!(
+            "  [message-wait:{context}] Parsed {} project entries ({} bytes)",
+            entry_count,
+            list_stdout.trim().len()
+        );
+
+        if let Some(message_id) = find_project_message_id(&list_stdout, sender_email) {
+            println!(
+                "  [message-wait:{context}] Found message {} from {}",
+                message_id, sender_email
+            );
+            return Ok((Some(message_id), list_stdout));
+        }
+
+        if attempt < attempts {
+            println!(
+                "  [message-wait:{context}] Message not visible yet, sleeping {:?} before retry",
+                delay
+            );
+            thread::sleep(delay);
+        }
+    }
+
+    println!(
+        "  [message-wait:{context}] Exhausted {} attempts without locating message from {}",
+        attempts, sender_email
+    );
+    Ok((None, last_stdout))
 }
 
 fn wait_for_submission_directory(
@@ -1057,10 +1192,10 @@ fn generate_samplesheet_from_db(
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let response: FilesListResponse = serde_json::from_str(&stdout)
-        .map_err(|e| anyhow!("Failed to parse files list JSON output: {}", e))?;
+    let response: FilesListData =
+        parse_json_output(&stdout, "Failed to parse files list JSON output")?;
 
-    if response.data.files.is_empty() {
+    if response.files.is_empty() {
         println!("⚠ Catalog returned no files");
     }
 
@@ -1071,7 +1206,7 @@ fn generate_samplesheet_from_db(
     writeln!(file, "participant_id,genotype_file_path")?;
 
     let mut rows = Vec::new();
-    for entry in &response.data.files {
+    for entry in &response.files {
         let participant = entry
             .participant_name
             .as_ref()
