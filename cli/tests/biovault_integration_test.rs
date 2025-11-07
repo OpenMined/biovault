@@ -20,6 +20,8 @@ const COUNT_LINES_PROJECT_YAML: &str =
 const COUNT_LINES_WORKFLOW: &str = include_str!("../examples/pipeline/count-lines/workflow.nf");
 const COUNT_LINES_SCRIPT: &str =
     include_str!("../examples/pipeline/count-lines/assets/count_lines.py");
+const MESSAGE_WAIT_ATTEMPTS: usize = 10;
+const MESSAGE_WAIT_DELAY_SECS: u64 = 2;
 
 fn wait_threshold() -> Option<usize> {
     match env::var("TEST_WAIT_FOR_STEPS") {
@@ -643,22 +645,23 @@ fn test_check_submission(client_base: &Path, sender_email: &str, test_mode: &str
     }
 
     println!("\n  Checking message state via CLI...");
-    let list_output = run_bv_command(
+    let (maybe_message_id, list_stdout) = match wait_for_project_message_id(
         client_base,
         test_mode,
-        &["message", "list", "--projects", "--unread", "--json"],
-    )?;
+        sender_email,
+        true,
+        MESSAGE_WAIT_ATTEMPTS,
+        Duration::from_secs(MESSAGE_WAIT_DELAY_SECS),
+        "check_submission_message",
+    ) {
+        Ok(result) => result,
+        Err(err) => {
+            println!("  ⚠ Unable to query unread project messages: {}", err);
+            return Ok(());
+        }
+    };
 
-    if !list_output.status.success() {
-        println!(
-            "  ⚠ Unable to list unread project messages: {}",
-            String::from_utf8_lossy(&list_output.stderr)
-        );
-        return Ok(());
-    }
-
-    let list_stdout = String::from_utf8_lossy(&list_output.stdout);
-    if let Some(message_id) = find_project_message_id(&list_stdout, sender_email) {
+    if let Some(message_id) = maybe_message_id {
         println!(
             "  Found unread project message [{}] from {}",
             message_id, sender_email
@@ -784,19 +787,16 @@ fn test_process_request(
     submissions.sort_by(|a, b| a.0.cmp(&b.0));
     let (submission_name, _submission_dir) = submissions.pop().unwrap();
     println!("Using submission directory: {}", submission_name);
-    let list_output = run_bv_command(
+    let (maybe_message_id, list_stdout) = wait_for_project_message_id(
         client_base,
         test_mode,
-        &["message", "list", "--projects", "--json"],
+        sender_email,
+        false,
+        MESSAGE_WAIT_ATTEMPTS,
+        Duration::from_secs(MESSAGE_WAIT_DELAY_SECS),
+        "process_request",
     )?;
-    if !list_output.status.success() {
-        return Err(anyhow!(
-            "Unable to list project messages: {}",
-            String::from_utf8_lossy(&list_output.stderr)
-        ));
-    }
-    let list_stdout = String::from_utf8_lossy(&list_output.stdout);
-    let message_id = find_project_message_id(&list_stdout, sender_email).ok_or_else(|| {
+    let message_id = maybe_message_id.ok_or_else(|| {
         anyhow!(
             "Could not locate project message for {} in CLI output:\n{}",
             sender_email,
@@ -846,6 +846,95 @@ fn test_process_request(
         run_results,
         submission_folder: submission_name,
     })
+}
+
+fn wait_for_project_message_id(
+    client_base: &Path,
+    test_mode: &str,
+    sender_email: &str,
+    unread_only: bool,
+    attempts: usize,
+    delay: Duration,
+    context: &str,
+) -> Result<(Option<String>, String)> {
+    let mut last_stdout = String::new();
+    for attempt in 1..=attempts {
+        println!(
+            "  [message-wait:{context}] Attempt {}/{} (unread_only={})",
+            attempt, attempts, unread_only
+        );
+
+        let sync_output = run_bv_command(client_base, test_mode, &["message", "sync"])?;
+        if !sync_output.status.success() {
+            println!(
+                "  [message-wait:{context}] 'bv message sync' exited with {}",
+                sync_output.status
+            );
+            let sync_stderr = String::from_utf8_lossy(&sync_output.stderr);
+            if !sync_stderr.trim().is_empty() {
+                println!("  [message-wait:{context}] sync stderr:\n{}", sync_stderr);
+            }
+        }
+
+        let mut args = vec!["message", "list", "--projects", "--json"];
+        if unread_only {
+            args.insert(3, "--unread");
+        }
+        let list_output = run_bv_command(client_base, test_mode, &args)?;
+        let list_stdout = String::from_utf8_lossy(&list_output.stdout).to_string();
+        last_stdout = list_stdout.clone();
+        let list_stderr = String::from_utf8_lossy(&list_output.stderr);
+        println!(
+            "  [message-wait:{context}] 'bv {}' exited with {}",
+            args.join(" "),
+            list_output.status
+        );
+        if !list_stderr.trim().is_empty() {
+            println!("  [message-wait:{context}] list stderr:\n{}", list_stderr);
+        }
+
+        if !list_output.status.success() {
+            return Err(anyhow!(
+                "'bv {}' failed with status {}. Stdout:\n{}\nStderr:\n{}",
+                args.join(" "),
+                list_output.status,
+                list_stdout,
+                list_stderr
+            ));
+        }
+
+        let entry_count = serde_json::from_str::<serde_json::Value>(list_stdout.trim())
+            .ok()
+            .and_then(|value| value.as_array().map(|arr| arr.len()))
+            .unwrap_or(0);
+        println!(
+            "  [message-wait:{context}] Parsed {} project entries ({} bytes)",
+            entry_count,
+            list_stdout.trim().len()
+        );
+
+        if let Some(message_id) = find_project_message_id(&list_stdout, sender_email) {
+            println!(
+                "  [message-wait:{context}] Found message {} from {}",
+                message_id, sender_email
+            );
+            return Ok((Some(message_id), list_stdout));
+        }
+
+        if attempt < attempts {
+            println!(
+                "  [message-wait:{context}] Message not visible yet, sleeping {:?} before retry",
+                delay
+            );
+            thread::sleep(delay);
+        }
+    }
+
+    println!(
+        "  [message-wait:{context}] Exhausted {} attempts without locating message from {}",
+        attempts, sender_email
+    );
+    Ok((None, last_stdout))
 }
 
 fn wait_for_submission_directory(
