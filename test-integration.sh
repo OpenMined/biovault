@@ -3,6 +3,42 @@ set -euo pipefail
 
 WAIT_VALUE="false"
 
+ensure_submodules_populated() {
+  if [[ ! -f .gitmodules ]]; then
+    return
+  fi
+
+  # Collect submodule paths defined in .gitmodules
+  local submodules=()
+  while IFS=' ' read -r _ path; do
+    [[ -n "$path" ]] && submodules+=("$path")
+  done < <(git config --file .gitmodules --get-regexp path 2>/dev/null || true)
+
+  if [[ ${#submodules[@]} -eq 0 ]]; then
+    return
+  fi
+
+  local missing=()
+  for path in "${submodules[@]}"; do
+    if [[ ! -d "$path" ]]; then
+      missing+=("$path (directory missing)")
+      continue
+    fi
+    if ! find "$path" -mindepth 1 -maxdepth 1 -not -name '.git' -print -quit | grep -q .; then
+      missing+=("$path (empty)")
+    fi
+  done
+
+  if ((${#missing[@]})); then
+    echo "The following submodule directories appear empty:" >&2
+    for entry in "${missing[@]}"; do
+      echo "  - $entry" >&2
+    done
+    echo "Run ./submodules.sh to fetch their contents before running tests." >&2
+    exit 1
+  fi
+}
+
 while (($#)); do
   case "$1" in
     --wait)
@@ -47,6 +83,8 @@ USAGE
   esac
   shift
 done
+
+ensure_submodules_populated
 
 rm -rf test-clients-local
 
