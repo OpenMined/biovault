@@ -2116,7 +2116,7 @@ fn calculate_median_processing_time(conn: &rusqlite::Connection) -> Result<Optio
     }
 
     times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let median = if times.len() % 2 == 0 {
+    let median = if times.len().is_multiple_of(2) {
         (times[times.len() / 2 - 1] + times[times.len() / 2]) / 2.0
     } else {
         times[times.len() / 2]

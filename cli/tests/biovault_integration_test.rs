@@ -20,6 +20,7 @@ const COUNT_LINES_PROJECT_YAML: &str =
 const COUNT_LINES_WORKFLOW: &str = include_str!("../examples/pipeline/count-lines/workflow.nf");
 const COUNT_LINES_SCRIPT: &str =
     include_str!("../examples/pipeline/count-lines/assets/count_lines.py");
+const DEFAULT_SMOKE_GENOTYPE_COUNT: usize = 100;
 
 fn wait_threshold() -> Option<usize> {
     match env::var("TEST_WAIT_FOR_STEPS") {
@@ -57,12 +58,28 @@ fn pause_between_steps(step_number: usize, step_label: &str) {
 }
 
 fn parse_json_output<T: DeserializeOwned>(stdout: &str, context: &str) -> Result<T> {
-    let trimmed = stdout.trim_start();
-    let start = trimmed
-        .find(['{', '['])
-        .ok_or_else(|| anyhow!("{}: no JSON payload found", context))?;
-    let json_slice = &trimmed[start..];
-    serde_json::from_str(json_slice)
+    let mut json_started = false;
+    let mut json_buffer = String::new();
+
+    for line in stdout.lines() {
+        if !json_started {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with('{') || trimmed.starts_with('[') {
+                json_started = true;
+                json_buffer.push_str(trimmed);
+                json_buffer.push('\n');
+            }
+        } else {
+            json_buffer.push_str(line);
+            json_buffer.push('\n');
+        }
+    }
+
+    if !json_started {
+        return Err(anyhow!("{}: no JSON payload found", context));
+    }
+
+    serde_json::from_str(json_buffer.trim_end())
         .map_err(|e| anyhow!("{}: failed to parse JSON: {}", context, e))
 }
 
@@ -140,8 +157,8 @@ fn test_biovault_e2e() -> Result<()> {
 
     // Test 1: Initialize BioVault for both clients
     println!("\n📝 Test 1: Initialize BioVault for both clients");
-    test_biovault_init(&client1_base, &client1_email, &test_mode)?;
-    test_biovault_init(&client2_base, &client2_email, &test_mode)?;
+    test_biovault_init(&client1_base, &client1_email, &test_mode, true)?;
+    test_biovault_init(&client2_base, &client2_email, &test_mode, true)?;
     pause_between_steps(1, "Test 1: Initialize BioVault for both clients");
 
     // Test 2: Stage genotype fixtures for processor
@@ -224,7 +241,143 @@ fn test_biovault_e2e() -> Result<()> {
     Ok(())
 }
 
-fn test_biovault_init(client_base: &Path, email: &str, test_mode: &str) -> Result<()> {
+/// Single-party smoke test that stages genotype fixtures locally and runs the BRCA pipeline.
+#[test]
+#[ignore]
+fn test_single_client_brca_pipeline() -> Result<()> {
+    println!("\n🧬 Running single-client BRCA smoke test...");
+
+    let test_mode = env::var("TEST_MODE").unwrap_or_else(|_| "local".to_string());
+    if test_mode != "local" {
+        return Err(anyhow!(
+            "Single-client smoke test currently supports only local mode; set TEST_MODE=local"
+        ));
+    }
+
+    let client_email = env::var("BIOVAULT_SMOKE_CLIENT_EMAIL")
+        .or_else(|_| env::var("SYFTBOX_CLIENT1_EMAIL"))
+        .unwrap_or_else(|_| "smoke-test@syftbox.net".to_string());
+    let test_clients_dir =
+        env::var("TEST_CLIENTS_DIR").unwrap_or_else(|_| "./test-clients-local".to_string());
+    let client_base = PathBuf::from(&test_clients_dir).join(&client_email);
+
+    if client_base.exists() {
+        fs::remove_dir_all(&client_base)?;
+    }
+    fs::create_dir_all(&client_base)?;
+
+    ensure_sbenv_environment(&client_base, &client_email)?;
+    test_biovault_init(&client_base, &client_email, &test_mode, false)?;
+
+    let fixtures_dir = stage_smoke_test_genotype_fixtures(&client_base, smoke_genotype_count())?;
+    let expected_files = count_files_in_dir(&fixtures_dir)?;
+    assert!(expected_files > 0, "Expected at least one genotype fixture");
+
+    let imported = test_import_genotype_data(&client_base, &fixtures_dir, &test_mode)?;
+    assert_eq!(
+        imported, expected_files,
+        "Imported genotype files should match fixture count"
+    );
+
+    let client_base_abs = canonicalize_path(&client_base);
+    let catalog_samplesheet = client_base_abs.join("brca_samplesheet.csv");
+    let catalog_count =
+        generate_samplesheet_from_db(&client_base_abs, &test_mode, &catalog_samplesheet)?;
+    assert_eq!(
+        catalog_count, expected_files,
+        "Catalog rows should match imported files"
+    );
+
+    let pipeline_samplesheet = client_base_abs.join("brca_pipeline_samplesheet.csv");
+    convert_samplesheet_for_pipeline(&catalog_samplesheet, &pipeline_samplesheet)?;
+
+    let check_output = run_bv_command(&client_base, &test_mode, &["check", "--json"])?;
+    if !check_output.status.success() {
+        eprintln!(
+            "bv check stderr:\n{}",
+            String::from_utf8_lossy(&check_output.stderr)
+        );
+        return Err(anyhow!("bv check failed"));
+    }
+
+    let pipeline_path = repo_root()
+        .join("bioscript")
+        .join("examples")
+        .join("brca")
+        .join("brca-classifier")
+        .join("pipeline.yaml");
+    if !pipeline_path.exists() {
+        return Err(anyhow!(
+            "BRCA pipeline not found at {}",
+            pipeline_path.display()
+        ));
+    }
+
+    let results_dir = client_base_abs.join("pipeline-results").join("brca-smoke");
+    if results_dir.exists() {
+        fs::remove_dir_all(&results_dir)?;
+    }
+    fs::create_dir_all(&results_dir)?;
+
+    let run_args = ["run".to_string(),
+        pipeline_path.to_string_lossy().to_string(),
+        "--set".to_string(),
+        format!(
+            "inputs.samplesheet={}",
+            pipeline_samplesheet.to_string_lossy()
+        ),
+        "--results-dir".to_string(),
+        results_dir.to_string_lossy().to_string()];
+
+    let run_slices: Vec<&str> = run_args.iter().map(|s| s.as_str()).collect();
+    let pipeline_output = run_bv_command(&client_base, &test_mode, &run_slices)?;
+    println!(
+        "bv run stdout:\n{}",
+        String::from_utf8_lossy(&pipeline_output.stdout)
+    );
+    if !pipeline_output.status.success() {
+        eprintln!(
+            "bv run stderr:\n{}",
+            String::from_utf8_lossy(&pipeline_output.stderr)
+        );
+        return Err(anyhow!("bv run pipeline failed"));
+    }
+
+    let step_results_dir = results_dir.join("brca");
+    let result_file = step_results_dir.join("result_BRCA.tsv");
+    assert!(
+        result_file.exists(),
+        "Result TSV not found at {}",
+        result_file.display()
+    );
+
+    let contents = fs::read_to_string(&result_file)?;
+    let mut lines = contents.lines();
+    let header = lines.next().unwrap_or_default();
+    assert!(
+        header.to_lowercase().contains("participant_id"),
+        "Result header missing participant_id column: {}",
+        header
+    );
+    let data_rows: Vec<&str> = lines.filter(|line| !line.trim().is_empty()).collect();
+    assert!(
+        !data_rows.is_empty(),
+        "Expected at least one BRCA classification row"
+    );
+
+    println!(
+        "✅ BRCA pipeline completed; results at {}",
+        result_file.display()
+    );
+    Ok(())
+}
+
+fn test_biovault_init(
+    client_base: &Path,
+    email: &str,
+    test_mode: &str,
+    expect_rpc: bool,
+) -> Result<()> {
     // Ensure the client base directory exists
     if !client_base.exists() {
         std::fs::create_dir_all(client_base)?;
@@ -270,7 +423,7 @@ fn test_biovault_init(client_base: &Path, email: &str, test_mode: &str) -> Resul
     );
 
     // Only check RPC directory if init actually ran (not skipped)
-    if !stdout_str.contains("Skipping initialization") {
+    if expect_rpc && !stdout_str.contains("Skipping initialization") {
         // Check that RPC directory was created with correct permissions
         let rpc_dir = client_base
             .join("datasites")
@@ -411,7 +564,13 @@ fn test_import_genotype_data(
     }
     let list_stdout = String::from_utf8_lossy(&list_output.stdout);
     let files_response: FilesListResponse =
-        parse_json_output(&list_stdout, "Failed to parse files list JSON output")?;
+        match parse_json_output(&list_stdout, "Failed to parse files list JSON output") {
+            Ok(resp) => resp,
+            Err(err) => {
+                println!("files list raw stdout:\n{}", list_stdout);
+                return Err(err);
+            }
+        };
     println!(
         "  Catalog now tracks {} genotype files",
         files_response.data.total
@@ -978,6 +1137,14 @@ fn test_archive_project(client_base: &Path, _other_email: &str, test_mode: &str)
     Ok(())
 }
 
+fn smoke_genotype_count() -> usize {
+    env::var("BIOVAULT_SMOKE_GENOTYPE_COUNT")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|count| *count > 0)
+        .unwrap_or(DEFAULT_SMOKE_GENOTYPE_COUNT)
+}
+
 fn stage_genotype_fixtures(client_base: &Path) -> Result<PathBuf> {
     let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(GENOTYPE_FIXTURES_DIR);
     if !source.exists() {
@@ -993,15 +1160,91 @@ fn stage_genotype_fixtures(client_base: &Path) -> Result<PathBuf> {
     Ok(canonicalize_path(&target))
 }
 
+fn stage_smoke_test_genotype_fixtures(client_base: &Path, count: usize) -> Result<PathBuf> {
+    let repo = repo_root();
+    let biosynth_dir = repo.join("biosynth");
+    let bvs_path = biosynth_dir.join("bvs");
+    if !bvs_path.exists() {
+        return Err(anyhow!(
+            "BioSynth generator not found at {}. Did you init the biosynth submodule?",
+            bvs_path.display()
+        ));
+    }
+
+    let overlay_path = repo
+        .join("cli")
+        .join("tests")
+        .join("data")
+        .join("variant_overlay.json");
+    if !overlay_path.exists() {
+        return Err(anyhow!(
+            "Variant overlay file missing: {}",
+            overlay_path.display()
+        ));
+    }
+
+    let client_base_abs = canonicalize_path(client_base);
+    let fixtures_dir = client_base_abs.join("genotype_fixtures");
+    if fixtures_dir.exists() {
+        fs::remove_dir_all(&fixtures_dir)?;
+    }
+    fs::create_dir_all(&fixtures_dir)?;
+
+    let output_pattern = format!(
+        "{}/{{id}}/{{id}}_X_X_GSAv3-DTC_GRCh38-{{month}}-{{day}}-{{year}}.txt",
+        fixtures_dir.to_string_lossy()
+    );
+    println!(
+        "\n🧬 Generating {} synthetic genotype fixtures with bvs synthetic...",
+        count
+    );
+
+    let command_output = Command::new(&bvs_path)
+        .current_dir(&biosynth_dir)
+        .arg("synthetic")
+        .arg("--output")
+        .arg(&output_pattern)
+        .arg("--count")
+        .arg(count.to_string())
+        .arg("--threads")
+        .arg("10")
+        .arg("--alt-frequency")
+        .arg("0.01")
+        .arg("--seed")
+        .arg("100")
+        .arg("--variants-file")
+        .arg(overlay_path.to_string_lossy().to_string())
+        .output()
+        .with_context(|| format!("Failed to execute {}", bvs_path.display()))?;
+
+    println!(
+        "bvs synthetic stdout:\n{}",
+        String::from_utf8_lossy(&command_output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&command_output.stderr);
+    if !stderr.trim().is_empty() {
+        println!("bvs synthetic stderr:\n{}", stderr);
+    }
+
+    if !command_output.status.success() {
+        return Err(anyhow!(
+            "bvs synthetic failed with status {}",
+            command_output.status
+        ));
+    }
+
+    Ok(canonicalize_path(&fixtures_dir))
+}
+
 fn count_files_in_dir(dir: &Path) -> Result<usize> {
     if !dir.exists() {
         return Ok(0);
     }
 
     let mut count = 0usize;
-    for entry in fs::read_dir(dir)? {
+    for entry in WalkDir::new(dir) {
         let entry = entry?;
-        if entry.file_type()?.is_file() {
+        if entry.file_type().is_file() {
             count += 1;
         }
     }
@@ -1027,6 +1270,136 @@ fn copy_dir_recursive(src: &Path, dest: &Path) -> Result<()> {
             fs::copy(&path, &target_path)?;
         }
     }
+    Ok(())
+}
+
+fn repo_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+fn locate_syftbox_binary() -> Result<PathBuf> {
+    if let Ok(env_path) = env::var("SYFTBOX_BINARY_PATH") {
+        let candidate = PathBuf::from(env_path);
+        if candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+
+    let root = repo_root();
+    let hint_file = root.join(".syftbox_binary_path");
+    if hint_file.exists() {
+        let content = fs::read_to_string(&hint_file)
+            .with_context(|| format!("Failed to read {}", hint_file.display()))?;
+        if let Some(start) = content.find('"') {
+            if let Some(end) = content[start + 1..].find('"') {
+                let path_str = &content[start + 1..start + 1 + end];
+                let candidate = PathBuf::from(path_str);
+                if candidate.exists() {
+                    return Ok(candidate);
+                }
+            }
+        }
+    }
+
+    let out_dir = root.join("syftbox").join(".out");
+    if out_dir.exists() {
+        for entry in fs::read_dir(out_dir)? {
+            let path = entry?.path();
+            if path.is_file() {
+                return Ok(path);
+            }
+        }
+    }
+
+    Err(anyhow!(
+        "Unable to locate SyftBox binary. Set SYFTBOX_BINARY_PATH or create .syftbox_binary_path"
+    ))
+}
+
+fn ensure_sbenv_environment(client_base: &Path, email: &str) -> Result<()> {
+    let syftbox_dir = client_base.join(".syftbox");
+    if syftbox_dir.exists() {
+        return Ok(());
+    }
+
+    fs::create_dir_all(client_base)?;
+
+    let sbenv_path = repo_root().join("sbenv").join("sbenv");
+    if !sbenv_path.exists() {
+        return Err(anyhow!(
+            "sbenv launcher not found at {}",
+            sbenv_path.display()
+        ));
+    }
+
+    let binary_path = locate_syftbox_binary().context("Unable to find SyftBox binary")?;
+    let server_url =
+        env::var("SYFTBOX_SERVER_URL").unwrap_or_else(|_| "http://localhost:8080".to_string());
+
+    let output = Command::new(&sbenv_path)
+        .current_dir(client_base)
+        .arg("init")
+        .arg("--dev")
+        .arg("--quiet")
+        .arg("--email")
+        .arg(email)
+        .arg("--server-url")
+        .arg(&server_url)
+        .arg("--binary")
+        .arg(&binary_path)
+        .output()
+        .with_context(|| format!("Failed to execute sbenv init in {}", client_base.display()))?;
+
+    if !output.status.success() {
+        return Err(anyhow!(
+            "sbenv init failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    println!(
+        "✓ Initialized sbenv environment for {} using {}",
+        email,
+        binary_path.display()
+    );
+    Ok(())
+}
+
+fn convert_samplesheet_for_pipeline(source: &Path, dest: &Path) -> Result<()> {
+    let mut reader = csv::Reader::from_path(source)
+        .with_context(|| format!("Failed to open catalog samplesheet at {}", source.display()))?;
+
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut writer = csv::Writer::from_path(dest).with_context(|| {
+        format!(
+            "Failed to create pipeline samplesheet at {}",
+            dest.display()
+        )
+    })?;
+
+    writer.write_record(["participant_id", "genotype_file"])?;
+    for record in reader.records() {
+        let record = record.with_context(|| {
+            format!(
+                "Failed to read samplesheet record from {}",
+                source.display()
+            )
+        })?;
+        let participant = record
+            .get(0)
+            .ok_or_else(|| anyhow!("Samplesheet missing participant_id column"))?;
+        let genotype_path = record
+            .get(1)
+            .ok_or_else(|| anyhow!("Samplesheet missing genotype_file_path column"))?;
+
+        writer.write_record([participant, genotype_path])?;
+    }
+    writer.flush()?;
     Ok(())
 }
 
@@ -1057,8 +1430,8 @@ fn generate_samplesheet_from_db(
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let response: FilesListResponse = serde_json::from_str(&stdout)
-        .map_err(|e| anyhow!("Failed to parse files list JSON output: {}", e))?;
+    let response: FilesListResponse =
+        parse_json_output(&stdout, "Failed to parse files list JSON output")?;
 
     if response.data.files.is_empty() {
         println!("⚠ Catalog returned no files");

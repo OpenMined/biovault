@@ -27,6 +27,11 @@ on:
         required: false
         default: true
         type: boolean
+      run_smoke_test:
+        description: 'Run single-client BRCA smoke test'
+        required: false
+        default: true
+        type: boolean
 
 jobs:
   colab-test:
@@ -224,4 +229,40 @@ jobs:
       cleanup_after_success: true
       update_submodules: true
 
+  smoke-test:
+    name: BRCA Smoke Test
+    if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.run_smoke_test) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          profile: minimal
+          override: true
+
+      - name: Run smoke test
+        run: |
+          set -euo pipefail
+          ./test-smoke.sh --genotype-count 100
+        env:
+          CI: true
+          GITHUB_ACTIONS: true
+          BIOVAULT_SMOKE_CLIENT_EMAIL: smoke-test@syftbox.net
+
+      - name: Upload smoke artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-test-artifacts-${{ github.run_id }}
+          path: |
+            test-clients-local/
+            cli/target/
+          retention-days: 7
 
