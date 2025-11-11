@@ -29,6 +29,11 @@ on:
         required: false
         type: boolean
         default: false
+      bump_only:
+        description: 'Only bump the version and skip build/release steps'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -42,7 +47,7 @@ env:
 jobs:
   test:
     name: Run tests
-    if: ${{ !inputs.skip_tests }}
+    if: ${{ !inputs.skip_tests && !inputs.bump_only }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -170,6 +175,7 @@ jobs:
     needs: [check-version, bump-version]
     if: |
       always() && 
+      !inputs.bump_only &&
       needs.check-version.result == 'success' &&
       (needs.bump-version.result == 'success' || needs.bump-version.result == 'skipped')
     strategy:
@@ -271,6 +277,7 @@ jobs:
     needs: [build, check-version, bump-version]
     if: |
       always() && 
+      !inputs.bump_only &&
       needs.build.result == 'success' &&
       (needs.bump-version.result == 'success' || needs.bump-version.result == 'skipped')
     steps:
@@ -293,6 +300,7 @@ jobs:
     needs: [build, check-version, bump-version, publish-crate]
     if: |
       always() && 
+      !inputs.bump_only &&
       needs.build.result == 'success' &&
       (needs.bump-version.result == 'success' || needs.bump-version.result == 'skipped')
     steps:
