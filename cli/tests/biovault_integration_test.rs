@@ -146,7 +146,7 @@ struct FilesListEntry {
 #[test]
 #[ignore]
 fn test_biovault_e2e() -> Result<()> {
-    println!("\n🧬 Testing BioVault end-to-end workflow:");
+    println!("\n🧬 Testing BioVault end-to-end workflow!");
 
     // Get configuration from environment
     let client1_email =
