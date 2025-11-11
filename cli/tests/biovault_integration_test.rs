@@ -146,7 +146,7 @@ struct FilesListEntry {
 #[test]
 #[ignore]
 fn test_biovault_e2e() -> Result<()> {
-    println!("\n🧬 Testing BioVault end-to-end workflow:");
+    println!("\n🧬 Testing BioVault end-to-end workflow!");
 
     // Get configuration from environment
     let client1_email =
@@ -644,6 +644,69 @@ fn test_check_submission(client_base: &Path, sender_email: &str, test_mode: &str
         println!("  Messages may not have synced yet");
     }
 
+    // Debug: Check for message files in the filesystem
+    println!("\n  Checking for message files in filesystem...");
+    let message_dir = client_base
+        .join("datasites")
+        .join(client_base.file_name().unwrap())
+        .join("app_data")
+        .join("biovault")
+        .join("rpc")
+        .join("message");
+
+    if message_dir.exists() {
+        println!("  Message directory exists at: {}", message_dir.display());
+        match fs::read_dir(&message_dir) {
+            Ok(entries) => {
+                let mut count = 0;
+                for entry in entries.flatten() {
+                    count += 1;
+                    println!(
+                        "    - {} ({})",
+                        entry.file_name().to_string_lossy(),
+                        if entry.path().is_file() {
+                            "file"
+                        } else {
+                            "dir"
+                        }
+                    );
+                }
+                if count == 0 {
+                    println!("    (directory is empty)");
+                }
+            }
+            Err(e) => println!("  Error reading message directory: {}", e),
+        }
+    } else {
+        println!(
+            "  Message directory does not exist: {}",
+            message_dir.display()
+        );
+    }
+
+    // Also check the datasites directory from sender's perspective
+    let sender_datasite = client_base.join("datasites").join(sender_email);
+    println!(
+        "  Checking sender's datasite at: {}",
+        sender_datasite.display()
+    );
+    if sender_datasite.exists() {
+        println!("    Sender's datasite exists");
+        let message_path = sender_datasite.join("app_data/biovault/rpc/message");
+        if message_path.exists() {
+            println!("    Message path exists, listing files:");
+            if let Ok(entries) = fs::read_dir(&message_path) {
+                for entry in entries.flatten() {
+                    println!("      - {}", entry.file_name().to_string_lossy());
+                }
+            }
+        } else {
+            println!("    Message path does not exist");
+        }
+    } else {
+        println!("    Sender's datasite does not exist");
+    }
+
     println!("\n  Checking message state via CLI...");
     let (maybe_message_id, list_stdout) = match wait_for_project_message_id(
         client_base,
@@ -858,11 +921,49 @@ fn wait_for_project_message_id(
     context: &str,
 ) -> Result<(Option<String>, String)> {
     let mut last_stdout = String::new();
+
+    // Debug: Show message directory structure on first attempt
+    let datasites_path = client_base.join("datasites");
+    println!(
+        "  [message-wait:{context}] Checking datasites at: {}",
+        datasites_path.display()
+    );
+
     for attempt in 1..=attempts {
         println!(
             "  [message-wait:{context}] Attempt {}/{} (unread_only={})",
             attempt, attempts, unread_only
         );
+
+        // Debug: Show directory structure on first attempt
+        if attempt == 1 {
+            println!("  [message-wait:{context}] Directory structure:");
+            if datasites_path.exists() {
+                for entry in WalkDir::new(&datasites_path)
+                    .max_depth(6)
+                    .into_iter()
+                    .filter_map(|e| e.ok())
+                {
+                    let path = entry.path();
+                    if path.extension().and_then(|s| s.to_str()) == Some("request")
+                        || path.file_name().and_then(|s| s.to_str()) == Some("message")
+                    {
+                        println!("    - {}", path.display());
+                        if path.is_file() {
+                            if let Ok(metadata) = path.metadata() {
+                                println!(
+                                    "      size: {} bytes, modified: {:?}",
+                                    metadata.len(),
+                                    metadata.modified()
+                                );
+                            }
+                        }
+                    }
+                }
+            } else {
+                println!("    datasites directory does not exist!");
+            }
+        }
 
         let sync_output = run_bv_command(client_base, test_mode, &["message", "sync"])?;
         if !sync_output.status.success() {
@@ -873,6 +974,11 @@ fn wait_for_project_message_id(
             let sync_stderr = String::from_utf8_lossy(&sync_output.stderr);
             if !sync_stderr.trim().is_empty() {
                 println!("  [message-wait:{context}] sync stderr:\n{}", sync_stderr);
+            }
+        } else {
+            let sync_stdout = String::from_utf8_lossy(&sync_output.stdout);
+            if !sync_stdout.trim().is_empty() {
+                println!("  [message-wait:{context}] sync stdout:\n{}", sync_stdout);
             }
         }
 
@@ -903,6 +1009,15 @@ fn wait_for_project_message_id(
             ));
         }
 
+        // Debug: Show raw stdout on first few attempts
+        if attempt <= 3 {
+            println!(
+                "  [message-wait:{context}] list stdout (raw, {} bytes):\n{}",
+                list_stdout.len(),
+                list_stdout
+            );
+        }
+
         let entry_count = serde_json::from_str::<serde_json::Value>(list_stdout.trim())
             .ok()
             .and_then(|value| value.as_array().map(|arr| arr.len()))
@@ -912,6 +1027,26 @@ fn wait_for_project_message_id(
             entry_count,
             list_stdout.trim().len()
         );
+
+        // Debug: If we got entries, show them
+        if entry_count > 0 {
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(list_stdout.trim()) {
+                if let Some(array) = value.as_array() {
+                    for (idx, msg) in array.iter().enumerate() {
+                        let from = msg
+                            .get("from")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unknown");
+                        let msg_type = msg
+                            .get("message_type")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unknown");
+                        let id = msg.get("id").and_then(|v| v.as_str()).unwrap_or("unknown");
+                        println!("    [{}] from={}, type={}, id={}", idx, from, msg_type, id);
+                    }
+                }
+            }
+        }
 
         if let Some(message_id) = find_project_message_id(&list_stdout, sender_email) {
             println!(
@@ -1295,6 +1430,17 @@ fn run_bv_command(
     args: &[&str],
 ) -> Result<std::process::Output> {
     let client_base_abs = canonicalize_path(client_base);
+
+    // Debug: Show what we're doing (only for message commands to reduce noise)
+    if args.first() == Some(&"message") {
+        println!(
+            "[run_bv_command] client_base={}, test_mode={}, args={:?}",
+            client_base_abs.display(),
+            test_mode,
+            args
+        );
+    }
+
     // Copy bv binary to temp location to avoid path issues
     let bv_source = get_bv_binary_path()?;
     let bv_temp = PathBuf::from("/tmp/bv-test");

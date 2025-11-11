@@ -36,23 +36,10 @@ jobs:
           cargo --version
           rustfmt --version
 
-      - name: Cache cargo registry
-        uses: actions/cache@v4
+      - name: Cache Rust dependencies and build artifacts
+        uses: Swatinem/rust-cache@v2
         with:
-          path: ~/.cargo/registry
-          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('cli/Cargo.lock') }}
-
-      - name: Cache cargo index
-        uses: actions/cache@v4
-        with:
-          path: ~/.cargo/git
-          key: ${{ runner.os }}-cargo-index-${{ hashFiles('cli/Cargo.lock') }}
-
-      - name: Cache cargo build
-        uses: actions/cache@v4
-        with:
-          path: cli/target
-          key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('cli/Cargo.lock') }}-v2
+          workspaces: "cli -> target"
 
       - name: Check formatting
         if: matrix.os != 'windows-latest'
@@ -86,11 +73,14 @@ jobs:
       uses: extractions/setup-just@v1
 
     - name: Install Rust
-      uses: actions-rs/toolchain@v1
+      uses: dtolnay/rust-toolchain@master
       with:
         toolchain: 1.91.0
-        profile: minimal
-        override: true
+
+    - name: Cache Rust dependencies and build artifacts
+      uses: Swatinem/rust-cache@v2
+      with:
+        workspaces: "cli -> target"
 
     - name: Install cargo-nextest
       uses: taiki-e/install-action@v2
@@ -114,19 +104,33 @@ jobs:
       run: |
         echo "=== Server Logs ==="
         docker logs syftbox-server || true
-        echo "=== Client 1 Directory ==="
-        ls -la test-clients-local/client1@syftbox.net/ || true
-        ls -la test-clients-local/client1@syftbox.net/.syftbox/ || true
+        echo ""
+        echo "=== Client 1 Directory Structure ==="
+        find test-clients-local/client1@syftbox.net/datasites -type f -name "*.request" -o -name "*.response" 2>/dev/null || echo "No message files found"
+        echo ""
+        echo "=== Client 1 Message Directory ==="
+        ls -laR test-clients-local/client1@syftbox.net/datasites/*/app_data/biovault/rpc/ 2>/dev/null || echo "No RPC directory"
+        echo ""
+        echo "=== Client 2 Message Directory ==="
+        ls -laR test-clients-local/client2@syftbox.net/datasites/*/app_data/biovault/rpc/ 2>/dev/null || echo "No RPC directory"
+        echo ""
+        echo "=== Client 1 Datasites Overview ==="
+        find test-clients-local/client1@syftbox.net/datasites -type d -maxdepth 3 2>/dev/null || true
+        echo ""
+        echo "=== Client 2 Datasites Overview ==="
+        find test-clients-local/client2@syftbox.net/datasites -type d -maxdepth 3 2>/dev/null || true
+        echo ""
         echo "=== Client 1 Logs ==="
         cat test-clients-local/client1@syftbox.net/.syftbox/logs/client.log || echo "No client1 log file found"
-        echo "=== Client 2 Directory ==="
-        ls -la test-clients-local/client2@syftbox.net/ || true
-        ls -la test-clients-local/client2@syftbox.net/.syftbox/ || true
+        echo ""
         echo "=== Client 2 Logs ==="
         cat test-clients-local/client2@syftbox.net/.syftbox/logs/client.log || echo "No client2 log file found"
-        echo "=== Test files ==="
-        ls -la test-clients-local/ || true
+        echo ""
         echo "=== Check syftbox installation ==="
         which syftbox || echo "syftbox not in PATH"
+        echo ""
         echo "=== Python packages ==="
         pip list | grep -i syft || true
+        echo ""
+        echo "=== BioVault Database Status (Client 2) ==="
+        ls -la test-clients-local/client2@syftbox.net/.biovault/*.db 2>/dev/null || echo "No database found"
