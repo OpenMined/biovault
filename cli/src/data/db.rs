@@ -476,9 +476,12 @@ impl BioVaultDb {
             [],
         )?;
 
-        // Migration: Create default "Unorganized Files" collection and migrate existing files
+        // Migration: Create default "Unsorted Files" collection and migrate existing files
         // This ensures backward compatibility - existing files get assigned to a default collection
-        let unorganized_exists: bool = conn
+        // Also handle migration from old "Unorganized Files" to "Unsorted Files"
+        
+        // Check for old "Unorganized Files" collection and migrate it
+        let old_unorganized_exists: bool = conn
             .query_row(
                 "SELECT COUNT(*) FROM collections WHERE variable_name = 'unorganized_files'",
                 [],
@@ -487,21 +490,43 @@ impl BioVaultDb {
             .map(|count: i32| count > 0)
             .unwrap_or(false);
 
-        if !unorganized_exists {
-            info!("Creating default 'Unorganized Files' collection for existing files");
+        if old_unorganized_exists {
+            info!("Migrating 'Unorganized Files' to 'Unsorted Files'");
+            // Rename the collection
+            conn.execute(
+                "UPDATE collections SET name = 'Unsorted Files', variable_name = 'unsorted_files', 
+                 description = 'Files that have not been assigned to a collection', updated_at = CURRENT_TIMESTAMP
+                 WHERE variable_name = 'unorganized_files'",
+                [],
+            )?;
+            info!("Migration complete: 'Unorganized Files' renamed to 'Unsorted Files'");
+        }
+
+        // Check for "Unsorted Files" collection
+        let unsorted_exists: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM collections WHERE variable_name = 'unsorted_files'",
+                [],
+                |row| row.get(0),
+            )
+            .map(|count: i32| count > 0)
+            .unwrap_or(false);
+
+        if !unsorted_exists {
+            info!("Creating default 'Unsorted Files' collection for existing files");
             
             // Create the collection
             conn.execute(
                 "INSERT INTO collections (name, description, variable_name, created_at, updated_at)
-                 VALUES ('Unorganized Files', 'Files imported before collections were introduced', 'unorganized_files', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+                 VALUES ('Unsorted Files', 'Files that have not been assigned to a collection', 'unsorted_files', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
                 [],
             )?;
 
-            let unorganized_collection_id = conn.last_insert_rowid();
-            info!("Created 'Unorganized Files' collection with ID: {}", unorganized_collection_id);
+            let unsorted_collection_id = conn.last_insert_rowid();
+            info!("Created 'Unsorted Files' collection with ID: {}", unsorted_collection_id);
 
             // Find all files that aren't in any collection
-            let unorganized_files: Vec<i64> = conn
+            let unsorted_files: Vec<i64> = conn
                 .prepare(
                     "SELECT f.id FROM files f
                      LEFT JOIN collection_files cf ON f.id = cf.file_id
@@ -510,19 +535,19 @@ impl BioVaultDb {
                 .query_map([], |row| row.get(0))?
                 .collect::<Result<Vec<i64>, _>>()?;
 
-            if !unorganized_files.is_empty() {
-                info!("Migrating {} existing file(s) to 'Unorganized Files' collection", unorganized_files.len());
+            if !unsorted_files.is_empty() {
+                info!("Migrating {} existing file(s) to 'Unsorted Files' collection", unsorted_files.len());
                 
-                // Add all unorganized files to the default collection
-                for file_id in &unorganized_files {
+                // Add all unsorted files to the default collection
+                for file_id in &unsorted_files {
                     conn.execute(
                         "INSERT OR IGNORE INTO collection_files (collection_id, file_id, created_at)
                          VALUES (?1, ?2, CURRENT_TIMESTAMP)",
-                        params![unorganized_collection_id, file_id],
+                        params![unsorted_collection_id, file_id],
                     )?;
                 }
                 
-                info!("Migration complete: {} file(s) assigned to 'Unorganized Files' collection", unorganized_files.len());
+                info!("Migration complete: {} file(s) assigned to 'Unsorted Files' collection", unsorted_files.len());
             } else {
                 info!("No existing files found to migrate");
             }

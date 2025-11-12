@@ -135,6 +135,7 @@ pub fn get_collection_by_id(db: &BioVaultDb, id: i64) -> Result<CollectionRecord
         },
     )?;
 
+    // Get file count (same for all collections, including "Unsorted Files")
     let file_count: i32 = db
         .conn
         .query_row(
@@ -199,7 +200,7 @@ pub fn list_collections(db: &BioVaultDb) -> Result<Vec<CollectionRecord>> {
     for row in rows {
         let (id, name, description, variable_name, created_at, updated_at) = row?;
 
-        // Get file count
+        // Get file count (same for all collections, including "Unsorted Files")
         let file_count: i32 = db
             .conn
             .query_row(
@@ -227,7 +228,8 @@ pub fn list_collections(db: &BioVaultDb) -> Result<Vec<CollectionRecord>> {
 pub fn get_collection_detail(db: &BioVaultDb, identifier: &str) -> Result<CollectionDetail> {
     let collection = get_collection(db, identifier)?;
 
-    // Get all files in this collection
+    // Get all files in this collection (same query for all collections, including "Unsorted Files")
+    // "Unsorted Files" is a real collection - files are explicitly assigned to it
     let mut stmt = db.conn.prepare(
         "SELECT f.id, f.file_path, f.file_hash, f.file_type, f.file_size, f.data_type,
                 f.metadata, f.status, f.processing_error, f.created_at, f.updated_at,

@@ -1999,22 +1999,55 @@ pub fn import_files_as_pending(
         }
     }
 
-    // Add imported files to collection if specified
-    if let Some(collection_id) = collection_identifier {
-        if !imported_file_ids.is_empty() {
-            use crate::data::collections::add_files_to_collection;
-            match add_files_to_collection(db, collection_id, imported_file_ids.clone()) {
-                Ok(added) => {
-                    tracing::debug!(
-                        "Added {} files to collection '{}'",
-                        added,
-                        collection_id
-                    );
-                }
-                Err(e) => {
+    // Add imported files to collection
+    // If collection_identifier is None, assign to "Unsorted Files" collection
+    let target_collection = collection_identifier.unwrap_or("unsorted_files");
+    
+    if !imported_file_ids.is_empty() {
+        use crate::data::collections::add_files_to_collection;
+        match add_files_to_collection(db, target_collection, imported_file_ids.clone()) {
+            Ok(added) => {
+                tracing::debug!(
+                    "Added {} files to collection '{}'",
+                    added,
+                    target_collection
+                );
+            }
+            Err(e) => {
+                // If "Unsorted Files" doesn't exist, create it
+                if target_collection == "unsorted_files" {
+                    use crate::data::collections::create_collection;
+                    match create_collection(
+                        db,
+                        "Unsorted Files".to_string(),
+                        Some("Files that have not been assigned to a collection".to_string()),
+                        Some("unsorted_files".to_string()),
+                    ) {
+                        Ok(_) => {
+                            // Retry adding files
+                            if let Ok(added) = add_files_to_collection(db, target_collection, imported_file_ids.clone()) {
+                                tracing::debug!(
+                                    "Created and added {} files to 'Unsorted Files' collection",
+                                    added
+                                );
+                            } else {
+                                errors.push(format!(
+                                    "Failed to add files to newly created 'Unsorted Files' collection: {}",
+                                    e
+                                ));
+                            }
+                        }
+                        Err(create_err) => {
+                            errors.push(format!(
+                                "Failed to create 'Unsorted Files' collection: {}",
+                                create_err
+                            ));
+                        }
+                    }
+                } else {
                     errors.push(format!(
                         "Failed to add files to collection '{}': {}",
-                        collection_id, e
+                        target_collection, e
                     ));
                 }
             }
