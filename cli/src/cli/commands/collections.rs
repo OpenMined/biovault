@@ -1,7 +1,7 @@
 use anyhow::Result;
 use colored::Colorize;
 
-use crate::data::{self, BioVaultDb, CliResponse, generate_variable_name};
+use crate::data::{self, generate_variable_name, BioVaultDb, CliResponse};
 
 pub async fn create(
     name: String,
@@ -29,7 +29,9 @@ pub async fn create(
     } else {
         println!(
             "{}",
-            format!("✓ Created collection '{}'", collection.name).green().bold()
+            format!("✓ Created collection '{}'", collection.name)
+                .green()
+                .bold()
         );
         println!("  Variable name: {}", collection.variable_name.cyan());
         if let Some(desc) = &collection.description {
@@ -127,11 +129,7 @@ pub async fn show(identifier: String, format: String) -> Result<()> {
 
                 println!(
                     "  {}  {}  {}  {}  {}",
-                    file.id,
-                    file.file_path,
-                    file_type,
-                    size_str,
-                    participant
+                    file.id, file.file_path, file_type, size_str, participant
                 );
             }
         }
@@ -140,11 +138,7 @@ pub async fn show(identifier: String, format: String) -> Result<()> {
     Ok(())
 }
 
-pub async fn add_files(
-    collection: String,
-    file_ids: Vec<i64>,
-    format: String,
-) -> Result<()> {
+pub async fn add_files(collection: String, file_ids: Vec<i64>, format: String) -> Result<()> {
     let db = BioVaultDb::new()?;
     let added = data::add_files_to_collection(&db, &collection, file_ids.clone())?;
 
@@ -156,31 +150,31 @@ pub async fn add_files(
         });
         let response = CliResponse::new(&json_data);
         println!("{}", response.to_json()?);
+    } else if added > 0 {
+        println!(
+            "{}",
+            format!("✓ Added {} file(s) to collection '{}'", added, collection)
+                .green()
+                .bold()
+        );
     } else {
-        if added > 0 {
-            println!(
-                "{}",
-                format!("✓ Added {} file(s) to collection '{}'", added, collection)
-                    .green()
-                    .bold()
-            );
-        } else {
-            println!(
-                "{}",
-                format!("⊘ No files added (all files were already in collection)")
-                    .yellow()
-            );
-        }
+        println!(
+            "{}",
+            "⊘ No files added (all files were already in collection)"
+                .to_string()
+                .yellow()
+        );
     }
 
     Ok(())
 }
 
-pub async fn remove_files(
-    collection: String,
-    file_ids: Vec<i64>,
-    format: String,
-) -> Result<()> {
+pub async fn remove_files(collection: String, file_ids: Vec<i64>, format: String) -> Result<()> {
+    // Prevent removing files from "Unsorted Files" from CLI - it's a UI-only virtual collection
+    if collection == "unsorted_files" || collection == "Unsorted Files" {
+        anyhow::bail!("Cannot remove files from 'Unsorted Files' - it is a virtual collection. Files appear there when not assigned to any collection.");
+    }
+
     let db = BioVaultDb::new()?;
     let removed = data::remove_files_from_collection(&db, &collection, file_ids.clone())?;
 
@@ -192,20 +186,18 @@ pub async fn remove_files(
         });
         let response = CliResponse::new(&json_data);
         println!("{}", response.to_json()?);
+    } else if removed > 0 {
+        println!(
+            "{}",
+            format!(
+                "✓ Removed {} file(s) from collection '{}'",
+                removed, collection
+            )
+            .green()
+            .bold()
+        );
     } else {
-        if removed > 0 {
-            println!(
-                "{}",
-                format!("✓ Removed {} file(s) from collection '{}'", removed, collection)
-                    .green()
-                    .bold()
-            );
-        } else {
-            println!(
-                "{}",
-                format!("⊘ No files removed").yellow()
-            );
-        }
+        println!("{}", "⊘ No files removed".to_string().yellow());
     }
 
     Ok(())
@@ -224,7 +216,9 @@ pub async fn delete(identifier: String, format: String) -> Result<()> {
     } else {
         println!(
             "{}",
-            format!("✓ Deleted collection '{}'", identifier).green().bold()
+            format!("✓ Deleted collection '{}'", identifier)
+                .green()
+                .bold()
         );
     }
 
@@ -251,7 +245,9 @@ pub async fn update(
     } else {
         println!(
             "{}",
-            format!("✓ Updated collection '{}'", collection.name).green().bold()
+            format!("✓ Updated collection '{}'", collection.name)
+                .green()
+                .bold()
         );
         println!("  Variable name: {}", collection.variable_name.cyan());
         if let Some(desc) = &collection.description {
@@ -261,4 +257,3 @@ pub async fn update(
 
     Ok(())
 }
-

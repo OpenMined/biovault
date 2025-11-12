@@ -51,6 +51,7 @@ pub async fn scan(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn import(
     path: String,
     extension: Option<String>,
@@ -165,14 +166,14 @@ pub async fn import(
                 // Collection doesn't exist, create it
                 let suggested_var_name = data::generate_variable_name(collection_name);
                 let var_name = collection_var_name.unwrap_or(suggested_var_name);
-                
+
                 if format != "json" {
                     println!(
                         "{}",
                         format!("📦 Creating collection '{}'...", collection_name).dimmed()
                     );
                 }
-                
+
                 data::create_collection(
                     &db,
                     collection_name.clone(),
@@ -187,12 +188,15 @@ pub async fn import(
         if !result.files.is_empty() {
             let file_ids: Vec<i64> = result.files.iter().map(|f| f.id).collect();
             let added = data::add_files_to_collection(&db, &collection_var_name, file_ids)?;
-            
+
             if format != "json" && added > 0 {
                 println!(
                     "{}",
-                    format!("  ✓ Added {} file(s) to collection '{}'", added, collection_name)
-                        .dimmed()
+                    format!(
+                        "  ✓ Added {} file(s) to collection '{}'",
+                        added, collection_name
+                    )
+                    .dimmed()
                 );
             }
         }

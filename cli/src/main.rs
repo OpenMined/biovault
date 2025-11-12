@@ -1004,13 +1004,22 @@ enum FilesCommands {
         )]
         pattern: Option<String>,
 
-        #[arg(long, help = "Collection name to add files to (will be created if doesn't exist)")]
+        #[arg(
+            long,
+            help = "Collection name to add files to (will be created if doesn't exist)"
+        )]
         collection: Option<String>,
 
-        #[arg(long, help = "Collection description (only used if collection is created)")]
+        #[arg(
+            long,
+            help = "Collection description (only used if collection is created)"
+        )]
         collection_description: Option<String>,
 
-        #[arg(long, help = "Collection variable name (snake_case). Auto-generated if not provided")]
+        #[arg(
+            long,
+            help = "Collection variable name (snake_case). Auto-generated if not provided"
+        )]
         collection_var_name: Option<String>,
 
         #[arg(long, help = "Dry run - show what would be imported without importing")]
@@ -1233,7 +1242,10 @@ enum CollectionsCommands {
         #[arg(long, help = "Collection description")]
         description: Option<String>,
 
-        #[arg(long, help = "Variable name (snake_case). If not provided, will be auto-generated from name")]
+        #[arg(
+            long,
+            help = "Variable name (snake_case). If not provided, will be auto-generated from name"
+        )]
         var_name: Option<String>,
 
         #[arg(long, help = "Output format (json|table)", default_value = "table")]
