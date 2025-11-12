@@ -1902,11 +1902,16 @@ pub fn hash_file(path: &str) -> Result<String> {
 
 // Fast import - add files to queue for background processing
 
-pub fn import_files_as_pending(db: &BioVaultDb, files: Vec<CsvFileImport>) -> Result<ImportResult> {
+pub fn import_files_as_pending(
+    db: &BioVaultDb,
+    files: Vec<CsvFileImport>,
+    collection_identifier: Option<&str>,
+) -> Result<ImportResult> {
     let conn = db.connection();
     let mut imported = 0;
     let mut skipped = 0;
     let mut errors = Vec::new();
+    let mut imported_file_ids = Vec::new();
 
     for file_info in files {
         // Check if file already exists
@@ -1964,12 +1969,14 @@ pub fn import_files_as_pending(db: &BioVaultDb, files: Vec<CsvFileImport>) -> Re
 
         match result {
             Ok(_) => {
+                let file_id = conn.last_insert_rowid();
+                imported_file_ids.push(file_id);
+
                 // If this is a genotype file with metadata, create genotype_metadata row
                 let data_type = file_info.data_type.as_deref().unwrap_or("Unknown");
                 if data_type == "Genotype"
                     && (file_info.source.is_some() || file_info.grch_version.is_some())
                 {
-                    let file_id = conn.last_insert_rowid();
                     let meta_result = conn.execute(
                         "INSERT INTO genotype_metadata (file_id, source, grch_version, created_at, updated_at)
                          VALUES (?1, ?2, ?3, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
@@ -1989,6 +1996,28 @@ pub fn import_files_as_pending(db: &BioVaultDb, files: Vec<CsvFileImport>) -> Re
                 imported += 1;
             }
             Err(e) => errors.push(format!("Failed to import {}: {}", file_info.file_path, e)),
+        }
+    }
+
+    // Add imported files to collection if specified
+    if let Some(collection_id) = collection_identifier {
+        if !imported_file_ids.is_empty() {
+            use crate::data::collections::add_files_to_collection;
+            match add_files_to_collection(db, collection_id, imported_file_ids.clone()) {
+                Ok(added) => {
+                    tracing::debug!(
+                        "Added {} files to collection '{}'",
+                        added,
+                        collection_id
+                    );
+                }
+                Err(e) => {
+                    errors.push(format!(
+                        "Failed to add files to collection '{}': {}",
+                        collection_id, e
+                    ));
+                }
+            }
         }
     }
 

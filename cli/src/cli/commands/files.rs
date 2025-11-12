@@ -56,6 +56,9 @@ pub async fn import(
     extension: Option<String>,
     recursive: bool,
     pattern: Option<String>,
+    collection: Option<String>,
+    collection_description: Option<String>,
+    collection_var_name: Option<String>,
     dry_run: bool,
     non_interactive: bool,
     format: String,
@@ -153,8 +156,63 @@ pub async fn import(
         pattern.as_deref(),
     )?;
 
+    // Handle collection if specified
+    let collection_id = if let Some(collection_name) = &collection {
+        // Get or create collection
+        let collection_record = match data::get_collection(&db, collection_name) {
+            Ok(c) => c,
+            Err(_) => {
+                // Collection doesn't exist, create it
+                let suggested_var_name = data::generate_variable_name(collection_name);
+                let var_name = collection_var_name.unwrap_or(suggested_var_name);
+                
+                if format != "json" {
+                    println!(
+                        "{}",
+                        format!("📦 Creating collection '{}'...", collection_name).dimmed()
+                    );
+                }
+                
+                data::create_collection(
+                    &db,
+                    collection_name.clone(),
+                    collection_description.clone(),
+                    Some(var_name),
+                )?
+            }
+        };
+
+        // Add imported files to collection
+        let collection_var_name = collection_record.variable_name.clone();
+        if !result.files.is_empty() {
+            let file_ids: Vec<i64> = result.files.iter().map(|f| f.id).collect();
+            let added = data::add_files_to_collection(&db, &collection_var_name, file_ids)?;
+            
+            if format != "json" && added > 0 {
+                println!(
+                    "{}",
+                    format!("  ✓ Added {} file(s) to collection '{}'", added, collection_name)
+                        .dimmed()
+                );
+            }
+        }
+
+        Some(collection_record.id)
+    } else {
+        None
+    };
+
     if format == "json" {
-        let response = CliResponse::new(&result);
+        let mut json_result = serde_json::json!({
+            "imported": result.imported,
+            "skipped": result.skipped,
+            "errors": result.errors,
+            "files": result.files
+        });
+        if let Some(cid) = collection_id {
+            json_result["collection_id"] = serde_json::json!(cid);
+        }
+        let response = CliResponse::new(&json_result);
         println!("{}", response.to_json()?);
     } else {
         // Table format
@@ -1329,6 +1387,7 @@ pub async fn import_csv(
                     .cloned(),
             })
             .collect(),
+        None, // No collection for CSV imports (collections handled separately)
     )?;
 
     if format == "json" {
@@ -1501,6 +1560,7 @@ pub async fn import_pending(csv_path: String, format: String) -> Result<()> {
                 inferred_sex: None,
             })
             .collect(),
+        None, // No collection for CSV imports (collections handled separately)
     )?;
 
     if format == "json" {

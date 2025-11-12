@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use rusqlite::Connection;
+use rusqlite::{Connection, params};
 use std::fs;
 use std::path::{Path, PathBuf};
 use tracing::info;
@@ -432,6 +432,100 @@ impl BioVaultDb {
             info!("Adding metadata column to runs table");
             conn.execute("ALTER TABLE runs ADD COLUMN metadata TEXT", [])?;
             info!("Migration complete: added metadata column to runs");
+        }
+
+        // Create collections table if it doesn't exist
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS collections (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                description TEXT,
+                variable_name TEXT UNIQUE NOT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_collections_variable_name ON collections(variable_name)",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_collections_name ON collections(name)",
+            [],
+        )?;
+
+        // Create collection_files table if it doesn't exist
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS collection_files (
+                collection_id INTEGER NOT NULL,
+                file_id INTEGER NOT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (collection_id) REFERENCES collections(id) ON DELETE CASCADE,
+                FOREIGN KEY (file_id) REFERENCES files(id) ON DELETE CASCADE,
+                PRIMARY KEY (collection_id, file_id)
+            )",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_collection_files_collection_id ON collection_files(collection_id)",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_collection_files_file_id ON collection_files(file_id)",
+            [],
+        )?;
+
+        // Migration: Create default "Unorganized Files" collection and migrate existing files
+        // This ensures backward compatibility - existing files get assigned to a default collection
+        let unorganized_exists: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM collections WHERE variable_name = 'unorganized_files'",
+                [],
+                |row| row.get(0),
+            )
+            .map(|count: i32| count > 0)
+            .unwrap_or(false);
+
+        if !unorganized_exists {
+            info!("Creating default 'Unorganized Files' collection for existing files");
+            
+            // Create the collection
+            conn.execute(
+                "INSERT INTO collections (name, description, variable_name, created_at, updated_at)
+                 VALUES ('Unorganized Files', 'Files imported before collections were introduced', 'unorganized_files', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+                [],
+            )?;
+
+            let unorganized_collection_id = conn.last_insert_rowid();
+            info!("Created 'Unorganized Files' collection with ID: {}", unorganized_collection_id);
+
+            // Find all files that aren't in any collection
+            let unorganized_files: Vec<i64> = conn
+                .prepare(
+                    "SELECT f.id FROM files f
+                     LEFT JOIN collection_files cf ON f.id = cf.file_id
+                     WHERE cf.file_id IS NULL"
+                )?
+                .query_map([], |row| row.get(0))?
+                .collect::<Result<Vec<i64>, _>>()?;
+
+            if !unorganized_files.is_empty() {
+                info!("Migrating {} existing file(s) to 'Unorganized Files' collection", unorganized_files.len());
+                
+                // Add all unorganized files to the default collection
+                for file_id in &unorganized_files {
+                    conn.execute(
+                        "INSERT OR IGNORE INTO collection_files (collection_id, file_id, created_at)
+                         VALUES (?1, ?2, CURRENT_TIMESTAMP)",
+                        params![unorganized_collection_id, file_id],
+                    )?;
+                }
+                
+                info!("Migration complete: {} file(s) assigned to 'Unorganized Files' collection", unorganized_files.len());
+            } else {
+                info!("No existing files found to migrate");
+            }
         }
 
         Ok(())

@@ -1,3 +1,4 @@
+pub mod collections;
 pub mod db;
 pub mod dev_envs;
 pub mod files;
@@ -7,6 +8,7 @@ pub mod project_editor;
 pub mod projects;
 pub mod response;
 
+pub use collections::*;
 pub use db::BioVaultDb;
 pub use dev_envs::*;
 pub use files::*;

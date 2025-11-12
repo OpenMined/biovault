@@ -486,6 +486,12 @@ enum Commands {
         command: FilesCommands,
     },
 
+    #[command(about = "Manage collections of files")]
+    Collections {
+        #[command(subcommand)]
+        command: CollectionsCommands,
+    },
+
     #[command(about = "SQL database operations")]
     Sql {
         #[command(subcommand)]
@@ -998,6 +1004,15 @@ enum FilesCommands {
         )]
         pattern: Option<String>,
 
+        #[arg(long, help = "Collection name to add files to (will be created if doesn't exist)")]
+        collection: Option<String>,
+
+        #[arg(long, help = "Collection description (only used if collection is created)")]
+        collection_description: Option<String>,
+
+        #[arg(long, help = "Collection variable name (snake_case). Auto-generated if not provided")]
+        collection_var_name: Option<String>,
+
         #[arg(long, help = "Dry run - show what would be imported without importing")]
         dry_run: bool,
 
@@ -1202,6 +1217,90 @@ enum FilesCommands {
     ImportPending {
         #[arg(help = "Path to CSV file containing file metadata")]
         csv_path: String,
+
+        #[arg(long, help = "Output format (json|table)", default_value = "table")]
+        format: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum CollectionsCommands {
+    #[command(about = "Create a new collection")]
+    Create {
+        #[arg(help = "Collection name")]
+        name: String,
+
+        #[arg(long, help = "Collection description")]
+        description: Option<String>,
+
+        #[arg(long, help = "Variable name (snake_case). If not provided, will be auto-generated from name")]
+        var_name: Option<String>,
+
+        #[arg(long, help = "Output format (json|table)", default_value = "table")]
+        format: String,
+    },
+
+    #[command(about = "List all collections")]
+    List {
+        #[arg(long, help = "Output format (json|table)", default_value = "table")]
+        format: String,
+    },
+
+    #[command(about = "Show collection details")]
+    Show {
+        #[arg(help = "Collection identifier (name or variable_name)")]
+        identifier: String,
+
+        #[arg(long, help = "Output format (json|table)", default_value = "table")]
+        format: String,
+    },
+
+    #[command(about = "Add files to a collection")]
+    AddFiles {
+        #[arg(help = "Collection identifier (name or variable_name)")]
+        collection: String,
+
+        #[arg(help = "File IDs to add", num_args = 1..)]
+        file_ids: Vec<i64>,
+
+        #[arg(long, help = "Output format (json|table)", default_value = "table")]
+        format: String,
+    },
+
+    #[command(about = "Remove files from a collection")]
+    RemoveFiles {
+        #[arg(help = "Collection identifier (name or variable_name)")]
+        collection: String,
+
+        #[arg(help = "File IDs to remove", num_args = 1..)]
+        file_ids: Vec<i64>,
+
+        #[arg(long, help = "Output format (json|table)", default_value = "table")]
+        format: String,
+    },
+
+    #[command(about = "Delete a collection")]
+    Delete {
+        #[arg(help = "Collection identifier (name or variable_name)")]
+        identifier: String,
+
+        #[arg(long, help = "Output format (json|table)", default_value = "table")]
+        format: String,
+    },
+
+    #[command(about = "Update collection metadata")]
+    Update {
+        #[arg(help = "Collection identifier (name or variable_name)")]
+        identifier: String,
+
+        #[arg(long, help = "New collection name")]
+        name: Option<String>,
+
+        #[arg(long, help = "New collection description (use empty string to clear)")]
+        description: Option<String>,
+
+        #[arg(long, help = "New variable name (snake_case)")]
+        var_name: Option<String>,
 
         #[arg(long, help = "Output format (json|table)", default_value = "table")]
         format: String,
@@ -1950,6 +2049,9 @@ async fn async_main_with(cli: Cli) -> Result<()> {
                 ext,
                 recursive,
                 pattern,
+                collection,
+                collection_description,
+                collection_var_name,
                 dry_run,
                 non_interactive,
                 format,
@@ -1959,6 +2061,9 @@ async fn async_main_with(cli: Cli) -> Result<()> {
                     ext,
                     recursive,
                     pattern,
+                    collection,
+                    collection_description,
+                    collection_var_name,
                     dry_run,
                     non_interactive,
                     format,
@@ -2046,6 +2151,49 @@ async fn async_main_with(cli: Cli) -> Result<()> {
             }
             FilesCommands::ImportPending { csv_path, format } => {
                 commands::files::import_pending(csv_path, format).await?;
+            }
+        },
+        Commands::Collections { command } => match command {
+            CollectionsCommands::Create {
+                name,
+                description,
+                var_name,
+                format,
+            } => {
+                commands::collections::create(name, description, var_name, format).await?;
+            }
+            CollectionsCommands::List { format } => {
+                commands::collections::list(format).await?;
+            }
+            CollectionsCommands::Show { identifier, format } => {
+                commands::collections::show(identifier, format).await?;
+            }
+            CollectionsCommands::AddFiles {
+                collection,
+                file_ids,
+                format,
+            } => {
+                commands::collections::add_files(collection, file_ids, format).await?;
+            }
+            CollectionsCommands::RemoveFiles {
+                collection,
+                file_ids,
+                format,
+            } => {
+                commands::collections::remove_files(collection, file_ids, format).await?;
+            }
+            CollectionsCommands::Delete { identifier, format } => {
+                commands::collections::delete(identifier, format).await?;
+            }
+            CollectionsCommands::Update {
+                identifier,
+                name,
+                description,
+                var_name,
+                format,
+            } => {
+                commands::collections::update(identifier, name, description, var_name, format)
+                    .await?;
             }
         },
         Commands::Submit {
