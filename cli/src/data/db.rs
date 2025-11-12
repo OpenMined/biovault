@@ -434,6 +434,48 @@ impl BioVaultDb {
             info!("Migration complete: added metadata column to runs");
         }
 
+        // Create collections table if it doesn't exist
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS collections (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                description TEXT,
+                variable_name TEXT UNIQUE NOT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_collections_variable_name ON collections(variable_name)",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_collections_name ON collections(name)",
+            [],
+        )?;
+
+        // Create collection_files table if it doesn't exist
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS collection_files (
+                collection_id INTEGER NOT NULL,
+                file_id INTEGER NOT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (collection_id) REFERENCES collections(id) ON DELETE CASCADE,
+                FOREIGN KEY (file_id) REFERENCES files(id) ON DELETE CASCADE,
+                PRIMARY KEY (collection_id, file_id)
+            )",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_collection_files_collection_id ON collection_files(collection_id)",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_collection_files_file_id ON collection_files(file_id)",
+            [],
+        )?;
+
         Ok(())
     }
 
@@ -663,6 +705,8 @@ mod tests {
         assert!(tables.contains(&"projects".to_string()));
         assert!(tables.contains(&"runs".to_string()));
         assert!(tables.contains(&"run_participants".to_string()));
+        assert!(tables.contains(&"collections".to_string()));
+        assert!(tables.contains(&"collection_files".to_string()));
 
         config::clear_test_biovault_home();
     }
