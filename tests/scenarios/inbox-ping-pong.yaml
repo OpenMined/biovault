@@ -1,0 +1,67 @@
+setup:
+  server:
+    - "./tests/scripts/server.sh --reset"
+    - "./tests/scripts/server.sh"
+  clients:
+    - "./tests/scripts/datasite.sh --reset"
+    - "./tests/scripts/datasite.sh --names client1@sandbox.local,client2@sandbox.local"
+
+steps:
+  - name: Seed genotype fixtures for both clients
+    run: |
+      ./tests/scripts/import-data.sh \
+        --csv {{workspace}}/cli/tests/data/participants_all.csv \
+        --clients client1@sandbox.local,client2@sandbox.local \
+        --path-column genotype_file
+
+  - name: Client1 submits count-lines project to client2
+    datasite: client1@sandbox.local
+    run: |
+      rm -rf count-lines
+      mkdir -p count-lines
+      cp -R "{{workspace}}/cli/examples/pipeline/count-lines/." count-lines/
+      {{workspace}}/cli/target/release/bv submit count-lines \
+        client2@sandbox.local \
+        --non-interactive \
+        --force
+
+  - name: Client2 syncs inbox
+    datasite: client2@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv message sync
+
+  - name: Wait for project files to sync
+    datasite: client2@sandbox.local
+    wait_for: datasites/client1@sandbox.local/shared/biovault/submissions/*/project.yaml
+    timeout: 30
+
+  - name: Client2 lists inbox messages
+    datasite: client2@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv inbox --plain --json
+    capture: inbox_json
+
+  - name: Extract project message ID
+    datasite: client2@sandbox.local
+    run: |
+      msg=$(jq -r '.messages[] | select(.message_type.Project != null) | .id' <<< '{{inbox_json}}' | head -n 1)
+      if [[ -z "$msg" ]]; then
+        echo "No project message found in inbox output" >&2
+        exit 1
+      fi
+      echo "$msg"
+    capture: project_msg
+
+  - name: Client2 processes project (test mode, approve)
+    datasite: client2@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv message process "{{project_msg}}" \
+        --test \
+        --participant ALL \
+        --approve \
+        --non-interactive
+
+  - name: Client1 verifies returned results exist
+    datasite: client1@sandbox.local
+    wait_for: datasites/client1@sandbox.local/shared/biovault/submissions/*/results/ALL/line_counts.csv
+    timeout: 10

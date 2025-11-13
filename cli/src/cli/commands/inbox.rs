@@ -138,6 +138,7 @@ pub struct ListFilters {
     pub message_type: Option<String>,
     pub from: Option<String>,
     pub search: Option<String>,
+    pub json: bool,
 }
 
 /// Display messages in the inbox with optional filters
@@ -172,6 +173,12 @@ pub fn list(config: &Config, filters: ListFilters) -> Result<()> {
     } else {
         messages
     };
+
+    if filters.json {
+        let payload = serde_json::json!({ "messages": messages });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+        return Ok(());
+    }
 
     if messages.is_empty() {
         println!("No messages found");
@@ -713,6 +720,7 @@ mod tests {
             message_type: None,
             from: None,
             search: None,
+            json: false,
         };
         assert!(!filters.sent);
         assert!(!filters.all);
@@ -721,6 +729,7 @@ mod tests {
         assert!(filters.message_type.is_none());
         assert!(filters.from.is_none());
         assert!(filters.search.is_none());
+        assert!(!filters.json);
     }
 
     #[test]
@@ -753,6 +762,7 @@ mod tests {
             message_type: Some("project".to_string()),
             from: Some("test@example.com".to_string()),
             search: Some("search term".to_string()),
+            json: false,
         };
         assert!(filters.sent);
         assert!(!filters.all);
@@ -789,6 +799,7 @@ mod tests {
             message_type: None,
             from: None,
             search: None,
+            json: false,
         };
         assert!(filters.sent);
         assert!(!filters.all);
@@ -804,6 +815,7 @@ mod tests {
             message_type: None,
             from: None,
             search: Some("test query".to_string()),
+            json: false,
         };
         assert_eq!(filters.search, Some("test query".to_string()));
     }
@@ -818,6 +830,7 @@ mod tests {
             message_type: Some("request".to_string()),
             from: None,
             search: None,
+            json: false,
         };
         assert_eq!(filters.message_type, Some("request".to_string()));
     }
@@ -832,6 +845,7 @@ mod tests {
             message_type: None,
             from: Some("user@example.com".to_string()),
             search: None,
+            json: false,
         };
         assert_eq!(filters.from, Some("user@example.com".to_string()));
     }
@@ -846,6 +860,7 @@ mod tests {
             message_type: None,
             from: None,
             search: None,
+            json: false,
         };
         assert!(filters.projects);
         assert!(!filters.sent);
@@ -861,6 +876,7 @@ mod tests {
             message_type: None,
             from: None,
             search: None,
+            json: false,
         };
         assert!(filters.unread);
         assert!(!filters.all);
@@ -876,6 +892,7 @@ mod tests {
             message_type: None,
             from: None,
             search: None,
+            json: false,
         };
         assert!(filters.all);
         assert!(!filters.sent);
@@ -891,6 +908,7 @@ mod tests {
             message_type: Some("system".to_string()),
             from: Some("admin@test.com".to_string()),
             search: Some("important".to_string()),
+            json: false,
         };
         assert!(filters.sent);
         assert!(filters.unread);
@@ -973,6 +991,7 @@ mod tests {
             message_type: Some("project".to_string()),
             from: Some("alice".to_string()),
             search: Some("test".to_string()),
+            json: false,
         };
 
         assert!(filters.sent);
@@ -996,6 +1015,7 @@ mod tests {
             message_type: None,
             from: None,
             search: None,
+            json: false,
         };
         list(&cfg, filters).unwrap();
     }
@@ -1054,6 +1074,7 @@ mod tests {
                 message_type: None,
                 from: None,
                 search: None,
+                json: false,
             },
         )
         .unwrap();
@@ -1068,6 +1089,7 @@ mod tests {
                 message_type: None,
                 from: None,
                 search: None,
+                json: false,
             },
         )
         .unwrap();
@@ -1082,6 +1104,7 @@ mod tests {
                 message_type: None,
                 from: None,
                 search: None,
+                json: false,
             },
         )
         .unwrap();
@@ -1096,6 +1119,7 @@ mod tests {
                 message_type: Some("project".into()),
                 from: None,
                 search: None,
+                json: false,
             },
         )
         .unwrap();
@@ -1110,6 +1134,7 @@ mod tests {
                 message_type: None,
                 from: None,
                 search: Some("greet".into()),
+                json: false,
             },
         )
         .unwrap();
@@ -1124,6 +1149,7 @@ mod tests {
                 message_type: None,
                 from: Some("alice".into()),
                 search: None,
+                json: false,
             },
         )
         .unwrap();
@@ -1242,6 +1268,7 @@ mod tests {
             message_type: None,
             from: None,
             search: None,
+            json: false,
         };
         assert!(filters.message_type.is_none());
         assert!(filters.from.is_none());
@@ -1345,6 +1372,7 @@ mod tests {
                 message_type: None,
                 from: None,
                 search: None,
+                json: false,
             },
         )
         .unwrap();
@@ -1392,6 +1420,7 @@ mod tests {
                 message_type: None,
                 from: None,
                 search: None,
+                json: false,
             },
         )
         .unwrap();
@@ -1423,6 +1452,7 @@ mod tests {
                 message_type: None,
                 from: None,
                 search: None,
+                json: false,
             },
         )
         .unwrap();
@@ -1452,6 +1482,7 @@ mod tests {
                 message_type: None,
                 from: None,
                 search: None,
+                json: false,
             },
         )
         .unwrap();
@@ -1482,6 +1513,7 @@ mod tests {
                 message_type: None,
                 from: None,
                 search: None,
+                json: false,
             },
         )
         .unwrap();
@@ -1528,6 +1560,7 @@ mod tests {
                 message_type: None,
                 from: Some("alice".into()),
                 search: None,
+                json: false,
             },
         )
         .unwrap();
