@@ -262,8 +262,9 @@ start_client_daemon() {
     set +u
     cd "$client_dir"
     eval "$("$SBENV_BIN" activate --quiet)"
+    # Use SYFTBOX_BINARY_PATH (absolute path) to avoid circular symlink
+    ln -sf "$SYFTBOX_BINARY_PATH" ./syftbox
     export SYFTBOX_BINARY="${SYFTBOX_BINARY:-$SYFTBOX_BINARY_PATH}"
-    ln -sf "$SYFTBOX_BINARY" ./syftbox
     PATH="$PWD:$PATH"
     "$SBENV_BIN" start --skip-login-check >>"$launcher_log" 2>&1
   ) &

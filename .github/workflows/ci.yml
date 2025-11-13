@@ -158,8 +158,19 @@ jobs:
     - name: Install uv
       uses: astral-sh/setup-uv@v3
 
+    - name: Add minio to /etc/hosts
+      run: |
+        echo "127.0.0.1 minio" | sudo tee -a /etc/hosts
+        cat /etc/hosts | grep minio
+
     - name: Build BioVault CLI
       run: cd cli && cargo build --release
+
+    - name: Setup BioVault dependencies (Nextflow, etc.)
+      run: cd cli && ./target/release/bv setup
+
+    - name: Verify dependencies
+      run: cd cli && ./target/release/bv check
 
     - name: Run inbox-ping-pong scenario
       run: ./test-scenario.sh tests/scenarios/inbox-ping-pong.yaml
@@ -198,8 +209,19 @@ jobs:
     - name: Install uv
       uses: astral-sh/setup-uv@v3
 
+    - name: Add minio to /etc/hosts
+      run: |
+        echo "127.0.0.1 minio" | sudo tee -a /etc/hosts
+        cat /etc/hosts | grep minio
+
     - name: Build BioVault CLI
       run: cd cli && cargo build --release
+
+    - name: Setup BioVault dependencies (Nextflow, etc.)
+      run: cd cli && ./target/release/bv setup
+
+    - name: Verify dependencies
+      run: cd cli && ./target/release/bv check
 
     - name: Run import-and-run scenario
       run: ./test-scenario.sh tests/scenarios/import-and-run.yaml
@@ -238,8 +260,19 @@ jobs:
     - name: Install uv
       uses: astral-sh/setup-uv@v3
 
+    - name: Add minio to /etc/hosts
+      run: |
+        echo "127.0.0.1 minio" | sudo tee -a /etc/hosts
+        cat /etc/hosts | grep minio
+
     - name: Build BioVault CLI
       run: cd cli && cargo build --release
+
+    - name: Setup BioVault dependencies (Nextflow, etc.)
+      run: cd cli && ./target/release/bv setup
+
+    - name: Verify dependencies
+      run: cd cli && ./target/release/bv check
 
     - name: Run break-nextflow scenario
       run: ./test-scenario.sh tests/scenarios/break-nextflow.yaml
