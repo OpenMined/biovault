@@ -264,30 +264,24 @@ requires_data_dir() {
   fi
 }
 
-set +u
 SAMPLE_SET_PRESENT=0
-if ((${#EXTRA_SET_ARGS[@]})); then
-  for entry in "${EXTRA_SET_ARGS[@]}"; do
-    if [[ "$entry" == inputs.samplesheet=* ]]; then
-      SAMPLE_SET_PRESENT=1
-      break
-    fi
-  done
-fi
+for entry in "${EXTRA_SET_ARGS[@]+"${EXTRA_SET_ARGS[@]}"}"; do
+  if [[ "$entry" == inputs.samplesheet=* ]]; then
+    SAMPLE_SET_PRESENT=1
+    break
+  fi
+done
 if (( SAMPLE_SET_PRESENT == 0 )); then
   EXTRA_SET_ARGS+=("inputs.samplesheet=$SAMPLESHEET_PATH")
 fi
 
 DATA_SET_PRESENT=0
-if ((${#EXTRA_SET_ARGS[@]})); then
-  for entry in "${EXTRA_SET_ARGS[@]}"; do
-    if [[ "$entry" == inputs.data_dir=* ]]; then
-      DATA_SET_PRESENT=1
-      break
-    fi
-  done
-fi
-set -u
+for entry in "${EXTRA_SET_ARGS[@]+"${EXTRA_SET_ARGS[@]}"}"; do
+  if [[ "$entry" == inputs.data_dir=* ]]; then
+    DATA_SET_PRESENT=1
+    break
+  fi
+done
 
 if (( DATA_SET_PRESENT == 0 )) && requires_data_dir "$PROJECT_PATH"; then
   if inferred_dir="$(infer_data_dir "$SAMPLESHEET_PATH")"; then
@@ -302,11 +296,9 @@ RUN_CMD=(run "$PROJECT_PATH" --results-dir "$RESULTS_DIR")
 (( RUN_TEST )) && RUN_CMD+=(--test)
 (( RUN_DRY )) && RUN_CMD+=(--dry-run)
 (( RUN_DOCKER )) && RUN_CMD+=(--with-docker)
-set +u
-for entry in "${EXTRA_SET_ARGS[@]}"; do
+for entry in "${EXTRA_SET_ARGS[@]+"${EXTRA_SET_ARGS[@]}"}"; do
   RUN_CMD+=(--set "$entry")
 done
-set -u
 
 echo "Running pipeline:"
 printf '  bv %s\n' "${RUN_CMD[*]}"
