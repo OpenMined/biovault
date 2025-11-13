@@ -109,14 +109,10 @@ require_bin() {
 }
 
 abs_path() {
-  echo "[DEBUG abs_path] Input: $1" >&2
   python3 - <<'PY' "$1"
 import os, sys
 print(os.path.abspath(sys.argv[1]))
 PY
-  local result=$?
-  echo "[DEBUG abs_path] Result: $result" >&2
-  return $result
 }
 
 [[ -n "$DATASITE" ]] || { echo "--datasite is required" >&2; usage >&2; exit 1; }
@@ -198,22 +194,14 @@ if [[ -z "$SAMPLESHEET_OVERRIDE" ]]; then
   generate_samplesheet "$SAMPLESHEET_PATH" "$DATA_FILTER"
 fi
 
-echo "[DEBUG] Samplesheet contents:"
-cat "$SAMPLESHEET_PATH" || echo "Failed to read samplesheet"
-echo "[DEBUG] End samplesheet contents"
-
-echo "[DEBUG] Creating results directory..."
 if [[ -z "$RESULTS_DIR" ]]; then
   RESULTS_DIR="$CLIENT_DIR/.sandbox-run/results/$(basename "$PROJECT_PATH")-$(timestamp)"
 fi
 RESULTS_DIR="$(abs_path "$RESULTS_DIR")"
-echo "[DEBUG] Results dir: $RESULTS_DIR"
 mkdir -p "$RESULTS_DIR"
-echo "[DEBUG] Results directory created"
 
 infer_data_dir() {
   local sheet="$1"
-  echo "[DEBUG infer_data_dir] Processing: $sheet" >&2
   python3 - <<'PY' "$sheet"
 import csv, os, sys
 sheet = sys.argv[1]
@@ -256,62 +244,40 @@ PY
 
 requires_data_dir() {
   local target="$1"
-  echo "[DEBUG requires_data_dir] Checking: $target" >&2
   local file=""
   if [[ -f "$target" ]]; then
     file="$target"
-    echo "[DEBUG requires_data_dir] Found file: $file" >&2
   elif [[ -d "$target" ]]; then
-    echo "[DEBUG requires_data_dir] Target is directory" >&2
     if [[ -f "$target/pipeline.yaml" ]]; then
       file="$target/pipeline.yaml"
-      echo "[DEBUG requires_data_dir] Found: pipeline.yaml" >&2
     elif [[ -f "$target/project.yaml" ]]; then
       file="$target/project.yaml"
-      echo "[DEBUG requires_data_dir] Found: project.yaml" >&2
     fi
   fi
   if [[ -z "$file" ]]; then
-    echo "[DEBUG requires_data_dir] No file found, returning false" >&2
     return 1
   fi
-  echo "[DEBUG requires_data_dir] Searching for data_dir in: $file" >&2
   if command -v rg >/dev/null 2>&1; then
     rg -q --fixed-strings --word-regexp "data_dir" "$file"
   else
     grep -q "data_dir" "$file"
   fi
-  local result=$?
-  echo "[DEBUG requires_data_dir] Search result: $result" >&2
-  return $result
 }
 
-echo "[DEBUG] Checking samplesheet arg..."
-set +u  # Temporarily disable undefined variable check for array operations
-echo "[DEBUG] EXTRA_SET_ARGS count: ${#EXTRA_SET_ARGS[@]}"
+set +u
 SAMPLE_SET_PRESENT=0
-echo "[DEBUG] Checking if samplesheet already in args..."
 if ((${#EXTRA_SET_ARGS[@]})); then
-  echo "[DEBUG] Iterating through EXTRA_SET_ARGS..."
   for entry in "${EXTRA_SET_ARGS[@]}"; do
-    echo "[DEBUG] Checking entry: $entry"
     if [[ "$entry" == inputs.samplesheet=* ]]; then
       SAMPLE_SET_PRESENT=1
-      echo "[DEBUG] Found existing samplesheet arg"
       break
     fi
   done
-  echo "[DEBUG] Done iterating"
 fi
-echo "[DEBUG] SAMPLE_SET_PRESENT: $SAMPLE_SET_PRESENT"
 if (( SAMPLE_SET_PRESENT == 0 )); then
-  echo "[DEBUG] Adding samplesheet to args: $SAMPLESHEET_PATH"
   EXTRA_SET_ARGS+=("inputs.samplesheet=$SAMPLESHEET_PATH")
-  echo "[DEBUG] Added samplesheet to args"
 fi
-echo "[DEBUG] Samplesheet arg set: $SAMPLESHEET_PATH"
 
-echo "[DEBUG] Checking data_dir arg..."
 DATA_SET_PRESENT=0
 if ((${#EXTRA_SET_ARGS[@]})); then
   for entry in "${EXTRA_SET_ARGS[@]}"; do
@@ -321,11 +287,9 @@ if ((${#EXTRA_SET_ARGS[@]})); then
     fi
   done
 fi
-set -u  # Re-enable undefined variable check
-echo "[DEBUG] Data dir present: $DATA_SET_PRESENT"
-echo "[DEBUG] Checking if project requires data_dir..."
+set -u
+
 if (( DATA_SET_PRESENT == 0 )) && requires_data_dir "$PROJECT_PATH"; then
-  echo "[DEBUG] Project requires data_dir, inferring from samplesheet..."
   if inferred_dir="$(infer_data_dir "$SAMPLESHEET_PATH")"; then
     EXTRA_SET_ARGS+=("inputs.data_dir=$inferred_dir")
     echo "Inferred data dir: $inferred_dir"
@@ -333,19 +297,16 @@ if (( DATA_SET_PRESENT == 0 )) && requires_data_dir "$PROJECT_PATH"; then
     echo "Failed to infer data directory from $SAMPLESHEET_PATH" >&2
     exit 1
   fi
-else
-  echo "[DEBUG] Project does not require data_dir or already set"
 fi
-
-echo "[DEBUG] Building run command..."
 RUN_CMD=(run "$PROJECT_PATH" --results-dir "$RESULTS_DIR")
 (( RUN_TEST )) && RUN_CMD+=(--test)
 (( RUN_DRY )) && RUN_CMD+=(--dry-run)
 (( RUN_DOCKER )) && RUN_CMD+=(--with-docker)
+set +u
 for entry in "${EXTRA_SET_ARGS[@]}"; do
   RUN_CMD+=(--set "$entry")
 done
-echo "[DEBUG] Run command built successfully"
+set -u
 
 echo "Running pipeline:"
 printf '  bv %s\n' "${RUN_CMD[*]}"
