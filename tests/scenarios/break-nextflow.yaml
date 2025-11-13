@@ -7,24 +7,71 @@ setup:
     - "./tests/scripts/datasite.sh --names client1@sandbox.local"
 
 steps:
-  - name: Import test data with edge-case participant IDs
+  - name: Import good test data only
     run: |
       ./tests/scripts/import-data.sh \
-        --csv tests/break_nextflow/samplesheet.csv \
+        --csv tests/break_nextflow/good_data.csv \
         --clients client1@sandbox.local \
         --path-column genotype_file
 
-  - name: Verify only valid files were imported (3 out of 5)
+  - name: Verify 2 valid files were imported
     datasite: client1@sandbox.local
     run: sqlite3 .biovault/biovault.db "select count(*) from files"
-    expect: "3"
+    expect: "2"
 
-  - name: Run count-lines pipeline with edge-case IDs
+  - name: Export samplesheet from catalog
+    datasite: client1@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv samplesheet export-catalog \
+        .sandbox-run/exported.csv \
+        --path-column genotype_file \
+        --data-type genotype
+
+  - name: Inject bad rows into samplesheet before running
+    datasite: client1@sandbox.local
+    run: |
+      python3 - <<'PY'
+import csv
+import os
+
+# Read exported good samplesheet
+with open('.sandbox-run/exported.csv', 'r') as f:
+    reader = csv.DictReader(f)
+    rows = list(reader)
+    fieldnames = reader.fieldnames
+
+# Get the absolute data directory from first good row
+if rows:
+    first_path = rows[0]['genotype_file']
+    data_dir = os.path.dirname(first_path)
+else:
+    raise Exception("No rows in exported samplesheet")
+
+# Add bad rows with edge-case participant IDs
+bad_rows = [
+    {'participant_id': 'P002', 'genotype_file': os.path.join(data_dir, 'test_snps_p002.txt')},  # directory
+    {'participant_id': 'P 004', 'genotype_file': rows[0]['genotype_file']},  # space in ID
+    {'participant_id': 'P*005', 'genotype_file': os.path.join(data_dir, 'test_snps_p002.txt')},  # special char + directory
+]
+
+# Combine good + bad rows
+all_rows = rows + bad_rows
+
+# Write modified samplesheet
+with open('.sandbox-run/modified.csv', 'w', newline='') as f:
+    writer = csv.DictWriter(f, fieldnames=fieldnames)
+    writer.writeheader()
+    writer.writerows(all_rows)
+
+print(f"Created modified samplesheet with {len(rows)} good + {len(bad_rows)} bad rows")
+PY
+
+  - name: Run count-lines pipeline with edge-case samplesheet
     run: |
       ./tests/scripts/run.sh \
         --datasite client1@sandbox.local \
         --project cli/examples/pipeline/count-lines \
-        --data all
+        --samplesheet sandbox/client1@sandbox.local/.sandbox-run/modified.csv
 
   - name: Verify results exist (should handle edge-case participant IDs)
     datasite: client1@sandbox.local
