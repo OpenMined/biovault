@@ -1,6 +1,7 @@
 #[cfg(test)]
 mod hard_reset_tests {
     use anyhow::Result;
+    use biovault::syftbox::SyftBoxApp;
     use std::fs;
     use std::path::{Path, PathBuf};
     use tempfile::TempDir;
@@ -11,6 +12,7 @@ mod hard_reset_tests {
         biovault_home: PathBuf,
         syftbox_data_dir: PathBuf,
         email: String,
+        app: SyftBoxApp,
     }
 
     impl TestEnvironment {
@@ -19,12 +21,15 @@ mod hard_reset_tests {
             let biovault_home = temp_dir.path().join(".biovault");
             let syftbox_data_dir = temp_dir.path().join("syftbox_data");
             let email = "test@example.com".to_string();
+            fs::create_dir_all(&syftbox_data_dir)?;
+            let app = SyftBoxApp::new(&syftbox_data_dir, &email, "biovault")?;
 
             Ok(TestEnvironment {
                 _temp_dir: temp_dir,
                 biovault_home,
                 syftbox_data_dir,
                 email,
+                app,
             })
         }
 
@@ -36,83 +41,123 @@ mod hard_reset_tests {
                 format!("email: {}\nversion: 0.1.0", self.email),
             )?;
 
-            // Create datasite structure
-            let datasite_path = self.syftbox_data_dir.join("datasites").join(&self.email);
+            let storage = &self.app.storage;
+            let datasite_path = self.app.data_dir.join("datasites").join(&self.email);
 
-            // Public biovault
             let public_biovault = datasite_path.join("public").join("biovault");
-            fs::create_dir_all(&public_biovault)?;
-            fs::write(
-                public_biovault.join("participants.yaml"),
-                "participants: []",
+            storage.ensure_dir(&public_biovault)?;
+            storage.write_plaintext_file(
+                &public_biovault.join("participants.yaml"),
+                b"participants: []",
+                true,
             )?;
 
-            // Shared submissions
             let shared_submissions = datasite_path
                 .join("shared")
                 .join("biovault")
                 .join("submissions");
-            fs::create_dir_all(&shared_submissions)?;
-            fs::write(
-                shared_submissions.join("test_submission.yaml"),
-                "submission: test",
+            storage.ensure_dir(&shared_submissions)?;
+            storage.write_plaintext_file(
+                &shared_submissions.join("test_submission.yaml"),
+                b"submission: test",
+                true,
             )?;
 
-            // App data biovault (includes RPC)
             let app_data_biovault = datasite_path.join("app_data").join("biovault");
-            fs::create_dir_all(app_data_biovault.join("rpc"))?;
-            fs::write(app_data_biovault.join("rpc").join("messages.json"), "[]")?;
+            storage.ensure_dir(app_data_biovault.join("rpc").as_path())?;
+            storage.write_plaintext_file(
+                &app_data_biovault.join("rpc").join("messages.json"),
+                b"[]",
+                true,
+            )?;
 
-            // Private app_data/biovault (at DATA_DIR root, not under datasite!)
             let private_biovault = self
-                .syftbox_data_dir
+                .app
+                .data_dir
                 .join("private")
                 .join("app_data")
                 .join("biovault");
-            fs::create_dir_all(&private_biovault)?;
-            fs::write(private_biovault.join("private_data.yaml"), "data: private")?;
+            storage.ensure_dir(&private_biovault)?;
+            storage.write_plaintext_file(
+                &private_biovault.join("private_data.yaml"),
+                b"data: private",
+                true,
+            )?;
 
             Ok(())
         }
 
         fn verify_all_deleted(&self) -> bool {
             // Check that all BioVault directories are gone
-            let datasite_path = self.syftbox_data_dir.join("datasites").join(&self.email);
+            let storage = &self.app.storage;
+            let datasite_path = self.app.data_dir.join("datasites").join(&self.email);
+
+            let public_exists = storage
+                .path_exists(&datasite_path.join("public").join("biovault"))
+                .unwrap_or(true);
+            let shared_exists = storage
+                .path_exists(
+                    &datasite_path
+                        .join("shared")
+                        .join("biovault")
+                        .join("submissions"),
+                )
+                .unwrap_or(true);
+            let app_data_exists = storage
+                .path_exists(&datasite_path.join("app_data").join("biovault"))
+                .unwrap_or(true);
+            let private_exists = storage
+                .path_exists(
+                    &self
+                        .app
+                        .data_dir
+                        .join("private")
+                        .join("app_data")
+                        .join("biovault"),
+                )
+                .unwrap_or(true);
 
             !self.biovault_home.exists()
-                && !datasite_path.join("public").join("biovault").exists()
-                && !datasite_path
-                    .join("shared")
-                    .join("biovault")
-                    .join("submissions")
-                    .exists()
-                && !datasite_path.join("app_data").join("biovault").exists()
-                && !self
-                    .syftbox_data_dir
-                    .join("private")
-                    .join("app_data")
-                    .join("biovault")
-                    .exists()
+                && !public_exists
+                && !shared_exists
+                && !app_data_exists
+                && !private_exists
         }
 
         fn verify_some_exist(&self) -> bool {
             // Check that at least some paths still exist
-            let datasite_path = self.syftbox_data_dir.join("datasites").join(&self.email);
+            let storage = &self.app.storage;
+            let datasite_path = self.app.data_dir.join("datasites").join(&self.email);
+
+            let public_exists = storage
+                .path_exists(&datasite_path.join("public").join("biovault"))
+                .unwrap_or(false);
+            let shared_exists = storage
+                .path_exists(&datasite_path.join("shared").join("biovault"))
+                .unwrap_or(false);
+            let app_data_exists = storage
+                .path_exists(&datasite_path.join("app_data").join("biovault"))
+                .unwrap_or(false);
+            let private_exists = storage
+                .path_exists(
+                    &self
+                        .app
+                        .data_dir
+                        .join("private")
+                        .join("app_data")
+                        .join("biovault"),
+                )
+                .unwrap_or(false);
 
             self.biovault_home.exists()
-                || datasite_path.join("public").join("biovault").exists()
-                || datasite_path.join("shared").join("biovault").exists()
-                || datasite_path.join("app_data").join("biovault").exists()
-                || self
-                    .syftbox_data_dir
-                    .join("private")
-                    .join("app_data")
-                    .join("biovault")
-                    .exists()
+                || public_exists
+                || shared_exists
+                || app_data_exists
+                || private_exists
         }
 
         fn get_cleanup_paths(&self) -> Vec<PathBuf> {
-            let datasite_path = self.syftbox_data_dir.join("datasites").join(&self.email);
+            let datasite_path = self.app.data_dir.join("datasites").join(&self.email);
 
             vec![
                 self.biovault_home.clone(),
@@ -122,7 +167,8 @@ mod hard_reset_tests {
                     .join("biovault")
                     .join("submissions"),
                 datasite_path.join("app_data").join("biovault"),
-                self.syftbox_data_dir
+                self.app
+                    .data_dir
                     .join("private")
                     .join("app_data")
                     .join("biovault"),
@@ -282,13 +328,17 @@ mod hard_reset_tests {
             format!("email: {}", env.email),
         )?;
 
-        let datasite_path = env.syftbox_data_dir.join("datasites").join(&env.email);
+        let datasite_path = env.app.data_dir.join("datasites").join(&env.email);
         let public_biovault = datasite_path.join("public").join("biovault");
-        fs::create_dir_all(&public_biovault)?;
+        env.app.storage.ensure_dir(&public_biovault)?;
 
         // Verify partial structure exists
         assert!(env.biovault_home.exists());
-        assert!(public_biovault.exists());
+        assert!(env
+            .app
+            .storage
+            .path_exists(&public_biovault)
+            .unwrap_or(false));
 
         // Get paths and delete them
         let paths = env.get_cleanup_paths();
@@ -350,7 +400,7 @@ mod hard_reset_tests {
         let env = TestEnvironment::new()?;
 
         // Test edge case: SYFTBOX_DATA_DIR points directly to a datasite
-        let datasite_dir = env.syftbox_data_dir.join("datasites").join(&env.email);
+        let datasite_dir = env.app.data_dir.join("datasites").join(&env.email);
 
         std::env::set_var("BIOVAULT_HOME", &env.biovault_home);
         std::env::set_var("SYFTBOX_DATA_DIR", &datasite_dir);
@@ -361,15 +411,16 @@ mod hard_reset_tests {
 
         // Create public biovault under the datasite
         let public_biovault = datasite_dir.join("public").join("biovault");
-        fs::create_dir_all(&public_biovault)?;
+        env.app.storage.ensure_dir(&public_biovault)?;
 
         // Private should still be at the real data_dir root
         let private_biovault = env
-            .syftbox_data_dir
+            .app
+            .data_dir
             .join("private")
             .join("app_data")
             .join("biovault");
-        fs::create_dir_all(&private_biovault)?;
+        env.app.storage.ensure_dir(&private_biovault)?;
 
         // Delete paths
         let paths_to_delete = vec![
@@ -386,8 +437,16 @@ mod hard_reset_tests {
 
         // Verify deletion
         assert!(!env.biovault_home.exists());
-        assert!(!public_biovault.exists());
-        assert!(!private_biovault.exists());
+        assert!(!env
+            .app
+            .storage
+            .path_exists(&public_biovault)
+            .unwrap_or(true));
+        assert!(!env
+            .app
+            .storage
+            .path_exists(&private_biovault)
+            .unwrap_or(true));
 
         // Clean up environment variables
         std::env::remove_var("BIOVAULT_HOME");

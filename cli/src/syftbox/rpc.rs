@@ -32,10 +32,11 @@ pub fn send_response(
     app: &SyftBoxApp,
     endpoint_name: &str,
     request_path: &Path,
+    request: &RpcRequest,
     response: &RpcResponse,
 ) -> Result<()> {
     let endpoint = Endpoint::new(app, endpoint_name)?;
-    endpoint.send_response(request_path, response)
+    endpoint.send_response(request_path, request, response)
 }
 
 /// Create and send a request to another datasite
@@ -70,7 +71,7 @@ where
 {
     match handler(request) {
         Ok(response) => {
-            send_response(app, endpoint_name, request_path, &response)?;
+            send_response(app, endpoint_name, request_path, request, &response)?;
             Ok(())
         }
         Err(e) => {
@@ -81,7 +82,7 @@ where
                 500,
                 &format!("Error processing request: {}", e),
             );
-            send_response(app, endpoint_name, request_path, &error_response)?;
+            send_response(app, endpoint_name, request_path, request, &error_response)?;
             Err(e)
         }
     }

@@ -1,7 +1,7 @@
 use crate::syftbox::app::SyftBoxApp;
+use crate::syftbox::storage::{ReadPolicy, WritePolicy};
 use crate::syftbox::types::{RpcRequest, RpcResponse};
-use anyhow::{Context, Result};
-use std::fs;
+use anyhow::{anyhow, bail, Context, Result};
 use std::path::{Path, PathBuf};
 
 /// Represents an RPC endpoint
@@ -32,7 +32,7 @@ impl Endpoint {
             return Ok(requests);
         }
 
-        for entry in fs::read_dir(&self.path)? {
+        for entry in std::fs::read_dir(&self.path)? {
             let entry = entry?;
             let path = entry.path();
 
@@ -54,37 +54,47 @@ impl Endpoint {
 
     /// Read a request file
     fn read_request(&self, path: &Path) -> Result<RpcRequest> {
-        let content = fs::read_to_string(path)
-            .with_context(|| format!("Failed to read request file: {:?}", path))?;
-
-        let request: RpcRequest = serde_json::from_str(&content)
-            .with_context(|| format!("Failed to parse request JSON from: {:?}", path))?;
-
-        Ok(request)
+        self.app
+            .storage
+            .read_json(path, ReadPolicy::AllowPlaintext)
+            .with_context(|| format!("Failed to parse request JSON from: {:?}", path))
     }
 
     /// Send a response for a request
-    pub fn send_response(&self, request_path: &Path, response: &RpcResponse) -> Result<()> {
+    pub fn send_response(
+        &self,
+        request_path: &Path,
+        request: &RpcRequest,
+        response: &RpcResponse,
+    ) -> Result<()> {
+        if request_path.is_dir() {
+            bail!(
+                "request path {:?} is a directory, expected file",
+                request_path
+            );
+        }
+
         // Get the request ID from the filename (UUID.request -> UUID)
         let request_filename = request_path
             .file_stem()
             .and_then(|s| s.to_str())
-            .ok_or_else(|| anyhow::anyhow!("Invalid request filename"))?;
+            .ok_or_else(|| anyhow!("Invalid request filename"))?;
 
         // Create response file path (UUID.response)
         let response_filename = format!("{}.response", request_filename);
         let response_path = self.path.join(response_filename);
 
-        // Write the response file
-        let response_json =
-            serde_json::to_string_pretty(&response).context("Failed to serialize response")?;
+        let write_policy = WritePolicy::Envelope {
+            recipients: vec![request.sender.clone()],
+            hint: Some(format!("rpc-response-{}", response.id)),
+        };
 
-        fs::write(&response_path, response_json)
-            .with_context(|| format!("Failed to write response file: {:?}", response_path))?;
+        self.app
+            .storage
+            .write_json(&response_path, response, write_policy, true)?;
 
         // Delete the request file
-        fs::remove_file(request_path)
-            .with_context(|| format!("Failed to delete request file: {:?}", request_path))?;
+        self.app.storage.remove_path(request_path)?;
 
         println!("Sent response to: {:?}", response_path);
         Ok(())
@@ -95,11 +105,17 @@ impl Endpoint {
         let request_filename = format!("{}.request", request.id);
         let request_path = self.path.join(request_filename);
 
-        let request_json =
-            serde_json::to_string_pretty(&request).context("Failed to serialize request")?;
+        let write_policy = match extract_email_from_syft_url(&request.url) {
+            Some(email) => WritePolicy::Envelope {
+                recipients: vec![email],
+                hint: Some(format!("rpc-request-{}", request.id)),
+            },
+            None => WritePolicy::Plaintext,
+        };
 
-        fs::write(&request_path, request_json)
-            .with_context(|| format!("Failed to write request file: {:?}", request_path))?;
+        self.app
+            .storage
+            .write_json(&request_path, request, write_policy, true)?;
 
         println!("Created request: {:?}", request_path);
         Ok(request_path)
@@ -113,7 +129,7 @@ impl Endpoint {
             return Ok(responses);
         }
 
-        for entry in fs::read_dir(&self.path)? {
+        for entry in std::fs::read_dir(&self.path)? {
             let entry = entry?;
             let path = entry.path();
 
@@ -135,21 +151,22 @@ impl Endpoint {
 
     /// Read a response file
     fn read_response(&self, path: &Path) -> Result<RpcResponse> {
-        let content = fs::read_to_string(path)
-            .with_context(|| format!("Failed to read response file: {:?}", path))?;
-
-        let response: RpcResponse = serde_json::from_str(&content)
-            .with_context(|| format!("Failed to parse response JSON from: {:?}", path))?;
-
-        Ok(response)
+        self.app
+            .storage
+            .read_json(path, ReadPolicy::AllowPlaintext)
+            .with_context(|| format!("Failed to parse response JSON from: {:?}", path))
     }
 
     /// Clean up a response file after processing
     pub fn cleanup_response(&self, response_path: &Path) -> Result<()> {
-        fs::remove_file(response_path)
-            .with_context(|| format!("Failed to delete response file: {:?}", response_path))?;
+        self.app.storage.remove_path(response_path)?;
         Ok(())
     }
+}
+
+fn extract_email_from_syft_url(url: &str) -> Option<String> {
+    let trimmed = url.strip_prefix("syft://")?;
+    trimmed.split('/').next().map(|s| s.to_string())
 }
 
 #[cfg(test)]
@@ -190,7 +207,7 @@ mod tests {
         )
         .expect("ok_json");
 
-        endpoint.send_response(req_path, &response)?;
+        endpoint.send_response(req_path, req, &response)?;
 
         // Verify request was deleted and response created
         assert!(!request_path.exists());
@@ -276,13 +293,14 @@ mod tests {
         let bogus = std::path::Path::new("");
         let ok_resp =
             crate::syftbox::types::RpcResponse::error(&req, "r@example.com".into(), 500, "err");
-        assert!(endpoint.send_response(bogus, &ok_resp).is_err());
+        // when request metadata is missing, send_response should fail
+        assert!(endpoint.send_response(bogus, &req, &ok_resp).is_err());
 
         // 7) send_response with directory-as-request should fail on remove_file
         let dir_as_req = endpoint.path.join("dirlike.request");
         std::fs::create_dir_all(&dir_as_req)?;
         // This will succeed writing response but fail deleting the dir
-        let result = endpoint.send_response(&dir_as_req, &ok_resp);
+        let result = endpoint.send_response(&dir_as_req, &req, &ok_resp);
         assert!(result.is_err());
 
         // 8) create_request fails when a directory with same name exists

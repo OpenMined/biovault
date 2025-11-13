@@ -2,6 +2,7 @@ pub mod app;
 pub mod control;
 pub mod endpoint;
 pub mod rpc;
+pub mod storage;
 pub mod types;
 
 pub use app::SyftBoxApp;
@@ -11,6 +12,7 @@ pub use control::{
 };
 pub use endpoint::Endpoint;
 pub use rpc::{check_requests, send_response};
+pub use storage::SyftBoxStorage;
 pub use types::{RpcHeaders, RpcRequest, RpcResponse};
 
 use anyhow::Result;
