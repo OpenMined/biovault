@@ -24,6 +24,9 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Init submodules
+        run: ./submodules.sh
+
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@master
         with:
