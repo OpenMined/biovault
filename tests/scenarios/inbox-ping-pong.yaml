@@ -25,7 +25,7 @@ steps:
         --non-interactive \
         --force
 
-  - name: Client2 syncs inbox
+  - name: Client2 syncs inbox (first time)
     datasite: client2@sandbox.local
     run: |
       {{workspace}}/cli/target/release/bv message sync
@@ -34,6 +34,23 @@ steps:
     datasite: client2@sandbox.local
     wait_for: datasites/client1@sandbox.local/shared/biovault/submissions/*/project.yaml
     timeout: 30
+
+  - name: Debug - check message directories
+    datasite: client2@sandbox.local
+    run: |
+      echo "=== Submissions directory ==="
+      find datasites/client1@sandbox.local/shared/biovault/submissions -type f 2>/dev/null || echo "No submissions found"
+      echo ""
+      echo "=== RPC directory ==="
+      find datasites/client1@sandbox.local/app_data/biovault/rpc -type f 2>/dev/null || echo "No RPC directory"
+      echo ""
+      echo "=== BioVault message cache ==="
+      ls -la .biovault/messages/ 2>/dev/null || echo "No message cache"
+
+  - name: Client2 syncs inbox (second time)
+    datasite: client2@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv message sync
 
   - name: Client2 lists inbox messages
     datasite: client2@sandbox.local
