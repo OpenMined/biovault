@@ -109,10 +109,14 @@ require_bin() {
 }
 
 abs_path() {
+  echo "[DEBUG abs_path] Input: $1" >&2
   python3 - <<'PY' "$1"
 import os, sys
 print(os.path.abspath(sys.argv[1]))
 PY
+  local result=$?
+  echo "[DEBUG abs_path] Result: $result" >&2
+  return $result
 }
 
 [[ -n "$DATASITE" ]] || { echo "--datasite is required" >&2; usage >&2; exit 1; }
@@ -193,6 +197,10 @@ generate_samplesheet() {
 if [[ -z "$SAMPLESHEET_OVERRIDE" ]]; then
   generate_samplesheet "$SAMPLESHEET_PATH" "$DATA_FILTER"
 fi
+
+echo "[DEBUG] Samplesheet contents:"
+cat "$SAMPLESHEET_PATH" || echo "Failed to read samplesheet"
+echo "[DEBUG] End samplesheet contents"
 
 echo "[DEBUG] Creating results directory..."
 if [[ -z "$RESULTS_DIR" ]]; then
@@ -279,23 +287,33 @@ requires_data_dir() {
 }
 
 echo "[DEBUG] Checking samplesheet arg..."
+set +u  # Temporarily disable undefined variable check for array operations
+echo "[DEBUG] EXTRA_SET_ARGS count: ${#EXTRA_SET_ARGS[@]}"
 SAMPLE_SET_PRESENT=0
-if ((${#EXTRA_SET_ARGS[@]:-0})); then
+echo "[DEBUG] Checking if samplesheet already in args..."
+if ((${#EXTRA_SET_ARGS[@]})); then
+  echo "[DEBUG] Iterating through EXTRA_SET_ARGS..."
   for entry in "${EXTRA_SET_ARGS[@]}"; do
+    echo "[DEBUG] Checking entry: $entry"
     if [[ "$entry" == inputs.samplesheet=* ]]; then
       SAMPLE_SET_PRESENT=1
+      echo "[DEBUG] Found existing samplesheet arg"
       break
     fi
   done
+  echo "[DEBUG] Done iterating"
 fi
+echo "[DEBUG] SAMPLE_SET_PRESENT: $SAMPLE_SET_PRESENT"
 if (( SAMPLE_SET_PRESENT == 0 )); then
+  echo "[DEBUG] Adding samplesheet to args: $SAMPLESHEET_PATH"
   EXTRA_SET_ARGS+=("inputs.samplesheet=$SAMPLESHEET_PATH")
+  echo "[DEBUG] Added samplesheet to args"
 fi
 echo "[DEBUG] Samplesheet arg set: $SAMPLESHEET_PATH"
 
 echo "[DEBUG] Checking data_dir arg..."
 DATA_SET_PRESENT=0
-if ((${#EXTRA_SET_ARGS[@]:-0})); then
+if ((${#EXTRA_SET_ARGS[@]})); then
   for entry in "${EXTRA_SET_ARGS[@]}"; do
     if [[ "$entry" == inputs.data_dir=* ]]; then
       DATA_SET_PRESENT=1
@@ -303,6 +321,7 @@ if ((${#EXTRA_SET_ARGS[@]:-0})); then
     fi
   done
 fi
+set -u  # Re-enable undefined variable check
 echo "[DEBUG] Data dir present: $DATA_SET_PRESENT"
 echo "[DEBUG] Checking if project requires data_dir..."
 if (( DATA_SET_PRESENT == 0 )) && requires_data_dir "$PROJECT_PATH"; then
