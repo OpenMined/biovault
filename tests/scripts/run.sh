@@ -194,11 +194,14 @@ if [[ -z "$SAMPLESHEET_OVERRIDE" ]]; then
   generate_samplesheet "$SAMPLESHEET_PATH" "$DATA_FILTER"
 fi
 
+echo "[DEBUG] Creating results directory..."
 if [[ -z "$RESULTS_DIR" ]]; then
   RESULTS_DIR="$CLIENT_DIR/.sandbox-run/results/$(basename "$PROJECT_PATH")-$(timestamp)"
 fi
 RESULTS_DIR="$(abs_path "$RESULTS_DIR")"
+echo "[DEBUG] Results dir: $RESULTS_DIR"
 mkdir -p "$RESULTS_DIR"
+echo "[DEBUG] Results directory created"
 
 infer_data_dir() {
   local sheet="$1"
@@ -286,7 +289,9 @@ if ((${#EXTRA_SET_ARGS[@]:-0})); then
     fi
   done
 fi
+echo "[DEBUG] Checking if project requires data_dir..."
 if (( DATA_SET_PRESENT == 0 )) && requires_data_dir "$PROJECT_PATH"; then
+  echo "[DEBUG] Project requires data_dir, inferring from samplesheet..."
   if inferred_dir="$(infer_data_dir "$SAMPLESHEET_PATH")"; then
     EXTRA_SET_ARGS+=("inputs.data_dir=$inferred_dir")
     echo "Inferred data dir: $inferred_dir"
@@ -294,8 +299,11 @@ if (( DATA_SET_PRESENT == 0 )) && requires_data_dir "$PROJECT_PATH"; then
     echo "Failed to infer data directory from $SAMPLESHEET_PATH" >&2
     exit 1
   fi
+else
+  echo "[DEBUG] Project does not require data_dir or already set"
 fi
 
+echo "[DEBUG] Building run command..."
 RUN_CMD=(run "$PROJECT_PATH" --results-dir "$RESULTS_DIR")
 (( RUN_TEST )) && RUN_CMD+=(--test)
 (( RUN_DRY )) && RUN_CMD+=(--dry-run)
@@ -303,6 +311,7 @@ RUN_CMD=(run "$PROJECT_PATH" --results-dir "$RESULTS_DIR")
 for entry in "${EXTRA_SET_ARGS[@]}"; do
   RUN_CMD+=(--set "$entry")
 done
+echo "[DEBUG] Run command built successfully"
 
 echo "Running pipeline:"
 printf '  bv %s\n' "${RUN_CMD[*]}"
