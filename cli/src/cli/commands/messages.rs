@@ -676,7 +676,7 @@ pub async fn process_project_message(
 
             // Approve if requested
             if approve {
-                approve_project_non_interactive(config, &msg).await?;
+                approve_project_non_interactive(config, &msg, test).await?;
                 println!("✓ Project approved and results sent to sender");
             }
         }
@@ -1127,7 +1127,7 @@ async fn process_dynamic_project_message(
     }
 
     if approve {
-        approve_project_non_interactive(config, msg).await?;
+        approve_project_non_interactive(config, msg, test).await?;
         println!("✓ Project approved and results sent to sender");
     }
 
@@ -1332,18 +1332,32 @@ fn ensure_catalog_ready_for_all(_config: &Config) -> anyhow::Result<()> {
 }
 
 /// Non-interactive version of approve_project for automated testing
-async fn approve_project_non_interactive(config: &Config, msg: &Message) -> anyhow::Result<()> {
+async fn approve_project_non_interactive(
+    config: &Config,
+    msg: &Message,
+    test: bool,
+) -> anyhow::Result<()> {
     let dest = build_run_project_copy(config, msg)?;
-    let results_dir = dest.join("results-real");
     let storage = syftbox_storage(config)?;
+    let results_dir = if test {
+        // In test mode, use test results for approval
+        dest.join("results-test")
+    } else {
+        dest.join("results-real")
+    };
     let needs_run = !results_dir.exists()
         || storage
             .list_dir(&results_dir)
             .map(|entries| entries.is_empty())
             .unwrap_or(true);
-    if needs_run {
+    if needs_run && !test {
+        // Only run real data if not in test mode
         println!("No results found. Running on real data before approval...");
         run_project_real(config, msg).await?;
+    } else if needs_run && test {
+        return Err(anyhow::anyhow!(
+            "No test results found. Run with --test first before approving."
+        ));
     }
 
     // Release results to sender shared location

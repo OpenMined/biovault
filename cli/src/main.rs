@@ -209,6 +209,7 @@ mod tests {
             Commands::Inbox {
                 interactive,
                 plain,
+                json,
                 sent,
                 all,
                 unread,
@@ -219,6 +220,7 @@ mod tests {
             } => {
                 assert!(!interactive);
                 assert!(plain);
+                assert!(!json);
                 assert!(sent);
                 assert!(!all);
                 assert!(!unread);
@@ -380,13 +382,13 @@ enum Commands {
 
     #[command(about = "Show system information")]
     Info {
-        #[arg(long, help = "Output as JSON")]
+        #[arg(long, help = "Output plain mode as JSON")]
         json: bool,
     },
 
     #[command(about = "Check for required dependencies")]
     Check {
-        #[arg(long, help = "Output as JSON")]
+        #[arg(long, help = "Output plain mode as JSON")]
         json: bool,
     },
 
@@ -464,7 +466,7 @@ enum Commands {
         #[command(subcommand)]
         command: Option<ConfigCommands>,
 
-        #[arg(long, help = "Output as JSON")]
+        #[arg(long, help = "Output plain mode as JSON")]
         json: bool,
     },
 
@@ -525,6 +527,9 @@ enum Commands {
 
         #[arg(long, help = "Plain, non-interactive list output")]
         plain: bool,
+
+        #[arg(long, help = "Output plain mode as JSON")]
+        json: bool,
 
         #[arg(short = 's', long, help = "Show sent messages")]
         sent: bool,
@@ -1236,6 +1241,31 @@ enum SamplesheetCommands {
         )]
         ignore: bool,
     },
+    #[command(about = "Export cataloged files into a samplesheet CSV")]
+    ExportCatalog {
+        #[arg(help = "Output CSV file path")]
+        output_file: String,
+
+        #[arg(
+            long = "data-type",
+            default_value = "genotype",
+            help = "Filter catalog entries by data type (use 'all' for no filter)"
+        )]
+        data_type: String,
+
+        #[arg(
+            long = "participants",
+            help = "Comma-separated participant IDs to include (default: all)"
+        )]
+        participants: Option<String>,
+
+        #[arg(
+            long = "path-column",
+            default_value = "genotype_file",
+            help = "Column name to use for file paths in the CSV"
+        )]
+        path_column: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1362,7 +1392,7 @@ enum SqlCommands {
         #[arg(help = "Table name (shows all tables if not specified)")]
         table: Option<String>,
 
-        #[arg(long, help = "Output as JSON")]
+        #[arg(long, help = "Output plain mode as JSON")]
         json: bool,
     },
 
@@ -2063,6 +2093,7 @@ async fn async_main_with(cli: Cli) -> Result<()> {
         Commands::Inbox {
             interactive,
             plain,
+            json,
             sent,
             all,
             unread,
@@ -2082,6 +2113,7 @@ async fn async_main_with(cli: Cli) -> Result<()> {
                     message_type,
                     from,
                     search,
+                    json,
                 };
                 commands::inbox::list(&config, filters)?;
             } else {
@@ -2174,6 +2206,20 @@ async fn async_main_with(cli: Cli) -> Result<()> {
                     file_filter,
                     extract_cols,
                     ignore,
+                )
+                .await?;
+            }
+            SamplesheetCommands::ExportCatalog {
+                output_file,
+                data_type,
+                participants,
+                path_column,
+            } => {
+                commands::samplesheet::export_catalog(
+                    output_file,
+                    data_type,
+                    participants,
+                    path_column,
                 )
                 .await?;
             }

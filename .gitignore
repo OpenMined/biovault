@@ -228,3 +228,5 @@ test-clients-local/
 .DS_Store
 cli/nextflow
 cli/test_project/*
+
+sandbox/*
