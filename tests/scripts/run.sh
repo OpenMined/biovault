@@ -205,6 +205,7 @@ echo "[DEBUG] Results directory created"
 
 infer_data_dir() {
   local sheet="$1"
+  echo "[DEBUG infer_data_dir] Processing: $sheet" >&2
   python3 - <<'PY' "$sheet"
 import csv, os, sys
 sheet = sys.argv[1]
@@ -247,26 +248,37 @@ PY
 
 requires_data_dir() {
   local target="$1"
+  echo "[DEBUG requires_data_dir] Checking: $target" >&2
   local file=""
   if [[ -f "$target" ]]; then
     file="$target"
+    echo "[DEBUG requires_data_dir] Found file: $file" >&2
   elif [[ -d "$target" ]]; then
+    echo "[DEBUG requires_data_dir] Target is directory" >&2
     if [[ -f "$target/pipeline.yaml" ]]; then
       file="$target/pipeline.yaml"
+      echo "[DEBUG requires_data_dir] Found: pipeline.yaml" >&2
     elif [[ -f "$target/project.yaml" ]]; then
       file="$target/project.yaml"
+      echo "[DEBUG requires_data_dir] Found: project.yaml" >&2
     fi
   fi
   if [[ -z "$file" ]]; then
+    echo "[DEBUG requires_data_dir] No file found, returning false" >&2
     return 1
   fi
+  echo "[DEBUG requires_data_dir] Searching for data_dir in: $file" >&2
   if command -v rg >/dev/null 2>&1; then
     rg -q --fixed-strings --word-regexp "data_dir" "$file"
   else
     grep -q "data_dir" "$file"
   fi
+  local result=$?
+  echo "[DEBUG requires_data_dir] Search result: $result" >&2
+  return $result
 }
 
+echo "[DEBUG] Checking samplesheet arg..."
 SAMPLE_SET_PRESENT=0
 if ((${#EXTRA_SET_ARGS[@]:-0})); then
   for entry in "${EXTRA_SET_ARGS[@]}"; do
@@ -279,7 +291,9 @@ fi
 if (( SAMPLE_SET_PRESENT == 0 )); then
   EXTRA_SET_ARGS+=("inputs.samplesheet=$SAMPLESHEET_PATH")
 fi
+echo "[DEBUG] Samplesheet arg set: $SAMPLESHEET_PATH"
 
+echo "[DEBUG] Checking data_dir arg..."
 DATA_SET_PRESENT=0
 if ((${#EXTRA_SET_ARGS[@]:-0})); then
   for entry in "${EXTRA_SET_ARGS[@]}"; do
@@ -289,6 +303,7 @@ if ((${#EXTRA_SET_ARGS[@]:-0})); then
     fi
   done
 fi
+echo "[DEBUG] Data dir present: $DATA_SET_PRESENT"
 echo "[DEBUG] Checking if project requires data_dir..."
 if (( DATA_SET_PRESENT == 0 )) && requires_data_dir "$PROJECT_PATH"; then
   echo "[DEBUG] Project requires data_dir, inferring from samplesheet..."
