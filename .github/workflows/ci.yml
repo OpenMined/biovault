@@ -76,6 +76,11 @@ jobs:
       with:
         submodules: recursive
 
+    - name: Install protoc
+      uses: arduino/setup-protoc@v2
+      with:
+        repo-token: ${{ secrets.GITHUB_TOKEN }}
+
     - name: Install just
       uses: extractions/setup-just@v1
 
@@ -162,6 +167,11 @@ jobs:
       with:
         workspaces: "cli -> target"
 
+    - name: Install protoc
+      uses: arduino/setup-protoc@v2
+      with:
+        repo-token: ${{ secrets.GITHUB_TOKEN }}
+
     - name: Install uv
       uses: astral-sh/setup-uv@v3
 
@@ -213,6 +223,11 @@ jobs:
       with:
         workspaces: "cli -> target"
 
+    - name: Install protoc
+      uses: arduino/setup-protoc@v2
+      with:
+        repo-token: ${{ secrets.GITHUB_TOKEN }}
+
     - name: Install uv
       uses: astral-sh/setup-uv@v3
 
@@ -263,6 +278,11 @@ jobs:
       uses: Swatinem/rust-cache@v2
       with:
         workspaces: "cli -> target"
+
+    - name: Install protoc
+      uses: arduino/setup-protoc@v2
+      with:
+        repo-token: ${{ secrets.GITHUB_TOKEN }}
 
     - name: Install uv
       uses: astral-sh/setup-uv@v3
