@@ -1,0 +1,33 @@
+setup:
+  server:
+    - "./tests/scripts/server.sh --reset"
+    - "./tests/scripts/server.sh"
+  clients:
+    - "./tests/scripts/datasite.sh --reset"
+    - "./tests/scripts/datasite.sh --names client1@sandbox.local"
+
+steps:
+  - name: Import test data with edge-case participant IDs
+    run: |
+      ./tests/scripts/import-data.sh \
+        --csv tests/break_nextflow/samplesheet.csv \
+        --clients client1@sandbox.local \
+        --path-column genotype_file
+
+  - name: Verify only valid files were imported (3 out of 5)
+    datasite: client1@sandbox.local
+    run: sqlite3 .biovault/biovault.db "select count(*) from files"
+    expect: "3"
+
+  - name: Run count-lines pipeline with edge-case IDs
+    run: |
+      ./tests/scripts/run.sh \
+        --datasite client1@sandbox.local \
+        --project cli/examples/pipeline/count-lines \
+        --data all
+
+  - name: Verify results exist (should handle edge-case participant IDs)
+    datasite: client1@sandbox.local
+    run: |
+      ls .sandbox-run/results | tail -n 1 | xargs -I{} ls ".sandbox-run/results/{}"
+    expect: "line_counts.csv"

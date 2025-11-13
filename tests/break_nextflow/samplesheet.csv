@@ -1,0 +1,6 @@
+participant_id,genotype_file
+P001,data/test_snps.txt
+P002,data/test_snps_p002.txt
+P003,data/test_snps_p003.txt
+"P 004",data/test_snps.txt
+"P*005",data/test_snps_p002.txt
