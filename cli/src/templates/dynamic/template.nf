@@ -1,6 +1,42 @@
 import groovy.yaml.YamlSlurper
 nextflow.enable.dsl=2
 
+def __bvNormalizeNextflow(rawConfig) {
+    def allowedStrategies = ['ignore', 'retry', 'finish', 'terminate'] as Set
+    def candidate = (rawConfig instanceof Map) ? rawConfig : [:]
+
+    def strategyValue = candidate.error_strategy ?: candidate.errorStrategy ?: 'ignore'
+    def normalizedStrategy = strategyValue?.toString()?.toLowerCase() ?: 'ignore'
+    if (!allowedStrategies.contains(normalizedStrategy)) {
+        println "[bv] WARNING: Unsupported nextflow.error_strategy='${normalizedStrategy}', defaulting to 'ignore'"
+        normalizedStrategy = 'ignore'
+    }
+
+    def rawRetries = candidate.max_retries
+    if (rawRetries == null && candidate.containsKey('maxRetries')) {
+        rawRetries = candidate.maxRetries
+    }
+
+    int normalizedRetries = 0
+    if (rawRetries != null) {
+        try {
+            normalizedRetries = (rawRetries as Integer).intValue()
+            if (normalizedRetries < 0) {
+                println "[bv] WARNING: nextflow.max_retries cannot be negative; defaulting to 0"
+                normalizedRetries = 0
+            }
+        } catch (Throwable t) {
+            println "[bv] WARNING: Could not parse nextflow.max_retries='${rawRetries}', defaulting to 0"
+            normalizedRetries = 0
+        }
+    }
+
+    return [
+        error_strategy: normalizedStrategy,
+        max_retries: normalizedRetries
+    ].asImmutable()
+}
+
 params.results_dir = params.results_dir ?: 'results'
 params.work_flow_file = params.work_flow_file ?: 'workflow.nf'
 params.project_spec = params.project_spec ?: null
@@ -9,6 +45,9 @@ params.params_json = params.params_json ?: null
 if (!params.containsKey('assets_dir')) {
     params.assets_dir = null
 }
+
+def __bvParamsPayloadBootstrap = new groovy.json.JsonSlurper().parseText(params.params_json ?: '{}')
+params.nextflow = __bvNormalizeNextflow(__bvParamsPayloadBootstrap.nextflow)
 
 // Optional context parameters (provided by BioVault daemon in production)
 params.run_id = null
@@ -43,6 +82,8 @@ workflow {
 
     // Build context from parameters
     def contextParams = paramsPayload ?: [:]
+    def normalizedNextflow = __bvNormalizeNextflow(contextParams.nextflow)
+    contextParams.nextflow = normalizedNextflow
     def assetsDirParam = contextParams.assets_dir ?: params.assets_dir
     def assetsDirFile = assetsDirParam ? file(assetsDirParam) : null
     def assetsDirChannel = assetsDirFile ? Channel.value(assetsDirFile) : null
@@ -58,6 +99,7 @@ workflow {
         user          : params.user,
         run_timestamp : params.run_timestamp,
         params        : contextParams,
+        nextflow      : normalizedNextflow,
         assets_dir    : assetsDirFile,
         assets_dir_ch : assetsDirChannel
     ]
@@ -92,10 +134,15 @@ workflow {
 
     file(params.results_dir).mkdirs()
 
-    USER(
-        context,
-        *(boundInputs.collect { it[1] })
-    )
+    try {
+        USER(
+            context,
+            *(boundInputs.collect { it[1] })
+        )
+    } catch (Throwable t) {
+        println "[bv] ERROR: Workflow '${spec.name ?: 'unknown'}' failed - ${t.message}"
+        throw t
+    }
 }
 
 def __bvDeepFreeze(value) {
@@ -204,9 +251,16 @@ def __bvLoadGenotypeRecords(path, format, mapping) {
                     genoFilePath = csvBaseDir.resolve(genotypeFile).toString()
                 }
 
+                def validation = __bvValidateGenotypePath(genoFilePath)
+                if (validation.status != 'ok') {
+                    println "[bv] WARNING: Participant '${participantId}' genotype file issue (${validation.status}) at '${genoFilePath}' - ${validation.message}"
+                }
+
                 return [
                     participant_id: participantId,
                     genotype_file: genoFilePath ? file(genoFilePath) : null,
+                    genotype_path: genoFilePath,
+                    validation: validation,
                     grch_build: grchBuild,
                     source: source
                 ].findAll { it.value != null }
@@ -226,9 +280,16 @@ def __bvLoadGenotypeRecords(path, format, mapping) {
                 genoFilePath = csvBaseDir.resolve(genotypeFile).toString()
             }
 
+            def validation = __bvValidateGenotypePath(genoFilePath)
+            if (validation.status != 'ok') {
+                println "[bv] WARNING: Participant '${participantId}' genotype file issue (${validation.status}) at '${genoFilePath}' - ${validation.message}"
+            }
+
             return [
                 participant_id: participantId,
                 genotype_file: genoFilePath ? file(genoFilePath) : null,
+                genotype_path: genoFilePath,
+                validation: validation,
                 grch_build: grchBuild,
                 source: source
             ].findAll { it.value != null }
@@ -241,4 +302,26 @@ def __bvLoadGenotypeRecords(path, format, mapping) {
 def __bvLoadParticipantSheet(path, format, mapping) {
     // ParticipantSheet is similar to List[GenotypeRecord] but with sheet-specific fields
     return __bvLoadGenotypeRecords(path, format, mapping)
+}
+
+def __bvValidateGenotypePath(pathStr) {
+    if (!pathStr) {
+        return [status: 'missing', message: 'No genotype file path provided']
+    }
+
+    try {
+        def candidate = new File(pathStr)
+        if (!candidate.exists()) {
+            return [status: 'missing', message: 'Path does not exist']
+        }
+        if (candidate.isDirectory()) {
+            return [status: 'directory', message: 'Path points to a directory, expected file']
+        }
+        if (!candidate.canRead()) {
+            return [status: 'unreadable', message: 'Path is not readable by Nextflow runtime']
+        }
+        return [status: 'ok', message: '']
+    } catch (Throwable t) {
+        return [status: 'unknown', message: t.message ?: 'Unexpected error validating path']
+    }
 }
