@@ -134,3 +134,157 @@ jobs:
         echo ""
         echo "=== BioVault Database Status (Client 2) ==="
         ls -la test-clients-local/client2@syftbox.net/.biovault/*.db 2>/dev/null || echo "No database found"
+
+  # Run scenario tests in parallel (each in its own runner)
+  scenario-inbox-ping-pong:
+    name: Scenario - Inbox Ping Pong
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@master
+      with:
+        toolchain: 1.91.0
+
+    - name: Cache Rust dependencies
+      uses: Swatinem/rust-cache@v2
+      with:
+        workspaces: "cli -> target"
+
+    - name: Install uv
+      uses: astral-sh/setup-uv@v3
+
+    - name: Add minio to /etc/hosts
+      run: |
+        echo "127.0.0.1 minio" | sudo tee -a /etc/hosts
+        cat /etc/hosts | grep minio
+
+    - name: Build BioVault CLI
+      run: cd cli && cargo build --release
+
+    - name: Setup BioVault dependencies (Nextflow, etc.)
+      run: cd cli && ./target/release/bv setup
+
+    - name: Verify dependencies
+      run: cd cli && ./target/release/bv check
+
+    - name: Run inbox-ping-pong scenario
+      run: ./test-scenario.sh tests/scenarios/inbox-ping-pong.yaml
+
+    - name: Show logs on failure
+      if: failure()
+      run: |
+        echo "=== Server Logs ==="
+        docker logs syftbox-server || true
+        echo ""
+        echo "=== Sandbox Directory Structure ==="
+        find sandbox -type d -maxdepth 2 2>/dev/null || true
+        echo ""
+        echo "=== Client Logs ==="
+        find sandbox -name "*.log" -exec echo "--- {} ---" \; -exec cat {} \; 2>/dev/null || true
+
+  scenario-import-and-run:
+    name: Scenario - Import and Run
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@master
+      with:
+        toolchain: 1.91.0
+
+    - name: Cache Rust dependencies
+      uses: Swatinem/rust-cache@v2
+      with:
+        workspaces: "cli -> target"
+
+    - name: Install uv
+      uses: astral-sh/setup-uv@v3
+
+    - name: Add minio to /etc/hosts
+      run: |
+        echo "127.0.0.1 minio" | sudo tee -a /etc/hosts
+        cat /etc/hosts | grep minio
+
+    - name: Build BioVault CLI
+      run: cd cli && cargo build --release
+
+    - name: Setup BioVault dependencies (Nextflow, etc.)
+      run: cd cli && ./target/release/bv setup
+
+    - name: Verify dependencies
+      run: cd cli && ./target/release/bv check
+
+    - name: Run import-and-run scenario
+      run: ./test-scenario.sh tests/scenarios/import-and-run.yaml
+
+    - name: Show logs on failure
+      if: failure()
+      run: |
+        echo "=== Server Logs ==="
+        docker logs syftbox-server || true
+        echo ""
+        echo "=== Sandbox Directory Structure ==="
+        find sandbox -type d -maxdepth 2 2>/dev/null || true
+        echo ""
+        echo "=== Client Logs ==="
+        find sandbox -name "*.log" -exec echo "--- {} ---" \; -exec cat {} \; 2>/dev/null || true
+
+  scenario-break-nextflow:
+    name: Scenario - Break Nextflow
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@master
+      with:
+        toolchain: 1.91.0
+
+    - name: Cache Rust dependencies
+      uses: Swatinem/rust-cache@v2
+      with:
+        workspaces: "cli -> target"
+
+    - name: Install uv
+      uses: astral-sh/setup-uv@v3
+
+    - name: Add minio to /etc/hosts
+      run: |
+        echo "127.0.0.1 minio" | sudo tee -a /etc/hosts
+        cat /etc/hosts | grep minio
+
+    - name: Build BioVault CLI
+      run: cd cli && cargo build --release
+
+    - name: Setup BioVault dependencies (Nextflow, etc.)
+      run: cd cli && ./target/release/bv setup
+
+    - name: Verify dependencies
+      run: cd cli && ./target/release/bv check
+
+    - name: Run break-nextflow scenario
+      run: ./test-scenario.sh tests/scenarios/break-nextflow.yaml
+
+    - name: Show logs on failure
+      if: failure()
+      run: |
+        echo "=== Server Logs ==="
+        docker logs syftbox-server || true
+        echo ""
+        echo "=== Sandbox Directory Structure ==="
+        find sandbox -type d -maxdepth 2 2>/dev/null || true
+        echo ""
+        echo "=== Client Logs ==="
+        find sandbox -name "*.log" -exec echo "--- {} ---" \; -exec cat {} \; 2>/dev/null || true

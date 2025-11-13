@@ -1,6 +1,8 @@
+use crate::data::db::BioVaultDb;
 use anyhow::{Context, Result};
+use csv::Writer;
 use regex::Regex;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use tracing::{debug, info, warn};
@@ -149,6 +151,111 @@ pub async fn create(
         );
     }
 
+    Ok(())
+}
+
+pub async fn export_catalog(
+    output_file: String,
+    data_type: String,
+    participants: Option<String>,
+    path_column: String,
+) -> Result<()> {
+    let db = BioVaultDb::new()?;
+    let mut stmt = db.conn.prepare(
+        "SELECT f.file_path, f.data_type, p.participant_id
+         FROM files f
+         LEFT JOIN participants p ON f.participant_id = p.id
+         ORDER BY f.file_path",
+    )?;
+    let mut rows = stmt.query([])?;
+
+    if let Some(parent) = Path::new(&output_file).parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)?;
+        }
+    }
+
+    let mut writer = Writer::from_path(&output_file)?;
+    let path_header = if path_column.trim().is_empty() {
+        "genotype_file"
+    } else {
+        path_column.trim()
+    };
+    writer.write_record(["participant_id", path_header])?;
+
+    let dt_filter = if data_type.eq_ignore_ascii_case("all") {
+        None
+    } else {
+        Some(data_type.to_lowercase())
+    };
+
+    let participant_filter: Option<HashSet<String>> = participants.as_ref().and_then(|raw| {
+        if raw.trim().is_empty() || raw.eq_ignore_ascii_case("all") {
+            None
+        } else {
+            Some(
+                raw.split(',')
+                    .filter_map(|p| {
+                        let trimmed = p.trim();
+                        if trimmed.is_empty() {
+                            None
+                        } else {
+                            Some(trimmed.to_lowercase())
+                        }
+                    })
+                    .collect::<HashSet<_>>(),
+            )
+        }
+    });
+
+    let mut written = 0usize;
+    while let Some(row) = rows.next()? {
+        let file_path: String = row.get(0)?;
+        if file_path.trim().is_empty() {
+            continue;
+        }
+
+        if let Some(ref dt) = dt_filter {
+            let row_type: Option<String> = row.get(1)?;
+            let matches = row_type
+                .as_ref()
+                .map(|value| value.to_lowercase() == *dt)
+                .unwrap_or(false);
+            if !matches {
+                continue;
+            }
+        }
+
+        let participant: Option<String> = row.get(2)?;
+        let mut participant_id = participant.unwrap_or_default();
+        if participant_id.trim().is_empty() {
+            participant_id = Path::new(&file_path)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("unknown")
+                .to_string();
+        }
+        let participant_id = participant_id.trim().to_string();
+
+        if let Some(ref filter) = participant_filter {
+            if !filter.contains(&participant_id.to_lowercase()) {
+                continue;
+            }
+        }
+
+        writer.write_record([participant_id, file_path])?;
+        written += 1;
+    }
+
+    writer.flush()?;
+
+    if written == 0 {
+        anyhow::bail!(
+            "No cataloged files matched the requested criteria. Import data before exporting."
+        );
+    }
+
+    println!("✓ Exported {} catalog entries to {}", written, output_file);
     Ok(())
 }
 

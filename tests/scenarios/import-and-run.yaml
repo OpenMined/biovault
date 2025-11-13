@@ -1,0 +1,32 @@
+setup:
+  server:
+    - "./tests/scripts/server.sh --reset"
+    - "./tests/scripts/server.sh"
+  clients:
+    - "./tests/scripts/datasite.sh --reset"
+    - "./tests/scripts/datasite.sh --names client1@sandbox.local,client2@sandbox.local"
+
+steps:
+  - name: Import genotype fixtures for client2
+    run: |
+      ./tests/scripts/import-data.sh \
+        --csv cli/tests/data/participants_all.csv \
+        --clients client2@sandbox.local \
+        --path-column genotype_file
+
+  - name: Run HERC2 classifier pipeline
+    run: |
+      ./tests/scripts/run.sh \
+        --datasite client2@sandbox.local \
+        --project bioscript/examples/herc2/herc2-classifier/pipeline.yaml \
+        --data all
+
+  - name: Assert BioVault catalog contains 13 files
+    datasite: client2@sandbox.local
+    run: sqlite3 .biovault/biovault.db "select count(*) from files"
+    expect: "13"
+
+  - name: Assert results TSV exists
+    datasite: client2@sandbox.local
+    run: |
+      ls .sandbox-run/results | tail -n 1 | xargs -I{} test -f ".sandbox-run/results/{}/herc2/result_HERC2.tsv"
