@@ -1,3 +1,4 @@
+use crate::syftbox::storage::SyftBoxStorage;
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -37,6 +38,7 @@ pub struct SyftBoxApp {
     pub data_dir: PathBuf,
     pub app_data_dir: PathBuf,
     pub rpc_dir: PathBuf,
+    pub storage: SyftBoxStorage,
 }
 
 impl SyftBoxApp {
@@ -50,12 +52,15 @@ impl SyftBoxApp {
 
         let rpc_dir = app_data_dir.join("rpc");
 
+        let storage = SyftBoxStorage::new(data_dir);
+
         let app = Self {
             app_name: app_name.to_string(),
             email: email.to_string(),
             data_dir: data_dir.to_path_buf(),
             app_data_dir,
             rpc_dir,
+            storage,
         };
 
         app.ensure_initialized()?;
@@ -78,13 +83,11 @@ impl SyftBoxApp {
         // Create app-level permission file if it doesn't exist
         let app_permission_file = self.app_data_dir.join(PERMISSION_FILE_NAME);
         if !app_permission_file.exists() {
-            fs::write(&app_permission_file, DEFAULT_APP_PERMISSION_CONTENT).with_context(|| {
-                format!(
-                    "Failed to create app permission file: {:?}",
-                    app_permission_file
-                )
-            })?;
-            // quiet
+            self.storage.write_plaintext_file(
+                &app_permission_file,
+                DEFAULT_APP_PERMISSION_CONTENT.as_bytes(),
+                false,
+            )?;
         }
 
         // Create RPC directory if it doesn't exist
@@ -97,13 +100,11 @@ impl SyftBoxApp {
         // Create RPC permission file if it doesn't exist
         let rpc_permission_file = self.rpc_dir.join(PERMISSION_FILE_NAME);
         if !rpc_permission_file.exists() {
-            fs::write(&rpc_permission_file, DEFAULT_RPC_PERMISSION_CONTENT).with_context(|| {
-                format!(
-                    "Failed to create RPC permission file: {:?}",
-                    rpc_permission_file
-                )
-            })?;
-            // quiet
+            self.storage.write_plaintext_file(
+                &rpc_permission_file,
+                DEFAULT_RPC_PERMISSION_CONTENT.as_bytes(),
+                false,
+            )?;
         }
 
         Ok(())

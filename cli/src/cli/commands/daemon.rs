@@ -227,19 +227,7 @@ impl Daemon {
         }
 
         let app = SyftBoxApp::new(&data_dir, &self.config.email, "biovault")?;
-        let watch_path = app
-            .data_dir
-            .join("datasites")
-            .join(&app.email)
-            .join("app_data")
-            .join("biovault")
-            .join("rpc")
-            .join("message");
-
-        if !watch_path.exists() {
-            std::fs::create_dir_all(&watch_path)
-                .with_context(|| format!("Failed to create watch directory: {:?}", watch_path))?;
-        }
+        let watch_path = app.register_endpoint("/message")?;
 
         self.log("INFO", &format!("Watching directory: {:?}", watch_path));
 

@@ -100,6 +100,14 @@ fn get_cleanup_paths(config: &Config) -> Vec<CleanupPath> {
             path: private_biovault.clone(),
             exists: private_biovault.exists(),
         });
+
+        // 6. Unencrypted shadow directory (if present)
+        let shadow_root = real_data_dir.join("unencrypted").join(&config.email);
+        paths.push(CleanupPath {
+            description: "└─ unencrypted shadow".to_string(),
+            path: shadow_root.clone(),
+            exists: shadow_root.exists(),
+        });
     } else {
         warn!("Could not determine SyftBox data directory - some paths may not be cleaned");
     }
@@ -358,23 +366,26 @@ mod tests {
         let shared = datasite.join("shared").join("biovault").join("submissions");
         let app_data = datasite.join("app_data").join("biovault");
         let private = root.join("private").join("app_data").join("biovault");
+        let shadow = root.join("unencrypted").join("user@example.com");
 
         fs::create_dir_all(&root).unwrap();
         fs::create_dir_all(&public).unwrap();
         fs::create_dir_all(&shared).unwrap();
         fs::create_dir_all(&app_data).unwrap();
         fs::create_dir_all(&private).unwrap();
+        fs::create_dir_all(&shadow).unwrap();
         set_test_syftbox_data_dir(&root);
 
         let config = test_config();
         let paths = get_cleanup_paths(&config);
 
-        assert_eq!(paths.len(), 5);
+        assert_eq!(paths.len(), 6);
         assert!(paths.iter().any(|p| p.path == bv_home && p.exists));
         assert!(paths.iter().any(|p| p.path == public && p.exists));
         assert!(paths.iter().any(|p| p.path == shared && p.exists));
         assert!(paths.iter().any(|p| p.path == app_data && p.exists));
         assert!(paths.iter().any(|p| p.path == private && p.exists));
+        assert!(paths.iter().any(|p| p.path == shadow && p.exists));
 
         clear_test_biovault_home();
         clear_test_syftbox_data_dir();
@@ -393,23 +404,26 @@ mod tests {
         let shared = datasite.join("shared").join("biovault").join("submissions");
         let app_data = datasite.join("app_data").join("biovault");
         let private = root.join("private").join("app_data").join("biovault");
+        let shadow = root.join("unencrypted").join("user@example.com");
 
         fs::create_dir_all(&datasite).unwrap();
         fs::create_dir_all(&public).unwrap();
         fs::create_dir_all(&shared).unwrap();
         fs::create_dir_all(&app_data).unwrap();
         fs::create_dir_all(&private).unwrap();
+        fs::create_dir_all(&shadow).unwrap();
         set_test_syftbox_data_dir(&datasite);
 
         let config = test_config();
         let paths = get_cleanup_paths(&config);
 
-        assert_eq!(paths.len(), 5);
+        assert_eq!(paths.len(), 6);
         assert!(paths.iter().any(|p| p.path == bv_home && p.exists));
         assert!(paths.iter().any(|p| p.path == public && p.exists));
         assert!(paths.iter().any(|p| p.path == shared && p.exists));
         assert!(paths.iter().any(|p| p.path == app_data && p.exists));
         assert!(paths.iter().any(|p| p.path == private && p.exists));
+        assert!(paths.iter().any(|p| p.path == shadow && p.exists));
 
         clear_test_biovault_home();
         clear_test_syftbox_data_dir();
@@ -445,11 +459,13 @@ mod tests {
         let shared = datasite.join("shared").join("biovault").join("submissions");
         let app_data = datasite.join("app_data").join("biovault");
         let private = root.join("private").join("app_data").join("biovault");
+        let shadow = root.join("unencrypted").join("user@example.com");
 
         fs::create_dir_all(&public).unwrap();
         fs::create_dir_all(&shared).unwrap();
         fs::create_dir_all(&app_data).unwrap();
         fs::create_dir_all(&private).unwrap();
+        fs::create_dir_all(&shadow).unwrap();
         fs::write(public.join("file"), "contents").unwrap();
         fs::write(private.join("file"), "contents").unwrap();
         set_test_syftbox_data_dir(&root);
@@ -467,6 +483,7 @@ mod tests {
         assert!(!shared.exists());
         assert!(!app_data.exists());
         assert!(!private.exists());
+        assert!(!shadow.exists());
 
         clear_test_biovault_home();
         clear_test_syftbox_data_dir();

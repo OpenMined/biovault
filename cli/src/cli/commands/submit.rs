@@ -3,10 +3,15 @@ use crate::cli::syft_url::SyftURL;
 use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::messages::{Message, MessageType};
+use crate::syftbox::storage::SyftBoxStorage;
+#[cfg(test)]
+use crate::syftbox::SyftBoxApp;
 use crate::types::{ProjectYaml, SyftPermissions};
 use anyhow::Context;
 use chrono::Local;
 use dialoguer::{Confirm, Editor};
+use serde::de::DeserializeOwned;
+use serde::Serialize;
 use serde_json::json;
 use serde_yaml;
 use std::collections::HashMap;
@@ -21,6 +26,8 @@ pub async fn submit(
     force: bool,
 ) -> Result<()> {
     let config = Config::load()?;
+
+    let storage = syftbox_storage(&config)?;
 
     // Parse destination - could be email or full syft URL
     let (datasite_email, participant_url) = if destination.starts_with("syft://") {
@@ -156,7 +163,7 @@ pub async fn submit(
 
     // Create submission path
     let submissions_path = config.get_shared_submissions_path()?;
-    fs::create_dir_all(&submissions_path)?;
+    storage.ensure_dir(&submissions_path)?;
 
     let submission_path = submissions_path.join(&submission_folder_name);
 
@@ -165,7 +172,8 @@ pub async fn submit(
         // Verify the hash matches using the same deterministic method
         let existing_project_yaml = submission_path.join("project.yaml");
         if existing_project_yaml.exists() {
-            let existing_project = ProjectYaml::from_file(&existing_project_yaml)?;
+            let existing_project =
+                read_yaml_from_storage::<ProjectYaml>(&storage, &existing_project_yaml)?;
 
             // Calculate existing project hash using same method
             let mut existing_hash_content = String::new();
@@ -200,12 +208,14 @@ pub async fn submit(
 
                     // Update permissions to include new recipient
                     update_permissions_for_new_recipient(
+                        &storage,
                         &existing_permissions_path,
                         &datasite_email,
                     )?;
 
                     // Update project.yaml with new datasites
-                    let mut existing_project = ProjectYaml::from_file(&existing_project_yaml)?;
+                    let mut existing_project =
+                        read_yaml_from_storage::<ProjectYaml>(&storage, &existing_project_yaml)?;
                     if let Some(ref mut datasites) = existing_project.datasites {
                         if !datasites.contains(&datasite_email) {
                             datasites.push(datasite_email.clone());
@@ -225,7 +235,12 @@ pub async fn submit(
                         }
                     }
 
-                    existing_project.save(&existing_project_yaml)?;
+                    write_yaml_to_storage(
+                        &storage,
+                        &existing_project_yaml,
+                        &existing_project,
+                        true,
+                    )?;
 
                     println!("✓ Permissions updated for existing submission");
                     println!("  Location: {}", submission_path.display());
@@ -258,13 +273,23 @@ pub async fn submit(
                         if let Some(ref url) = participant_url {
                             updated_project.participants = Some(vec![url.clone()]);
                         }
-                        updated_project.save(&existing_project_yaml)?;
+                        write_yaml_to_storage(
+                            &storage,
+                            &existing_project_yaml,
+                            &updated_project,
+                            true,
+                        )?;
 
                         // Update syft.pub.yaml
                         let existing_permissions_path = submission_path.join("syft.pub.yaml");
                         let updated_permissions =
                             SyftPermissions::new_for_datasite(&datasite_email);
-                        updated_permissions.save(&existing_permissions_path)?;
+                        write_yaml_to_storage(
+                            &storage,
+                            &existing_permissions_path,
+                            &updated_permissions,
+                            true,
+                        )?;
                     }
 
                     // Send new request message for same project
@@ -297,6 +322,7 @@ pub async fn submit(
 
                 return create_and_submit_project(
                     &config,
+                    &storage,
                     &project,
                     &datasite_email,
                     &project_dir,
@@ -314,6 +340,7 @@ pub async fn submit(
     // New submission - create and submit
     create_and_submit_project(
         &config,
+        &storage,
         &project,
         &datasite_email,
         &project_dir,
@@ -332,18 +359,45 @@ fn hash_file(path: &Path) -> Result<String> {
     Ok(blake3::hash(&content).to_hex().to_string())
 }
 
-fn copy_project_files(src: &Path, dest: &Path) -> Result<()> {
+fn syftbox_storage(config: &Config) -> Result<SyftBoxStorage> {
+    let data_dir = config.get_syftbox_data_dir()?;
+    Ok(SyftBoxStorage::new(&data_dir))
+}
+
+fn read_yaml_from_storage<T: DeserializeOwned>(storage: &SyftBoxStorage, path: &Path) -> Result<T> {
+    let bytes = storage
+        .read_plaintext_file(path)
+        .with_context(|| format!("Failed to read {:?}", path))?;
+    Ok(serde_yaml::from_slice(&bytes).with_context(|| format!("Failed to parse {:?}", path))?)
+}
+
+fn write_yaml_to_storage<T: Serialize>(
+    storage: &SyftBoxStorage,
+    path: &Path,
+    value: &T,
+    overwrite: bool,
+) -> Result<()> {
+    let yaml = serde_yaml::to_string(value)?;
+    storage
+        .write_plaintext_file(path, yaml.as_bytes(), overwrite)
+        .with_context(|| format!("Failed to write {:?}", path))?;
+    Ok(())
+}
+
+fn copy_project_files(src: &Path, dest: &Path, storage: &SyftBoxStorage) -> Result<()> {
+    storage.ensure_dir(dest)?;
     // Copy workflow.nf
     let src_workflow = src.join("workflow.nf");
     let dest_workflow = dest.join("workflow.nf");
-    fs::copy(&src_workflow, &dest_workflow)
-        .with_context(|| "Failed to copy workflow.nf".to_string())?;
+    let workflow_bytes = fs::read(&src_workflow)
+        .with_context(|| "Failed to read workflow.nf from project".to_string())?;
+    storage.write_plaintext_file(&dest_workflow, &workflow_bytes, true)?;
 
     // Copy assets directory if it exists
     let src_assets = src.join("assets");
     if src_assets.exists() && src_assets.is_dir() {
         let dest_assets = dest.join("assets");
-        fs::create_dir_all(&dest_assets)?;
+        storage.ensure_dir(&dest_assets)?;
 
         for entry in WalkDir::new(&src_assets)
             .min_depth(1)
@@ -356,13 +410,11 @@ fn copy_project_files(src: &Path, dest: &Path) -> Result<()> {
             let dest_path = dest_assets.join(relative_path);
 
             if entry.file_type().is_dir() {
-                fs::create_dir_all(&dest_path)?;
+                storage.ensure_dir(&dest_path)?;
             } else {
-                if let Some(parent) = dest_path.parent() {
-                    fs::create_dir_all(parent)?;
-                }
-                fs::copy(src_path, &dest_path)
-                    .with_context(|| format!("Failed to copy file: {}", src_path.display()))?;
+                let bytes = fs::read(src_path)
+                    .with_context(|| format!("Failed to read file: {}", src_path.display()))?;
+                storage.write_plaintext_file(&dest_path, &bytes, true)?;
             }
         }
     }
@@ -373,6 +425,7 @@ fn copy_project_files(src: &Path, dest: &Path) -> Result<()> {
 #[allow(clippy::too_many_arguments)]
 fn create_and_submit_project(
     config: &Config,
+    storage: &SyftBoxStorage,
     project: &ProjectYaml,
     datasite_email: &str,
     project_dir: &Path,
@@ -384,20 +437,21 @@ fn create_and_submit_project(
     non_interactive: bool,
 ) -> Result<()> {
     // Create submission directory
-    fs::create_dir_all(submission_path)?;
+    storage.ensure_dir(submission_path)?;
 
     // Copy project files
-    copy_project_files(project_dir, submission_path)?;
+    copy_project_files(project_dir, submission_path, storage)?;
 
     // Save updated project.yaml
     let mut final_project = project.clone();
     final_project.participants = participant_url.map(|url| vec![url]);
-    final_project.save(&submission_path.join("project.yaml"))?;
+    let project_yaml_path = submission_path.join("project.yaml");
+    write_yaml_to_storage(storage, &project_yaml_path, &final_project, true)?;
 
     // Create permissions file
     let permissions = SyftPermissions::new_for_datasite(datasite_email);
     let permissions_path = submission_path.join("syft.pub.yaml");
-    permissions.save(&permissions_path)?;
+    write_yaml_to_storage(storage, &permissions_path, &permissions, true)?;
 
     println!("✓ Project submitted successfully!");
     println!("  Name: {}", project.name);
@@ -533,18 +587,11 @@ fn send_project_message(
 }
 
 fn update_permissions_for_new_recipient(
+    storage: &SyftBoxStorage,
     permissions_path: &Path,
     new_recipient: &str,
 ) -> Result<()> {
-    let yaml_content = fs::read_to_string(permissions_path).with_context(|| {
-        format!(
-            "Failed to read permissions file: {}",
-            permissions_path.display()
-        )
-    })?;
-
-    let mut permissions: SyftPermissions =
-        serde_yaml::from_str(&yaml_content).with_context(|| "Failed to parse permissions YAML")?;
+    let mut permissions: SyftPermissions = read_yaml_from_storage(storage, permissions_path)?;
 
     // Add new recipient to all rules
     for rule in &mut permissions.rules {
@@ -560,7 +607,7 @@ fn update_permissions_for_new_recipient(
     }
 
     // Save updated permissions
-    permissions.save(&permissions_path.to_path_buf())?;
+    write_yaml_to_storage(storage, permissions_path, &permissions, true)?;
     Ok(())
 }
 
@@ -594,7 +641,7 @@ mod tests {
         project.save(&path.to_path_buf()).unwrap();
     }
 
-    fn setup_submit_env(temp: &TempDir, config_email: &str) -> (PathBuf, PathBuf, PathBuf) {
+    fn setup_submit_env(temp: &TempDir, config_email: &str) -> (PathBuf, SyftBoxApp, PathBuf) {
         let bv_home = temp.path().join(".biovault");
         fs::create_dir_all(&bv_home).unwrap();
         set_test_biovault_home(&bv_home);
@@ -611,6 +658,7 @@ mod tests {
         let syft_dir = temp.path().join("syft_data");
         fs::create_dir_all(&syft_dir).unwrap();
         set_test_syftbox_data_dir(&syft_dir);
+        let app = SyftBoxApp::new(&syft_dir, config_email, "biovault").unwrap();
 
         let project_dir = temp.path().join("project");
         fs::create_dir_all(project_dir.join("assets")).unwrap();
@@ -618,33 +666,18 @@ mod tests {
         fs::write(project_dir.join("assets/data.csv"), b"data").unwrap();
         write_project_yaml(&project_dir.join("project.yaml"), None);
 
-        // Ensure datasites base exists for SyftBoxApp
-        fs::create_dir_all(
-            syft_dir
-                .join("datasites")
-                .join(config_email)
-                .join("app_data")
-                .join("biovault"),
-        )
-        .unwrap();
-
-        (project_dir, syft_dir, bv_home)
+        (project_dir, app, bv_home)
     }
 
-    fn list_submissions(syft_dir: &Path, config_email: &str) -> Vec<PathBuf> {
-        let submissions_dir = syft_dir
+    fn list_submissions(app: &SyftBoxApp) -> Vec<PathBuf> {
+        let submissions_dir = app
+            .data_dir
             .join("datasites")
-            .join(config_email)
+            .join(&app.email)
             .join("shared")
             .join("biovault")
             .join("submissions");
-        if !submissions_dir.exists() {
-            return vec![];
-        }
-        std::fs::read_dir(&submissions_dir)
-            .unwrap()
-            .filter_map(|entry| entry.ok().map(|e| e.path()))
-            .collect()
+        app.storage.list_dir(&submissions_dir).unwrap_or_default()
     }
 
     #[test]
@@ -665,8 +698,9 @@ mod tests {
         fs::create_dir_all(src.join("assets/nested")).unwrap();
         fs::write(src.join("workflow.nf"), b"wf").unwrap();
         fs::write(src.join("assets/nested/file.bin"), b"x").unwrap();
+        let storage = SyftBoxStorage::new(tmp.path());
 
-        copy_project_files(&src, &dest).unwrap();
+        copy_project_files(&src, &dest, &storage).unwrap();
 
         assert!(dest.join("workflow.nf").exists());
         assert!(dest.join("assets/nested/file.bin").exists());
@@ -677,7 +711,7 @@ mod tests {
         fs::write(src2.join("workflow.nf"), b"wf").unwrap();
         let dest2 = tmp.path().join("dest2");
         fs::create_dir_all(&dest2).unwrap();
-        copy_project_files(&src2, &dest2).unwrap();
+        copy_project_files(&src2, &dest2, &storage).unwrap();
     }
 
     #[test]
@@ -721,7 +755,8 @@ mod tests {
         fs::create_dir_all(&dest).unwrap();
         // No workflow.nf file
 
-        let result = copy_project_files(&src, &dest);
+        let storage = SyftBoxStorage::new(tmp.path());
+        let result = copy_project_files(&src, &dest, &storage);
         assert!(result.is_err());
     }
 
@@ -748,7 +783,8 @@ mod tests {
             );
         }
 
-        let result = copy_project_files(&src, &dest);
+        let storage = SyftBoxStorage::new(tmp.path());
+        let result = copy_project_files(&src, &dest, &storage);
         assert!(result.is_ok());
         assert!(dest.join("workflow.nf").exists());
     }
@@ -764,7 +800,8 @@ mod tests {
         fs::write(src.join("workflow.nf"), b"wf").unwrap();
         fs::write(src.join("assets/a/b/c/d/deep.txt"), b"deep").unwrap();
 
-        copy_project_files(&src, &dest).unwrap();
+        let storage = SyftBoxStorage::new(tmp.path());
+        copy_project_files(&src, &dest, &storage).unwrap();
 
         assert!(dest.join("workflow.nf").exists());
         assert!(dest.join("assets/a/b/c/d/deep.txt").exists());
@@ -788,7 +825,8 @@ mod tests {
         fs::write(src.join("workflow.nf"), workflow_content).unwrap();
         fs::write(src.join("assets/data.csv"), asset_content).unwrap();
 
-        copy_project_files(&src, &dest).unwrap();
+        let storage = SyftBoxStorage::new(tmp.path());
+        copy_project_files(&src, &dest, &storage).unwrap();
 
         let copied_workflow = fs::read(dest.join("workflow.nf")).unwrap();
         let copied_asset = fs::read(dest.join("assets/data.csv")).unwrap();
@@ -810,7 +848,8 @@ mod tests {
         let original = SyftPermissions::new_for_datasite("original@example.com");
         original.save(&path.to_path_buf()).unwrap();
 
-        update_permissions_for_new_recipient(&path, "colleague@example.com").unwrap();
+        let storage = SyftBoxStorage::new(tmp.path());
+        update_permissions_for_new_recipient(&storage, &path, "colleague@example.com").unwrap();
 
         let updated: SyftPermissions =
             serde_yaml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
@@ -839,7 +878,7 @@ mod tests {
             .contains(&"colleague@example.com".to_string()));
 
         // Running again should not duplicate entries
-        update_permissions_for_new_recipient(&path, "colleague@example.com").unwrap();
+        update_permissions_for_new_recipient(&storage, &path, "colleague@example.com").unwrap();
         let deduped: SyftPermissions =
             serde_yaml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         let reads: Vec<_> = deduped
@@ -876,8 +915,8 @@ mod tests {
             syftbox_credentials: None,
         };
 
-        let datasite_path = syft_dir.join("datasites").join(&config.email); // SyftBoxApp::new lazily creates this, but ensure base exists
-        fs::create_dir_all(&datasite_path).unwrap();
+        let app = SyftBoxApp::new(&syft_dir, &config.email, "biovault").unwrap();
+        let datasite_path = app.data_dir.join("datasites").join(&config.email);
 
         let submission_folder = "demo-20240101-deadbeef";
         let submission_path = datasite_path
@@ -885,7 +924,7 @@ mod tests {
             .join("biovault")
             .join("submissions")
             .join(submission_folder);
-        fs::create_dir_all(&submission_path).unwrap();
+        app.storage.ensure_dir(&submission_path).unwrap();
 
         let mut hashes = HashMap::new();
         hashes.insert("workflow.nf".to_string(), "abc123".to_string());
@@ -901,6 +940,22 @@ mod tests {
             outputs: None,
             b3_hashes: Some(hashes),
         };
+
+        write_yaml_to_storage(
+            &app.storage,
+            &submission_path.join("project.yaml"),
+            &project,
+            true,
+        )
+        .unwrap();
+        let perms = SyftPermissions::new_for_datasite(&config.email);
+        write_yaml_to_storage(
+            &app.storage,
+            &submission_path.join("syft.pub.yaml"),
+            &perms,
+            true,
+        )
+        .unwrap();
 
         send_project_message(
             &config,
@@ -932,17 +987,8 @@ mod tests {
         assert!(project_location.starts_with(&format!("syft://{}", config.email)));
 
         // Ensure RPC request file written for the recipient
-        let rpc_dir = syft_dir
-            .join("datasites")
-            .join(&config.email)
-            .join("app_data")
-            .join("biovault")
-            .join("rpc")
-            .join("message");
-        let rpc_entries: Vec<_> = std::fs::read_dir(&rpc_dir)
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .collect();
+        let rpc_dir = app.register_endpoint("/message").unwrap();
+        let rpc_entries = app.storage.list_dir(&rpc_dir).unwrap_or_default();
         assert!(!rpc_entries.is_empty());
 
         clear_test_syftbox_data_dir();
@@ -954,7 +1000,7 @@ mod tests {
     async fn submit_updates_existing_submission_for_new_recipient() {
         let temp = TempDir::new().unwrap();
         let config_email = "me@example.com";
-        let (project_dir, syft_dir, _bv_home) = setup_submit_env(&temp, config_email);
+        let (project_dir, app, _bv_home) = setup_submit_env(&temp, config_email);
 
         submit(
             project_dir.to_string_lossy().to_string(),
@@ -965,7 +1011,7 @@ mod tests {
         .await
         .unwrap();
 
-        let before_dirs = list_submissions(&syft_dir, config_email);
+        let before_dirs = list_submissions(&app);
         assert_eq!(before_dirs.len(), 1);
         let submission_path = before_dirs[0].clone();
 
@@ -978,12 +1024,14 @@ mod tests {
         .await
         .unwrap();
 
-        let after_dirs = list_submissions(&syft_dir, config_email);
+        let after_dirs = list_submissions(&app);
         assert_eq!(after_dirs.len(), 1);
         assert_eq!(after_dirs[0], submission_path);
 
         let permissions: SyftPermissions = serde_yaml::from_str(
-            &fs::read_to_string(submission_path.join("syft.pub.yaml")).unwrap(),
+            &app.storage
+                .read_plaintext_string(&submission_path.join("syft.pub.yaml"))
+                .unwrap(),
         )
         .unwrap();
         for rule in &permissions.rules {
@@ -1017,7 +1065,7 @@ mod tests {
     async fn submit_creates_new_version_when_forced_after_changes() {
         let temp = TempDir::new().unwrap();
         let config_email = "force@example.com";
-        let (project_dir, syft_dir, _bv_home) = setup_submit_env(&temp, config_email);
+        let (project_dir, app, _bv_home) = setup_submit_env(&temp, config_email);
 
         submit(
             project_dir.to_string_lossy().to_string(),
@@ -1028,7 +1076,7 @@ mod tests {
         .await
         .unwrap();
 
-        let initial_dirs = list_submissions(&syft_dir, config_email);
+        let initial_dirs = list_submissions(&app);
         assert_eq!(initial_dirs.len(), 1);
 
         // Change workflow to alter project hash
@@ -1050,7 +1098,7 @@ mod tests {
         .unwrap();
 
         // Changed content produces a new submission folder automatically
-        let after_no_force = list_submissions(&syft_dir, config_email);
+        let after_no_force = list_submissions(&app);
         assert!(after_no_force.len() >= 2);
 
         let latest_submission = after_no_force
@@ -1070,7 +1118,7 @@ mod tests {
         .await
         .unwrap();
 
-        let final_dirs = list_submissions(&syft_dir, config_email);
+        let final_dirs = list_submissions(&app);
         assert_eq!(final_dirs.len(), after_no_force.len());
 
         clear_test_syftbox_data_dir();

@@ -52,6 +52,7 @@ lazy_static = "1.4"
 notify = "6.1"
 libc = "0.2"
 csv = "1.3"
+syft-crypto-protocol = { path = "../syft-crypto-core/protocol" }
 
 [build-dependencies]
 serde_yaml = "0.9"

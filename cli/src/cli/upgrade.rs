@@ -1,4 +1,5 @@
 use crate::config::{get_biovault_home, Config};
+use crate::syftbox::storage::SyftBoxStorage;
 use std::fs;
 use std::path::Path;
 use tracing::info;
@@ -145,6 +146,8 @@ fn fix_permission_yaml_indentation(config: &Config) -> anyhow::Result<()> {
         }
     };
 
+    let storage = SyftBoxStorage::new(&data_dir);
+
     // Fix RPC permission file
     let rpc_permission_file = data_dir
         .join("datasites")
@@ -155,7 +158,7 @@ fn fix_permission_yaml_indentation(config: &Config) -> anyhow::Result<()> {
         .join("syft.pub.yaml");
 
     if rpc_permission_file.exists() {
-        fix_yaml_file(&rpc_permission_file)?;
+        fix_yaml_file(&storage, &rpc_permission_file)?;
         println!(
             "  ✓ Fixed RPC permission file: {}",
             rpc_permission_file.display()
@@ -171,7 +174,7 @@ fn fix_permission_yaml_indentation(config: &Config) -> anyhow::Result<()> {
         .join("syft.pub.yaml");
 
     if app_permission_file.exists() {
-        fix_yaml_file(&app_permission_file)?;
+        fix_yaml_file(&storage, &app_permission_file)?;
         println!(
             "  ✓ Fixed app permission file: {}",
             app_permission_file.display()
@@ -181,7 +184,7 @@ fn fix_permission_yaml_indentation(config: &Config) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn fix_yaml_file(path: &Path) -> anyhow::Result<()> {
+fn fix_yaml_file(storage: &SyftBoxStorage, path: &Path) -> anyhow::Result<()> {
     // Just replace the entire file with the correct format
     // This is safer than trying to fix various indentation issues
 
@@ -213,7 +216,7 @@ fn fix_yaml_file(path: &Path) -> anyhow::Result<()> {
     };
 
     // Always write the correct content
-    fs::write(path, new_content)?;
+    storage.write_plaintext_file(path, new_content.as_bytes(), true)?;
 
     Ok(())
 }
