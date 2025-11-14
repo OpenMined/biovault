@@ -1,3 +1,4 @@
+use super::run::execute_with_logging;
 use crate::error::Result;
 use crate::project_spec::ProjectSpec;
 use anyhow::Context;
@@ -88,6 +89,9 @@ pub async fn execute_dynamic(
     if !project_path.exists() {
         return Err(anyhow::anyhow!("Project folder does not exist: {}", project_folder).into());
     }
+
+    let nextflow_log_path = project_path.join(".nextflow.log");
+    fs::remove_file(&nextflow_log_path).ok();
 
     let spec_path = project_path.join("project.yaml");
     if !spec_path.exists() {
@@ -226,6 +230,8 @@ pub async fn execute_dynamic(
         append_desktop_log("[Pipeline] WARNING: No config found, using system PATH");
     }
 
+    cmd.arg("-log").arg(&nextflow_log_path);
+
     cmd.arg("run").arg(&template_abs);
 
     if resume {
@@ -263,10 +269,9 @@ pub async fn execute_dynamic(
     println!("  {}", display_cmd.dimmed());
     append_desktop_log(&format!("[Pipeline] Nextflow command: {}", display_cmd));
 
-    let status = cmd
-        .current_dir(project_path)
-        .status()
-        .context("Failed to execute nextflow")?;
+    cmd.current_dir(project_path);
+    let status =
+        execute_with_logging(cmd, Some(nextflow_log_path)).context("Failed to execute nextflow")?;
 
     if !status.success() {
         append_desktop_log(&format!(
