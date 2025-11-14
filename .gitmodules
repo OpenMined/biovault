@@ -7,3 +7,6 @@
 [submodule "bioscript"]
 	path = bioscript
 	url = https://github.com/OpenMined/bioscript
+[submodule "biosynth"]
+	path = biosynth
+	url = https://github.com/openmined/biosynth
