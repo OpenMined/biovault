@@ -298,6 +298,7 @@ pub async fn execute_dynamic(
         append_desktop_log("[Pipeline] WARNING: Could not build augmented PATH, using system PATH");
     }
 
+
     cmd.arg("-log").arg(&nextflow_log_path);
 
     cmd.arg("run").arg(&template_abs);

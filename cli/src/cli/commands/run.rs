@@ -202,6 +202,7 @@ fn resolve_binary_path(cfg: Option<&crate::config::Config>, name: &str) -> Optio
     None
 }
 
+
 struct LogTailHandle {
     stop_flag: Arc<AtomicBool>,
     handle: thread::JoinHandle<()>,
