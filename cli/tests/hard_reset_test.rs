@@ -174,6 +174,17 @@ mod hard_reset_tests {
                     .join("biovault"),
             ]
         }
+
+        fn remove_path(&self, path: &Path) -> Result<()> {
+            if !path.exists() {
+                return Ok(());
+            }
+
+            match self.app.storage.path_exists(path) {
+                Ok(_) => self.app.storage.remove_path(path),
+                Err(_) => delete_path_safely(path),
+            }
+        }
     }
 
     // Safety check to prevent accidental deletion of real ~/.biovault
@@ -261,9 +272,7 @@ mod hard_reset_tests {
         // Get paths and delete them
         let paths = env.get_cleanup_paths();
         for path in &paths {
-            if path.exists() {
-                delete_path_safely(path)?;
-            }
+            env.remove_path(path)?;
         }
 
         // Verify all paths are deleted
@@ -294,8 +303,7 @@ mod hard_reset_tests {
         // Get paths and attempt to delete them (should not error)
         let paths = env.get_cleanup_paths();
         for path in &paths {
-            // This should not fail even if paths don't exist
-            delete_path_safely(path)?;
+            env.remove_path(path)?;
         }
 
         // Verify nothing exists (as expected)
@@ -343,9 +351,7 @@ mod hard_reset_tests {
         // Get paths and delete them
         let paths = env.get_cleanup_paths();
         for path in &paths {
-            if path.exists() {
-                delete_path_safely(path)?;
-            }
+            env.remove_path(path)?;
         }
 
         // Verify all paths are deleted
@@ -430,9 +436,7 @@ mod hard_reset_tests {
         ];
 
         for path in &paths_to_delete {
-            if path.exists() {
-                delete_path_safely(path)?;
-            }
+            env.remove_path(path)?;
         }
 
         // Verify deletion
