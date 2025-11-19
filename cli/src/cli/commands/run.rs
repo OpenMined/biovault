@@ -11,10 +11,13 @@ use serde::{Deserialize, Serialize};
 use serde_yaml::Value as YamlValue;
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::thread;
+use std::time::Duration;
 // use tempfile::TempDir; // no longer needed since we don't copy templates
 use tracing::{debug, info};
 
@@ -123,7 +126,135 @@ fn append_desktop_log(level: &str, message: &str) {
     }
 }
 
-fn execute_with_logging(mut cmd: Command) -> anyhow::Result<std::process::ExitStatus> {
+fn sanitize_stream_line(line: &str) -> String {
+    let segment = line.rsplit('\r').next().unwrap_or(line);
+    strip_ansi_sequences(segment)
+}
+
+fn strip_ansi_sequences(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch == '\u{001b}' {
+            match chars.peek().copied() {
+                Some('[') => {
+                    chars.next();
+                    for c in chars.by_ref() {
+                        if ('@'..='~').contains(&c) {
+                            break;
+                        }
+                    }
+                }
+                Some(']') => {
+                    chars.next();
+                    while let Some(c) = chars.next() {
+                        if c == '\u{0007}' {
+                            break;
+                        }
+                        if c == '\u{001b}' {
+                            if matches!(chars.peek(), Some('\\')) {
+                                chars.next();
+                            }
+                            break;
+                        }
+                    }
+                }
+                Some(_) => {}
+                None => {}
+            }
+            continue;
+        }
+        output.push(ch);
+    }
+
+    output
+}
+
+struct LogTailHandle {
+    stop_flag: Arc<AtomicBool>,
+    handle: thread::JoinHandle<()>,
+}
+
+impl LogTailHandle {
+    fn stop(self) {
+        self.stop_flag.store(true, Ordering::SeqCst);
+        let _ = self.handle.join();
+    }
+}
+
+fn spawn_nextflow_log_forwarder(log_path: PathBuf) -> Option<LogTailHandle> {
+    match std::env::var("BIOVAULT_DESKTOP_LOG_FILE") {
+        Ok(path) if !path.is_empty() => path,
+        _ => return None,
+    };
+
+    let stop_flag = Arc::new(AtomicBool::new(false));
+    let thread_flag = stop_flag.clone();
+
+    let handle = thread::spawn(move || {
+        let mut offset: u64 = 0;
+        while !thread_flag.load(Ordering::SeqCst) {
+            forward_nextflow_lines(&log_path, &mut offset);
+            thread::sleep(Duration::from_millis(500));
+        }
+        forward_nextflow_lines(&log_path, &mut offset);
+    });
+
+    Some(LogTailHandle { stop_flag, handle })
+}
+
+fn forward_nextflow_lines(log_path: &Path, offset: &mut u64) {
+    if let Ok(metadata) = fs::metadata(log_path) {
+        if metadata.len() < *offset {
+            *offset = 0;
+        }
+    }
+
+    let mut file = match std::fs::File::open(log_path) {
+        Ok(file) => file,
+        Err(_) => return, // File will appear once Nextflow starts writing.
+    };
+
+    if file.seek(SeekFrom::Start(*offset)).is_err() {
+        return;
+    }
+
+    let mut reader = BufReader::new(file);
+    let mut line = String::new();
+
+    loop {
+        line.clear();
+        match reader.read_line(&mut line) {
+            Ok(0) => break,
+            Ok(n) => {
+                *offset += n as u64;
+                let trimmed = line.trim_end_matches(['\r', '\n']);
+                if !should_forward_nextflow_line(trimmed) {
+                    continue;
+                }
+                append_desktop_log("INFO", &format!("[Nextflow log] {}", trimmed));
+            }
+            Err(_) => break,
+        }
+    }
+}
+
+fn should_forward_nextflow_line(line: &str) -> bool {
+    if line.is_empty() {
+        return false;
+    }
+    let info = "] INFO ";
+    let warn = "] WARN ";
+    let error = "] ERROR ";
+    (line.contains(info) || line.contains(warn) || line.contains(error))
+        && !line.contains("] DEBUG ")
+}
+
+pub(crate) fn execute_with_logging(
+    mut cmd: Command,
+    nextflow_log_path: Option<PathBuf>,
+) -> anyhow::Result<std::process::ExitStatus> {
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
 
@@ -135,12 +266,21 @@ fn execute_with_logging(mut cmd: Command) -> anyhow::Result<std::process::ExitSt
         let log_path = log_path.clone();
         thread::spawn(move || {
             let reader = BufReader::new(stdout);
+            let mut last_line: Option<String> = None;
             for line in reader.lines().map_while(Result::ok) {
                 println!("{}", line);
+                let sanitized = sanitize_stream_line(&line);
+                if sanitized.is_empty() {
+                    continue;
+                }
+                if last_line.as_deref() == Some(&sanitized) {
+                    continue;
+                }
+                last_line = Some(sanitized.clone());
                 if let Some(ref path) = log_path {
-                    let _ = append_desktop_log_to_path(path, "INFO", &line);
+                    let _ = append_desktop_log_to_path(path, "INFO", &sanitized);
                 } else {
-                    append_desktop_log("INFO", &line);
+                    append_desktop_log("INFO", &sanitized);
                 }
             }
         })
@@ -150,16 +290,27 @@ fn execute_with_logging(mut cmd: Command) -> anyhow::Result<std::process::ExitSt
         let log_path = log_path.clone();
         thread::spawn(move || {
             let reader = BufReader::new(stderr);
+            let mut last_line: Option<String> = None;
             for line in reader.lines().map_while(Result::ok) {
                 eprintln!("{}", line);
+                let sanitized = sanitize_stream_line(&line);
+                if sanitized.is_empty() {
+                    continue;
+                }
+                if last_line.as_deref() == Some(&sanitized) {
+                    continue;
+                }
+                last_line = Some(sanitized.clone());
                 if let Some(ref path) = log_path {
-                    let _ = append_desktop_log_to_path(path, "ERROR", &line);
+                    let _ = append_desktop_log_to_path(path, "ERROR", &sanitized);
                 } else {
-                    append_desktop_log("ERROR", &line);
+                    append_desktop_log("ERROR", &sanitized);
                 }
             }
         })
     });
+
+    let log_forwarder = nextflow_log_path.and_then(spawn_nextflow_log_forwarder);
 
     let status = child
         .wait()
@@ -170,6 +321,9 @@ fn execute_with_logging(mut cmd: Command) -> anyhow::Result<std::process::ExitSt
     }
     if let Some(handle) = stderr_handle {
         let _ = handle.join();
+    }
+    if let Some(forwarder) = log_forwarder {
+        forwarder.stop();
     }
 
     Ok(status)
@@ -990,6 +1144,9 @@ async fn execute_sheet_workflow(params: &RunParams, config: &ProjectConfig) -> a
         config.workflow, config.name
     );
 
+    let nextflow_log_path = project_path.join(".nextflow.log");
+    fs::remove_file(&nextflow_log_path).ok();
+
     // Get configured Nextflow path or use default
     let nextflow_cmd = crate::config::get_config()
         .ok()
@@ -1001,6 +1158,8 @@ async fn execute_sheet_workflow(params: &RunParams, config: &ProjectConfig) -> a
 
     // Set working directory to project directory
     cmd.current_dir(&project_path);
+
+    cmd.arg("-log").arg(&nextflow_log_path);
 
     cmd.arg("run")
         .arg(&temp_template)
@@ -1047,6 +1206,7 @@ async fn execute_sheet_workflow(params: &RunParams, config: &ProjectConfig) -> a
 
     // Add config file
     cmd.arg("-c").arg(&temp_config);
+    cmd.arg("-log").arg(&nextflow_log_path);
 
     // Print the command that will be executed
     println!("\n{}", "Nextflow command:".green().bold());
@@ -1075,7 +1235,8 @@ async fn execute_sheet_workflow(params: &RunParams, config: &ProjectConfig) -> a
     // Execute Nextflow
     println!("Executing Nextflow sheet workflow...");
     append_desktop_log("INFO", "Executing Nextflow sheet workflow...");
-    let status = execute_with_logging(cmd).context("Failed to execute Nextflow")?;
+    let status =
+        execute_with_logging(cmd, Some(nextflow_log_path)).context("Failed to execute Nextflow")?;
 
     if !status.success() {
         append_desktop_log("ERROR", "Nextflow execution failed");
@@ -1227,6 +1388,9 @@ pub async fn execute(params: RunParams) -> anyhow::Result<()> {
         println!("Processing participant: {}", participant.id.cyan());
     }
 
+    let nextflow_log_path = project_path.join(".nextflow.log");
+    fs::remove_file(&nextflow_log_path).ok();
+
     // Get configured Nextflow path or use default
     let nextflow_cmd = crate::config::get_config()
         .ok()
@@ -1238,6 +1402,8 @@ pub async fn execute(params: RunParams) -> anyhow::Result<()> {
 
     // Set working directory to project directory
     cmd.current_dir(&project_path);
+
+    cmd.arg("-log").arg(&nextflow_log_path);
 
     cmd.arg("run")
         .arg(&temp_template)
@@ -1336,7 +1502,8 @@ pub async fn execute(params: RunParams) -> anyhow::Result<()> {
     // Execute Nextflow
     println!("Executing Nextflow workflow...");
     append_desktop_log("INFO", "Executing Nextflow workflow...");
-    let status = execute_with_logging(cmd).context("Failed to execute Nextflow")?;
+    let status =
+        execute_with_logging(cmd, Some(nextflow_log_path)).context("Failed to execute Nextflow")?;
 
     if !status.success() {
         append_desktop_log("ERROR", "Nextflow execution failed");
