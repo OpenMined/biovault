@@ -23,5 +23,6 @@ pub mod samplesheet;
 pub mod setup;
 pub mod sql;
 pub mod submit;
+pub mod syc;
 pub mod syftbox;
 pub mod update;

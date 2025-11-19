@@ -801,6 +801,19 @@ fn copy_dir_recursive(config: &Config, src: &Path, dst: &Path) -> anyhow::Result
             .unwrap_or(false)
     };
 
+    // Determine recipient from destination path (e.g., "client1@sandbox.local")
+    let data_dir = config.get_syftbox_data_dir()?;
+    let datasites_dir = data_dir.join("datasites");
+    let recipient = if dst.starts_with(&datasites_dir) {
+        dst.strip_prefix(&datasites_dir)
+            .ok()
+            .and_then(|p| p.components().next())
+            .and_then(|c| c.as_os_str().to_str())
+            .map(|s| s.to_string())
+    } else {
+        None
+    };
+
     for entry in walkdir::WalkDir::new(src)
         .into_iter()
         .filter_map(|e| e.ok())
@@ -825,17 +838,26 @@ fn copy_dir_recursive(config: &Config, src: &Path, dst: &Path) -> anyhow::Result
         }
 
         let data = if storage.contains(entry.path()) {
+            // Use shadow-aware read to populate shadow folder when decrypting
             storage
-                .read_plaintext_file(entry.path())
+                .read_with_shadow(entry.path())
                 .with_context(|| format!("Failed to read {:?}", entry.path()))?
         } else {
             fs::read(entry.path()).with_context(|| format!("Failed to read {:?}", entry.path()))?
         };
 
         if storage.contains(&out) {
-            storage
-                .write_plaintext_file(&out, &data, true)
-                .with_context(|| format!("Failed to write {:?}", out))?;
+            // If we have a recipient, encrypt the file using shadow folder pattern
+            if let Some(ref recip) = recipient {
+                storage
+                    .write_encrypted_with_shadow(&out, &data, vec![recip.clone()], None, true)
+                    .with_context(|| format!("Failed to write encrypted {:?}", out))?;
+            } else {
+                // Fallback to plaintext if recipient unknown
+                storage
+                    .write_plaintext_file(&out, &data, true)
+                    .with_context(|| format!("Failed to write {:?}", out))?;
+            }
         } else {
             fs::write(&out, &data).with_context(|| format!("Failed to write {:?}", out))?;
         }
@@ -1345,11 +1367,14 @@ async fn approve_project_non_interactive(
     } else {
         dest.join("results-real")
     };
-    let needs_run = !results_dir.exists()
-        || storage
-            .list_dir(&results_dir)
-            .map(|entries| entries.is_empty())
-            .unwrap_or(true);
+
+    // Check if results exist using filesystem directly (more robust than storage.list_dir)
+    let needs_run = !results_dir.exists() || {
+        std::fs::read_dir(&results_dir)
+            .map(|mut entries| entries.next().is_none())
+            .unwrap_or(true)
+    };
+
     if needs_run && !test {
         // Only run real data if not in test mode
         println!("No results found. Running on real data before approval...");
@@ -1823,11 +1848,14 @@ pub fn view_thread(config: &Config, thread_id: &str) -> Result<()> {
 }
 
 /// Sync messages (check for new incoming and update ACKs)
-pub fn sync_messages(config: &Config) -> Result<()> {
+pub fn sync_messages(config: &Config, no_cleanup: bool) -> Result<()> {
     let (_, sync) = init_message_system(config)?;
 
     println!("🔄 Syncing messages...");
-    sync.sync()?;
+    if no_cleanup {
+        println!("🐛 Debug mode: keeping consumed messages (--no-cleanup)");
+    }
+    sync.sync(no_cleanup)?;
 
     Ok(())
 }
@@ -2276,7 +2304,7 @@ mod tests {
         let cfg = create_test_config();
 
         // Should not error even without messages
-        super::sync_messages(&cfg)?;
+        super::sync_messages(&cfg, false)?;
         Ok(())
     }
 

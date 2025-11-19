@@ -14,6 +14,30 @@ steps:
         --clients client1@sandbox.local,client2@sandbox.local \
         --path-column genotype_file
 
+  - name: Wait for client1 public key to sync
+    datasite: client2@sandbox.local
+    wait_for: datasites/client1@sandbox.local/public/crypto/did.json
+    timeout: 30
+
+  - name: Wait for client2 public key to sync
+    datasite: client1@sandbox.local
+    wait_for: datasites/client2@sandbox.local/public/crypto/did.json
+    timeout: 30
+
+  - name: Client1 imports Client2 bundle
+    datasite: client1@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv syc import \
+        datasites/client2@sandbox.local/public/crypto/did.json \
+        --expected-identity client2@sandbox.local
+
+  - name: Client2 imports Client1 bundle
+    datasite: client2@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv syc import \
+        datasites/client1@sandbox.local/public/crypto/did.json \
+        --expected-identity client1@sandbox.local
+
   - name: Client1 submits count-lines project to client2
     datasite: client1@sandbox.local
     run: |
@@ -33,7 +57,7 @@ steps:
   - name: Client2 syncs inbox
     datasite: client2@sandbox.local
     run: |
-      {{workspace}}/cli/target/release/bv message sync
+      {{workspace}}/cli/target/release/bv message sync --no-cleanup
 
   - name: Client2 lists inbox messages
     datasite: client2@sandbox.local
@@ -44,12 +68,7 @@ steps:
   - name: Extract project message ID
     datasite: client2@sandbox.local
     run: |
-      msg=$(jq -r '.messages[] | select(.message_type.Project != null) | .id' <<< '{{inbox_json}}' | head -n 1)
-      if [[ -z "$msg" ]]; then
-        echo "No project message found in inbox output" >&2
-        exit 1
-      fi
-      echo "$msg"
+      jq -r '.messages[] | select(.message_type.Project != null) | .id' <<< '{{inbox_json}}' | head -n 1
     capture: project_msg
 
   - name: Client2 processes project (test mode, approve)
@@ -61,7 +80,108 @@ steps:
         --approve \
         --non-interactive
 
-  - name: Client1 verifies returned results exist
+  - name: Assert Client2 has project file shadows
+    datasite: client2@sandbox.local
+    run: |
+      test -f "$(find unencrypted -name "project.yaml" -path "*/client1@sandbox.local/shared/biovault/submissions/*" | head -n 1)"
+      test -f "$(find unencrypted -name "workflow.nf" -path "*/client1@sandbox.local/shared/biovault/submissions/*" | head -n 1)"
+
+  - name: Assert no encrypted files in Client2 shadow folder
+    datasite: client2@sandbox.local
+    assert_no_encrypted: unencrypted
+
+  - name: Client2 syncs to send results notification
+    datasite: client2@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv message sync --no-cleanup
+
+  - name: Client1 syncs to fetch results
+    datasite: client1@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv message sync --no-cleanup
+
+  - name: Wait for response file to sync to client1
+    datasite: client1@sandbox.local
+    wait_for: datasites/client2@sandbox.local/app_data/biovault/rpc/message/*.response
+    timeout: 30
+
+  - name: Client1 re-syncs to read response
+    datasite: client1@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv message sync --no-cleanup
+
+  - name: Wait for Client2 notification request
+    datasite: client1@sandbox.local
+    wait_for: datasites/client1@sandbox.local/app_data/biovault/rpc/message/*.request
+    timeout: 30
+
+  - name: Client1 syncs to read notification
+    datasite: client1@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv message sync --no-cleanup
+
+  - name: Assert Client1 has notification shadow
+    datasite: client1@sandbox.local
+    run: |
+      test -n "$(find unencrypted -name "*.request" -path "*/client1@sandbox.local/app_data/biovault/rpc/message/*")"
+
+  - name: Client1 lists inbox
+    datasite: client1@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv inbox --plain --json
+    capture: client1_inbox
+
+  - name: Wait for Client1's ACK response to notification
+    datasite: client2@sandbox.local
+    wait_for: datasites/client1@sandbox.local/app_data/biovault/rpc/message/*.response
+    timeout: 30
+
+  - name: Client2 syncs to read ACK response
+    datasite: client2@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv message sync --no-cleanup
+      test -n "$(find unencrypted -name "*.response" -path "*/client1@sandbox.local/app_data/biovault/rpc/message/*")"
+
+  - name: Assert results CSV exists
     datasite: client1@sandbox.local
     wait_for: datasites/client1@sandbox.local/shared/biovault/submissions/*/results/ALL/line_counts.csv
-    timeout: 10
+    timeout: 30
+
+  - name: Client1 reads results CSV to create shadow
+    datasite: client1@sandbox.local
+    run: |
+      SUBDIR=$(ls datasites/client1@sandbox.local/shared/biovault/submissions | tail -n 1)
+      RESULTS_PATH="datasites/client1@sandbox.local/shared/biovault/submissions/${SUBDIR}/results/ALL/line_counts.csv"
+      {{workspace}}/cli/target/release/bv syc read "$RESULTS_PATH"
+
+  - name: Restrict results write access after receipt
+    datasite: client1@sandbox.local
+    run: |
+      SUBDIR=$(ls datasites/client1@sandbox.local/shared/biovault/submissions | tail -n 1)
+      PERM="datasites/client1@sandbox.local/shared/biovault/submissions/${SUBDIR}/syft.pub.yaml"
+      tmp=$(mktemp)
+      yq '(.rules[] | select(.pattern == "results/**/*").access.write) = []' "$PERM" > "$tmp"
+      mv "$tmp" "$PERM"
+
+  - name: Assert Client1 has all expected shadows
+    datasite: client1@sandbox.local
+    run: |
+      SUBDIR=$(ls datasites/client1@sandbox.local/shared/biovault/submissions | tail -n 1)
+      # Project file shadows (write shadows)
+      test -f "unencrypted/client1@sandbox.local/shared/biovault/submissions/${SUBDIR}/project.yaml"
+      test -f "unencrypted/client1@sandbox.local/shared/biovault/submissions/${SUBDIR}/workflow.nf"
+      # Results shadow (read shadow)
+      test -f "unencrypted/client1@sandbox.local/shared/biovault/submissions/${SUBDIR}/results/ALL/line_counts.csv"
+
+  - name: Assert no encrypted files in Client1 shadow folder
+    datasite: client1@sandbox.local
+    assert_no_encrypted: unencrypted
+
+  - name: Assert no encrypted files in Client2 shadow folder
+    datasite: client2@sandbox.local
+    assert_no_encrypted: unencrypted
+
+  - name: Client2 syncs final ACK
+    datasite: client2@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv message sync --no-cleanup

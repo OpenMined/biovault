@@ -3,7 +3,7 @@ use crate::cli::syft_url::SyftURL;
 use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::messages::{Message, MessageType};
-use crate::syftbox::storage::SyftBoxStorage;
+use crate::syftbox::storage::{SyftBoxStorage, WritePolicy};
 #[cfg(test)]
 use crate::syftbox::SyftBoxApp;
 use crate::types::{ProjectYaml, SyftPermissions};
@@ -239,6 +239,7 @@ pub async fn submit(
                         &storage,
                         &existing_project_yaml,
                         &existing_project,
+                        Some(datasite_email.as_str()),
                         true,
                     )?;
 
@@ -277,6 +278,7 @@ pub async fn submit(
                             &storage,
                             &existing_project_yaml,
                             &updated_project,
+                            Some(datasite_email.as_str()),
                             true,
                         )?;
 
@@ -288,6 +290,7 @@ pub async fn submit(
                             &storage,
                             &existing_permissions_path,
                             &updated_permissions,
+                            None,
                             true,
                         )?;
                     }
@@ -375,23 +378,41 @@ fn write_yaml_to_storage<T: Serialize>(
     storage: &SyftBoxStorage,
     path: &Path,
     value: &T,
+    recipient: Option<&str>,
     overwrite: bool,
 ) -> Result<()> {
     let yaml = serde_yaml::to_string(value)?;
-    storage
-        .write_plaintext_file(path, yaml.as_bytes(), overwrite)
-        .with_context(|| format!("Failed to write {:?}", path))?;
+    let policy = if let Some(identity) = recipient {
+        WritePolicy::Envelope {
+            recipients: vec![identity.to_string()],
+            hint: path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned()),
+        }
+    } else {
+        WritePolicy::Plaintext
+    };
+    storage.write_with_shadow(path, yaml.as_bytes(), policy, overwrite)?;
     Ok(())
 }
 
-fn copy_project_files(src: &Path, dest: &Path, storage: &SyftBoxStorage) -> Result<()> {
+fn copy_project_files(
+    src: &Path,
+    dest: &Path,
+    storage: &SyftBoxStorage,
+    recipient: &str,
+) -> Result<()> {
     storage.ensure_dir(dest)?;
     // Copy workflow.nf
     let src_workflow = src.join("workflow.nf");
     let dest_workflow = dest.join("workflow.nf");
     let workflow_bytes = fs::read(&src_workflow)
         .with_context(|| "Failed to read workflow.nf from project".to_string())?;
-    storage.write_plaintext_file(&dest_workflow, &workflow_bytes, true)?;
+    let workflow_policy = WritePolicy::Envelope {
+        recipients: vec![recipient.to_string()],
+        hint: Some("workflow.nf".into()),
+    };
+    storage.write_with_shadow(&dest_workflow, &workflow_bytes, workflow_policy, true)?;
 
     // Copy assets directory if it exists
     let src_assets = src.join("assets");
@@ -414,7 +435,16 @@ fn copy_project_files(src: &Path, dest: &Path, storage: &SyftBoxStorage) -> Resu
             } else {
                 let bytes = fs::read(src_path)
                     .with_context(|| format!("Failed to read file: {}", src_path.display()))?;
-                storage.write_plaintext_file(&dest_path, &bytes, true)?;
+                let hint = dest_path
+                    .strip_prefix(dest)
+                    .ok()
+                    .and_then(|p| p.to_str())
+                    .map(|s| format!("assets/{s}"));
+                let asset_policy = WritePolicy::Envelope {
+                    recipients: vec![recipient.to_string()],
+                    hint,
+                };
+                storage.write_with_shadow(&dest_path, &bytes, asset_policy, true)?;
             }
         }
     }
@@ -440,18 +470,24 @@ fn create_and_submit_project(
     storage.ensure_dir(submission_path)?;
 
     // Copy project files
-    copy_project_files(project_dir, submission_path, storage)?;
+    copy_project_files(project_dir, submission_path, storage, datasite_email)?;
 
     // Save updated project.yaml
     let mut final_project = project.clone();
     final_project.participants = participant_url.map(|url| vec![url]);
     let project_yaml_path = submission_path.join("project.yaml");
-    write_yaml_to_storage(storage, &project_yaml_path, &final_project, true)?;
+    write_yaml_to_storage(
+        storage,
+        &project_yaml_path,
+        &final_project,
+        Some(datasite_email),
+        true,
+    )?;
 
     // Create permissions file
     let permissions = SyftPermissions::new_for_datasite(datasite_email);
     let permissions_path = submission_path.join("syft.pub.yaml");
-    write_yaml_to_storage(storage, &permissions_path, &permissions, true)?;
+    write_yaml_to_storage(storage, &permissions_path, &permissions, None, true)?;
 
     println!("✓ Project submitted successfully!");
     println!("  Name: {}", project.name);
@@ -575,7 +611,8 @@ fn send_project_message(
     }
 
     // Try to send immediately; if offline, it will remain queued locally
-    let _ = sync.send_message(&msg.id);
+    sync.send_message(&msg.id)
+        .context("failed to send project message")?;
 
     println!("✉️  Project message prepared for {}", datasite_email);
     if let Some(subj) = &msg.subject {
@@ -607,7 +644,7 @@ fn update_permissions_for_new_recipient(
     }
 
     // Save updated permissions
-    write_yaml_to_storage(storage, permissions_path, &permissions, true)?;
+    write_yaml_to_storage(storage, permissions_path, &permissions, None, true)?;
     Ok(())
 }
 
@@ -700,7 +737,7 @@ mod tests {
         fs::write(src.join("assets/nested/file.bin"), b"x").unwrap();
         let storage = SyftBoxStorage::new(tmp.path());
 
-        copy_project_files(&src, &dest, &storage).unwrap();
+        copy_project_files(&src, &dest, &storage, "peer@example.com").unwrap();
 
         assert!(dest.join("workflow.nf").exists());
         assert!(dest.join("assets/nested/file.bin").exists());
@@ -711,7 +748,7 @@ mod tests {
         fs::write(src2.join("workflow.nf"), b"wf").unwrap();
         let dest2 = tmp.path().join("dest2");
         fs::create_dir_all(&dest2).unwrap();
-        copy_project_files(&src2, &dest2, &storage).unwrap();
+        copy_project_files(&src2, &dest2, &storage, "peer@example.com").unwrap();
     }
 
     #[test]
@@ -756,7 +793,7 @@ mod tests {
         // No workflow.nf file
 
         let storage = SyftBoxStorage::new(tmp.path());
-        let result = copy_project_files(&src, &dest, &storage);
+        let result = copy_project_files(&src, &dest, &storage, "peer@example.com");
         assert!(result.is_err());
     }
 
@@ -784,7 +821,7 @@ mod tests {
         }
 
         let storage = SyftBoxStorage::new(tmp.path());
-        let result = copy_project_files(&src, &dest, &storage);
+        let result = copy_project_files(&src, &dest, &storage, "peer@example.com");
         assert!(result.is_ok());
         assert!(dest.join("workflow.nf").exists());
     }
@@ -801,7 +838,7 @@ mod tests {
         fs::write(src.join("assets/a/b/c/d/deep.txt"), b"deep").unwrap();
 
         let storage = SyftBoxStorage::new(tmp.path());
-        copy_project_files(&src, &dest, &storage).unwrap();
+        copy_project_files(&src, &dest, &storage, "peer@example.com").unwrap();
 
         assert!(dest.join("workflow.nf").exists());
         assert!(dest.join("assets/a/b/c/d/deep.txt").exists());
@@ -826,7 +863,7 @@ mod tests {
         fs::write(src.join("assets/data.csv"), asset_content).unwrap();
 
         let storage = SyftBoxStorage::new(tmp.path());
-        copy_project_files(&src, &dest, &storage).unwrap();
+        copy_project_files(&src, &dest, &storage, "peer@example.com").unwrap();
 
         let copied_workflow = fs::read(dest.join("workflow.nf")).unwrap();
         let copied_asset = fs::read(dest.join("assets/data.csv")).unwrap();
@@ -945,6 +982,7 @@ mod tests {
             &app.storage,
             &submission_path.join("project.yaml"),
             &project,
+            Some(config.email.as_str()),
             true,
         )
         .unwrap();
@@ -953,6 +991,7 @@ mod tests {
             &app.storage,
             &submission_path.join("syft.pub.yaml"),
             &perms,
+            None,
             true,
         )
         .unwrap();

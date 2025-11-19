@@ -44,7 +44,7 @@ flate2 = "1.0"
 walkdir = "2.4"
 semver = "1.0"
 self_update = { version = "0.41", default-features = false, features = ["archive-tar", "compression-flate2", "rustls"] }
-rand = "0.8"
+rand = "0.9"
 base64 = "0.22"
 rusqlite = { version = "0.32", features = ["bundled", "chrono"] }
 include_dir = "0.7"

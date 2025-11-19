@@ -119,9 +119,9 @@ pub async fn check_and_notify_random() -> Result<()> {
     }
 
     use rand::Rng;
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
 
-    if rng.gen_bool(0.1) {
+    if rng.random_bool(0.1) {
         if let Ok(Some(new_version)) = check_for_updates().await {
             eprintln!(
                 "\n{} {} {} {}",

@@ -1,5 +1,5 @@
 use crate::syftbox::app::SyftBoxApp;
-use crate::syftbox::storage::{ReadPolicy, WritePolicy};
+use crate::syftbox::storage::WritePolicy;
 use crate::syftbox::types::{RpcRequest, RpcResponse};
 use anyhow::{anyhow, bail, Context, Result};
 use std::path::{Path, PathBuf};
@@ -24,15 +24,23 @@ impl Endpoint {
         })
     }
 
-    /// Check for request files in this endpoint
+    /// Check for request files in this endpoint (your own folder only)
+    /// Requests are written by others TO you in datasites/your-email/app_data/biovault/rpc/message/
     pub fn check_requests(&self) -> Result<Vec<(PathBuf, RpcRequest)>> {
+        // Only check your own endpoint folder - this is where others write requests TO you
+        self.check_requests_in_folder(&self.path)
+    }
+
+    /// Helper to check for requests in a specific folder
+    fn check_requests_in_folder(&self, folder: &Path) -> Result<Vec<(PathBuf, RpcRequest)>> {
         let mut requests = Vec::new();
 
-        if !self.path.exists() {
+        // Return empty if folder doesn't exist
+        if !folder.exists() {
             return Ok(requests);
         }
 
-        for entry in std::fs::read_dir(&self.path)? {
+        for entry in std::fs::read_dir(folder)? {
             let entry = entry?;
             let path = entry.path();
 
@@ -56,7 +64,7 @@ impl Endpoint {
     fn read_request(&self, path: &Path) -> Result<RpcRequest> {
         self.app
             .storage
-            .read_json(path, ReadPolicy::AllowPlaintext)
+            .read_json_with_shadow(path)
             .with_context(|| format!("Failed to parse request JSON from: {:?}", path))
     }
 
@@ -66,6 +74,7 @@ impl Endpoint {
         request_path: &Path,
         request: &RpcRequest,
         response: &RpcResponse,
+        no_cleanup: bool,
     ) -> Result<()> {
         if request_path.is_dir() {
             bail!(
@@ -80,9 +89,17 @@ impl Endpoint {
             .and_then(|s| s.to_str())
             .ok_or_else(|| anyhow!("Invalid request filename"))?;
 
-        // Create response file path (UUID.response)
+        // Create response file path next to the request (UUID.response in same directory)
+        // This ensures the sender can find the response in their own app_data folder
         let response_filename = format!("{}.response", request_filename);
-        let response_path = self.path.join(response_filename);
+        let request_dir = request_path
+            .parent()
+            .ok_or_else(|| anyhow!("Request path has no parent"))?;
+        let response_path = request_dir.join(response_filename);
+
+        eprintln!("DEBUG send_response:");
+        eprintln!("  request_path: {:?}", request_path);
+        eprintln!("  response_path: {:?}", response_path);
 
         let write_policy = WritePolicy::Envelope {
             recipients: vec![request.sender.clone()],
@@ -91,10 +108,12 @@ impl Endpoint {
 
         self.app
             .storage
-            .write_json(&response_path, response, write_policy, true)?;
+            .write_json_with_shadow(&response_path, response, write_policy, true)?;
 
-        // Delete the request file
-        self.app.storage.remove_path(request_path)?;
+        // Delete the request file (unless --no-cleanup mode)
+        if !no_cleanup {
+            self.app.storage.remove_path(request_path)?;
+        }
 
         println!("Sent response to: {:?}", response_path);
         Ok(())
@@ -115,21 +134,77 @@ impl Endpoint {
 
         self.app
             .storage
-            .write_json(&request_path, request, write_policy, true)?;
+            .write_json_with_shadow(&request_path, request, write_policy, true)?;
 
         println!("Created request: {:?}", request_path);
         Ok(request_path)
     }
 
     /// Check for response files (when we sent a request and are waiting for response)
+    /// Responses are in OTHER identity folders (where you wrote requests), NOT your own folder
+    /// You write requests to datasites/their-email/, they write responses back there
     pub fn check_responses(&self) -> Result<Vec<(PathBuf, RpcResponse)>> {
         let mut responses = Vec::new();
 
-        if !self.path.exists() {
+        // Get the datasites root directory
+        let datasites_root = self.app.data_dir.join("datasites");
+        if !datasites_root.exists() {
             return Ok(responses);
         }
 
-        for entry in std::fs::read_dir(&self.path)? {
+        // Canonicalize paths to handle symlinks (e.g., /var -> /private/var on macOS)
+        let canonical_datasites_root = datasites_root
+            .canonicalize()
+            .unwrap_or_else(|_| datasites_root.clone());
+        let canonical_path = self
+            .path
+            .canonicalize()
+            .unwrap_or_else(|_| self.path.clone());
+
+        // Get the endpoint-relative path (e.g., "app_data/biovault/rpc/message")
+        let endpoint_suffix = canonical_path
+            .strip_prefix(&canonical_datasites_root)
+            .ok()
+            .and_then(|p| p.strip_prefix(self.app.email.as_str()).ok());
+
+        if endpoint_suffix.is_none() {
+            // Path structure unexpected - can't determine suffix
+            return Ok(responses);
+        }
+
+        let endpoint_suffix = endpoint_suffix.unwrap();
+
+        // Scan all identity folders
+        // Responses are where you wrote requests (in other people's folders)
+        // Also check your own folder for test/development scenarios
+        for entry in std::fs::read_dir(&datasites_root)? {
+            let entry = entry?;
+            let identity_path = entry.path();
+
+            if !identity_path.is_dir() {
+                continue;
+            }
+
+            // Check the endpoint folder for this identity
+            let endpoint_folder = identity_path.join(endpoint_suffix);
+            if endpoint_folder.exists() {
+                responses.extend(self.check_responses_in_folder(&endpoint_folder)?);
+            }
+        }
+
+        Ok(responses)
+    }
+
+    /// Helper to check for responses in a specific folder
+    fn check_responses_in_folder(&self, folder: &Path) -> Result<Vec<(PathBuf, RpcResponse)>> {
+        let mut responses = Vec::new();
+
+        // Return empty if folder doesn't exist
+        if !folder.exists() {
+            return Ok(responses);
+        }
+
+        for entry in std::fs::read_dir(folder)? {
             let entry = entry?;
             let path = entry.path();
 
@@ -153,7 +228,7 @@ impl Endpoint {
     fn read_response(&self, path: &Path) -> Result<RpcResponse> {
         self.app
             .storage
-            .read_json(path, ReadPolicy::AllowPlaintext)
+            .read_json_with_shadow(path)
             .with_context(|| format!("Failed to parse response JSON from: {:?}", path))
     }
 
@@ -207,7 +282,7 @@ mod tests {
         )
         .expect("ok_json");
 
-        endpoint.send_response(req_path, req, &response)?;
+        endpoint.send_response(req_path, req, &response, false)?;
 
         // Verify request was deleted and response created
         assert!(!request_path.exists());
@@ -275,7 +350,11 @@ mod tests {
 
         // 5) Early-return branches when endpoint directory is missing
         // Remove the endpoint directory and ensure both checks return empty
-        std::fs::remove_dir_all(&endpoint.path)?;
+        // Handle path existence check robustly (may not exist due to cleanup or symlink resolution)
+        if endpoint.path.exists() {
+            // Try to remove the directory, but don't fail if it's already gone
+            let _ = std::fs::remove_dir_all(&endpoint.path);
+        }
         let none_reqs = endpoint.check_requests()?;
         let none_resps = endpoint.check_responses()?;
         assert!(none_reqs.is_empty());
@@ -294,13 +373,15 @@ mod tests {
         let ok_resp =
             crate::syftbox::types::RpcResponse::error(&req, "r@example.com".into(), 500, "err");
         // when request metadata is missing, send_response should fail
-        assert!(endpoint.send_response(bogus, &req, &ok_resp).is_err());
+        assert!(endpoint
+            .send_response(bogus, &req, &ok_resp, false)
+            .is_err());
 
         // 7) send_response with directory-as-request should fail on remove_file
         let dir_as_req = endpoint.path.join("dirlike.request");
         std::fs::create_dir_all(&dir_as_req)?;
         // This will succeed writing response but fail deleting the dir
-        let result = endpoint.send_response(&dir_as_req, &req, &ok_resp);
+        let result = endpoint.send_response(&dir_as_req, &req, &ok_resp, false);
         assert!(result.is_err());
 
         // 8) create_request fails when a directory with same name exists

@@ -105,6 +105,8 @@ def run_step(step: Dict[str, Any], variables: Dict[str, str]):
     expect = step.get("expect")
     wait_for = step.get("wait_for")
     timeout = step.get("timeout", 30)
+    assert_no_encrypted = step.get("assert_no_encrypted")
+    assert_encrypted = step.get("assert_encrypted")
 
     # Handle wait_for syntax
     if wait_for:
@@ -133,8 +135,91 @@ def run_step(step: Dict[str, Any], variables: Dict[str, str]):
 
         raise SystemExit(f"Timeout waiting for: {wait_path}")
 
+    # Handle assert_no_encrypted: check that files/directory have no SYC1 headers
+    if assert_no_encrypted:
+        import glob
+        expanded = replace_vars(assert_no_encrypted, variables)
+
+        if datasite:
+            client_dir = SANDBOX_ROOT / datasite
+            check_path = client_dir / expanded
+        else:
+            check_path = ROOT / expanded
+
+        # Collect files to check
+        if check_path.is_dir():
+            files_to_check = list(check_path.rglob("*"))
+            files_to_check = [f for f in files_to_check if f.is_file()]
+        elif '*' in str(check_path):
+            files_to_check = [Path(p) for p in glob.glob(str(check_path))]
+        else:
+            files_to_check = [check_path] if check_path.exists() else []
+
+        # Check each file for SYC1 header
+        encrypted_files = []
+        for file_path in files_to_check:
+            try:
+                with open(file_path, 'rb') as f:
+                    header = f.read(4)
+                    if header == b'SYC1':
+                        encrypted_files.append(file_path)
+            except Exception:
+                pass  # Skip files we can't read
+
+        if encrypted_files:
+            print(f"ERROR: Found {len(encrypted_files)} encrypted file(s):")
+            for f in encrypted_files:
+                print(f"  - {f}")
+            raise SystemExit(f"Encrypted files found in: {check_path}")
+
+        print(f"✓ No encrypted files in: {expanded}")
+        return
+
+    # Handle assert_encrypted: check that files have SYC1 headers
+    if assert_encrypted:
+        import glob
+        expanded = replace_vars(assert_encrypted, variables)
+
+        if datasite:
+            client_dir = SANDBOX_ROOT / datasite
+            check_path = client_dir / expanded
+        else:
+            check_path = ROOT / expanded
+
+        # Collect files to check
+        if check_path.is_dir():
+            files_to_check = list(check_path.rglob("*"))
+            files_to_check = [f for f in files_to_check if f.is_file()]
+        elif '*' in str(check_path):
+            files_to_check = [Path(p) for p in glob.glob(str(check_path))]
+        else:
+            files_to_check = [check_path] if check_path.exists() else []
+
+        if not files_to_check:
+            raise SystemExit(f"No files found to check: {check_path}")
+
+        # Check each file for SYC1 header
+        unencrypted_files = []
+        for file_path in files_to_check:
+            try:
+                with open(file_path, 'rb') as f:
+                    header = f.read(4)
+                    if header != b'SYC1':
+                        unencrypted_files.append(file_path)
+            except Exception:
+                unencrypted_files.append(file_path)  # Assume unencrypted if can't read
+
+        if unencrypted_files:
+            print(f"ERROR: Found {len(unencrypted_files)} unencrypted file(s):")
+            for f in unencrypted_files:
+                print(f"  - {f}")
+            raise SystemExit(f"Unencrypted files found in: {check_path}")
+
+        print(f"✓ All files encrypted in: {expanded}")
+        return
+
     if not command:
-        raise SystemExit("Each step must define a 'run' or 'wait_for' command.")
+        raise SystemExit("Each step must define a 'run', 'wait_for', 'assert_no_encrypted', or 'assert_encrypted' command.")
 
     result = run_shell(command, datasite, variables, capture=bool(capture))
 

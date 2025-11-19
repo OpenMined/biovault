@@ -255,7 +255,7 @@ dependencies = [
  "libc",
  "notify",
  "predicates",
- "rand 0.8.5",
+ "rand",
  "regex",
  "reqwest",
  "rusqlite",
@@ -553,7 +553,7 @@ checksum = "94950e87ea550d6d68f1993f3e7bebc8cb7235157bff84337d46195c3aa0b3f0"
 dependencies = [
  "hax-lib 0.3.5",
  "pastey",
- "rand 0.9.1",
+ "rand",
 ]
 
 [[package]]
@@ -1792,7 +1792,7 @@ version = "0.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "50c487a3fb34361f4f78a9c9dc5eff4ae62ef3ccb69a916af7b524dd288de9db"
 dependencies = [
- "rand 0.9.1",
+ "rand",
 ]
 
 [[package]]
@@ -1815,7 +1815,7 @@ dependencies = [
  "derive_more",
  "displaydoc",
  "log",
- "rand 0.9.1",
+ "rand",
  "sha2",
  "subtle",
  "thiserror 2.0.17",
@@ -1849,7 +1849,7 @@ dependencies = [
  "log",
  "prost",
  "prost-build",
- "rand 0.9.1",
+ "rand",
  "rayon",
  "serde",
  "sha2",
@@ -2417,7 +2417,7 @@ dependencies = [
  "bytes",
  "getrandom 0.3.3",
  "lru-slab",
- "rand 0.9.1",
+ "rand",
  "ring",
  "rustc-hash",
  "rustls",
@@ -2460,33 +2460,12 @@ checksum = "69cdb34c158ceb288df11e18b4bd39de994f6657d83847bdffdbd7f346754b0f"
 
 [[package]]
 name = "rand"
-version = "0.8.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "34af8d1a0e25924bc5b7c43c079c942339d8f0a8b57c39049bef581b46327404"
-dependencies = [
- "libc",
- "rand_chacha 0.3.1",
- "rand_core 0.6.4",
-]
-
-[[package]]
-name = "rand"
 version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9fbfd9d094a40bf3ae768db9361049ace4c0e04a4fd6b359518bd7b73a73dd97"
 dependencies = [
- "rand_chacha 0.9.0",
+ "rand_chacha",
  "rand_core 0.9.3",
-]
-
-[[package]]
-name = "rand_chacha"
-version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e6c10a63a0fa32252be49d21e7709d4d4baf8d231c2dbce1eaa8141b9b127d88"
-dependencies = [
- "ppv-lite86",
- "rand_core 0.6.4",
 ]
 
 [[package]]
@@ -2999,7 +2978,7 @@ dependencies = [
  "hpke-rs",
  "hpke-rs-crypto",
  "libsignal-core",
- "rand_chacha 0.9.0",
+ "rand_chacha",
  "rand_core 0.9.3",
  "sha1",
  "sha2",
@@ -3091,7 +3070,7 @@ dependencies = [
  "num_enum",
  "prost",
  "prost-build",
- "rand 0.9.1",
+ "rand",
  "rand_core 0.9.3",
  "sha2",
  "sorted-vec",
@@ -3127,7 +3106,7 @@ dependencies = [
  "hex",
  "hkdf",
  "libsignal-protocol",
- "rand 0.9.1",
+ "rand",
  "serde",
  "serde_jcs",
  "serde_json",

@@ -100,7 +100,7 @@ impl MessageSync {
 
         self.app
             .storage
-            .write_json(&request_path, &rpc_request, write_policy, true)?;
+            .write_json_with_shadow(&request_path, &rpc_request, write_policy, true)?;
 
         println!("📤 Message sent to {}", msg.to);
         println!("Request written to: {:?}", request_path);
@@ -108,7 +108,7 @@ impl MessageSync {
     }
 
     /// Check for incoming messages
-    pub fn check_incoming(&self) -> Result<Vec<String>> {
+    pub fn check_incoming(&self, no_cleanup: bool) -> Result<Vec<String>> {
         let endpoint = Endpoint::new(&self.app, "/message")?;
         let requests = endpoint.check_requests()?;
 
@@ -210,7 +210,7 @@ impl MessageSync {
                 200,
                 b"Message received".to_vec(),
             );
-            endpoint.send_response(&request_path, &rpc_request, &ack_response)?;
+            endpoint.send_response(&request_path, &rpc_request, &ack_response, no_cleanup)?;
 
             // Silent - will be shown when listing messages
         }
@@ -219,7 +219,7 @@ impl MessageSync {
     }
 
     /// Check for ACK responses to sent messages
-    pub fn check_acks(&self) -> Result<()> {
+    pub fn check_acks(&self, no_cleanup: bool) -> Result<()> {
         let endpoint = Endpoint::new(&self.app, "/message")?;
         let responses = endpoint.check_responses()?;
 
@@ -246,34 +246,36 @@ impl MessageSync {
                 }
             }
 
-            // Clean up response file
-            endpoint.cleanup_response(&response_path)?;
+            // Clean up response file (unless --no-cleanup mode)
+            if !no_cleanup {
+                endpoint.cleanup_response(&response_path)?;
+            }
         }
 
         Ok(())
     }
 
     /// Full sync cycle: check incoming, send pending, check acks (verbose)
-    pub fn sync(&self) -> Result<()> {
+    pub fn sync(&self, no_cleanup: bool) -> Result<()> {
         // Check for new incoming messages
-        let new_messages = self.check_incoming()?;
+        let new_messages = self.check_incoming(no_cleanup)?;
         if !new_messages.is_empty() {
             println!("📬 {} new message(s) received", new_messages.len());
         }
 
         // Check for ACK responses
-        self.check_acks()?;
+        self.check_acks(no_cleanup)?;
 
         Ok(())
     }
 
     /// Silent sync - returns results without printing
     pub fn sync_quiet(&self) -> Result<(Vec<String>, usize)> {
-        // Check for new incoming messages
-        let new_messages = self.check_incoming()?;
+        // Check for new incoming messages (always cleanup in quiet mode - used internally)
+        let new_messages = self.check_incoming(false)?;
 
         // Check for ACK responses
-        self.check_acks()?;
+        self.check_acks(false)?;
 
         Ok((new_messages.clone(), new_messages.len()))
     }
@@ -325,7 +327,7 @@ mod tests {
         ms_sender.send_message(&m.id).unwrap();
 
         // Recipient checks incoming; should ingest and write an ACK response in bob's endpoint dir
-        let new_msgs = ms_recipient.check_incoming().unwrap();
+        let new_msgs = ms_recipient.check_incoming(false).unwrap();
         assert_eq!(new_msgs.len(), 1);
 
         // Simulate syft sync by copying the response from bob's endpoint to alice's endpoint
@@ -339,7 +341,7 @@ mod tests {
         }
 
         // Sender checks ACKs and should update message sync status
-        ms_sender.check_acks().unwrap();
+        ms_sender.check_acks(false).unwrap();
     }
 
     #[test]
@@ -389,7 +391,7 @@ mod tests {
             .unwrap();
 
         // Process ACKs and verify status is Failed
-        ms_sender.check_acks().unwrap();
+        ms_sender.check_acks(false).unwrap();
         let updated = ms_sender.db.get_message(&m.id).unwrap().unwrap();
         assert_eq!(updated.sync_status, SyncStatus::Failed);
         assert!(updated.rpc_ack_at.is_some());

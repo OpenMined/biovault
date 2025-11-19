@@ -425,7 +425,7 @@ async fn interactive_impl(
                 if !daemon_running {
                     println!("\nSyncing messages...");
                     let sync = super::messages::init_message_system(config)?.1;
-                    let _ = sync.sync();
+                    let _ = sync.sync(false);
                     println!("Sync complete. Press Enter...");
                 } else {
                     println!(
