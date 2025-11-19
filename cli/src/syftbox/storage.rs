@@ -524,6 +524,7 @@ impl SyftBoxStorage {
         let opts = BytesWriteOpts {
             relative,
             recipients,
+            sender: None,
             plaintext,
             overwrite,
             hint,
