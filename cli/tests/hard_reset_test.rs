@@ -89,33 +89,25 @@ mod hard_reset_tests {
 
         fn verify_all_deleted(&self) -> bool {
             // Check that all BioVault directories are gone
-            let storage = &self.app.storage;
             let datasite_path = self.app.data_dir.join("datasites").join(&self.email);
 
-            let public_exists = storage
-                .path_exists(&datasite_path.join("public").join("biovault"))
-                .unwrap_or(true);
-            let shared_exists = storage
-                .path_exists(
-                    &datasite_path
-                        .join("shared")
-                        .join("biovault")
-                        .join("submissions"),
-                )
-                .unwrap_or(true);
-            let app_data_exists = storage
-                .path_exists(&datasite_path.join("app_data").join("biovault"))
-                .unwrap_or(true);
-            let private_exists = storage
-                .path_exists(
-                    &self
-                        .app
-                        .data_dir
-                        .join("private")
-                        .join("app_data")
-                        .join("biovault"),
-                )
-                .unwrap_or(true);
+            let public_exists = self.path_exists(&datasite_path.join("public").join("biovault"));
+            let shared_exists = self.path_exists(
+                &datasite_path
+                    .join("shared")
+                    .join("biovault")
+                    .join("submissions"),
+            );
+            let app_data_exists =
+                self.path_exists(&datasite_path.join("app_data").join("biovault"));
+            let private_exists = self.path_exists(
+                &self
+                    .app
+                    .data_dir
+                    .join("private")
+                    .join("app_data")
+                    .join("biovault"),
+            );
 
             !self.biovault_home.exists()
                 && !public_exists
@@ -126,28 +118,20 @@ mod hard_reset_tests {
 
         fn verify_some_exist(&self) -> bool {
             // Check that at least some paths still exist
-            let storage = &self.app.storage;
             let datasite_path = self.app.data_dir.join("datasites").join(&self.email);
 
-            let public_exists = storage
-                .path_exists(&datasite_path.join("public").join("biovault"))
-                .unwrap_or(false);
-            let shared_exists = storage
-                .path_exists(&datasite_path.join("shared").join("biovault"))
-                .unwrap_or(false);
-            let app_data_exists = storage
-                .path_exists(&datasite_path.join("app_data").join("biovault"))
-                .unwrap_or(false);
-            let private_exists = storage
-                .path_exists(
-                    &self
-                        .app
-                        .data_dir
-                        .join("private")
-                        .join("app_data")
-                        .join("biovault"),
-                )
-                .unwrap_or(false);
+            let public_exists = self.path_exists(&datasite_path.join("public").join("biovault"));
+            let shared_exists = self.path_exists(&datasite_path.join("shared").join("biovault"));
+            let app_data_exists =
+                self.path_exists(&datasite_path.join("app_data").join("biovault"));
+            let private_exists = self.path_exists(
+                &self
+                    .app
+                    .data_dir
+                    .join("private")
+                    .join("app_data")
+                    .join("biovault"),
+            );
 
             self.biovault_home.exists()
                 || public_exists
@@ -183,6 +167,16 @@ mod hard_reset_tests {
             match self.app.storage.path_exists(path) {
                 Ok(_) => self.app.storage.remove_path(path),
                 Err(_) => delete_path_safely(path),
+            }
+        }
+
+        fn path_exists(&self, path: &Path) -> bool {
+            match self.app.storage.path_exists(path) {
+                Ok(result) => result,
+                Err(err) => {
+                    eprintln!("WARN: path_exists fallback for {:?}: {}", path, err);
+                    path.exists()
+                }
             }
         }
     }
