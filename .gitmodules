@@ -7,3 +7,6 @@
 [submodule "bioscript"]
 	path = bioscript
 	url = https://github.com/OpenMined/bioscript
+[submodule "syft-crypto-core"]
+	path = syft-crypto-core
+	url = https://github.com/OpenMined/syft-crypto-core

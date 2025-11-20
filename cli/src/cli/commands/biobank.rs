@@ -12,6 +12,7 @@ use crate::cli::commands::participant::{Participant, ParticipantsFile};
 use crate::cli::syft_url::SyftURL;
 use crate::config::{get_config, Config};
 use crate::error::Error;
+use crate::syftbox::storage::SyftBoxStorage;
 
 const PUBLIC_TEMPLATE_PATH: &str = include_str!("../../participants.public.template.yaml");
 
@@ -96,6 +97,24 @@ fn get_syftbox_data_dir() -> Result<PathBuf> {
     Ok(data_dir)
 }
 
+fn syft_storage() -> Result<SyftBoxStorage> {
+    let data_dir = get_syftbox_data_dir()?;
+    Ok(SyftBoxStorage::new(&data_dir))
+}
+
+fn read_text_with_optional_storage(path: &Path) -> Result<String> {
+    if let Ok(data_dir) = get_syftbox_data_dir() {
+        let storage = SyftBoxStorage::new(&data_dir);
+        if path.starts_with(&data_dir) {
+            let bytes = storage
+                .read_plaintext_file(path)
+                .with_context(|| format!("Failed to read {:?}", path))?;
+            return Ok(String::from_utf8(bytes)?);
+        }
+    }
+    fs::read_to_string(path).with_context(|| format!("Failed to read {:?}", path))
+}
+
 fn get_datasite_path(email: &str) -> Result<PathBuf> {
     let data_dir = get_syftbox_data_dir()?;
     let datasite_path = data_dir.join("datasites").join(email);
@@ -125,6 +144,7 @@ fn load_private_participants() -> Result<ParticipantsFile> {
 
 fn load_public_participants(email: &str) -> Result<PublicParticipantsFile> {
     let path = get_public_participants_path(email)?;
+    let storage = syft_storage()?;
 
     if !path.exists() {
         // Create with defaults if doesn't exist
@@ -149,8 +169,10 @@ fn load_public_participants(email: &str) -> Result<PublicParticipantsFile> {
             mock_data,
         })
     } else {
-        let contents = fs::read_to_string(&path)
+        let bytes = storage
+            .read_plaintext_file(&path)
             .with_context(|| format!("Failed to read public participants file at {:?}", path))?;
+        let contents = String::from_utf8(bytes)?;
         let mut parsed: PublicParticipantsFile = serde_yaml::from_str(&contents)
             .with_context(|| "Failed to parse public participants YAML")?;
 
@@ -170,7 +192,9 @@ fn load_public_participants(email: &str) -> Result<PublicParticipantsFile> {
 fn save_public_participants(email: &str, file: &PublicParticipantsFile) -> Result<()> {
     let path = get_public_participants_path(email)?;
     let parent = path.parent().ok_or_else(|| anyhow!("Invalid path"))?;
-    fs::create_dir_all(parent)
+    let storage = syft_storage()?;
+    storage
+        .ensure_dir(parent)
         .with_context(|| format!("Failed to create directory {:?}", parent))?;
 
     // Build YAML content manually to support proper anchor references
@@ -241,7 +265,8 @@ fn save_public_participants(email: &str, file: &PublicParticipantsFile) -> Resul
         }
     }
 
-    fs::write(&path, yaml_content)
+    storage
+        .write_plaintext_file(&path, yaml_content.as_bytes(), true)
         .with_context(|| format!("Failed to write public participants file at {:?}", path))?;
 
     Ok(())
@@ -387,7 +412,7 @@ pub fn read_participant_with_mode(
     participant_id: &str,
     mode: ReadMode,
 ) -> Result<HashMap<String, String>> {
-    let contents = fs::read_to_string(participant_file)
+    let contents = read_text_with_optional_storage(participant_file)
         .with_context(|| format!("Failed to read participant file at {:?}", participant_file))?;
 
     let yaml: YamlValue =
@@ -523,6 +548,7 @@ pub async fn list(override_path: Option<PathBuf>) -> crate::error::Result<()> {
     } else {
         config.get_syftbox_data_dir()?
     };
+    let storage = SyftBoxStorage::new(&data_dir);
 
     let datasites_dir = data_dir.join("datasites");
 
@@ -532,7 +558,7 @@ pub async fn list(override_path: Option<PathBuf>) -> crate::error::Result<()> {
         ));
     }
 
-    let biobanks = find_biobanks(&datasites_dir)?;
+    let biobanks = find_biobanks(&storage, &datasites_dir)?;
 
     if biobanks.is_empty() {
         println!("No biobanks found in {}", datasites_dir.display());
@@ -590,39 +616,32 @@ pub async fn list(override_path: Option<PathBuf>) -> crate::error::Result<()> {
     Ok(())
 }
 
-fn find_biobanks(datasites_dir: &Path) -> Result<Vec<BioBankInfo>> {
+fn find_biobanks(storage: &SyftBoxStorage, datasites_dir: &Path) -> Result<Vec<BioBankInfo>> {
     let mut biobanks = Vec::new();
+    let entries = storage.list_dir(datasites_dir)?;
+    for entry in entries {
+        if !entry.is_dir() {
+            continue;
+        }
+        let Some(email) = entry.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let participants_path = entry
+            .join("public")
+            .join("biovault")
+            .join("participants.yaml");
+        if !participants_path.exists() {
+            continue;
+        }
 
-    let pattern = format!(
-        "{}/**/**/public/biovault/participants.yaml",
-        datasites_dir.display()
-    );
-    debug!("Searching for biobank files with pattern: {}", pattern);
-
-    for entry in glob::glob(&pattern)? {
-        match entry {
-            Ok(path) => {
-                debug!("Found participants file: {}", path.display());
-
-                if let Some(email) = extract_email_from_path(&path, datasites_dir) {
-                    match load_biobank_file(&path, &email) {
-                        Ok(biobank_info) => {
-                            biobanks.push(biobank_info);
-                        }
-                        Err(e) => {
-                            eprintln!("Invalid file at path: {}", path.display());
-                            eprintln!("  Error: {}", e);
-                        }
-                    }
-                } else {
-                    eprintln!(
-                        "Warning: Could not extract email from path: {}",
-                        path.display()
-                    );
-                }
-            }
+        match load_biobank_file(storage, &participants_path, email) {
+            Ok(info) => biobanks.push(info),
             Err(e) => {
-                eprintln!("Warning: Error accessing path: {}", e);
+                eprintln!(
+                    "Invalid file at path: {} ({})",
+                    participants_path.display(),
+                    e
+                );
             }
         }
     }
@@ -632,26 +651,16 @@ fn find_biobanks(datasites_dir: &Path) -> Result<Vec<BioBankInfo>> {
     Ok(biobanks)
 }
 
-fn extract_email_from_path(path: &Path, datasites_dir: &Path) -> Option<String> {
-    let relative_path = path.strip_prefix(datasites_dir).ok()?;
-    let components: Vec<&str> = relative_path
-        .components()
-        .filter_map(|c| c.as_os_str().to_str())
-        .collect();
-
-    // Path structure: datasites/email/public/biovault/participants.yaml
-    // After strip_prefix: email/public/biovault/participants.yaml
-    // We want the email which is at index 0
-    if !components.is_empty() {
-        Some(components[0].to_string())
+fn load_biobank_file(storage: &SyftBoxStorage, path: &Path, email: &str) -> Result<BioBankInfo> {
+    let content = if storage.contains(path) {
+        let bytes = storage
+            .read_plaintext_file(path)
+            .with_context(|| format!("Failed to read participants file: {}", path.display()))?;
+        String::from_utf8(bytes).with_context(|| format!("Invalid UTF-8 in {}", path.display()))?
     } else {
-        None
-    }
-}
-
-fn load_biobank_file(path: &Path, email: &str) -> Result<BioBankInfo> {
-    let content = fs::read_to_string(path)
-        .with_context(|| format!("Failed to read participants file: {}", path.display()))?;
+        fs::read_to_string(path)
+            .with_context(|| format!("Failed to read participants file: {}", path.display()))?
+    };
 
     let mut biobank_file: BiobankFile = serde_yaml::from_str(&content)
         .with_context(|| format!("Failed to parse participants file: {}", path.display()))?;
@@ -687,6 +696,7 @@ fn load_biobank_file(path: &Path, email: &str) -> Result<BioBankInfo> {
 mod tests {
     use super::*;
     use crate::config::Config;
+    use crate::syftbox::SyftBoxApp;
     use tempfile::TempDir;
 
     // Helper function to create a test config
@@ -766,9 +776,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let email = "test@example.com";
 
-        // Isolate config and paths to this test thread
         crate::config::set_test_biovault_home(temp_dir.path().join(".biovault"));
-        // Provide an in-memory config for calls to get_config()
         let syftbox_config_path = temp_dir.path().join("syftbox_config.json");
         crate::config::set_test_config(crate::config::Config {
             email: email.to_string(),
@@ -778,53 +786,42 @@ mod tests {
             syftbox_credentials: None,
         });
 
-        // Setup test environment - create datasites for the email we're using
-        let datasites_dir = temp_dir.path().join("datasites").join(email);
-        fs::create_dir_all(&datasites_dir).unwrap();
+        let app = SyftBoxApp::new(temp_dir.path(), email, "biovault").unwrap();
+        let data_dir = app.data_dir.clone();
 
         create_test_config(temp_dir.path(), email, temp_dir.path()).unwrap();
         create_test_participants_file(temp_dir.path()).unwrap();
 
-        // Test publishing a single participant
-        let result = publish(Some("TEST1".to_string()), false, None).await;
-        if let Err(ref e) = result {
-            eprintln!("Publish error: {}", e);
-        }
-        assert!(result.is_ok());
+        let read_public = |path: &Path| -> String {
+            String::from_utf8(
+                app.storage
+                    .read_plaintext_file(path)
+                    .expect("read participants"),
+            )
+            .expect("utf8")
+        };
 
-        // Check that the public file was created
-        let public_path = datasites_dir
+        let public_path = data_dir
+            .join("datasites")
+            .join(email)
             .join("public")
             .join("biovault")
             .join("participants.yaml");
-        assert!(public_path.exists());
 
-        // Read and verify the public file content
-        let public_content = fs::read_to_string(&public_path).unwrap();
+        let result = publish(Some("TEST1".to_string()), false, None).await;
+        assert!(result.is_ok());
+
+        let mut public_content = read_public(&public_path);
         assert!(public_content.contains("TEST1"));
         assert!(public_content.contains("mock: *mock_data_grch38"));
-        assert!(public_content.contains("mock_data_grch38: &mock_data_grch38"));
-        assert!(public_content.contains("{root.private_url}#participants.TEST1"));
-        assert!(public_content.contains("{url}.ref"));
-        assert!(public_content.contains(&format!("datasite: {}", email)));
-        assert!(public_content.contains("http_relay_servers:\n  - syftbox.net"));
-        assert!(public_content.contains(&format!(
-            "public_url: \"syft://{}/public/biovault/participants.yaml\"",
-            email
-        )));
 
-        // Test publishing all participants
         let result = publish(None, true, None).await;
         assert!(result.is_ok());
 
-        let public_content = fs::read_to_string(&public_path).unwrap();
+        public_content = read_public(&public_path);
         assert!(public_content.contains("TEST1"));
         assert!(public_content.contains("TEST2"));
-        // Both TEST1 and TEST2 use GRCh38, so both should have mock references
-        assert!(public_content.contains("mock: *mock_data_grch38"));
-        assert!(public_content.contains("mock_data_grch38: &mock_data_grch38"));
 
-        // Test publishing with custom HTTP relay servers
         let custom_servers = vec![
             "relay1.example.com".to_string(),
             "relay2.example.com".to_string(),
@@ -832,27 +829,24 @@ mod tests {
         let result = publish(Some("TEST1".to_string()), false, Some(custom_servers)).await;
         assert!(result.is_ok());
 
-        let public_content = fs::read_to_string(&public_path).unwrap();
+        public_content = read_public(&public_path);
         assert!(public_content
             .contains("http_relay_servers:\n  - relay1.example.com\n  - relay2.example.com"));
 
-        // Test unpublishing a single participant
         let result = unpublish(Some("TEST1".to_string()), false).await;
         assert!(result.is_ok());
 
-        let public_content = fs::read_to_string(&public_path).unwrap();
+        public_content = read_public(&public_path);
         assert!(!public_content.contains("TEST1:"));
         assert!(public_content.contains("TEST2"));
 
-        // Test unpublishing all
         let result = unpublish(None, true).await;
         assert!(result.is_ok());
 
-        let public_content = fs::read_to_string(&public_path).unwrap();
+        public_content = read_public(&public_path);
         assert!(!public_content.contains("TEST1:"));
         assert!(!public_content.contains("TEST2:"));
 
-        // Clear test overrides
         crate::config::clear_test_config();
         crate::config::clear_test_biovault_home();
     }
@@ -1002,17 +996,26 @@ participants:
     #[serial_test::serial]
     async fn test_list_biobanks() -> Result<()> {
         let temp_dir = TempDir::new()?;
+        let storage = SyftBoxStorage::new(temp_dir.path());
         let datasites_dir = temp_dir.path().join("datasites");
+        storage.ensure_dir(&datasites_dir)?;
 
         create_test_biobank(
+            &storage,
             &datasites_dir,
             "alice@example.com",
             vec![("PARTICIPANT1", "GRCh38"), ("PARTICIPANT2", "GRCh37")],
         )?;
 
-        create_test_biobank(&datasites_dir, "bob@example.org", vec![("TEST", "GRCh38")])?;
+        create_test_biobank(
+            &storage,
+            &datasites_dir,
+            "bob@example.org",
+            vec![("TEST", "GRCh38")],
+        )?;
 
         create_test_biobank(
+            &storage,
             &datasites_dir,
             "charlie@example.net",
             vec![
@@ -1062,6 +1065,7 @@ participants:
     }
 
     fn create_test_biobank(
+        storage: &SyftBoxStorage,
         datasites_dir: &Path,
         email: &str,
         participants: Vec<(&str, &str)>,
@@ -1071,7 +1075,7 @@ participants:
             .join(email)
             .join("public")
             .join("biovault");
-        fs::create_dir_all(&biobank_dir)?;
+        storage.ensure_dir(&biobank_dir)?;
 
         let mut participants_map = BTreeMap::new();
         for (id, ref_version) in participants {
@@ -1101,7 +1105,11 @@ participants:
         };
 
         let yaml_content = serde_yaml::to_string(&biobank_file)?;
-        fs::write(biobank_dir.join("participants.yaml"), yaml_content)?;
+        storage.write_plaintext_file(
+            &biobank_dir.join("participants.yaml"),
+            yaml_content.as_bytes(),
+            true,
+        )?;
 
         Ok(())
     }

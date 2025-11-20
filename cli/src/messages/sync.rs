@@ -5,6 +5,7 @@ use std::path::Path;
 
 use crate::syftbox::app::SyftBoxApp;
 use crate::syftbox::endpoint::Endpoint;
+use crate::syftbox::storage::WritePolicy;
 use crate::syftbox::types::{RpcRequest, RpcResponse};
 
 use super::db::MessageDb;
@@ -74,8 +75,9 @@ impl MessageSync {
         self.db.update_message(&msg)?;
 
         // Write request directly to recipient's datasite RPC folder
-        let data_dir = self.app.data_dir.clone();
-        let recipient_rpc_dir = data_dir
+        let recipient_rpc_dir = self
+            .app
+            .data_dir
             .join("datasites")
             .join(&msg.to)
             .join("app_data")
@@ -83,23 +85,22 @@ impl MessageSync {
             .join("rpc")
             .join("message");
 
-        // Create directory if it doesn't exist
-        std::fs::create_dir_all(&recipient_rpc_dir).with_context(|| {
-            format!(
-                "Failed to create RPC directory for recipient: {:?}",
-                recipient_rpc_dir
-            )
-        })?;
+        self.app
+            .storage
+            .ensure_dir(&recipient_rpc_dir)
+            .with_context(|| format!("Failed to prepare RPC dir {:?}", recipient_rpc_dir))?;
 
-        // Write the request file
         let request_filename = format!("{}.request", rpc_request.id);
         let request_path = recipient_rpc_dir.join(request_filename);
 
-        let request_json =
-            serde_json::to_string_pretty(&rpc_request).context("Failed to serialize request")?;
+        let write_policy = WritePolicy::Envelope {
+            recipients: vec![msg.to.clone()],
+            hint: Some(format!("message-{}", rpc_request.id)),
+        };
 
-        std::fs::write(&request_path, request_json)
-            .with_context(|| format!("Failed to write request file: {:?}", request_path))?;
+        self.app
+            .storage
+            .write_json_with_shadow(&request_path, &rpc_request, write_policy, true)?;
 
         println!("📤 Message sent to {}", msg.to);
         println!("Request written to: {:?}", request_path);
@@ -107,7 +108,7 @@ impl MessageSync {
     }
 
     /// Check for incoming messages
-    pub fn check_incoming(&self) -> Result<Vec<String>> {
+    pub fn check_incoming(&self, no_cleanup: bool) -> Result<Vec<String>> {
         let endpoint = Endpoint::new(&self.app, "/message")?;
         let requests = endpoint.check_requests()?;
 
@@ -209,7 +210,7 @@ impl MessageSync {
                 200,
                 b"Message received".to_vec(),
             );
-            endpoint.send_response(&request_path, &ack_response)?;
+            endpoint.send_response(&request_path, &rpc_request, &ack_response, no_cleanup)?;
 
             // Silent - will be shown when listing messages
         }
@@ -218,7 +219,7 @@ impl MessageSync {
     }
 
     /// Check for ACK responses to sent messages
-    pub fn check_acks(&self) -> Result<()> {
+    pub fn check_acks(&self, no_cleanup: bool) -> Result<()> {
         let endpoint = Endpoint::new(&self.app, "/message")?;
         let responses = endpoint.check_responses()?;
 
@@ -245,34 +246,36 @@ impl MessageSync {
                 }
             }
 
-            // Clean up response file
-            endpoint.cleanup_response(&response_path)?;
+            // Clean up response file (unless --no-cleanup mode)
+            if !no_cleanup {
+                endpoint.cleanup_response(&response_path)?;
+            }
         }
 
         Ok(())
     }
 
     /// Full sync cycle: check incoming, send pending, check acks (verbose)
-    pub fn sync(&self) -> Result<()> {
+    pub fn sync(&self, no_cleanup: bool) -> Result<()> {
         // Check for new incoming messages
-        let new_messages = self.check_incoming()?;
+        let new_messages = self.check_incoming(no_cleanup)?;
         if !new_messages.is_empty() {
             println!("📬 {} new message(s) received", new_messages.len());
         }
 
         // Check for ACK responses
-        self.check_acks()?;
+        self.check_acks(no_cleanup)?;
 
         Ok(())
     }
 
     /// Silent sync - returns results without printing
     pub fn sync_quiet(&self) -> Result<(Vec<String>, usize)> {
-        // Check for new incoming messages
-        let new_messages = self.check_incoming()?;
+        // Check for new incoming messages (always cleanup in quiet mode - used internally)
+        let new_messages = self.check_incoming(false)?;
 
         // Check for ACK responses
-        self.check_acks()?;
+        self.check_acks(false)?;
 
         Ok((new_messages.clone(), new_messages.len()))
     }
@@ -282,22 +285,20 @@ impl MessageSync {
 mod tests {
     use super::*;
     use crate::messages::models::Message;
-    use std::fs;
+    use crate::syftbox::storage::SyftBoxStorage;
     use tempfile::TempDir;
 
     // Helper to list response files under an endpoint path
-    fn list_response_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
-        if !dir.exists() {
-            return vec![];
-        }
-        let mut out = vec![];
-        for e in fs::read_dir(dir).unwrap() {
-            let p = e.unwrap().path();
-            if p.extension().and_then(|s| s.to_str()) == Some("response") {
-                out.push(p);
-            }
-        }
-        out
+    fn list_response_files(
+        storage: &SyftBoxStorage,
+        dir: &std::path::Path,
+    ) -> Vec<std::path::PathBuf> {
+        storage
+            .list_dir(dir)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("response"))
+            .collect()
     }
 
     #[test]
@@ -326,20 +327,21 @@ mod tests {
         ms_sender.send_message(&m.id).unwrap();
 
         // Recipient checks incoming; should ingest and write an ACK response in bob's endpoint dir
-        let new_msgs = ms_recipient.check_incoming().unwrap();
+        let new_msgs = ms_recipient.check_incoming(false).unwrap();
         assert_eq!(new_msgs.len(), 1);
 
         // Simulate syft sync by copying the response from bob's endpoint to alice's endpoint
         let recipient_ep = app_recipient.endpoint_path("/message");
         let sender_ep = app_sender.endpoint_path("/message");
-        fs::create_dir_all(&sender_ep).unwrap();
-        for resp in list_response_files(&recipient_ep) {
+        app_sender.storage.ensure_dir(&sender_ep).unwrap();
+        for resp in list_response_files(&app_recipient.storage, &recipient_ep) {
             let file_name = resp.file_name().unwrap();
-            fs::copy(&resp, sender_ep.join(file_name)).unwrap();
+            let dest = sender_ep.join(file_name);
+            app_sender.storage.copy_raw_file(&resp, &dest).unwrap();
         }
 
         // Sender checks ACKs and should update message sync status
-        ms_sender.check_acks().unwrap();
+        ms_sender.check_acks(false).unwrap();
     }
 
     #[test]
@@ -379,10 +381,17 @@ mod tests {
         // Force response id to match the request id we need to ack
         resp.id = req_id.clone();
         let resp_path = endpoint.path.join(format!("{}.response", req_id));
-        std::fs::write(&resp_path, serde_json::to_string_pretty(&resp).unwrap()).unwrap();
+        app_sender
+            .storage
+            .write_plaintext_file(
+                &resp_path,
+                serde_json::to_string_pretty(&resp).unwrap().as_bytes(),
+                true,
+            )
+            .unwrap();
 
         // Process ACKs and verify status is Failed
-        ms_sender.check_acks().unwrap();
+        ms_sender.check_acks(false).unwrap();
         let updated = ms_sender.db.get_message(&m.id).unwrap().unwrap();
         assert_eq!(updated.sync_status, SyncStatus::Failed);
         assert!(updated.rpc_ack_at.is_some());

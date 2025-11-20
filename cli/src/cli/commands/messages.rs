@@ -5,9 +5,10 @@ use crate::config::Config;
 use crate::data::{self, BioVaultDb};
 use crate::messages::{Message, MessageDb, MessageSync};
 use crate::project_spec::ProjectSpec;
+use crate::syftbox::storage::SyftBoxStorage;
 use crate::types::ProjectYaml;
 use crate::types::SyftPermissions;
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use colored::Colorize;
 use csv::Writer;
 use dialoguer::{Confirm, Input, Select};
@@ -61,6 +62,11 @@ pub fn get_message_db_path(config: &Config) -> Result<PathBuf> {
     }
 
     Ok(db_path)
+}
+
+fn syftbox_storage(config: &Config) -> Result<SyftBoxStorage> {
+    let data_dir = config.get_syftbox_data_dir()?;
+    Ok(SyftBoxStorage::new(&data_dir))
 }
 
 #[cfg(test)]
@@ -447,12 +453,13 @@ pub async fn read_message(config: &Config, message_id: &str, non_interactive: bo
                     }
                 }
                 if status == "approved" {
+                    let storage_opt = syftbox_storage(config).ok();
                     if let Some(path_str) = meta.get("results_path").and_then(|v| v.as_str()) {
                         let results = std::path::PathBuf::from(path_str);
                         println!("Results location: {}", results.display());
                         if results.exists() {
                             println!("Results tree:");
-                            print_dir_tree(&results, 3)?;
+                            print_dir_tree(storage_opt.as_ref(), &results, 3)?;
                         }
                     } else if let Some(loc) = meta.get("project_location").and_then(|v| v.as_str())
                     {
@@ -461,7 +468,7 @@ pub async fn read_message(config: &Config, message_id: &str, non_interactive: bo
                             println!("Results location: {}", results.display());
                             if results.exists() {
                                 println!("Results tree:");
-                                print_dir_tree(&results, 3)?;
+                                print_dir_tree(storage_opt.as_ref(), &results, 3)?;
                             }
                         }
                     }
@@ -533,7 +540,8 @@ pub async fn read_message(config: &Config, message_id: &str, non_interactive: bo
                     println!("Results location: {}", results.display());
                     if results.exists() {
                         println!("Results tree:");
-                        print_dir_tree(&results, 3)?;
+                        let storage_opt = syftbox_storage(config).ok();
+                        print_dir_tree(storage_opt.as_ref(), &results, 3)?;
                     }
                 }
             }
@@ -705,10 +713,12 @@ fn archive_project(config: &Config, msg: &Message) -> anyhow::Result<()> {
     let root = resolve_syft_url_to_path(config, project_location)?;
     let perm_path = root.join("syft.pub.yaml");
     if perm_path.exists() {
-        let content = fs::read_to_string(&perm_path)?;
-        let mut perms: SyftPermissions = serde_yaml::from_str(&content)?;
+        let storage = syftbox_storage(config)?;
+        let bytes = storage.read_plaintext_file(&perm_path)?;
+        let mut perms: SyftPermissions = serde_yaml::from_slice(&bytes)?;
         perms.rules.retain(|r| r.pattern != "results/**/*");
-        perms.save(&perm_path)?;
+        let yaml = serde_yaml::to_string(&perms)?;
+        storage.write_plaintext_file(&perm_path, yaml.as_bytes(), true)?;
         println!("Revoked write permissions to results for the recipient.");
     } else {
         println!(
@@ -782,34 +792,101 @@ fn receiver_private_submissions_path(config: &Config) -> anyhow::Result<PathBuf>
         .join("submissions"))
 }
 
-fn copy_dir_recursive(src: &Path, dst: &Path) -> anyhow::Result<()> {
-    fs::create_dir_all(dst)?;
+fn copy_dir_recursive(config: &Config, src: &Path, dst: &Path) -> anyhow::Result<()> {
+    let storage = syftbox_storage(config)?;
+    let skip_syft_pub = |path: &Path| {
+        path.file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| n == "syft.pub.yaml")
+            .unwrap_or(false)
+    };
+
+    // Determine recipient from destination path (e.g., "client1@sandbox.local")
+    let data_dir = config.get_syftbox_data_dir()?;
+    let datasites_dir = data_dir.join("datasites");
+    let recipient = if dst.starts_with(&datasites_dir) {
+        dst.strip_prefix(&datasites_dir)
+            .ok()
+            .and_then(|p| p.components().next())
+            .and_then(|c| c.as_os_str().to_str())
+            .map(|s| s.to_string())
+    } else {
+        None
+    };
+
     for entry in walkdir::WalkDir::new(src)
         .into_iter()
         .filter_map(|e| e.ok())
     {
-        let rel = entry.path().strip_prefix(src).unwrap();
+        let rel = entry
+            .path()
+            .strip_prefix(src)
+            .with_context(|| format!("Failed to relativize {:?}", entry.path()))?;
         let out = dst.join(rel);
+
         if entry.file_type().is_dir() {
-            fs::create_dir_all(&out)?;
+            ensure_dir_with_storage(&storage, &out)?;
+            continue;
+        }
+
+        if skip_syft_pub(entry.path()) {
+            continue;
+        }
+
+        if let Some(parent) = out.parent() {
+            ensure_dir_with_storage(&storage, parent)?;
+        }
+
+        let data = if storage.contains(entry.path()) {
+            // Use shadow-aware read to populate shadow folder when decrypting
+            storage
+                .read_with_shadow(entry.path())
+                .with_context(|| format!("Failed to read {:?}", entry.path()))?
         } else {
-            // Skip any syft.pub.yaml files anywhere in the tree
-            if entry
-                .path()
-                .file_name()
-                .and_then(|n| n.to_str())
-                .map(|n| n == "syft.pub.yaml")
-                .unwrap_or(false)
-            {
-                continue;
+            fs::read(entry.path()).with_context(|| format!("Failed to read {:?}", entry.path()))?
+        };
+
+        if storage.contains(&out) {
+            // If we have a recipient, encrypt the file using shadow folder pattern
+            if let Some(ref recip) = recipient {
+                storage
+                    .write_encrypted_with_shadow(&out, &data, vec![recip.clone()], None, true)
+                    .with_context(|| format!("Failed to write encrypted {:?}", out))?;
+            } else {
+                // Fallback to plaintext if recipient unknown
+                storage
+                    .write_plaintext_file(&out, &data, true)
+                    .with_context(|| format!("Failed to write {:?}", out))?;
             }
-            if let Some(parent) = out.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            fs::copy(entry.path(), &out)?;
+        } else {
+            fs::write(&out, &data).with_context(|| format!("Failed to write {:?}", out))?;
         }
     }
+
     Ok(())
+}
+
+fn ensure_dir_with_storage(storage: &SyftBoxStorage, dir: &Path) -> anyhow::Result<()> {
+    if storage.contains(dir) {
+        storage.ensure_dir(dir)?;
+    } else {
+        fs::create_dir_all(dir)?;
+    }
+    Ok(())
+}
+
+fn list_dir_any(storage: Option<&SyftBoxStorage>, dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
+    if let Some(storage) = storage {
+        if storage.contains(dir) {
+            return storage.list_dir(dir);
+        }
+    }
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+    Ok(fs::read_dir(dir)?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .collect())
 }
 
 fn build_run_project_copy(config: &Config, msg: &Message) -> anyhow::Result<PathBuf> {
@@ -824,7 +901,7 @@ fn build_run_project_copy(config: &Config, msg: &Message) -> anyhow::Result<Path
     // Always copy if project.yaml is missing (handles incomplete/failed copies)
     let project_yaml = dest_path.join("project.yaml");
     if !project_yaml.exists() {
-        copy_dir_recursive(&sender_root, &dest_path)?;
+        copy_dir_recursive(config, &sender_root, &dest_path)?;
     }
 
     Ok(dest_path)
@@ -963,7 +1040,7 @@ async fn run_project_test(config: &Config, msg: &Message) -> anyhow::Result<()> 
     })
     .await?;
     println!("{}", "Test run completed.".green());
-    print_results_location_and_tree(&run_dir, &source, true)?;
+    print_results_location_and_tree(config, &run_dir, &source, true)?;
     Ok(())
 }
 
@@ -985,7 +1062,7 @@ async fn run_project_real(config: &Config, msg: &Message) -> anyhow::Result<()> 
         let source_results = run_dir.join(&invocation.results_dir);
         let dest_results = dest.join(&invocation.results_dir);
         if source_results.exists() {
-            copy_dir_recursive(&source_results, &dest_results)?;
+            copy_dir_recursive(config, &source_results, &dest_results)?;
         }
         return Ok(());
     }
@@ -1015,12 +1092,12 @@ async fn run_project_real(config: &Config, msg: &Message) -> anyhow::Result<()> 
     })
     .await?;
     println!("{}", "Real data run completed.".green());
-    print_results_location_and_tree(&run_dir, &source, false)?;
+    print_results_location_and_tree(config, &run_dir, &source, false)?;
 
     let results_dir = run_dir.join("results-real");
     let dest_results = dest.join("results-real");
     if results_dir.exists() {
-        copy_dir_recursive(&results_dir, &dest_results)?;
+        copy_dir_recursive(config, &results_dir, &dest_results)?;
     }
     Ok(())
 }
@@ -1054,7 +1131,7 @@ async fn process_dynamic_project_message(
     let source_results = run_dir.join(&invocation.results_dir);
     let dest_results = dest.join(&invocation.results_dir);
     if source_results.exists() {
-        copy_dir_recursive(&source_results, &dest_results)?;
+        copy_dir_recursive(config, &source_results, &dest_results)?;
     }
 
     let participant_label = Path::new(&invocation.results_dir)
@@ -1283,16 +1360,21 @@ async fn approve_project_non_interactive(
     test: bool,
 ) -> anyhow::Result<()> {
     let dest = build_run_project_copy(config, msg)?;
+    let storage = syftbox_storage(config)?;
     let results_dir = if test {
         // In test mode, use test results for approval
         dest.join("results-test")
     } else {
         dest.join("results-real")
     };
-    let needs_run = !results_dir.exists()
-        || fs::read_dir(&results_dir)
-            .map(|mut i| i.next().is_none())
-            .unwrap_or(true);
+
+    // Check if results exist using filesystem directly (more robust than storage.list_dir)
+    let needs_run = !results_dir.exists() || {
+        std::fs::read_dir(&results_dir)
+            .map(|mut entries| entries.next().is_none())
+            .unwrap_or(true)
+    };
+
     if needs_run && !test {
         // Only run real data if not in test mode
         println!("No results found. Running on real data before approval...");
@@ -1310,7 +1392,7 @@ async fn approve_project_non_interactive(
         .ok_or_else(|| anyhow::anyhow!("missing metadata"))?;
     let (sender_root, _folder) = sender_project_root(config, meta)?;
     let sender_results = sender_root.join("results");
-    copy_dir_recursive(&results_dir, &sender_results)?;
+    copy_dir_recursive(config, &results_dir, &sender_results)?;
 
     // Get project details for the message
     let project_location = meta
@@ -1321,12 +1403,14 @@ async fn approve_project_non_interactive(
     // Check if results exist and get basic info
     let results_info = if sender_results.exists() {
         let mut info = Vec::new();
-        if let Ok(entries) = fs::read_dir(&sender_results) {
-            for entry in entries.flatten() {
-                if entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
-                    info.push(format!("{}/", entry.file_name().to_string_lossy()));
-                } else {
-                    info.push(entry.file_name().to_string_lossy().to_string());
+        if let Ok(entries) = storage.list_dir(&sender_results) {
+            for entry in entries {
+                if entry.is_dir() {
+                    if let Some(name) = entry.file_name() {
+                        info.push(format!("{}/", name.to_string_lossy()));
+                    }
+                } else if let Some(name) = entry.file_name() {
+                    info.push(name.to_string_lossy().to_string());
                 }
             }
         }
@@ -1369,9 +1453,11 @@ async fn approve_project_non_interactive(
 async fn approve_project(config: &Config, msg: &Message) -> anyhow::Result<()> {
     let dest = build_run_project_copy(config, msg)?;
     let results_dir = dest.join("results-real");
+    let storage = syftbox_storage(config)?;
     let needs_run = !results_dir.exists()
-        || fs::read_dir(&results_dir)
-            .map(|mut i| i.next().is_none())
+        || storage
+            .list_dir(&results_dir)
+            .map(|entries| entries.is_empty())
             .unwrap_or(true);
     if needs_run {
         println!("No results found. Running on real data before approval...");
@@ -1385,7 +1471,7 @@ async fn approve_project(config: &Config, msg: &Message) -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!("missing metadata"))?;
     let (sender_root, _folder) = sender_project_root(config, meta)?;
     let sender_results = sender_root.join("results");
-    copy_dir_recursive(&results_dir, &sender_results)?;
+    copy_dir_recursive(config, &results_dir, &sender_results)?;
 
     // Get project details for the message
     let project_location = meta
@@ -1396,12 +1482,14 @@ async fn approve_project(config: &Config, msg: &Message) -> anyhow::Result<()> {
     // Check if results exist and get basic info
     let results_info = if sender_results.exists() {
         let mut info = Vec::new();
-        if let Ok(entries) = fs::read_dir(&sender_results) {
-            for entry in entries.flatten() {
-                if entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
-                    info.push(format!("{}/", entry.file_name().to_string_lossy()));
-                } else {
-                    info.push(entry.file_name().to_string_lossy().to_string());
+        if let Ok(entries) = storage.list_dir(&sender_results) {
+            for entry in entries {
+                if entry.is_dir() {
+                    if let Some(name) = entry.file_name() {
+                        info.push(format!("{}/", name.to_string_lossy()));
+                    }
+                } else if let Some(name) = entry.file_name() {
+                    info.push(name.to_string_lossy().to_string());
                 }
             }
         }
@@ -1596,7 +1684,7 @@ fn print_dynamic_results(project_root: &Path, results_dir: &str) -> anyhow::Resu
     println!("Results location: {}", results_path.display());
     if results_path.exists() {
         println!("Results tree:");
-        print_dir_tree(&results_path, 3)?;
+        print_dir_tree(None, &results_path, 3)?;
     } else {
         println!("Results folder not found yet at {}", results_path.display());
     }
@@ -1615,7 +1703,7 @@ fn prepare_run_directory(
     if run_dir.exists() {
         fs::remove_dir_all(&run_dir)?;
     }
-    copy_dir_recursive(source, &run_dir)?;
+    copy_dir_recursive(config, source, &run_dir)?;
     Ok(run_dir)
 }
 
@@ -1663,6 +1751,7 @@ fn auto_generate_samplesheet(_config: &Config, project_dir: &Path) -> anyhow::Re
 }
 
 fn print_results_location_and_tree(
+    config: &Config,
     project_root: &Path,
     participant_source: &str,
     is_test: bool,
@@ -1673,40 +1762,47 @@ fn print_results_location_and_tree(
     } else {
         "results-real"
     };
+    let storage = syftbox_storage(config).ok();
     let results_dir = project_root.join(base).join(&id);
     let base_dir = project_root.join(base);
     println!("Results location: {}", results_dir.display());
     if results_dir.exists() {
         println!("Results tree:");
-        print_dir_tree(&results_dir, 3)?;
+        print_dir_tree(storage.as_ref(), &results_dir, 3)?;
     } else if base_dir.exists() {
         println!(
             "Results folder for participant not found; showing {} instead",
             base_dir.display()
         );
-        print_dir_tree(&base_dir, 3)?;
+        print_dir_tree(storage.as_ref(), &base_dir, 3)?;
     } else {
         println!("Results folder not found yet at {}", results_dir.display());
     }
     Ok(())
 }
 
-fn print_dir_tree(root: &Path, max_depth: usize) -> anyhow::Result<()> {
-    fn walk(dir: &Path, depth: usize, max_depth: usize) -> anyhow::Result<()> {
+fn print_dir_tree(
+    storage: Option<&SyftBoxStorage>,
+    root: &Path,
+    max_depth: usize,
+) -> anyhow::Result<()> {
+    fn walk(
+        storage: Option<&SyftBoxStorage>,
+        dir: &Path,
+        depth: usize,
+        max_depth: usize,
+    ) -> anyhow::Result<()> {
         if depth > max_depth {
             return Ok(());
         }
-        let mut entries: Vec<_> = fs::read_dir(dir)?
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .collect();
+        let mut entries = list_dir_any(storage, dir)?;
         entries.sort();
         for path in entries {
             let indent = "  ".repeat(depth.saturating_sub(0));
             let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
             if path.is_dir() {
                 println!("{}{}/", indent, name);
-                walk(&path, depth + 1, max_depth)?;
+                walk(storage, &path, depth + 1, max_depth)?;
             } else {
                 println!("{}{}", indent, name);
             }
@@ -1714,7 +1810,7 @@ fn print_dir_tree(root: &Path, max_depth: usize) -> anyhow::Result<()> {
         Ok(())
     }
     println!("{}/", root.display());
-    walk(root, 1, max_depth)
+    walk(storage, root, 1, max_depth)
 }
 
 /// View a message thread
@@ -1752,11 +1848,14 @@ pub fn view_thread(config: &Config, thread_id: &str) -> Result<()> {
 }
 
 /// Sync messages (check for new incoming and update ACKs)
-pub fn sync_messages(config: &Config) -> Result<()> {
+pub fn sync_messages(config: &Config, no_cleanup: bool) -> Result<()> {
     let (_, sync) = init_message_system(config)?;
 
     println!("🔄 Syncing messages...");
-    sync.sync()?;
+    if no_cleanup {
+        println!("🐛 Debug mode: keeping consumed messages (--no-cleanup)");
+    }
+    sync.sync(no_cleanup)?;
 
     Ok(())
 }
@@ -1796,6 +1895,8 @@ fn verify_project_from_metadata(
         return Ok((false, format!(" (missing path: {})", root.display())));
     }
 
+    let storage = syftbox_storage(config)?;
+
     // Need b3_hashes to verify
     let Some(expected_hashes) = project.b3_hashes.clone() else {
         return Ok((false, " (no hashes provided)".to_string()));
@@ -1809,7 +1910,8 @@ fn verify_project_from_metadata(
             mismatches.push(format!("missing: {}", rel));
             continue;
         }
-        let bytes = std::fs::read(&file_path)
+        let bytes = storage
+            .read_plaintext_file(&file_path)
             .map_err(|e| anyhow::anyhow!("failed to read {}: {}", file_path.display(), e))?;
         let got = blake3::hash(&bytes).to_hex().to_string();
         if got != *expected {
@@ -1832,6 +1934,7 @@ fn verify_project_from_metadata(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::syftbox::SyftBoxApp;
     use serde_json::json;
     use tempfile::TempDir;
 
@@ -1945,14 +2048,15 @@ mod tests {
             syftbox_credentials: None,
         };
 
-        // Build a fake project tree under datasites/u@example.com/app_data/biovault/submissions/proj1
-        let root = tmp
-            .path()
-            .join("datasites/u@example.com/app_data/biovault/submissions/proj1");
-        std::fs::create_dir_all(root.join("a/b")).unwrap();
-        std::fs::write(root.join("a/b/file.txt"), b"hi").unwrap();
-        // This file should be skipped when copying
-        std::fs::write(root.join("a/syft.pub.yaml"), b"rules:").unwrap();
+        let app = SyftBoxApp::new(tmp.path(), &cfg.email, "biovault").unwrap();
+        let root = app.app_data_dir.join("submissions").join("proj1");
+        app.storage.ensure_dir(&root.join("a/b")).unwrap();
+        app.storage
+            .write_plaintext_file(&root.join("a/b/file.txt"), b"hi", true)
+            .unwrap();
+        app.storage
+            .write_plaintext_file(&root.join("a/syft.pub.yaml"), b"rules:", true)
+            .unwrap();
 
         // sender_project_root from metadata
         let loc = format!(
@@ -1975,7 +2079,7 @@ mod tests {
 
         // Copy behaviour: skip syft.pub.yaml and recreate tree
         let dest = recv.join(&folder);
-        copy_dir_recursive(&sender_root, &dest)?;
+        copy_dir_recursive(&cfg, &sender_root, &dest)?;
         assert!(dest.join("a/b/file.txt").exists());
         assert!(!dest.join("a/syft.pub.yaml").exists());
 
@@ -1995,11 +2099,12 @@ mod tests {
         };
 
         // Make sender tree and one file
-        let proj = tmp
-            .path()
-            .join("datasites/u@example.com/app_data/biovault/submissions/projX");
-        std::fs::create_dir_all(proj.join("dir")).unwrap();
-        std::fs::write(proj.join("dir/f.txt"), b"x").unwrap();
+        let app = SyftBoxApp::new(tmp.path(), &cfg.email, "biovault").unwrap();
+        let proj = app.app_data_dir.join("submissions").join("projX");
+        app.storage.ensure_dir(&proj.join("dir")).unwrap();
+        app.storage
+            .write_plaintext_file(&proj.join("dir/f.txt"), b"x", true)
+            .unwrap();
         let meta =
             json!({"project_location": "syft://u@example.com/app_data/biovault/submissions/projX"});
         let mut msg = Message::new("u@example.com".into(), "v@example.com".into(), "b".into());
@@ -2026,18 +2131,17 @@ mod tests {
         };
 
         // Build project root with two files and compute blake3
-        let root = tmp
-            .path()
-            .join("datasites/u@example.com/app_data/biovault/submissions/projZ");
-        std::fs::create_dir_all(&root).unwrap();
+        let app = SyftBoxApp::new(tmp.path(), &cfg.email, "biovault").unwrap();
+        let root = app.app_data_dir.join("submissions").join("projZ");
+        app.storage.ensure_dir(&root).unwrap();
         let f1 = root.join("a.txt");
         let f2 = root.join("b.txt");
-        std::fs::write(&f1, b"A").unwrap();
-        std::fs::write(&f2, b"B").unwrap();
-        let h1 = blake3::hash(&std::fs::read(&f1).unwrap())
+        app.storage.write_plaintext_file(&f1, b"A", true).unwrap();
+        app.storage.write_plaintext_file(&f2, b"B", true).unwrap();
+        let h1 = blake3::hash(&app.storage.read_plaintext_file(&f1).unwrap())
             .to_hex()
             .to_string();
-        let h2 = blake3::hash(&std::fs::read(&f2).unwrap())
+        let h2 = blake3::hash(&app.storage.read_plaintext_file(&f2).unwrap())
             .to_hex()
             .to_string();
 
@@ -2054,7 +2158,9 @@ mod tests {
         assert!(ok, "expected OK, got note: {}", note);
 
         // Now break one file and expect failure with note
-        std::fs::write(&f2, b"BROKEN").unwrap();
+        app.storage
+            .write_plaintext_file(&f2, b"BROKEN", true)
+            .unwrap();
         let (ok2, note2) = verify_project_from_metadata(&cfg, &meta_ok)?;
         assert!(!ok2);
         assert!(!note2.is_empty());
@@ -2198,7 +2304,7 @@ mod tests {
         let cfg = create_test_config();
 
         // Should not error even without messages
-        super::sync_messages(&cfg)?;
+        super::sync_messages(&cfg, false)?;
         Ok(())
     }
 
@@ -2269,7 +2375,10 @@ mod tests {
         let dst = tmp.path().join("dst");
         std::fs::create_dir(&src)?;
 
-        copy_dir_recursive(&src, &dst)?;
+        crate::config::set_test_syftbox_data_dir(tmp.path());
+        let cfg = create_test_config();
+        copy_dir_recursive(&cfg, &src, &dst)?;
+        crate::config::clear_test_syftbox_data_dir();
         assert!(dst.exists());
         Ok(())
     }

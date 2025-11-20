@@ -476,6 +476,12 @@ enum Commands {
         command: SyftboxCommands,
     },
 
+    #[command(about = "Manage Syft Crypto vaults and bundles")]
+    Syc {
+        #[command(subcommand)]
+        command: commands::syc::SycCommands,
+    },
+
     #[command(about = "FASTQ file operations")]
     Fastq {
         #[command(subcommand)]
@@ -1328,7 +1334,13 @@ enum MessageCommands {
     },
 
     #[command(about = "Sync messages (check for new and update ACKs)")]
-    Sync,
+    Sync {
+        #[arg(
+            long,
+            help = "Keep consumed messages for debugging (don't delete .request/.response files)"
+        )]
+        no_cleanup: bool,
+    },
 
     #[command(about = "Process a project message (run test/real)")]
     Process {
@@ -1906,6 +1918,10 @@ async fn async_main_with(cli: Cli) -> Result<()> {
                     .await?;
             }
         },
+        Commands::Syc { command } => {
+            let config = biovault::config::Config::load()?;
+            commands::syc::handle(command, &config).await?;
+        }
         Commands::Fastq { command } => match command {
             FastqCommands::Combine {
                 input_folder,
@@ -2163,9 +2179,9 @@ async fn async_main_with(cli: Cli) -> Result<()> {
                 let config = biovault::config::Config::load()?;
                 commands::messages::view_thread(&config, &thread_id)?;
             }
-            MessageCommands::Sync => {
+            MessageCommands::Sync { no_cleanup } => {
                 let config = biovault::config::Config::load()?;
-                commands::messages::sync_messages(&config)?;
+                commands::messages::sync_messages(&config, no_cleanup)?;
             }
             MessageCommands::Process {
                 message_id,

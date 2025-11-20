@@ -1,0 +1,45 @@
+name: BioVault Scenario Tests
+
+on:
+  schedule:
+    - cron: '45 2 * * *'
+  workflow_dispatch:
+  workflow_call:
+
+jobs:
+  run-scenarios:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        scenario:
+          - tests/scenarios/import-and-run.yaml
+          - tests/scenarios/inbox-ping-pong.yaml
+          - tests/scenarios/break-nextflow.yaml
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Update submodules
+        run: |
+          chmod +x submodules.sh
+          ./submodules.sh
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq
+      - name: Install uv
+        uses: astral-sh/setup-uv@v2
+
+      - name: Run scenario
+        env:
+          CI: true
+        run: |
+          uv run --with pyyaml ./scripts/run_scenario.py ${{ matrix.scenario }}
+
+      - name: Cleanup SyftBox stack
+        if: always()
+        run: |
+          ./tests/scripts/server.sh --reset || true
