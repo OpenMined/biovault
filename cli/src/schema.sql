@@ -89,6 +89,33 @@ CREATE TABLE IF NOT EXISTS genotype_metadata (
 
 CREATE INDEX IF NOT EXISTS idx_genotype_file_id ON genotype_metadata(file_id);
 
+-- NEW: Collections (shared CLI/Desktop)
+-- Groups of files with metadata for organization and reference
+CREATE TABLE IF NOT EXISTS collections (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    description TEXT,
+    variable_name TEXT UNIQUE NOT NULL,  -- snake_case identifier for CLI/scripting
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_collections_variable_name ON collections(variable_name);
+CREATE INDEX IF NOT EXISTS idx_collections_name ON collections(name);
+
+-- NEW: Collection Files (many-to-many relationship)
+CREATE TABLE IF NOT EXISTS collection_files (
+    collection_id INTEGER NOT NULL,
+    file_id INTEGER NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (collection_id) REFERENCES collections(id) ON DELETE CASCADE,
+    FOREIGN KEY (file_id) REFERENCES files(id) ON DELETE CASCADE,
+    PRIMARY KEY (collection_id, file_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_collection_files_collection_id ON collection_files(collection_id);
+CREATE INDEX IF NOT EXISTS idx_collection_files_file_id ON collection_files(file_id);
+
 -- Add columns to existing files table if they don't exist (migration)
 -- SQLite doesn't have IF NOT EXISTS for ALTER TABLE, so we check first
 -- This is handled by separate migration code if needed
