@@ -1,4 +1,4 @@
-use crate::config::{get_biovault_home, Config};
+use crate::config::Config;
 use crate::syftbox::syc as syc_utils;
 use crate::Result;
 use anyhow::Context;
@@ -32,13 +32,13 @@ pub async fn handle(command: SycCommands, config: &Config) -> Result<()> {
             expected_identity,
         } => {
             let data_root = config.get_syftbox_data_dir()?;
-            let vault_home = get_biovault_home()?;
-            let vault_path = syc_utils::vault_path_for_home(&vault_home);
+            let encrypted_root = syc_utils::resolve_encrypted_root(&data_root);
+            let vault_path = syc_utils::vault_path_for_home(&encrypted_root);
             let parsed = syc_utils::import_public_bundle(
                 &bundle,
                 expected_identity.as_deref(),
                 &vault_path,
-                Some(&data_root),
+                Some(&encrypted_root),
                 Some(config.email.as_str()),
             )
             .with_context(|| format!("failed to import bundle from {}", bundle.display()))?;
