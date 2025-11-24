@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Utc};
 use notify::{Config as NotifyConfig, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
@@ -17,6 +17,7 @@ use crate::syftbox::app::SyftBoxApp;
 use crate::syftbox::{
     detect_mode, is_syftbox_running, start_syftbox as start_syftbox_process, SyftBoxMode,
 };
+use syftbox_sdk::syftbox::config::SyftboxRuntimeConfig;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DaemonStatus {
@@ -87,6 +88,12 @@ impl Daemon {
         })
     }
 
+    fn runtime_config(&self) -> Result<SyftboxRuntimeConfig> {
+        self.config
+            .to_syftbox_runtime_config()
+            .map_err(|e| anyhow!(e))
+    }
+
     fn log(&self, level: &str, message: &str) {
         let timestamp = Utc::now().format("%Y-%m-%d %H:%M:%S%.3f UTC");
         let log_line = format!("[{}] [{}] {}\n", timestamp, level, message);
@@ -143,13 +150,14 @@ impl Daemon {
 
     // NOT unit testable - spawns actual SyftBox processes (sbenv or syftbox command)
     async fn start_syftbox(&self) -> Result<()> {
-        let mode = detect_mode(&self.config)?;
+        let runtime_config = self.runtime_config()?;
+        let mode = detect_mode(&runtime_config)?;
         match mode {
             SyftBoxMode::Sbenv => self.log("INFO", "Starting SyftBox via sbenv..."),
             SyftBoxMode::Direct => self.log("INFO", "Starting SyftBox directly..."),
         }
 
-        match start_syftbox_process(&self.config) {
+        match start_syftbox_process(&runtime_config) {
             Ok(true) => self.log("INFO", "Successfully started SyftBox"),
             Ok(false) => self.log("INFO", "SyftBox already running"),
             Err(e) => {
@@ -162,7 +170,8 @@ impl Daemon {
     }
 
     async fn ensure_syftbox_running(&self) -> Result<()> {
-        if is_syftbox_running(&self.config)? {
+        let runtime_config = self.runtime_config()?;
+        if is_syftbox_running(&runtime_config)? {
             self.log("INFO", "SyftBox is already running");
             Ok(())
         } else {
@@ -212,7 +221,8 @@ impl Daemon {
         let data_dir = self.config.get_syftbox_data_dir()?;
         self.log("INFO", &format!("SyftBox data_dir: {:?}", data_dir));
 
-        let mode = detect_mode(&self.config)?;
+        let runtime_config = self.runtime_config()?;
+        let mode = detect_mode(&runtime_config)?;
         self.log("INFO", &format!("SyftBox mode: {:?}", mode));
 
         // Ensure SyftBox is running first

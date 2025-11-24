@@ -52,7 +52,11 @@ lazy_static = "1.4"
 notify = "6.1"
 libc = "0.2"
 csv = "1.3"
-syft-crypto-protocol = { path = "../syft-crypto-core/protocol" }
+syftbox-sdk = { path = "../syftbox-sdk", features = ["crypto", "process", "auth"] }
+
+[dev-dependencies.syftbox-sdk]
+path = "../syftbox-sdk"
+features = ["crypto", "process", "auth", "test-plaintext"]
 
 [build-dependencies]
 serde_yaml = "0.9"

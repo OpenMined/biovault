@@ -266,7 +266,7 @@ dependencies = [
  "serde_yaml",
  "serial_test",
  "sha2",
- "syft-crypto-protocol",
+ "syftbox-sdk",
  "sysinfo",
  "tempfile",
  "thiserror 1.0.69",
@@ -1807,9 +1807,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "libsignal-core"
-version = "0.1.0"
-source = "git+https://github.com/signalapp/libsignal.git?tag=v0.85.3#3f8643cf4452e9c66f4091a7e8fa02bfa5ba9262"
+name = "libsignal-core-syft"
+version = "0.85.3-beta.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32362bd91c9a0c5e8d9364090faf352cbf08e3caaefa71969586269a4ef4fa2b"
 dependencies = [
  "curve25519-dalek",
  "derive_more",
@@ -1824,9 +1825,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "libsignal-protocol"
-version = "0.1.0"
-source = "git+https://github.com/signalapp/libsignal.git?tag=v0.85.3#3f8643cf4452e9c66f4091a7e8fa02bfa5ba9262"
+name = "libsignal-protocol-syft"
+version = "0.85.3-beta.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0d5cf9d2e27b3c02b9c0f453dd624351ee9b7b3dc3c3582764af798cf7250ef8"
 dependencies = [
  "aes",
  "aes-gcm-siv",
@@ -1845,7 +1847,7 @@ dependencies = [
  "indexmap",
  "itertools",
  "libcrux-ml-kem",
- "libsignal-core",
+ "libsignal-core-syft",
  "log",
  "prost",
  "prost-build",
@@ -1853,8 +1855,8 @@ dependencies = [
  "rayon",
  "serde",
  "sha2",
- "signal-crypto",
- "spqr",
+ "signal-crypto-syft",
+ "spqr-syft",
  "subtle",
  "thiserror 2.0.17",
  "uuid",
@@ -2963,9 +2965,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
 
 [[package]]
-name = "signal-crypto"
-version = "0.1.0"
-source = "git+https://github.com/signalapp/libsignal.git?tag=v0.85.3#3f8643cf4452e9c66f4091a7e8fa02bfa5ba9262"
+name = "signal-crypto-syft"
+version = "0.85.3-beta.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fb72b364ae6f4335c37513ca65319d829589638caf5f21104cee3d62a47115bf"
 dependencies = [
  "aes",
  "cbc",
@@ -2977,7 +2980,7 @@ dependencies = [
  "hmac",
  "hpke-rs",
  "hpke-rs-crypto",
- "libsignal-core",
+ "libsignal-core-syft",
  "rand_chacha",
  "rand_core 0.9.3",
  "sha1",
@@ -3054,9 +3057,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "spqr"
-version = "1.2.0"
-source = "git+https://github.com/signalapp/SparsePostQuantumRatchet.git?tag=v1.2.0#99a759a3fd40cd9304459fb007fcf177db9ed207"
+name = "spqr-syft"
+version = "0.85.3-beta.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "77da2e2f0222b1268e58af3c475579753ced91128da5aa10988bbd9f0f86a9f4"
 dependencies = [
  "cpufeatures",
  "curve25519-dalek",
@@ -3097,7 +3101,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "syft-crypto-protocol"
-version = "0.1.0"
+version = "0.1.0-beta.1"
 dependencies = [
  "anyhow",
  "base64",
@@ -3105,7 +3109,7 @@ dependencies = [
  "chacha20poly1305",
  "hex",
  "hkdf",
- "libsignal-protocol",
+ "libsignal-protocol-syft",
  "rand",
  "serde",
  "serde_jcs",
@@ -3115,6 +3119,25 @@ dependencies = [
  "thiserror 2.0.17",
  "urlencoding",
  "zeroize",
+]
+
+[[package]]
+name = "syftbox-sdk"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "chrono",
+ "dirs",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "syft-crypto-protocol",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "uuid",
+ "walkdir",
 ]
 
 [[package]]

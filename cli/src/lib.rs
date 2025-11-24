@@ -5,7 +5,11 @@ pub mod error;
 pub mod messages;
 pub mod pipeline_spec;
 pub mod project_spec;
-pub mod syftbox;
 pub mod types;
+
+pub mod syftbox {
+    pub use syftbox_sdk::syftbox::*;
+    pub use syftbox_sdk::SyftURL;
+}
 
 pub use error::{Error, Result};

@@ -25,7 +25,11 @@ impl InstallCommandOutput {
 
 fn skip_install_commands() -> bool {
     env::var("BIOVAULT_SKIP_INSTALLS")
-        .map(|v| v != "0")
+        .ok()
+        .map(|v| {
+            let v = v.trim();
+            matches!(v, "1" | "true" | "TRUE" | "True")
+        })
         .unwrap_or(false)
 }
 

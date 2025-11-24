@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 
 #[cfg(test)]
 use std::collections::HashMap;
+use syftbox_sdk::syftbox::config::SyftboxRuntimeConfig;
 
 thread_local! {
     static TEST_CONFIG: RefCell<Option<Config>> = const { RefCell::new(None) };
@@ -353,6 +354,27 @@ impl Config {
             .join("shared")
             .join("biovault")
             .join("submissions"))
+    }
+
+    pub fn to_syftbox_runtime_config(&self) -> crate::error::Result<SyftboxRuntimeConfig> {
+        let config_path = self.get_syftbox_config_path()?;
+        let data_dir = self.get_syftbox_data_dir()?;
+        let mut runtime = SyftboxRuntimeConfig::new(self.email.clone(), config_path, data_dir);
+
+        if let Some(path) = self.get_binary_path("syftbox") {
+            let trimmed = path.trim();
+            if !trimmed.is_empty() {
+                runtime = runtime.with_binary_path(Some(PathBuf::from(trimmed)));
+            }
+        }
+
+        // Allow opt-out of crypto for testing/local overrides
+        let disable_crypto = std::env::var("SYFTBOX_DISABLE_SYC")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        runtime = runtime.with_disable_crypto(disable_crypto);
+
+        Ok(runtime)
     }
 }
 
