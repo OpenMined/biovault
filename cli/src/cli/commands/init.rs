@@ -207,26 +207,33 @@ pub async fn execute(email: Option<&str>, quiet: bool) -> Result<()> {
             sheet_nextflow_config_path
         );
 
-        match syc::provision_local_identity(&config, &biovault_dir) {
-            Ok(outcome) => {
-                if outcome.generated {
-                    println!("✓ Generated Syft Crypto identity for {}", outcome.identity);
-                    if let Some(mnemonic) = outcome.recovery_mnemonic.as_deref() {
-                        println!("  Recovery mnemonic (store securely!): {}", mnemonic);
+        match config.get_syftbox_data_dir() {
+            Ok(data_root) => match syc::provision_local_identity(&config.email, &data_root, None) {
+                Ok(outcome) => {
+                    if outcome.generated {
+                        println!("✓ Generated Syft Crypto identity for {}", outcome.identity);
+                        if let Some(mnemonic) = outcome.recovery_mnemonic.as_deref() {
+                            println!("  Recovery mnemonic (store securely!): {}", mnemonic);
+                        }
+                    } else {
+                        println!("✓ Syft Crypto identity detected for {}", outcome.identity);
                     }
-                } else {
-                    println!("✓ Syft Crypto identity detected for {}", outcome.identity);
+                    println!("  Vault directory: {}", outcome.vault_path.display());
+                    println!(
+                        "  Public bundle published at: {}",
+                        outcome.public_bundle_path.display()
+                    );
                 }
-                println!("  Vault directory: {}", outcome.vault_path.display());
-                println!(
-                    "  Public bundle published at: {}",
-                    outcome.public_bundle_path.display()
-                );
-            }
+                Err(err) => {
+                    eprintln!("⚠️  Unable to provision Syft Crypto identity automatically: {err}");
+                    eprintln!(
+                        "    Run 'bv syc import --bundle <path> --expected-identity <email>' once your peer shares a bundle."
+                    );
+                }
+            },
             Err(err) => {
-                eprintln!("⚠️  Unable to provision Syft Crypto identity automatically: {err}");
-                eprintln!(
-                    "    Run 'bv syc import --bundle <path> --expected-identity <email>' once your peer shares a bundle."
+                println!(
+                    "⚠️  Skipping Syft Crypto identity provisioning (no SyftBox config): {err}"
                 );
             }
         }

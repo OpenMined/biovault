@@ -31,11 +31,17 @@ pub async fn handle(command: SycCommands, config: &Config) -> Result<()> {
             bundle,
             expected_identity,
         } => {
-            let parsed =
-                syc_utils::import_public_bundle(config, &bundle, expected_identity.as_deref())
-                    .with_context(|| {
-                        format!("failed to import bundle from {}", bundle.display())
-                    })?;
+            let data_root = config.get_syftbox_data_dir()?;
+            let encrypted_root = syc_utils::resolve_encrypted_root(&data_root);
+            let vault_path = syc_utils::vault_path_for_home(&encrypted_root);
+            let parsed = syc_utils::import_public_bundle(
+                &bundle,
+                expected_identity.as_deref(),
+                &vault_path,
+                Some(&encrypted_root),
+                Some(config.email.as_str()),
+            )
+            .with_context(|| format!("failed to import bundle from {}", bundle.display()))?;
             println!("✓ Imported Syft Crypto bundle for {}", parsed.identity);
             println!("  fingerprint: {}", parsed.fingerprint);
         }
