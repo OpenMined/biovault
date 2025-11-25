@@ -10,6 +10,7 @@ jobs:
   run-scenarios:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         scenario:
           - tests/scenarios/import-and-run.yaml
@@ -30,8 +31,25 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y jq
+
       - name: Install uv
         uses: astral-sh/setup-uv@v2
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.91.0
+
+      - name: Install BioVault CLI
+        run: |
+          cargo install --path cli --force
+          echo "Installed bv to: $(which bv)"
+          bv --version
+
+      - name: Start SyftBox server
+        run: |
+          chmod +x ./tests/scripts/server.sh
+          ./tests/scripts/server.sh
 
       - name: Run scenario
         env:
