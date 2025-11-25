@@ -282,10 +282,6 @@ jobs:
           - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
             binary: bv
-          - os: ubuntu-latest
-            target: aarch64-unknown-linux-musl
-            binary: bv
-
           # macOS
           - os: macos-latest
             target: x86_64-apple-darwin
@@ -330,9 +326,6 @@ jobs:
           elif [[ "${{ matrix.target }}" == "aarch64-unknown-linux-gnu" ]]; then
             sudo apt-get update
             sudo apt-get install -y gcc-aarch64-linux-gnu
-          elif [[ "${{ matrix.target }}" == "aarch64-unknown-linux-musl" ]]; then
-            sudo apt-get update
-            sudo apt-get install -y musl-tools gcc-aarch64-linux-gnu
           fi
 
       - name: Configure cargo target linker
@@ -345,8 +338,6 @@ jobs:
             printf '[target.x86_64-unknown-linux-musl]\nlinker = "musl-gcc"\n' >> "$cfg"
           elif [[ "${{ matrix.target }}" == "aarch64-unknown-linux-gnu" ]]; then
             printf '[target.aarch64-unknown-linux-gnu]\nlinker = "aarch64-linux-gnu-gcc"\n' >> "$cfg"
-          elif [[ "${{ matrix.target }}" == "aarch64-unknown-linux-musl" ]]; then
-            printf '[target.aarch64-unknown-linux-musl]\nlinker = "aarch64-linux-gnu-gcc"\n' >> "$cfg"
           fi
 
       - name: Build release binary
