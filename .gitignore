@@ -230,3 +230,5 @@ cli/nextflow
 cli/test_project/*
 
 sandbox/*
+tests/scripts/sbdev
+sbdev

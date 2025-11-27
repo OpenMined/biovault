@@ -13,13 +13,12 @@ Options:
   --path-column NAME Treat NAME as the path column in the source CSV (default: file_path).
   -h, --help         Show this message.
 
-The script expects each client directory under the sandbox to be initialized via datasite.sh.
+The script expects each client directory under the sandbox to be initialized via devstack.sh.
 EOF
 }
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 CLI_DIR="$ROOT_DIR/cli"
-SBENV_BIN="$ROOT_DIR/sbenv/sbenv"
 SANDBOX_DIR="${SANDBOX_DIR:-$ROOT_DIR/sandbox}"
 CSV_PATH=""
 RAW_CLIENTS=()
@@ -82,8 +81,6 @@ CSV_PATH="$(abs_path "$CSV_PATH")"
 SOURCE_CSV="$CSV_PATH"
 
 require_bin cargo
-require_bin curl
-[[ -x "$SBENV_BIN" ]] || { echo "Missing sbenv binary at $SBENV_BIN" >&2; exit 1; }
 [[ -d "$CLI_DIR" ]] || { echo "Missing cli checkout at $CLI_DIR" >&2; exit 1; }
 [[ -d "$SANDBOX_DIR" ]] || { echo "Sandbox directory not found: $SANDBOX_DIR" >&2; exit 1; }
 
@@ -138,12 +135,16 @@ BV_BIN="$(ensure_bv_binary)"
 
 run_bv() {
   local client_dir="$1"; shift
-  (
-    set +u
-    cd "$client_dir"
-    eval "$("$SBENV_BIN" activate --quiet)"
-    "$BV_BIN" "$@"
-  )
+  local email
+  email="$(basename "$client_dir")"
+  local data_dir="$client_dir"
+  local config_path="$client_dir/.syftbox/config.json"
+  [[ -f "$config_path" ]] || { echo "Missing SyftBox config for $email at $config_path" >&2; exit 1; }
+  HOME="$client_dir" \
+  SYFTBOX_EMAIL="$email" \
+  SYFTBOX_DATA_DIR="$data_dir" \
+  SYFTBOX_CONFIG_PATH="$config_path" \
+  "$BV_BIN" "$@"
 }
 
 count_csv_rows() {

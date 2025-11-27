@@ -1,10 +1,6 @@
 setup:
   server:
-    - "./tests/scripts/server.sh --reset"
-    - "./tests/scripts/server.sh"
-  clients:
-    - "./tests/scripts/datasite.sh --reset"
-    - "./tests/scripts/datasite.sh --names client1@sandbox.local,client2@sandbox.local"
+    - "./tests/scripts/devstack.sh --reset --clients client1@sandbox.local,client2@sandbox.local"
 
 steps:
   - name: Seed genotype fixtures for both clients

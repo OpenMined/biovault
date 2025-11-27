@@ -1,7 +1,6 @@
 setup:
-  clients:
-    - "./tests/scripts/datasite.sh --reset"
-    - "./tests/scripts/datasite.sh --names client1@sandbox.local"
+  server:
+    - "./tests/scripts/devstack.sh --reset --clients client1@sandbox.local"
 
 steps:
   - name: Import genotype fixtures for client1
