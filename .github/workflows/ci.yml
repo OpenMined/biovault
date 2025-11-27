@@ -91,28 +91,14 @@ jobs:
         uses: arduino/setup-protoc@v2
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: Install just
-        uses: extractions/setup-just@v1
 
-      - name: Add minio to /etc/hosts
-        run: |
-          echo "127.0.0.1 minio" | sudo tee -a /etc/hosts
-          cat /etc/hosts | grep minio
-
-      - name: Start SyftBox server
-        run: just start-syftbox-server
-
-      - name: Wait for SyftBox server
-        run: just wait-for-server
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: syftbox/go.mod
 
       - name: Build BioVault CLI
         run: cd cli && cargo build --release
-
-      - name: Setup BioVault dependencies (Nextflow, etc.)
-        run: cd cli && ./target/release/bv setup
-
-      - name: Verify dependencies
-        run: cd cli && ./target/release/bv check
 
       - name: Run inbox-ping-pong scenario
         run: ./test-scenario.sh tests/scenarios/inbox-ping-pong.yaml
@@ -120,17 +106,17 @@ jobs:
       - name: Show logs on failure
         if: failure()
         run: |
-          echo "=== Server Logs ==="
-          docker logs syftbox-server || true
-          echo ""
           echo "=== Sandbox Directory Structure ==="
           find sandbox -type d -maxdepth 2 2>/dev/null || true
           echo ""
           echo "=== Client Logs ==="
           find sandbox -name "*.log" -exec echo "--- {} ---" \; -exec cat {} \; 2>/dev/null || true
-      - name: Stop SyftBox server
+
+      - name: Cleanup devstack
         if: always()
-        run: just stop-syftbox-server || true
+        run: |
+          chmod +x ./tests/scripts/devstack.sh
+          ./tests/scripts/devstack.sh --stop --reset || true
 
   scenario-import-and-run:
     name: Scenario - Import and Run
@@ -157,28 +143,14 @@ jobs:
         uses: arduino/setup-protoc@v2
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: Install just
-        uses: extractions/setup-just@v1
 
-      - name: Add minio to /etc/hosts
-        run: |
-          echo "127.0.0.1 minio" | sudo tee -a /etc/hosts
-          cat /etc/hosts | grep minio
-
-      - name: Start SyftBox server
-        run: just start-syftbox-server
-
-      - name: Wait for SyftBox server
-        run: just wait-for-server
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: syftbox/go.mod
 
       - name: Build BioVault CLI
         run: cd cli && cargo build --release
-
-      - name: Setup BioVault dependencies (Nextflow, etc.)
-        run: cd cli && ./target/release/bv setup
-
-      - name: Verify dependencies
-        run: cd cli && ./target/release/bv check
 
       - name: Run import-and-run scenario
         run: ./test-scenario.sh tests/scenarios/import-and-run.yaml
@@ -186,17 +158,17 @@ jobs:
       - name: Show logs on failure
         if: failure()
         run: |
-          echo "=== Server Logs ==="
-          docker logs syftbox-server || true
-          echo ""
           echo "=== Sandbox Directory Structure ==="
           find sandbox -type d -maxdepth 2 2>/dev/null || true
           echo ""
           echo "=== Client Logs ==="
           find sandbox -name "*.log" -exec echo "--- {} ---" \; -exec cat {} \; 2>/dev/null || true
-      - name: Stop SyftBox server
+
+      - name: Cleanup devstack
         if: always()
-        run: just stop-syftbox-server || true
+        run: |
+          chmod +x ./tests/scripts/devstack.sh
+          ./tests/scripts/devstack.sh --stop --reset || true
 
   scenario-break-nextflow:
     name: Scenario - Break Nextflow
@@ -223,28 +195,14 @@ jobs:
         uses: arduino/setup-protoc@v2
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: Install just
-        uses: extractions/setup-just@v1
 
-      - name: Add minio to /etc/hosts
-        run: |
-          echo "127.0.0.1 minio" | sudo tee -a /etc/hosts
-          cat /etc/hosts | grep minio
-
-      - name: Start SyftBox server
-        run: just start-syftbox-server
-
-      - name: Wait for SyftBox server
-        run: just wait-for-server
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: syftbox/go.mod
 
       - name: Build BioVault CLI
         run: cd cli && cargo build --release
-
-      - name: Setup BioVault dependencies (Nextflow, etc.)
-        run: cd cli && ./target/release/bv setup
-
-      - name: Verify dependencies
-        run: cd cli && ./target/release/bv check
 
       - name: Run break-nextflow scenario
         run: ./test-scenario.sh tests/scenarios/break-nextflow.yaml
@@ -252,14 +210,14 @@ jobs:
       - name: Show logs on failure
         if: failure()
         run: |
-          echo "=== Server Logs ==="
-          docker logs syftbox-server || true
-          echo ""
           echo "=== Sandbox Directory Structure ==="
           find sandbox -type d -maxdepth 2 2>/dev/null || true
           echo ""
           echo "=== Client Logs ==="
           find sandbox -name "*.log" -exec echo "--- {} ---" \; -exec cat {} \; 2>/dev/null || true
-      - name: Stop SyftBox server
+
+      - name: Cleanup devstack
         if: always()
-        run: just stop-syftbox-server || true
+        run: |
+          chmod +x ./tests/scripts/devstack.sh
+          ./tests/scripts/devstack.sh --stop --reset || true
