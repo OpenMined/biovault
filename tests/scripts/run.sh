@@ -19,7 +19,7 @@ Options:
   --skip-generate      Skip automatic samplesheet generation (requires --samplesheet).
   -h, --help           Show this message.
 
-The script activates the specified sandbox client via sbenv, generates a samplesheet
+The script uses the sandbox client configured by devstack, generates a samplesheet
 covering all imported files for that datasite (unless --samplesheet is provided),
 and runs `bv run` for the supplied project/pipeline with the samplesheet wired to
 `inputs.samplesheet`.
@@ -28,7 +28,6 @@ EOF
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 CLI_DIR="$ROOT_DIR/cli"
-SBENV_BIN="$ROOT_DIR/sbenv/sbenv"
 SANDBOX_DIR="${SANDBOX_DIR:-$ROOT_DIR/sandbox}"
 
 DATASITE=""
@@ -120,7 +119,6 @@ PY
 
 require_bin python3
 require_bin cargo
-[[ -x "$SBENV_BIN" ]] || { echo "Missing sbenv binary at $SBENV_BIN" >&2; exit 1; }
 [[ -d "$CLI_DIR" ]] || { echo "Missing cli directory at $CLI_DIR" >&2; exit 1; }
 
 SANDBOX_DIR="$(abs_path "$SANDBOX_DIR")"
@@ -150,12 +148,16 @@ BV_BIN="$(ensure_bv_binary)"
 
 run_bv() {
   local client_dir="$1"; shift
-  (
-    set +u
-    cd "$client_dir"
-    eval "$("$SBENV_BIN" activate --quiet)"
-    "$BV_BIN" "$@"
-  )
+  local email
+  email="$(basename "$client_dir")"
+  local data_dir="$client_dir"
+  local config_path="$client_dir/.syftbox/config.json"
+  [[ -f "$config_path" ]] || { echo "Missing SyftBox config for $email at $config_path" >&2; exit 1; }
+  HOME="$client_dir" \
+  SYFTBOX_EMAIL="$email" \
+  SYFTBOX_DATA_DIR="$data_dir" \
+  SYFTBOX_CONFIG_PATH="$config_path" \
+  "$BV_BIN" "$@"
 }
 
 timestamp() {
