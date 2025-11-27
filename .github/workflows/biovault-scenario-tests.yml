@@ -40,24 +40,20 @@ jobs:
         with:
           toolchain: 1.91.0
 
-      - name: Install BioVault CLI
-        run: |
-          cargo install --path cli --force
-          echo "Installed bv to: $(which bv)"
-          bv --version
-
-      - name: Start SyftBox server
-        run: |
-          chmod +x ./tests/scripts/server.sh
-          ./tests/scripts/server.sh
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: syftbox/go.mod
 
       - name: Run scenario
         env:
           CI: true
         run: |
-          uv run --with pyyaml ./scripts/run_scenario.py ${{ matrix.scenario }}
+          chmod +x ./test-scenario.sh
+          ./test-scenario.sh ${{ matrix.scenario }}
 
       - name: Cleanup SyftBox stack
         if: always()
         run: |
-          ./tests/scripts/server.sh --reset || true
+          chmod +x ./tests/scripts/devstack.sh
+          ./tests/scripts/devstack.sh --stop --reset || true

@@ -11,7 +11,59 @@ from typing import Any, Dict, Optional
 
 ROOT = Path(__file__).resolve().parent.parent
 SANDBOX_ROOT = ROOT / "sandbox"
-SBENV = ROOT / "sbenv" / "sbenv"
+JAVA_HOME_OVERRIDE: Optional[str] = None
+
+
+def detect_java_home() -> Optional[str]:
+    """Return a Java 17-24 home if available, preferring SCENARIO_JAVA_HOME."""
+    env_java = os.environ.get("SCENARIO_JAVA_HOME") or os.environ.get("JAVA_HOME")
+    if env_java and is_supported_java(env_java):
+        return env_java
+
+    helper = Path("/usr/libexec/java_home")
+    if helper.exists():
+        try:
+            result = subprocess.run(
+                [str(helper), "-v", "17-24"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            candidate = result.stdout.strip()
+            if candidate:
+                return candidate
+        except Exception:
+            pass
+    return None
+
+
+def is_supported_java(java_home: str) -> bool:
+    """Check whether the given JAVA_HOME points to a Java 17-24 runtime."""
+    java_bin = Path(java_home) / "bin" / "java"
+    if not java_bin.exists():
+        return False
+    try:
+        result = subprocess.run(
+            [str(java_bin), "-version"],
+            capture_output=True,
+            text=True,
+        )
+        output = result.stderr or result.stdout
+        # Parse version like 'java version "17.0.12"' or 'openjdk version "25.0.1"'
+        for line in output.splitlines():
+            if "version" in line and '"' in line:
+                try:
+                    version_str = line.split('"')[1]
+                    major = int(version_str.split(".")[0])
+                    return 17 <= major <= 24
+                except Exception:
+                    continue
+    except Exception:
+        return False
+    return False
+
+
+JAVA_HOME_OVERRIDE = detect_java_home()
 
 
 def load_scenario(path: Path) -> Dict[str, Any]:
@@ -47,31 +99,51 @@ def run_shell(
     env = os.environ.copy()
     env["WORKSPACE_ROOT"] = str(ROOT)
     env["SCENARIO_DATASITE"] = datasite or ""
-    java_home = env.get("SCENARIO_JAVA_HOME")
+    java_home = JAVA_HOME_OVERRIDE
     user_path = env.get("SCENARIO_USER_PATH")
 
     if datasite:
         client_dir = SANDBOX_ROOT / datasite
         if not client_dir.is_dir():
             raise SystemExit(f"Sandbox datasite missing: {client_dir}")
-        shell_parts = [
-            'set -eo pipefail',
-            f'eval "$({SBENV} activate --quiet)"',
-        ]
+
+        data_dir = client_dir
+        config_path = client_dir / ".syftbox" / "config.json"
+        if not config_path.exists():
+            raise SystemExit(f"Missing SyftBox config for {datasite}: {config_path}")
+
+        env.update(
+            {
+                "HOME": str(client_dir),
+                "SYFTBOX_EMAIL": datasite,
+                "SYFTBOX_DATA_DIR": str(data_dir),
+                "SYFTBOX_CONFIG_PATH": str(config_path),
+            }
+        )
         if java_home:
-            shell_parts.append(f'export JAVA_HOME="{java_home}"')
+            env["JAVA_HOME"] = java_home
+            env["JAVA_CMD"] = str(Path(java_home) / "bin" / "java")
+        # Relax Nextflow Java version checks to allow newer JVMs (e.g., 25)
+        env.setdefault("NXF_DISABLE_JAVA_VERSION_CHECK", "true")
+        env.setdefault("NXF_IGNORE_JAVA_VERSION", "true")
+        env.setdefault("NXF_OPTS", "-Dnxf.java.check=false")
         if user_path:
-            shell_parts.append(f'export PATH="{user_path}"')
-        shell_parts.append(expanded)
-        shell = '; '.join(shell_parts)
+            env["PATH"] = user_path
+
         result = subprocess.run(
-            ["bash", "-lc", shell],
+            ["bash", "-c", expanded],
             cwd=client_dir,
             env=env,
             text=True,
             capture_output=True,
         )
     else:
+        if java_home:
+            env["JAVA_HOME"] = java_home
+            env["JAVA_CMD"] = str(Path(java_home) / "bin" / "java")
+        env.setdefault("NXF_DISABLE_JAVA_VERSION_CHECK", "true")
+        env.setdefault("NXF_IGNORE_JAVA_VERSION", "true")
+        env.setdefault("NXF_OPTS", "-Dnxf.java.check=false")
         result = subprocess.run(
             expanded,
             cwd=ROOT,
