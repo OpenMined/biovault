@@ -13,6 +13,7 @@ Options:
   --clients list   Comma-separated client emails (default: client1@sandbox.local,client2@sandbox.local)
   --sandbox DIR    Sandbox root path (default: ./sandbox)
   --reset          Remove any existing devstack state before starting (also removes sandbox on stop)
+  --skip-sync-check Skip the sbdev sync probe after boot (faster, less safe)
   --stop           Stop the devstack instead of starting it
   --status         Print the current devstack state (relay/state.json) and exit
   -h, --help       Show this message
@@ -25,6 +26,7 @@ SANDBOX_DIR="${SANDBOX_DIR:-$ROOT_DIR/sandbox}"
 GO_CACHE_DIR="$SYFTBOX_DIR/.gocache"
 ACTION="start"
 RESET_FLAG=0
+SKIP_SYNC_CHECK=0
 RAW_CLIENTS=()
 
 while [[ $# -gt 0 ]]; do
@@ -41,6 +43,9 @@ while [[ $# -gt 0 ]]; do
       ;;
     --reset)
       RESET_FLAG=1
+      ;;
+    --skip-sync-check)
+      SKIP_SYNC_CHECK=1
       ;;
     --stop)
       ACTION="stop"
@@ -154,6 +159,7 @@ start_stack() {
   mkdir -p "$SANDBOX_DIR"
   local args=(--path "$SANDBOX_DIR" --random-ports)
   (( RESET_FLAG )) && args+=(--reset)
+  (( SKIP_SYNC_CHECK )) && args+=(--skip-sync-check)
   for email in "${CLIENTS[@]}"; do
     args+=(--client "$email")
   done
