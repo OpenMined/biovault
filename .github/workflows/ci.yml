@@ -215,6 +215,13 @@ jobs:
         with:
           go-version-file: syftbox/go.mod
 
+      - name: Install Nextflow
+        run: |
+          curl -fsSL https://get.nextflow.io | bash
+          sudo mv nextflow /usr/local/bin/
+          chmod +x /usr/local/bin/nextflow
+          nextflow -version
+
       - name: Build BioVault CLI
         run: cd cli && cargo build --release
 
