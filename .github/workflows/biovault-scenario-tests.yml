@@ -27,37 +27,51 @@ jobs:
           chmod +x submodules.sh
           ./submodules.sh
 
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y jq
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.91.0
 
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: 'cli -> target'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
       - name: Install protoc
         uses: arduino/setup-protoc@v2
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v2
-
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: 1.91.0
 
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
           go-version-file: syftbox/go.mod
 
-      - name: Run scenario
-        env:
-          CI: true
+      - name: Install Nextflow
         run: |
-          chmod +x ./test-scenario.sh
-          ./test-scenario.sh ${{ matrix.scenario }}
+          curl -fsSL https://get.nextflow.io | bash
+          sudo mv nextflow /usr/local/bin/
+          chmod +x /usr/local/bin/nextflow
+          nextflow -version
 
-      - name: Cleanup SyftBox stack
+      - name: Build BioVault CLI
+        run: cd cli && cargo build --release
+
+      - name: Run scenario
+        run: ./test-scenario.sh ${{ matrix.scenario }}
+
+      - name: Show logs on failure
+        if: failure()
+        run: |
+          echo "=== Sandbox Directory Structure ==="
+          find sandbox -type d -maxdepth 2 2>/dev/null || true
+          echo ""
+          echo "=== Client Logs ==="
+          find sandbox -name "*.log" -exec echo "--- {} ---" \; -exec cat {} \; 2>/dev/null || true
+
+      - name: Cleanup devstack
         if: always()
         run: |
           chmod +x ./tests/scripts/devstack.sh
