@@ -3132,6 +3132,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "serde_yaml",
  "syft-crypto-protocol",
  "thiserror 1.0.69",
  "tokio",

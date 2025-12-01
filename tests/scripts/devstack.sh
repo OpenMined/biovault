@@ -158,16 +158,16 @@ start_stack() {
     args+=(--client "$email")
   done
 
-  # Pass through Java/Nextflow environment variables if available
-  [[ -n "${SCENARIO_JAVA_HOME:-}" ]] && args+=(--env "JAVA_HOME=$SCENARIO_JAVA_HOME")
-  [[ -n "${SCENARIO_JAVA_HOME:-}" ]] && args+=(--env "JAVA_CMD=$SCENARIO_JAVA_HOME/bin/java")
-  [[ -n "${SCENARIO_USER_PATH:-}" ]] && args+=(--env "PATH=$SCENARIO_USER_PATH")
-  [[ -n "${NXF_DISABLE_JAVA_VERSION_CHECK:-}" ]] && args+=(--env "NXF_DISABLE_JAVA_VERSION_CHECK=$NXF_DISABLE_JAVA_VERSION_CHECK")
-  [[ -n "${NXF_IGNORE_JAVA_VERSION:-}" ]] && args+=(--env "NXF_IGNORE_JAVA_VERSION=$NXF_IGNORE_JAVA_VERSION")
-  [[ -n "${NXF_OPTS:-}" ]] && args+=(--env "NXF_OPTS=$NXF_OPTS")
+  # Pass through Java/Nextflow environment variables to the devstack processes
+  local env_vars=()
+  [[ -n "${SCENARIO_JAVA_HOME:-}" ]] && env_vars+=("JAVA_HOME=$SCENARIO_JAVA_HOME" "JAVA_CMD=$SCENARIO_JAVA_HOME/bin/java")
+  [[ -n "${SCENARIO_USER_PATH:-}" ]] && env_vars+=("PATH=$SCENARIO_USER_PATH")
+  [[ -n "${NXF_DISABLE_JAVA_VERSION_CHECK:-}" ]] && env_vars+=("NXF_DISABLE_JAVA_VERSION_CHECK=$NXF_DISABLE_JAVA_VERSION_CHECK")
+  [[ -n "${NXF_IGNORE_JAVA_VERSION:-}" ]] && env_vars+=("NXF_IGNORE_JAVA_VERSION=$NXF_IGNORE_JAVA_VERSION")
+  [[ -n "${NXF_OPTS:-}" ]] && env_vars+=("NXF_OPTS=$NXF_OPTS")
 
   echo "Starting SyftBox devstack via syftbox/cmd/devstack..."
-  (cd "$SYFTBOX_DIR" && GOCACHE="$GO_CACHE_DIR" go run ./cmd/devstack start "${args[@]}")
+  (cd "$SYFTBOX_DIR" && env "GOCACHE=$GO_CACHE_DIR" "${env_vars[@]:-}" go run ./cmd/devstack start "${args[@]}")
 
   for email in "${CLIENTS[@]}"; do
     bootstrap_biovault "$email"
