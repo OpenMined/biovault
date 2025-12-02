@@ -171,6 +171,37 @@ fn strip_ansi_sequences(input: &str) -> String {
     output
 }
 
+fn bundled_env_var(name: &str) -> Option<&'static str> {
+    match name {
+        "java" => Some("BIOVAULT_BUNDLED_JAVA"),
+        "nextflow" => Some("BIOVAULT_BUNDLED_NEXTFLOW"),
+        "uv" => Some("BIOVAULT_BUNDLED_UV"),
+        "syftbox" => Some("SYFTBOX_BINARY"),
+        _ => None,
+    }
+}
+
+fn resolve_binary_path(cfg: Option<&crate::config::Config>, name: &str) -> Option<String> {
+    if let Some(cfg) = cfg {
+        if let Some(path) = cfg.get_binary_path(name) {
+            if !path.is_empty() {
+                return Some(path);
+            }
+        }
+    }
+
+    if let Some(env_key) = bundled_env_var(name) {
+        if let Ok(env_path) = std::env::var(env_key) {
+            let trimmed = env_path.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+
+    None
+}
+
 struct LogTailHandle {
     stop_flag: Arc<AtomicBool>,
     handle: thread::JoinHandle<()>,
@@ -1148,9 +1179,8 @@ async fn execute_sheet_workflow(params: &RunParams, config: &ProjectConfig) -> a
     fs::remove_file(&nextflow_log_path).ok();
 
     // Get configured Nextflow path or use default
-    let nextflow_cmd = crate::config::get_config()
-        .ok()
-        .and_then(|cfg| cfg.get_binary_path("nextflow"))
+    let bv_config = crate::config::get_config().ok();
+    let nextflow_cmd = resolve_binary_path(bv_config.as_ref(), "nextflow")
         .unwrap_or_else(|| "nextflow".to_string());
 
     // Build Nextflow command
@@ -1392,9 +1422,8 @@ pub async fn execute(params: RunParams) -> anyhow::Result<()> {
     fs::remove_file(&nextflow_log_path).ok();
 
     // Get configured Nextflow path or use default
-    let nextflow_cmd = crate::config::get_config()
-        .ok()
-        .and_then(|cfg| cfg.get_binary_path("nextflow"))
+    let bv_config = crate::config::get_config().ok();
+    let nextflow_cmd = resolve_binary_path(bv_config.as_ref(), "nextflow")
         .unwrap_or_else(|| "nextflow".to_string());
 
     // Build Nextflow command

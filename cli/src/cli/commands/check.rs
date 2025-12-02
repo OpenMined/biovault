@@ -90,6 +90,15 @@ fn is_valid_java_binary(path: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn bundled_env_key(dep: &str) -> Option<&'static str> {
+    match dep {
+        "java" => Some("BIOVAULT_BUNDLED_JAVA"),
+        "nextflow" => Some("BIOVAULT_BUNDLED_NEXTFLOW"),
+        "uv" => Some("BIOVAULT_BUNDLED_UV"),
+        _ => None,
+    }
+}
+
 fn adjust_java_binary(mut current: Option<String>) -> Option<String> {
     if let Some(ref path) = current {
         if !is_valid_java_binary(path) {
@@ -586,6 +595,16 @@ pub fn check_dependencies_result() -> Result<DependencyCheckResult> {
             if let Ok(env_bin) = std::env::var("SYFTBOX_BINARY") {
                 if !env_bin.trim().is_empty() && Path::new(&env_bin).exists() {
                     binary_path = Some(env_bin);
+                }
+            }
+        }
+
+        if binary_path.is_none() {
+            if let Some(env_key) = bundled_env_key(&dep.name) {
+                if let Ok(env_bin) = env::var(env_key) {
+                    if !env_bin.trim().is_empty() && Path::new(&env_bin).exists() {
+                        binary_path = Some(env_bin);
+                    }
                 }
             }
         }
