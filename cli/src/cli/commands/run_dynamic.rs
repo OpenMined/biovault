@@ -10,7 +10,7 @@ use std::ffi::OsStr;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 fn append_desktop_log(message: &str) {
     if let Ok(path) = std::env::var("BIOVAULT_DESKTOP_LOG_FILE") {
@@ -109,12 +109,48 @@ fn build_augmented_path(cfg: Option<&crate::config::Config>) -> Option<String> {
         .and_then(|joined| joined.into_string().ok())
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct RunSettings {
+    /// Whether Docker must be running before launching Nextflow.
+    pub require_docker: bool,
+}
+
+impl Default for RunSettings {
+    fn default() -> Self {
+        Self {
+            // Current templates assume Docker; keep default strict.
+            require_docker: true,
+        }
+    }
+}
+
+fn check_docker_running(docker_bin: &str) -> Result<()> {
+    let status = Command::new(docker_bin)
+        .arg("info")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .with_context(|| format!("Failed to execute '{}'", docker_bin))?;
+
+    if status.success() {
+        return Ok(());
+    }
+
+    Err(anyhow::anyhow!(
+        "Docker daemon is not running ({} exited with {:?}). Please start Docker Desktop or the Docker service and retry.",
+        docker_bin,
+        status.code()
+    )
+    .into())
+}
+
 pub async fn execute_dynamic(
     project_folder: &str,
     args: Vec<String>,
     dry_run: bool,
     resume: bool,
     results_dir: Option<String>,
+    run_settings: RunSettings,
 ) -> Result<()> {
     let project_path = Path::new(project_folder);
     if !project_path.exists() {
@@ -213,6 +249,8 @@ pub async fn execute_dynamic(
     let config = crate::config::get_config().ok();
     let nextflow_bin =
         resolve_binary_path(config.as_ref(), "nextflow").unwrap_or_else(|| "nextflow".to_string());
+    let docker_bin =
+        resolve_binary_path(config.as_ref(), "docker").unwrap_or_else(|| "docker".to_string());
 
     // Log environment details for debugging
     append_desktop_log(&format!(
@@ -239,6 +277,15 @@ pub async fn execute_dynamic(
         } else {
             append_desktop_log(&format!("  {} = <not configured>", binary));
         }
+    }
+
+    if run_settings.require_docker {
+        append_desktop_log("[Pipeline] Checking Docker availability...");
+        if let Err(err) = check_docker_running(&docker_bin) {
+            append_desktop_log(&format!("[Pipeline] Docker check failed: {}", err));
+            return Err(err);
+        }
+        append_desktop_log("[Pipeline] Docker is running (docker info succeeded)");
     }
 
     if let Some(path_env) = build_augmented_path(config.as_ref()) {

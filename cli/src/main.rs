@@ -1720,6 +1720,7 @@ async fn async_main_with(cli: Cli) -> Result<()> {
                                 dry_run,
                                 resume,
                                 results_dir,
+                                commands::run_dynamic::RunSettings::default(),
                             )
                             .await?;
                         } else {
@@ -1787,6 +1788,7 @@ async fn async_main_with(cli: Cli) -> Result<()> {
                             dry_run,
                             resume,
                             results_dir,
+                            commands::run_dynamic::RunSettings::default(),
                         )
                         .await?;
                     }
@@ -1798,6 +1800,7 @@ async fn async_main_with(cli: Cli) -> Result<()> {
                         dry_run,
                         resume,
                         results_dir,
+                        commands::run_dynamic::RunSettings::default(),
                     )
                     .await?;
                 }
@@ -1809,6 +1812,7 @@ async fn async_main_with(cli: Cli) -> Result<()> {
                     dry_run,
                     resume,
                     results_dir,
+                    commands::run_dynamic::RunSettings::default(),
                 )
                 .await?;
             }

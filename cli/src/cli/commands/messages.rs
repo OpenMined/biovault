@@ -1041,6 +1041,7 @@ async fn run_project_test(config: &Config, msg: &Message) -> anyhow::Result<()> 
             false,
             false,
             Some(invocation.results_dir.clone()),
+            run_dynamic::RunSettings::default(),
         )
         .await?;
         print_dynamic_results(&run_dir, &invocation.results_dir)?;
@@ -1079,6 +1080,7 @@ async fn run_project_real(config: &Config, msg: &Message) -> anyhow::Result<()> 
             false,
             false,
             Some(invocation.results_dir.clone()),
+            run_dynamic::RunSettings::default(),
         )
         .await?;
         print_dynamic_results(&run_dir, &invocation.results_dir)?;
@@ -1149,6 +1151,7 @@ async fn process_dynamic_project_message(
         false,
         false,
         Some(invocation.results_dir.clone()),
+        run_dynamic::RunSettings::default(),
     )
     .await?;
 
