@@ -1,6 +1,7 @@
 pub mod cli;
 pub mod config;
 pub mod data;
+pub mod defaults;
 pub mod error;
 pub mod messages;
 pub mod pipeline_spec;
