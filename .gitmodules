@@ -10,3 +10,6 @@
 [submodule "syftbox-sdk"]
 	path = syftbox-sdk
 	url = https://github.com/OpenMined/syftbox-sdk.git
+[submodule "biovault-beaver"]
+	path = biovault-beaver
+	url = git@github.com:OpenMined/biovault-beaver.git

@@ -321,6 +321,7 @@ pub async fn run_pipeline(
             dry_run,
             resume,
             Some(step_results_dir_str.clone()),
+            run_dynamic::RunSettings::default(),
         )
         .await?;
 

@@ -1,4 +1,5 @@
 use crate::config::Config;
+use crate::defaults::SYFTBOX_DEFAULT_SERVER_URL;
 use crate::error::Error as ConfigError;
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -7,7 +8,7 @@ use std::collections::HashMap;
 use std::env;
 use std::path::{Path, PathBuf};
 
-const DEFAULT_SERVER_URL: &str = "https://syftbox.net";
+const DEFAULT_SERVER_URL: &str = SYFTBOX_DEFAULT_SERVER_URL;
 const DEFAULT_CLIENT_URL: &str = "http://localhost:7938";
 
 #[derive(Debug, Serialize)]

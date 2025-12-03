@@ -10,7 +10,7 @@ use std::ffi::OsStr;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 fn append_desktop_log(message: &str) {
     if let Ok(path) = std::env::var("BIOVAULT_DESKTOP_LOG_FILE") {
@@ -51,10 +51,41 @@ fn format_command(cmd: &Command) -> String {
     parts.join(" ")
 }
 
-fn build_augmented_path(cfg: &crate::config::Config) -> Option<String> {
+fn bundled_env_var(name: &str) -> Option<&'static str> {
+    match name {
+        "java" => Some("BIOVAULT_BUNDLED_JAVA"),
+        "nextflow" => Some("BIOVAULT_BUNDLED_NEXTFLOW"),
+        "uv" => Some("BIOVAULT_BUNDLED_UV"),
+        "syftbox" => Some("SYFTBOX_BINARY"),
+        _ => None,
+    }
+}
+
+fn resolve_binary_path(cfg: Option<&crate::config::Config>, name: &str) -> Option<String> {
+    if let Some(cfg) = cfg {
+        if let Some(path) = cfg.get_binary_path(name) {
+            if !path.is_empty() {
+                return Some(path);
+            }
+        }
+    }
+
+    if let Some(env_key) = bundled_env_var(name) {
+        if let Ok(env_path) = std::env::var(env_key) {
+            let trimmed = env_path.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+
+    None
+}
+
+fn build_augmented_path(cfg: Option<&crate::config::Config>) -> Option<String> {
     let mut entries = BTreeSet::new();
     for key in ["nextflow", "java", "docker"] {
-        if let Some(bin_path) = cfg.get_binary_path(key) {
+        if let Some(bin_path) = resolve_binary_path(cfg, key) {
             if bin_path.is_empty() {
                 continue;
             }
@@ -78,12 +109,48 @@ fn build_augmented_path(cfg: &crate::config::Config) -> Option<String> {
         .and_then(|joined| joined.into_string().ok())
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct RunSettings {
+    /// Whether Docker must be running before launching Nextflow.
+    pub require_docker: bool,
+}
+
+impl Default for RunSettings {
+    fn default() -> Self {
+        Self {
+            // Current templates assume Docker; keep default strict.
+            require_docker: true,
+        }
+    }
+}
+
+fn check_docker_running(docker_bin: &str) -> Result<()> {
+    let status = Command::new(docker_bin)
+        .arg("info")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .with_context(|| format!("Failed to execute '{}'", docker_bin))?;
+
+    if status.success() {
+        return Ok(());
+    }
+
+    Err(anyhow::anyhow!(
+        "Docker daemon is not running ({} exited with {:?}). Please start Docker Desktop or the Docker service and retry.",
+        docker_bin,
+        status.code()
+    )
+    .into())
+}
+
 pub async fn execute_dynamic(
     project_folder: &str,
     args: Vec<String>,
     dry_run: bool,
     resume: bool,
     results_dir: Option<String>,
+    run_settings: RunSettings,
 ) -> Result<()> {
     let project_path = Path::new(project_folder);
     if !project_path.exists() {
@@ -180,11 +247,10 @@ pub async fn execute_dynamic(
         .context("Failed to encode parameters metadata to JSON")?;
 
     let config = crate::config::get_config().ok();
-    let nextflow_bin = config
-        .as_ref()
-        .and_then(|cfg| cfg.get_binary_path("nextflow"))
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "nextflow".to_string());
+    let nextflow_bin =
+        resolve_binary_path(config.as_ref(), "nextflow").unwrap_or_else(|| "nextflow".to_string());
+    let docker_bin =
+        resolve_binary_path(config.as_ref(), "docker").unwrap_or_else(|| "docker".to_string());
 
     // Log environment details for debugging
     append_desktop_log(&format!(
@@ -204,30 +270,32 @@ pub async fn execute_dynamic(
 
     let mut cmd = Command::new(&nextflow_bin);
 
-    if let Some(cfg) = &config {
-        // Log configured binary paths
-        append_desktop_log("[Pipeline] Configured binary paths:");
-        for binary in ["nextflow", "java", "docker"] {
-            if let Some(path) = cfg.get_binary_path(binary) {
-                append_desktop_log(&format!("  {} = {}", binary, path));
-            } else {
-                append_desktop_log(&format!("  {} = <not configured>", binary));
-            }
-        }
-
-        if let Some(path_env) = build_augmented_path(cfg) {
-            append_desktop_log(&format!(
-                "[Pipeline] Final augmented PATH for nextflow: {}",
-                path_env
-            ));
-            cmd.env("PATH", path_env);
+    append_desktop_log("[Pipeline] Preferred binary paths:");
+    for binary in ["nextflow", "java", "docker"] {
+        if let Some(path) = resolve_binary_path(config.as_ref(), binary) {
+            append_desktop_log(&format!("  {} = {}", binary, path));
         } else {
-            append_desktop_log(
-                "[Pipeline] WARNING: Could not build augmented PATH, using system PATH",
-            );
+            append_desktop_log(&format!("  {} = <not configured>", binary));
         }
+    }
+
+    if run_settings.require_docker {
+        append_desktop_log("[Pipeline] Checking Docker availability...");
+        if let Err(err) = check_docker_running(&docker_bin) {
+            append_desktop_log(&format!("[Pipeline] Docker check failed: {}", err));
+            return Err(err);
+        }
+        append_desktop_log("[Pipeline] Docker is running (docker info succeeded)");
+    }
+
+    if let Some(path_env) = build_augmented_path(config.as_ref()) {
+        append_desktop_log(&format!(
+            "[Pipeline] Final augmented PATH for nextflow: {}",
+            path_env
+        ));
+        cmd.env("PATH", path_env);
     } else {
-        append_desktop_log("[Pipeline] WARNING: No config found, using system PATH");
+        append_desktop_log("[Pipeline] WARNING: Could not build augmented PATH, using system PATH");
     }
 
     cmd.arg("-log").arg(&nextflow_log_path);

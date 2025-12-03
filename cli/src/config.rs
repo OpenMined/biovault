@@ -360,8 +360,13 @@ impl Config {
         let config_path = self.get_syftbox_config_path()?;
         let data_dir = self.get_syftbox_data_dir()?;
         let mut runtime = SyftboxRuntimeConfig::new(self.email.clone(), config_path, data_dir);
-
-        if let Some(path) = self.get_binary_path("syftbox") {
+        // Prefer explicit env override for the syftbox binary, then config, else default
+        if let Ok(env_bin) = std::env::var("SYFTBOX_BINARY") {
+            let trimmed = env_bin.trim();
+            if !trimmed.is_empty() {
+                runtime = runtime.with_binary_path(Some(PathBuf::from(trimmed)));
+            }
+        } else if let Some(path) = self.get_binary_path("syftbox") {
             let trimmed = path.trim();
             if !trimmed.is_empty() {
                 runtime = runtime.with_binary_path(Some(PathBuf::from(trimmed)));
@@ -435,6 +440,18 @@ pub fn get_biovault_home() -> anyhow::Result<PathBuf> {
         return Ok(path);
     }
 
+    // If the user has already picked a home (persisted pointer), respect it even
+    // inside a SyftBox virtualenv to avoid creating a second .biovault.
+    if let Some(persisted) = read_persisted_home() {
+        fs::create_dir_all(&persisted).with_context(|| {
+            format!(
+                "Failed to create persisted biovault directory: {}",
+                persisted.display()
+            )
+        })?;
+        return Ok(persisted);
+    }
+
     // Check for SyftBox virtualenv
     if let Some(syftbox_data_dir) = get_env_var("SYFTBOX_DATA_DIR") {
         let path = PathBuf::from(syftbox_data_dir).join(".biovault");
@@ -445,16 +462,6 @@ pub fn get_biovault_home() -> anyhow::Result<PathBuf> {
 
     let home_dir =
         dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
-
-    if let Some(persisted) = read_persisted_home() {
-        fs::create_dir_all(&persisted).with_context(|| {
-            format!(
-                "Failed to create persisted biovault directory: {}",
-                persisted.display()
-            )
-        })?;
-        return Ok(persisted);
-    }
 
     // Check Desktop/BioVault BEFORE walking up directory tree
     // This ensures desktop app uses Desktop/BioVault instead of finding legacy .biovault

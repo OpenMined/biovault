@@ -13,11 +13,28 @@ use colored::Colorize;
 use csv::Writer;
 use dialoguer::{Confirm, Input, Select};
 use serde_json::json;
+use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
 
 const MESSAGE_ENDPOINT: &str = "/message";
+
+fn init_printed_emails() -> &'static Mutex<HashSet<String>> {
+    static SET: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    SET.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn should_log_init_line() -> bool {
+    matches!(
+        std::env::var("BIOVAULT_MESSAGE_INIT_LOG")
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
 
 /// Clean up stale database locks
 pub fn cleanup_locks(config: &Config, all: bool) -> Result<()> {
@@ -139,7 +156,14 @@ mod tests_fast_helpers {
 pub fn init_message_system(config: &Config) -> Result<(MessageDb, MessageSync)> {
     let (db, sync) = build_message_system(config)?;
 
-    println!("BioVault messaging initialized for {}", config.email);
+    if should_log_init_line() {
+        let mut seen = init_printed_emails()
+            .lock()
+            .expect("message init tracker poisoned");
+        if seen.insert(config.email.clone()) {
+            println!("BioVault messaging initialized for {}", config.email);
+        }
+    }
 
     Ok((db, sync))
 }
@@ -1017,6 +1041,7 @@ async fn run_project_test(config: &Config, msg: &Message) -> anyhow::Result<()> 
             false,
             false,
             Some(invocation.results_dir.clone()),
+            run_dynamic::RunSettings::default(),
         )
         .await?;
         print_dynamic_results(&run_dir, &invocation.results_dir)?;
@@ -1055,6 +1080,7 @@ async fn run_project_real(config: &Config, msg: &Message) -> anyhow::Result<()> 
             false,
             false,
             Some(invocation.results_dir.clone()),
+            run_dynamic::RunSettings::default(),
         )
         .await?;
         print_dynamic_results(&run_dir, &invocation.results_dir)?;
@@ -1125,6 +1151,7 @@ async fn process_dynamic_project_message(
         false,
         false,
         Some(invocation.results_dir.clone()),
+        run_dynamic::RunSettings::default(),
     )
     .await?;
 

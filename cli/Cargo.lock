@@ -547,9 +547,9 @@ checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 
 [[package]]
 name = "core-models"
-version = "0.0.3"
+version = "0.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "94950e87ea550d6d68f1993f3e7bebc8cb7235157bff84337d46195c3aa0b3f0"
+checksum = "0940496e5c83c54f3b753d5317daec82e8edac71c33aaa1f666d76f518de2444"
 dependencies = [
  "hax-lib 0.3.5",
  "pastey",
@@ -888,6 +888,16 @@ name = "fiat-crypto"
 version = "0.2.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "28dea519a9695b9977216879a3ebfddf92f1c08c05d984f8996aecd6ecdc811d"
+
+[[package]]
+name = "field-offset"
+version = "0.3.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "38e2275cc4e4fc009b0669731a1e5ab7ebf11f469eaede2bab9309a5b4d6057f"
+dependencies = [
+ "memoffset",
+ "rustc_version",
+]
 
 [[package]]
 name = "filetime"
@@ -1258,12 +1268,12 @@ dependencies = [
 
 [[package]]
 name = "hpke-rs"
-version = "0.3.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "36874953dfe0223fd877a77b0eefcd84f8da36161b446c6fcb47b8311fa0251a"
+checksum = "f0d131cd4e00b0d03bee8a120828a374474511ec1a713f2bdf2fa5528dc92b32"
 dependencies = [
  "hpke-rs-crypto",
- "libcrux-sha3 0.0.3",
+ "libcrux-sha3 0.0.4",
  "log",
  "rand_core 0.9.3",
  "zeroize",
@@ -1714,9 +1724,9 @@ dependencies = [
 
 [[package]]
 name = "libcrux-intrinsics"
-version = "0.0.3"
+version = "0.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5d3b41dcbc21a5fb7efbbb5af7405b2e79c4bfe443924e90b13afc0080318d31"
+checksum = "bc9ee7ef66569dd7516454fe26de4e401c0c62073929803486b96744594b9632"
 dependencies = [
  "core-models",
  "hax-lib 0.3.5",
@@ -1754,6 +1764,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "libcrux-secrets"
+version = "0.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6e4dbbf6bc9f2bc0f20dc3bea3e5c99adff3bdccf6d2a40488963da69e2ec307"
+dependencies = [
+ "hax-lib 0.3.5",
+]
+
+[[package]]
 name = "libcrux-sha2"
 version = "0.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1761,7 +1780,7 @@ checksum = "412cf855804ed65212e3d61983d500cea8b9259eff35bb6f8bf03aaf0ac19fbc"
 dependencies = [
  "libcrux-hacl-rs",
  "libcrux-macros",
- "libcrux-traits",
+ "libcrux-traits 0.0.2",
 ]
 
 [[package]]
@@ -1777,13 +1796,14 @@ dependencies = [
 
 [[package]]
 name = "libcrux-sha3"
-version = "0.0.3"
+version = "0.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "29d95de4257eafdfaf3bffecadb615219b0ca920c553722b3646d32dde76c797"
+checksum = "2400bec764d1c75b8a496d5747cffe32f1fb864a12577f0aca2f55a92021c962"
 dependencies = [
  "hax-lib 0.3.5",
- "libcrux-intrinsics 0.0.3",
+ "libcrux-intrinsics 0.0.4",
  "libcrux-platform",
+ "libcrux-traits 0.0.4",
 ]
 
 [[package]]
@@ -1792,6 +1812,16 @@ version = "0.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "50c487a3fb34361f4f78a9c9dc5eff4ae62ef3ccb69a916af7b524dd288de9db"
 dependencies = [
+ "rand",
+]
+
+[[package]]
+name = "libcrux-traits"
+version = "0.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9adfd58e79d860f6b9e40e35127bfae9e5bd3ade33201d1347459011a2add034"
+dependencies = [
+ "libcrux-secrets",
  "rand",
 ]
 
@@ -1808,9 +1838,9 @@ dependencies = [
 
 [[package]]
 name = "libsignal-core-syft"
-version = "0.85.3-beta.4"
+version = "0.85.3-beta.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "32362bd91c9a0c5e8d9364090faf352cbf08e3caaefa71969586269a4ef4fa2b"
+checksum = "d187031370c55863b5d81d2fe5852628ebac7e6bd6467eebbe90bbd95890cafa"
 dependencies = [
  "curve25519-dalek",
  "derive_more",
@@ -1826,9 +1856,9 @@ dependencies = [
 
 [[package]]
 name = "libsignal-protocol-syft"
-version = "0.85.3-beta.4"
+version = "0.85.3-beta.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d5cf9d2e27b3c02b9c0f453dd624351ee9b7b3dc3c3582764af798cf7250ef8"
+checksum = "3e970a79f9941dbd090a49d4a97dc2c13f93c67af1c2cf87833b8a9f8519b579"
 dependencies = [
  "aes",
  "aes-gcm-siv",
@@ -1928,6 +1958,15 @@ name = "memchr"
 version = "2.7.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32a282da65faaf38286cf3be983213fcf1d2e2a58700e808f83f4ea9a4804bc0"
+
+[[package]]
+name = "memoffset"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "488016bfae457b036d996092f6cb448677611ce4449e970ceaf42695203f218a"
+dependencies = [
+ "autocfg",
+]
 
 [[package]]
 name = "miniz_oxide"
@@ -2966,9 +3005,9 @@ checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
 
 [[package]]
 name = "signal-crypto-syft"
-version = "0.85.3-beta.4"
+version = "0.85.3-beta.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fb72b364ae6f4335c37513ca65319d829589638caf5f21104cee3d62a47115bf"
+checksum = "a06af9743165c3633491fc0d6dde0119c33a649a84528f9c579a67231b807f17"
 dependencies = [
  "aes",
  "cbc",
@@ -3058,9 +3097,9 @@ dependencies = [
 
 [[package]]
 name = "spqr-syft"
-version = "0.85.3-beta.4"
+version = "0.85.3-beta.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "77da2e2f0222b1268e58af3c475579753ced91128da5aa10988bbd9f0f86a9f4"
+checksum = "75560ac751ef99924e096c8cf86e488b54dffc0bd9fdf76114c8dd89133df166"
 dependencies = [
  "cpufeatures",
  "curve25519-dalek",
@@ -3101,7 +3140,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "syft-crypto-protocol"
-version = "0.1.0-beta.5"
+version = "0.1.2-beta.1"
 dependencies = [
  "anyhow",
  "base64",
@@ -3118,12 +3157,14 @@ dependencies = [
  "subtle",
  "thiserror 2.0.17",
  "urlencoding",
+ "winapi",
+ "windows-acl",
  "zeroize",
 ]
 
 [[package]]
 name = "syftbox-sdk"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "anyhow",
  "base64",
@@ -3132,6 +3173,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "serde_yaml",
  "syft-crypto-protocol",
  "thiserror 1.0.69",
  "tokio",
@@ -3773,6 +3815,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "widestring"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c168940144dd21fd8046987c16a46a33d5fc84eec29ef9dcddc2ac9e31526b7c"
+
+[[package]]
 name = "winapi"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3811,6 +3859,18 @@ checksum = "e48a53791691ab099e5e2ad123536d0fff50652600abaf43bbf952894110d0be"
 dependencies = [
  "windows-core 0.52.0",
  "windows-targets 0.52.6",
+]
+
+[[package]]
+name = "windows-acl"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "177b1723986bcb4c606058e77f6e8614b51c7f9ad2face6f6fd63dd5c8b3cec3"
+dependencies = [
+ "field-offset",
+ "libc",
+ "widestring",
+ "winapi",
 ]
 
 [[package]]

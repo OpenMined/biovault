@@ -71,18 +71,15 @@ mod hard_reset_tests {
                 true,
             )?;
 
+            // Private directory is outside datasites, use fs operations directly
             let private_biovault = self
                 .app
                 .data_dir
                 .join("private")
                 .join("app_data")
                 .join("biovault");
-            storage.ensure_dir(&private_biovault)?;
-            storage.write_plaintext_file(
-                &private_biovault.join("private_data.yaml"),
-                b"data: private",
-                true,
-            )?;
+            fs::create_dir_all(&private_biovault)?;
+            fs::write(private_biovault.join("private_data.yaml"), b"data: private")?;
 
             Ok(())
         }
@@ -413,14 +410,14 @@ mod hard_reset_tests {
         let public_biovault = datasite_dir.join("public").join("biovault");
         env.app.storage.ensure_dir(&public_biovault)?;
 
-        // Private should still be at the real data_dir root
+        // Private should still be at the real data_dir root (outside datasites)
         let private_biovault = env
             .app
             .data_dir
             .join("private")
             .join("app_data")
             .join("biovault");
-        env.app.storage.ensure_dir(&private_biovault)?;
+        fs::create_dir_all(&private_biovault)?;
 
         // Delete paths
         let paths_to_delete = vec![
@@ -440,11 +437,8 @@ mod hard_reset_tests {
             .storage
             .path_exists(&public_biovault)
             .unwrap_or(true));
-        assert!(!env
-            .app
-            .storage
-            .path_exists(&private_biovault)
-            .unwrap_or(true));
+        // private_biovault is outside datasites, use fs check directly
+        assert!(!private_biovault.exists());
 
         // Clean up environment variables
         std::env::remove_var("BIOVAULT_HOME");

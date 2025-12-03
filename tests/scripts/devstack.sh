@@ -13,6 +13,7 @@ Options:
   --clients list   Comma-separated client emails (default: client1@sandbox.local,client2@sandbox.local)
   --sandbox DIR    Sandbox root path (default: ./sandbox)
   --reset          Remove any existing devstack state before starting (also removes sandbox on stop)
+  --skip-sync-check Skip the sbdev sync probe after boot (faster, less safe)
   --stop           Stop the devstack instead of starting it
   --status         Print the current devstack state (relay/state.json) and exit
   -h, --help       Show this message
@@ -25,6 +26,7 @@ SANDBOX_DIR="${SANDBOX_DIR:-$ROOT_DIR/sandbox}"
 GO_CACHE_DIR="$SYFTBOX_DIR/.gocache"
 ACTION="start"
 RESET_FLAG=0
+SKIP_SYNC_CHECK=0
 RAW_CLIENTS=()
 
 while [[ $# -gt 0 ]]; do
@@ -41,6 +43,9 @@ while [[ $# -gt 0 ]]; do
       ;;
     --reset)
       RESET_FLAG=1
+      ;;
+    --skip-sync-check)
+      SKIP_SYNC_CHECK=1
       ;;
     --stop)
       ACTION="stop"
@@ -154,20 +159,22 @@ start_stack() {
   mkdir -p "$SANDBOX_DIR"
   local args=(--path "$SANDBOX_DIR" --random-ports)
   (( RESET_FLAG )) && args+=(--reset)
+  (( SKIP_SYNC_CHECK )) && args+=(--skip-sync-check)
   for email in "${CLIENTS[@]}"; do
     args+=(--client "$email")
   done
 
-  # Pass through Java/Nextflow environment variables if available
-  [[ -n "${SCENARIO_JAVA_HOME:-}" ]] && args+=(--env "JAVA_HOME=$SCENARIO_JAVA_HOME")
-  [[ -n "${SCENARIO_JAVA_HOME:-}" ]] && args+=(--env "JAVA_CMD=$SCENARIO_JAVA_HOME/bin/java")
-  [[ -n "${SCENARIO_USER_PATH:-}" ]] && args+=(--env "PATH=$SCENARIO_USER_PATH")
-  [[ -n "${NXF_DISABLE_JAVA_VERSION_CHECK:-}" ]] && args+=(--env "NXF_DISABLE_JAVA_VERSION_CHECK=$NXF_DISABLE_JAVA_VERSION_CHECK")
-  [[ -n "${NXF_IGNORE_JAVA_VERSION:-}" ]] && args+=(--env "NXF_IGNORE_JAVA_VERSION=$NXF_IGNORE_JAVA_VERSION")
-  [[ -n "${NXF_OPTS:-}" ]] && args+=(--env "NXF_OPTS=$NXF_OPTS")
+  # Export environment variables for the devstack command
+  # These will be inherited by the Go process and passed to spawned clients
+  export GOCACHE="$GO_CACHE_DIR"
+  [[ -n "${SCENARIO_JAVA_HOME:-}" ]] && export JAVA_HOME="$SCENARIO_JAVA_HOME" JAVA_CMD="$SCENARIO_JAVA_HOME/bin/java"
+  [[ -n "${SCENARIO_USER_PATH:-}" ]] && export PATH="$SCENARIO_USER_PATH"
+  [[ -n "${NXF_DISABLE_JAVA_VERSION_CHECK:-}" ]] && export NXF_DISABLE_JAVA_VERSION_CHECK
+  [[ -n "${NXF_IGNORE_JAVA_VERSION:-}" ]] && export NXF_IGNORE_JAVA_VERSION
+  [[ -n "${NXF_OPTS:-}" ]] && export NXF_OPTS
 
   echo "Starting SyftBox devstack via syftbox/cmd/devstack..."
-  (cd "$SYFTBOX_DIR" && GOCACHE="$GO_CACHE_DIR" go run ./cmd/devstack start "${args[@]}")
+  (cd "$SYFTBOX_DIR" && go run ./cmd/devstack start "${args[@]}")
 
   for email in "${CLIENTS[@]}"; do
     bootstrap_biovault "$email"

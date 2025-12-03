@@ -730,7 +730,7 @@ mod tests {
     fn copy_project_files_copies_workflow_and_assets() {
         let tmp = TempDir::new().unwrap();
         let src = tmp.path().join("src");
-        let dest = tmp.path().join("dest");
+        let dest = tmp.path().join("datasites/dest");
         fs::create_dir_all(&dest).unwrap();
         fs::create_dir_all(src.join("assets/nested")).unwrap();
         fs::write(src.join("workflow.nf"), b"wf").unwrap();
@@ -746,7 +746,7 @@ mod tests {
         let src2 = tmp.path().join("src2");
         fs::create_dir_all(&src2).unwrap();
         fs::write(src2.join("workflow.nf"), b"wf").unwrap();
-        let dest2 = tmp.path().join("dest2");
+        let dest2 = tmp.path().join("datasites/dest2");
         fs::create_dir_all(&dest2).unwrap();
         copy_project_files(&src2, &dest2, &storage, "peer@example.com").unwrap();
     }
@@ -801,7 +801,7 @@ mod tests {
     fn test_copy_project_files_with_symlinks() {
         let tmp = TempDir::new().unwrap();
         let src = tmp.path().join("src");
-        let dest = tmp.path().join("dest");
+        let dest = tmp.path().join("datasites/dest");
 
         fs::create_dir_all(&src).unwrap();
         fs::create_dir_all(&dest).unwrap();
@@ -830,7 +830,7 @@ mod tests {
     fn test_copy_project_files_deeply_nested() {
         let tmp = TempDir::new().unwrap();
         let src = tmp.path().join("src");
-        let dest = tmp.path().join("dest");
+        let dest = tmp.path().join("datasites/dest");
 
         fs::create_dir_all(&dest).unwrap();
         fs::create_dir_all(src.join("assets/a/b/c/d")).unwrap();
@@ -851,7 +851,7 @@ mod tests {
     fn test_copy_project_files_preserves_content() {
         let tmp = TempDir::new().unwrap();
         let src = tmp.path().join("src");
-        let dest = tmp.path().join("dest");
+        let dest = tmp.path().join("datasites/dest");
 
         fs::create_dir_all(&dest).unwrap();
         fs::create_dir_all(src.join("assets")).unwrap();
@@ -881,7 +881,9 @@ mod tests {
     #[test]
     fn update_permissions_adds_new_recipient_without_duplicates() {
         let tmp = TempDir::new().unwrap();
-        let path = tmp.path().join("syft.pub.yaml");
+        let datasites_dir = tmp.path().join("datasites");
+        fs::create_dir_all(&datasites_dir).unwrap();
+        let path = datasites_dir.join("syft.pub.yaml");
         let original = SyftPermissions::new_for_datasite("original@example.com");
         original.save(&path.to_path_buf()).unwrap();
 

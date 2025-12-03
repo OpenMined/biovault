@@ -90,6 +90,15 @@ fn is_valid_java_binary(path: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn bundled_env_key(dep: &str) -> Option<&'static str> {
+    match dep {
+        "java" => Some("BIOVAULT_BUNDLED_JAVA"),
+        "nextflow" => Some("BIOVAULT_BUNDLED_NEXTFLOW"),
+        "uv" => Some("BIOVAULT_BUNDLED_UV"),
+        _ => None,
+    }
+}
+
 fn adjust_java_binary(mut current: Option<String>) -> Option<String> {
     if let Some(ref path) = current {
         if !is_valid_java_binary(path) {
@@ -579,19 +588,41 @@ pub fn check_dependencies_result() -> Result<DependencyCheckResult> {
             .as_ref()
             .and_then(|cfg| cfg.get_binary_path(&dep.name));
 
-        // Check if the binary exists in PATH or use custom path
-        let mut binary_path = if custom_path
-            .as_ref()
-            .map(|p| Path::new(p).exists())
-            .unwrap_or(false)
-        {
-            custom_path.clone()
-        } else {
-            which::which(&dep.name)
-                .ok()
-                .map(|p| p.display().to_string())
+        // Priority for syftbox: SYFTBOX_BINARY env -> custom path -> PATH -> well-known locations -> sbenv
+        let mut binary_path = None;
+
+        if dep.name == "syftbox" {
+            if let Ok(env_bin) = std::env::var("SYFTBOX_BINARY") {
+                if !env_bin.trim().is_empty() && Path::new(&env_bin).exists() {
+                    binary_path = Some(env_bin);
+                }
+            }
         }
-        .or_else(|| find_in_well_known_locations(&dep.name));
+
+        if binary_path.is_none() {
+            if let Some(env_key) = bundled_env_key(&dep.name) {
+                if let Ok(env_bin) = env::var(env_key) {
+                    if !env_bin.trim().is_empty() && Path::new(&env_bin).exists() {
+                        binary_path = Some(env_bin);
+                    }
+                }
+            }
+        }
+
+        if binary_path.is_none() {
+            binary_path = if custom_path
+                .as_ref()
+                .map(|p| Path::new(p).exists())
+                .unwrap_or(false)
+            {
+                custom_path.clone()
+            } else {
+                which::which(&dep.name)
+                    .ok()
+                    .map(|p| p.display().to_string())
+            }
+            .or_else(|| find_in_well_known_locations(&dep.name));
+        }
         if dep.name == "java" {
             binary_path = adjust_java_binary(binary_path);
         }
