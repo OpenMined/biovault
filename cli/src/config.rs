@@ -361,7 +361,7 @@ impl Config {
         let data_dir = self.get_syftbox_data_dir()?;
         let mut runtime = SyftboxRuntimeConfig::new(self.email.clone(), config_path, data_dir);
         // Prefer explicit env override for the syftbox binary, then config, else default
-        if let Some(env_bin) = std::env::var("SYFTBOX_BINARY").ok() {
+        if let Ok(env_bin) = std::env::var("SYFTBOX_BINARY") {
             let trimmed = env_bin.trim();
             if !trimmed.is_empty() {
                 runtime = runtime.with_binary_path(Some(PathBuf::from(trimmed)));
