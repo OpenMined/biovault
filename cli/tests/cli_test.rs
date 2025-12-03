@@ -201,6 +201,16 @@ fn test_sample_data_list_cli() {
 
 #[test]
 fn test_run_dry_run_cli() {
+    // Skip test if Docker is not available (CI environments may not have it)
+    if std::process::Command::new("docker")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        eprintln!("Skipping test_run_dry_run_cli: Docker not available");
+        return;
+    }
+
     let tmp = TempDir::new().unwrap();
     // Set explicit BIOVAULT_HOME for templates
     let bv_home = tmp.path().join(".bvhome");
