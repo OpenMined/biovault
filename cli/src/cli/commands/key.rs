@@ -1,6 +1,6 @@
 use crate::config::Config;
 use crate::syftbox::syc::{
-    import_public_bundle, parse_public_bundle_file, provision_local_identity,
+    import_public_bundle, parse_public_bundle_file, provision_local_identity_with_options,
     restore_identity_from_mnemonic,
 };
 use crate::Result;
@@ -27,6 +27,8 @@ pub enum KeyCommands {
             help = "Override Syft Crypto vault path (defaults to datasites/.syc)"
         )]
         vault: Option<PathBuf>,
+        #[arg(long, help = "Force overwrite existing key material")]
+        force: bool,
         #[arg(long, help = "Output JSON instead of human-readable text")]
         json: bool,
     },
@@ -114,13 +116,15 @@ pub async fn handle(command: KeyCommands, config: &Config) -> Result<()> {
             email,
             data_dir,
             vault,
+            force,
             json,
         } => {
             let email = resolve_email(email.as_deref(), config)?;
             let (data_root, vault_path) =
                 resolve_paths(config, data_dir.as_deref(), vault.as_deref())?;
-            let outcome = provision_local_identity(&email, &data_root, Some(&vault_path))
-                .with_context(|| format!("failed to generate identity {email}"))?;
+            let outcome =
+                provision_local_identity_with_options(&email, &data_root, Some(&vault_path), force)
+                    .with_context(|| format!("failed to generate identity {email}"))?;
             let bundle = parse_public_bundle_file(&outcome.public_bundle_path)?;
             let result = GenerateResult {
                 identity: bundle.identity.clone(),
