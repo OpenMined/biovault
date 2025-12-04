@@ -16,6 +16,7 @@ jobs:
           - tests/scenarios/import-and-run.yaml
           - tests/scenarios/inbox-ping-pong.yaml
           - tests/scenarios/break-nextflow.yaml
+          - tests/scenarios/key-management.yaml
 
     steps:
       - uses: actions/checkout@v4

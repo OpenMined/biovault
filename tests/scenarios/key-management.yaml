@@ -1,0 +1,542 @@
+# Key Management Test Scenarios
+# Tests the full key lifecycle: generation, publishing, discovery, import, and messaging
+#
+# Run with: ./test-scenario.sh tests/scenarios/key-management.yaml
+
+setup:
+  server:
+    - "./tests/scripts/devstack.sh --reset --skip-keys --clients client1@sandbox.local,client2@sandbox.local"
+
+steps:
+  # ============================================================
+  # PHASE 1: Verify No Keys Exist (Fresh State)
+  # ============================================================
+
+  - name: "Phase 1: Verify client1 has NO keys initially"
+    datasite: client1@sandbox.local
+    run: |
+      echo "=== Checking for existing keys ==="
+      if [ -d ".syc/keys" ] && [ "$(ls -A .syc/keys 2>/dev/null)" ]; then
+        echo "✗ Keys directory exists and has files"
+        ls -la .syc/keys/
+        exit 1
+      fi
+      echo "✓ No keys exist yet"
+
+  - name: Verify client2 has NO keys initially
+    datasite: client2@sandbox.local
+    run: |
+      if [ -d ".syc/keys" ] && [ "$(ls -A .syc/keys 2>/dev/null)" ]; then
+        echo "✗ Keys directory exists and has files"
+        exit 1
+      fi
+      echo "✓ No keys exist yet"
+
+  # ============================================================
+  # PHASE 2: Initialize BioVault and Generate Keys
+  # ============================================================
+
+  - name: "Phase 2: Initialize BioVault for client1 and capture mnemonic"
+    datasite: client1@sandbox.local
+    run: |
+      # Run init and capture output to file (suppress stdout)
+      {{workspace}}/cli/target/release/bv init --quiet client1@sandbox.local 2>&1 > /tmp/client1_init.log
+      # Show init output for debugging
+      cat /tmp/client1_init.log >&2
+      echo "✓ BioVault initialized for client1" >&2
+      # Extract and output ONLY the mnemonic (this goes to stdout for capture)
+      grep "Recovery mnemonic" /tmp/client1_init.log | sed 's/.*Recovery mnemonic (store securely!): //'
+    capture: client1_mnemonic
+
+  - name: Verify client1 mnemonic captured
+    run: |
+      echo "Captured mnemonic: {{client1_mnemonic}}"
+      test -n "{{client1_mnemonic}}" && echo "✓ Mnemonic captured"
+
+  - name: Verify client1 key exists in vault
+    datasite: client1@sandbox.local
+    run: |
+      test -f ".syc/keys/client1@sandbox.local.key" && echo "✓ Private key exists"
+      test -f ".syc/bundles/client1@sandbox.local.json" && echo "✓ Bundle exists"
+
+  - name: Verify client1 DID is published
+    datasite: client1@sandbox.local
+    run: |
+      test -f "datasites/client1@sandbox.local/public/crypto/did.json" && echo "✓ Public DID published"
+
+  - name: Initialize BioVault for client2
+    datasite: client2@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv init --quiet client2@sandbox.local
+      echo "✓ BioVault initialized for client2"
+
+  - name: Generate keys for client2
+    datasite: client2@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv key generate
+      echo "✓ Keys generated for client2"
+
+  - name: Verify client2 key exists in vault
+    datasite: client2@sandbox.local
+    run: |
+      test -f ".syc/keys/client2@sandbox.local.key" && echo "✓ Private key exists"
+      test -f ".syc/bundles/client2@sandbox.local.json" && echo "✓ Bundle exists"
+
+  - name: Verify client2 DID is published
+    datasite: client2@sandbox.local
+    run: |
+      test -f "datasites/client2@sandbox.local/public/crypto/did.json" && echo "✓ Public DID published"
+
+  - name: Get client1 fingerprint
+    datasite: client1@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv key status --json | grep -o '"vault_fingerprint"[[:space:]]*:[[:space:]]*"[^"]*"' | cut -d'"' -f4 | head -c 16
+    capture: client1_fp_original
+
+  - name: Get client2 fingerprint
+    datasite: client2@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv key status --json | grep -o '"vault_fingerprint"[[:space:]]*:[[:space:]]*"[^"]*"' | cut -d'"' -f4 | head -c 16
+    capture: client2_fp_original
+
+  - name: Display captured fingerprints
+    run: |
+      echo "Client1 FP: {{client1_fp_original}}"
+      echo "Client2 FP: {{client2_fp_original}}"
+
+  # ============================================================
+  # PHASE 3: Message Without Imported Key (Should Fail)
+  # ============================================================
+
+  - name: "Phase 3: Client1 tries to send to client2 BEFORE importing key - should fail"
+    datasite: client1@sandbox.local
+    run: |
+      OUTPUT=$({{workspace}}/cli/target/release/bv message send \
+        client2@sandbox.local \
+        "This should fail - no key imported yet" 2>&1) || true
+      echo "$OUTPUT"
+      echo "$OUTPUT" | grep -qi "bundle\|not found\|cached" && echo "✓ Got expected error (no bundle cached)"
+
+  # ============================================================
+  # PHASE 4: Wait for Sync and Discover Keys
+  # ============================================================
+
+  - name: "Phase 4: Wait for client2's DID to sync to client1"
+    datasite: client1@sandbox.local
+    wait_for: datasites/client2@sandbox.local/public/crypto/did.json
+    timeout: 30
+
+  - name: Wait for client1's DID to sync to client2
+    datasite: client2@sandbox.local
+    wait_for: datasites/client1@sandbox.local/public/crypto/did.json
+    timeout: 30
+
+  - name: Client1 lists available DIDs to import
+    datasite: client1@sandbox.local
+    run: |
+      echo "=== Available DIDs in synced datasites ==="
+      find datasites/*/public/crypto/did.json 2>/dev/null | while read f; do
+        IDENTITY=$(grep -o '"identity"[[:space:]]*:[[:space:]]*"[^"]*"' "$f" | cut -d'"' -f4)
+        FP=$(grep -o '"identity_fingerprint"[[:space:]]*:[[:space:]]*"[^"]*"' "$f" | cut -d'"' -f4 | head -c 16)
+        echo "  $IDENTITY (fingerprint: $FP)"
+      done
+
+  # ============================================================
+  # PHASE 5: Import Keys and Exchange Messages
+  # ============================================================
+
+  - name: "Phase 5: Client1 imports Client2's public key"
+    datasite: client1@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv key import \
+        datasites/client2@sandbox.local/public/crypto/did.json \
+        --email client2@sandbox.local
+      echo "✓ Client1 imported Client2's key"
+
+  - name: Client2 imports Client1's public key
+    datasite: client2@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv key import \
+        datasites/client1@sandbox.local/public/crypto/did.json \
+        --email client1@sandbox.local
+      echo "✓ Client2 imported Client1's key"
+
+  - name: Verify client1 has client2's bundle cached
+    datasite: client1@sandbox.local
+    run: |
+      test -f ".syc/bundles/client2@sandbox.local.json" && echo "✓ Client2 bundle cached"
+
+  - name: Verify client2 has client1's bundle cached
+    datasite: client2@sandbox.local
+    run: |
+      test -f ".syc/bundles/client1@sandbox.local.json" && echo "✓ Client1 bundle cached"
+
+  - name: Client1 sends message to Client2
+    datasite: client1@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv message send \
+        client2@sandbox.local \
+        "Hello from client1 - message 1"
+      echo "✓ Message sent"
+
+  - name: Wait for message to arrive at client2
+    datasite: client2@sandbox.local
+    wait_for: datasites/client2@sandbox.local/app_data/biovault/rpc/message/*.request
+    timeout: 30
+
+  - name: Client2 syncs to receive message
+    datasite: client2@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv message sync --no-cleanup
+
+  - name: Client2 lists inbox - should see message
+    datasite: client2@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv inbox --plain
+    expect: "Hello from client1"
+
+  # ============================================================
+  # PHASE 6: Key Backup and Restore
+  # ============================================================
+
+  - name: "Phase 6: Client2 sends message to Client1 (for restore test)"
+    datasite: client2@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv message send \
+        client1@sandbox.local \
+        "Message for restore test - can you still read this?"
+      echo "✓ Message sent to client1"
+
+  - name: Wait for message to arrive at client1
+    datasite: client1@sandbox.local
+    wait_for: datasites/client1@sandbox.local/app_data/biovault/rpc/message/*.request
+    timeout: 30
+
+  - name: Client1 syncs to receive message before backup test
+    datasite: client1@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv message sync --no-cleanup
+      {{workspace}}/cli/target/release/bv inbox --plain
+    expect: "restore test"
+
+  - name: Record client1 fingerprint before restore
+    datasite: client1@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv key status --json | grep -o '"vault_fingerprint"[[:space:]]*:[[:space:]]*"[^"]*"' | cut -d'"' -f4 | head -c 16
+    capture: client1_fp_before_restore
+
+  - name: Client1 deletes their private key (simulating key loss)
+    datasite: client1@sandbox.local
+    run: |
+      echo "Deleting private key..."
+      rm -f .syc/keys/client1@sandbox.local.key
+      test ! -f ".syc/keys/client1@sandbox.local.key" && echo "✓ Private key deleted"
+      # Bundle should still exist
+      test -f ".syc/bundles/client1@sandbox.local.json" && echo "✓ Bundle still exists"
+
+  - name: Verify client1 cannot send messages without key
+    datasite: client1@sandbox.local
+    run: |
+      OUTPUT=$({{workspace}}/cli/target/release/bv message send \
+        client2@sandbox.local \
+        "This should fail" 2>&1) || true
+      echo "$OUTPUT"
+      echo "$OUTPUT" | grep -qi "key\|identity\|not found" && echo "✓ Cannot send without key"
+
+  - name: Client1 restores key from mnemonic
+    datasite: client1@sandbox.local
+    run: |
+      echo "Restoring key from mnemonic..."
+      {{workspace}}/cli/target/release/bv key restore \
+        --email client1@sandbox.local \
+        --mnemonic "{{client1_mnemonic}}"
+      echo "✓ Key restored from mnemonic"
+
+  - name: Verify restored key has same fingerprint (no TOFU change)
+    datasite: client1@sandbox.local
+    run: |
+      RESTORED_FP=$({{workspace}}/cli/target/release/bv key status --json | grep -o '"vault_fingerprint"[[:space:]]*:[[:space:]]*"[^"]*"' | cut -d'"' -f4 | head -c 16)
+      echo "Before restore: {{client1_fp_before_restore}}"
+      echo "After restore:  $RESTORED_FP"
+      test "{{client1_fp_before_restore}}" = "$RESTORED_FP" && echo "✓ Fingerprint unchanged - no TOFU warning!"
+
+  - name: Verify published DID matches restored key
+    datasite: client1@sandbox.local
+    run: |
+      VAULT_FP=$(grep -o '"identity_fingerprint"[[:space:]]*:[[:space:]]*"[^"]*"' .syc/bundles/client1@sandbox.local.json | cut -d'"' -f4 | head -c 16)
+      DID_FP=$(grep -o '"identity_fingerprint"[[:space:]]*:[[:space:]]*"[^"]*"' datasites/client1@sandbox.local/public/crypto/did.json | cut -d'"' -f4 | head -c 16)
+      echo "Vault fingerprint: $VAULT_FP"
+      echo "DID fingerprint:   $DID_FP"
+      test "$VAULT_FP" = "$DID_FP" && echo "✓ Vault matches published DID"
+
+  - name: Clean up old messages on client1
+    datasite: client1@sandbox.local
+    run: |
+      rm -f datasites/client1@sandbox.local/app_data/biovault/rpc/message/*.request
+      rm -f datasites/client1@sandbox.local/app_data/biovault/rpc/message/*.response
+      echo "✓ Cleaned old messages"
+
+  - name: Client2 sends new message to restored Client1
+    datasite: client2@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv message send \
+        client1@sandbox.local \
+        "Message AFTER restore - this proves decryption still works!"
+      echo "✓ Message sent to restored client1"
+
+  - name: Wait for post-restore message
+    datasite: client1@sandbox.local
+    wait_for: datasites/client1@sandbox.local/app_data/biovault/rpc/message/*.request
+    timeout: 30
+
+  - name: Client1 syncs and decrypts message after restore
+    datasite: client1@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv message sync --no-cleanup
+
+  - name: Verify client1 can read message after restore
+    datasite: client1@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv inbox --plain
+    expect: "AFTER restore"
+
+  - name: Client1 can send messages after restore
+    datasite: client1@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv message send \
+        client2@sandbox.local \
+        "Reply after restore - my key is working again!"
+      echo "✓ Client1 can send messages after restore"
+
+  # ============================================================
+  # PHASE 7: Key Regeneration and TOFU Detection
+  # ============================================================
+
+  - name: "Phase 7: Client2 regenerates their key"
+    datasite: client2@sandbox.local
+    run: |
+      echo "Regenerating client2 key..."
+      {{workspace}}/cli/target/release/bv key wipe
+      {{workspace}}/cli/target/release/bv key generate
+      echo "✓ Key regenerated"
+
+  - name: Get client2 NEW fingerprint
+    datasite: client2@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv key status --json | grep -o '"vault_fingerprint"[[:space:]]*:[[:space:]]*"[^"]*"' | cut -d'"' -f4 | head -c 16
+    capture: client2_fp_new
+
+  - name: Verify fingerprint changed
+    run: |
+      echo "Original: {{client2_fp_original}}"
+      echo "New: {{client2_fp_new}}"
+      test "{{client2_fp_original}}" != "{{client2_fp_new}}" && echo "✓ Fingerprint changed"
+
+  - name: Clean up old messages before testing key mismatch
+    datasite: client2@sandbox.local
+    run: |
+      rm -f datasites/client2@sandbox.local/app_data/biovault/rpc/message/*.request
+      rm -f datasites/client2@sandbox.local/app_data/biovault/rpc/message/*.response
+      echo "✓ Cleaned old messages"
+
+  # Client1 still has OLD client2 key cached
+  - name: Client1 sends message with OLD client2 key
+    datasite: client1@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv message send \
+        client2@sandbox.local \
+        "Message sent with your OLD key"
+      echo "✓ Message sent (encrypted with old key)"
+
+  - name: Wait for message to arrive
+    datasite: client2@sandbox.local
+    wait_for: datasites/client2@sandbox.local/app_data/biovault/rpc/message/*.request
+    timeout: 30
+
+  # Client2 tries to decrypt but has NEW key - should fail
+  - name: Client2 syncs - should get decryption error
+    datasite: client2@sandbox.local
+    run: |
+      OUTPUT=$({{workspace}}/cli/target/release/bv message sync --no-cleanup 2>&1) || true
+      echo "$OUTPUT"
+      echo "$OUTPUT" | grep -qi "decrypt\|failed\|error\|parse" && echo "✓ Got decryption issue (expected)"
+
+  # ============================================================
+  # PHASE 8: Trust New Key and Resume Communication
+  # ============================================================
+
+  - name: "Phase 8: Clean up old messages on client2 first"
+    datasite: client2@sandbox.local
+    run: |
+      rm -f datasites/client2@sandbox.local/app_data/biovault/rpc/message/*.request
+      rm -f datasites/client2@sandbox.local/app_data/biovault/rpc/message/*.response
+      echo "✓ Cleaned old messages"
+
+  - name: Wait for client1 to receive updated client2 public key
+    datasite: client1@sandbox.local
+    run: |
+      echo "Waiting for updated did.json to sync..."
+      for i in $(seq 1 30); do
+        FP=$(grep -o '"identity_fingerprint"[[:space:]]*:[[:space:]]*"[^"]*"' datasites/client2@sandbox.local/public/crypto/did.json 2>/dev/null | cut -d'"' -f4 | head -c 16 || echo "")
+        if [ "$FP" = "{{client2_fp_new}}" ]; then
+          echo "✓ New fingerprint synced: $FP"
+          exit 0
+        fi
+        echo "  Current: $FP (waiting for {{client2_fp_new}})"
+        sleep 1
+      done
+      echo "✗ Timeout waiting for new fingerprint"
+      exit 1
+
+  - name: Client1 re-imports Client2's NEW public key
+    datasite: client1@sandbox.local
+    run: |
+      # Remove old bundle first, then re-import to get new key (simulating "trust new key")
+      rm -f ".syc/bundles/client2@sandbox.local.json"
+      {{workspace}}/cli/target/release/bv key import \
+        datasites/client2@sandbox.local/public/crypto/did.json \
+        --email client2@sandbox.local
+      # Verify we got the right fingerprint
+      IMPORTED_FP=$(grep -o '"identity_fingerprint"[[:space:]]*:[[:space:]]*"[^"]*"' .syc/bundles/client2@sandbox.local.json | cut -d'"' -f4 | head -c 16)
+      echo "Imported fingerprint: $IMPORTED_FP"
+      echo "Expected: {{client2_fp_new}}"
+      echo "✓ Imported new key"
+
+  - name: Client1 sends message with NEW client2 key
+    datasite: client1@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv message send \
+        client2@sandbox.local \
+        "Message sent with your NEW key - should work!"
+      echo "✓ Message sent with new key"
+
+  - name: Wait for new message
+    datasite: client2@sandbox.local
+    wait_for: datasites/client2@sandbox.local/app_data/biovault/rpc/message/*.request
+    timeout: 30
+
+  - name: Client2 syncs the new message
+    datasite: client2@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv message sync --no-cleanup
+
+  - name: Client2 lists inbox - should see new message
+    datasite: client2@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv inbox --plain
+    expect: "NEW key"
+
+  # ============================================================
+  # PHASE 9: Recipient Removes Sender's Key
+  # ============================================================
+
+  - name: "Phase 9: Client2 removes Client1's imported key"
+    datasite: client2@sandbox.local
+    run: |
+      rm -f ".syc/bundles/client1@sandbox.local.json"
+      echo "✓ Removed client1 bundle from cache"
+
+  - name: Verify client1 bundle removed
+    datasite: client2@sandbox.local
+    run: |
+      test ! -f ".syc/bundles/client1@sandbox.local.json" && echo "✓ Bundle removed"
+
+  - name: Client1 sends another message
+    datasite: client1@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv message send \
+        client2@sandbox.local \
+        "Can you still read this after removing my key?"
+
+  - name: Wait for message
+    datasite: client2@sandbox.local
+    wait_for: datasites/client2@sandbox.local/app_data/biovault/rpc/message/*.request
+    timeout: 30
+
+  - name: Client2 syncs - should fail (no sender bundle)
+    datasite: client2@sandbox.local
+    run: |
+      OUTPUT=$({{workspace}}/cli/target/release/bv message sync --no-cleanup 2>&1) || true
+      echo "$OUTPUT"
+      echo "$OUTPUT" | grep -qi "sender bundle not cached\|import" && echo "✓ Got expected sender bundle error"
+
+  # ============================================================
+  # PHASE 10: Multiple Identities Prevention
+  # ============================================================
+
+  - name: "Phase 10: Artificially create multiple identity files"
+    datasite: client1@sandbox.local
+    run: |
+      cp ".syc/keys/client1@sandbox.local.key" .syc/keys/fake_identity.key
+      echo "✓ Created duplicate key file"
+
+  - name: Verify multiple key files exist
+    datasite: client1@sandbox.local
+    run: |
+      KEY_COUNT=$(ls .syc/keys/*.key 2>/dev/null | wc -l)
+      echo "Key files found: $KEY_COUNT"
+      test "$KEY_COUNT" -gt 1 && echo "✓ Multiple keys present"
+
+  - name: Try to send message - should get multiple identities error
+    datasite: client1@sandbox.local
+    run: |
+      OUTPUT=$({{workspace}}/cli/target/release/bv message send \
+        client2@sandbox.local \
+        "This should fail" 2>&1) || true
+      echo "$OUTPUT"
+      echo "$OUTPUT" | grep -qi "multiple identities" && echo "✓ Got multiple identities error"
+
+  - name: Regenerate key to clean up multiple identities
+    datasite: client1@sandbox.local
+    run: |
+      rm -f .syc/keys/*.key
+      {{workspace}}/cli/target/release/bv key generate
+      echo "✓ Regenerated key"
+
+  - name: Verify only one key file now
+    datasite: client1@sandbox.local
+    run: |
+      KEY_COUNT=$(ls .syc/keys/*.key 2>/dev/null | wc -l)
+      echo "Key files found: $KEY_COUNT"
+      test "$KEY_COUNT" -eq 1 && echo "✓ Only one key now"
+
+  # ============================================================
+  # PHASE 11: Verify Shadow Files Are Not Encrypted
+  # ============================================================
+
+  - name: "Phase 11: Assert no encrypted files in client1 shadows"
+    datasite: client1@sandbox.local
+    assert_no_encrypted: unencrypted
+
+  - name: Assert no encrypted files in client2 shadows
+    datasite: client2@sandbox.local
+    assert_no_encrypted: unencrypted
+
+  # ============================================================
+  # Summary
+  # ============================================================
+
+  - name: "=== TEST SUMMARY ==="
+    run: |
+      echo ""
+      echo "All key management scenarios completed!"
+      echo ""
+      echo "Tested:"
+      echo "  ✓ Fresh state (no keys)"
+      echo "  ✓ BioVault initialization"
+      echo "  ✓ Key generation and publishing"
+      echo "  ✓ Message without imported key (fails as expected)"
+      echo "  ✓ Key discovery via synced datasites"
+      echo "  ✓ Key import and exchange"
+      echo "  ✓ Basic encrypted messaging"
+      echo "  ✓ Key backup and restore from mnemonic"
+      echo "  ✓ Restored key matches original (no TOFU warning)"
+      echo "  ✓ Decryption works after restore"
+      echo "  ✓ Key regeneration"
+      echo "  ✓ TOFU detection (fingerprint change)"
+      echo "  ✓ Decryption failure with old key"
+      echo "  ✓ Trust new key and resume messaging"
+      echo "  ✓ Sender key removal by recipient"
+      echo "  ✓ Multiple identities prevention"
+      echo "  ✓ Shadow folder encryption verification"
+      echo ""

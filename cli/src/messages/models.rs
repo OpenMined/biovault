@@ -182,6 +182,139 @@ impl std::fmt::Display for SyncStatus {
     }
 }
 
+/// Reason why a message failed to decrypt
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum DecryptionFailureReason {
+    /// Sender's public bundle is not cached locally
+    SenderBundleNotCached,
+    /// Our private key doesn't match the recipient key in the envelope
+    RecipientKeyMismatch,
+    /// Decryption failed (corrupted data, wrong key, etc.)
+    DecryptionFailed,
+    /// The message was encrypted for a different identity
+    WrongRecipient,
+    /// Envelope parsing failed
+    InvalidEnvelope,
+    /// Unknown/other error
+    Other(String),
+}
+
+impl std::fmt::Display for DecryptionFailureReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DecryptionFailureReason::SenderBundleNotCached => {
+                write!(f, "Sender's key not imported")
+            }
+            DecryptionFailureReason::RecipientKeyMismatch => {
+                write!(f, "Message encrypted for different key")
+            }
+            DecryptionFailureReason::DecryptionFailed => {
+                write!(f, "Decryption failed")
+            }
+            DecryptionFailureReason::WrongRecipient => {
+                write!(f, "Message not addressed to you")
+            }
+            DecryptionFailureReason::InvalidEnvelope => {
+                write!(f, "Invalid message format")
+            }
+            DecryptionFailureReason::Other(msg) => write!(f, "{}", msg),
+        }
+    }
+}
+
+/// A message that failed to decrypt, with metadata extracted from the envelope
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FailedMessage {
+    /// Unique ID for this failed message record
+    pub id: String,
+    /// Path to the original encrypted request file
+    pub request_path: String,
+    /// RPC request ID from the filename
+    pub rpc_request_id: String,
+
+    /// Sender identity from envelope (email)
+    pub sender_identity: String,
+    /// Sender's key fingerprint from envelope
+    pub sender_fingerprint: String,
+
+    /// Expected recipient identity (us)
+    pub recipient_identity: Option<String>,
+    /// Recipient key fingerprint from envelope (what key we'd need)
+    pub recipient_fingerprint: Option<String>,
+
+    /// Why decryption failed
+    pub failure_reason: DecryptionFailureReason,
+    /// Detailed error message
+    pub error_details: String,
+
+    /// Filename hint from envelope (if any)
+    pub filename_hint: Option<String>,
+
+    /// When the failure was recorded
+    pub created_at: DateTime<Utc>,
+    /// Whether the user has dismissed this failure
+    pub dismissed: bool,
+}
+
+impl FailedMessage {
+    pub fn new(
+        request_path: String,
+        rpc_request_id: String,
+        sender_identity: String,
+        sender_fingerprint: String,
+        failure_reason: DecryptionFailureReason,
+        error_details: String,
+    ) -> Self {
+        Self {
+            id: Uuid::new_v4().to_string(),
+            request_path,
+            rpc_request_id,
+            sender_identity,
+            sender_fingerprint,
+            recipient_identity: None,
+            recipient_fingerprint: None,
+            failure_reason,
+            error_details,
+            filename_hint: None,
+            created_at: Utc::now(),
+            dismissed: false,
+        }
+    }
+
+    /// User-friendly description of what action they can take
+    pub fn suggested_action(&self) -> String {
+        match &self.failure_reason {
+            DecryptionFailureReason::SenderBundleNotCached => {
+                format!(
+                    "Import {}'s public key to decrypt this message",
+                    self.sender_identity
+                )
+            }
+            DecryptionFailureReason::RecipientKeyMismatch => {
+                format!(
+                    "This message was encrypted for a different key. Ask {} to resend it.",
+                    self.sender_identity
+                )
+            }
+            DecryptionFailureReason::DecryptionFailed => {
+                format!(
+                    "Message may be corrupted or encrypted for wrong key. Ask {} to resend.",
+                    self.sender_identity
+                )
+            }
+            DecryptionFailureReason::WrongRecipient => {
+                "This message was not addressed to you.".to_string()
+            }
+            DecryptionFailureReason::InvalidEnvelope => {
+                "The message format is invalid and cannot be processed.".to_string()
+            }
+            DecryptionFailureReason::Other(_) => {
+                format!("Contact {} about this message.", self.sender_identity)
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

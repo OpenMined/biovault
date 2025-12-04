@@ -14,6 +14,7 @@ Options:
   --sandbox DIR    Sandbox root path (default: ./sandbox)
   --reset          Remove any existing devstack state before starting (also removes sandbox on stop)
   --skip-sync-check Skip the sbdev sync probe after boot (faster, less safe)
+  --skip-keys      Skip key generation (for manual key management testing)
   --stop           Stop the devstack instead of starting it
   --status         Print the current devstack state (relay/state.json) and exit
   -h, --help       Show this message
@@ -27,6 +28,7 @@ GO_CACHE_DIR="$SYFTBOX_DIR/.gocache"
 ACTION="start"
 RESET_FLAG=0
 SKIP_SYNC_CHECK=0
+SKIP_KEYS=0
 RAW_CLIENTS=()
 
 while [[ $# -gt 0 ]]; do
@@ -46,6 +48,9 @@ while [[ $# -gt 0 ]]; do
       ;;
     --skip-sync-check)
       SKIP_SYNC_CHECK=1
+      ;;
+    --skip-keys)
+      SKIP_KEYS=1
       ;;
     --stop)
       ACTION="stop"
@@ -176,9 +181,13 @@ start_stack() {
   echo "Starting SyftBox devstack via syftbox/cmd/devstack..."
   (cd "$SYFTBOX_DIR" && go run ./cmd/devstack start "${args[@]}")
 
-  for email in "${CLIENTS[@]}"; do
-    bootstrap_biovault "$email"
-  done
+  if (( SKIP_KEYS )); then
+    echo "Skipping key generation (--skip-keys)"
+  else
+    for email in "${CLIENTS[@]}"; do
+      bootstrap_biovault "$email"
+    done
+  fi
 
   echo ""
   echo "Devstack ready at $SANDBOX_DIR"
