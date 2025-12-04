@@ -3140,7 +3140,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "syft-crypto-protocol"
-version = "0.1.2-beta.1"
+version = "0.1.2-beta.2"
 dependencies = [
  "anyhow",
  "base64",
@@ -3164,7 +3164,7 @@ dependencies = [
 
 [[package]]
 name = "syftbox-sdk"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "anyhow",
  "base64",
