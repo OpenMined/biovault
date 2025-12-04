@@ -8,7 +8,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use super::models::{Message, MessageStatus, MessageThreadSummary, SyncStatus, ThreadFilter};
+use super::models::{
+    DecryptionFailureReason, FailedMessage, Message, MessageStatus, MessageThreadSummary,
+    SyncStatus, ThreadFilter,
+};
 
 #[derive(Serialize, Deserialize)]
 struct LockInfo {
@@ -302,6 +305,39 @@ impl MessageDb {
         )?;
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_message_type ON messages(message_type)",
+            [],
+        )?;
+
+        // Create failed_messages table for tracking decryption failures
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS failed_messages (
+                id TEXT PRIMARY KEY,
+                request_path TEXT NOT NULL,
+                rpc_request_id TEXT NOT NULL UNIQUE,
+
+                sender_identity TEXT NOT NULL,
+                sender_fingerprint TEXT NOT NULL,
+
+                recipient_identity TEXT,
+                recipient_fingerprint TEXT,
+
+                failure_reason TEXT NOT NULL,
+                error_details TEXT NOT NULL,
+
+                filename_hint TEXT,
+
+                created_at TEXT NOT NULL,
+                dismissed INTEGER DEFAULT 0
+            )",
+            [],
+        )?;
+
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_failed_sender ON failed_messages(sender_identity)",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_failed_dismissed ON failed_messages(dismissed)",
             [],
         )?;
 
@@ -989,6 +1025,176 @@ impl MessageDb {
 
     fn is_sent_status(status: &MessageStatus) -> bool {
         matches!(status, MessageStatus::Sent | MessageStatus::Draft)
+    }
+
+    // =========================================================================
+    // Failed Messages (decryption failures)
+    // =========================================================================
+
+    /// Insert a failed message record
+    pub fn insert_failed_message(&self, msg: &FailedMessage) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO failed_messages (
+                id, request_path, rpc_request_id,
+                sender_identity, sender_fingerprint,
+                recipient_identity, recipient_fingerprint,
+                failure_reason, error_details,
+                filename_hint, created_at, dismissed
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![
+                msg.id,
+                msg.request_path,
+                msg.rpc_request_id,
+                msg.sender_identity,
+                msg.sender_fingerprint,
+                msg.recipient_identity,
+                msg.recipient_fingerprint,
+                format!("{:?}", msg.failure_reason),
+                msg.error_details,
+                msg.filename_hint,
+                msg.created_at.to_rfc3339(),
+                msg.dismissed as i32,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Get a failed message by RPC request ID
+    pub fn get_failed_message_by_rpc_id(
+        &self,
+        rpc_request_id: &str,
+    ) -> Result<Option<FailedMessage>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, request_path, rpc_request_id,
+                    sender_identity, sender_fingerprint,
+                    recipient_identity, recipient_fingerprint,
+                    failure_reason, error_details,
+                    filename_hint, created_at, dismissed
+             FROM failed_messages WHERE rpc_request_id = ?1",
+        )?;
+
+        let result = stmt.query_row(params![rpc_request_id], |row| {
+            Ok(Self::row_to_failed_message(row))
+        });
+
+        match result {
+            Ok(msg) => Ok(Some(msg?)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// List all failed messages, optionally excluding dismissed ones
+    pub fn list_failed_messages(&self, include_dismissed: bool) -> Result<Vec<FailedMessage>> {
+        let sql = if include_dismissed {
+            "SELECT id, request_path, rpc_request_id,
+                    sender_identity, sender_fingerprint,
+                    recipient_identity, recipient_fingerprint,
+                    failure_reason, error_details,
+                    filename_hint, created_at, dismissed
+             FROM failed_messages ORDER BY created_at DESC"
+        } else {
+            "SELECT id, request_path, rpc_request_id,
+                    sender_identity, sender_fingerprint,
+                    recipient_identity, recipient_fingerprint,
+                    failure_reason, error_details,
+                    filename_hint, created_at, dismissed
+             FROM failed_messages WHERE dismissed = 0 ORDER BY created_at DESC"
+        };
+
+        let mut stmt = self.conn.prepare(sql)?;
+        let rows = stmt.query_map([], |row| Ok(Self::row_to_failed_message(row)))?;
+
+        let mut messages = Vec::new();
+        for row in rows {
+            messages.push(row??);
+        }
+        Ok(messages)
+    }
+
+    /// Count non-dismissed failed messages
+    pub fn count_failed_messages(&self) -> Result<usize> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM failed_messages WHERE dismissed = 0",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(count as usize)
+    }
+
+    /// Dismiss a failed message by ID
+    pub fn dismiss_failed_message(&self, id: &str) -> Result<bool> {
+        let rows = self.conn.execute(
+            "UPDATE failed_messages SET dismissed = 1 WHERE id = ?1",
+            params![id],
+        )?;
+        Ok(rows > 0)
+    }
+
+    /// Delete a failed message by ID
+    pub fn delete_failed_message(&self, id: &str) -> Result<bool> {
+        let rows = self
+            .conn
+            .execute("DELETE FROM failed_messages WHERE id = ?1", params![id])?;
+        Ok(rows > 0)
+    }
+
+    /// Delete a failed message by RPC request ID (used after successful retry)
+    pub fn delete_failed_message_by_rpc_id(&self, rpc_request_id: &str) -> Result<bool> {
+        let rows = self.conn.execute(
+            "DELETE FROM failed_messages WHERE rpc_request_id = ?1",
+            params![rpc_request_id],
+        )?;
+        Ok(rows > 0)
+    }
+
+    fn row_to_failed_message(row: &Row) -> Result<FailedMessage> {
+        let failure_reason_str: String = row.get(7)?;
+        let failure_reason = Self::parse_failure_reason(&failure_reason_str);
+
+        let created_at_str: String = row.get(10)?;
+        let created_at = DateTime::parse_from_rfc3339(&created_at_str)
+            .map(|dt| dt.with_timezone(&Utc))
+            .unwrap_or_else(|_| Utc::now());
+
+        let dismissed_int: i32 = row.get(11)?;
+
+        Ok(FailedMessage {
+            id: row.get(0)?,
+            request_path: row.get(1)?,
+            rpc_request_id: row.get(2)?,
+            sender_identity: row.get(3)?,
+            sender_fingerprint: row.get(4)?,
+            recipient_identity: row.get(5)?,
+            recipient_fingerprint: row.get(6)?,
+            failure_reason,
+            error_details: row.get(8)?,
+            filename_hint: row.get(9)?,
+            created_at,
+            dismissed: dismissed_int != 0,
+        })
+    }
+
+    fn parse_failure_reason(s: &str) -> DecryptionFailureReason {
+        match s {
+            "SenderBundleNotCached" => DecryptionFailureReason::SenderBundleNotCached,
+            "RecipientKeyMismatch" => DecryptionFailureReason::RecipientKeyMismatch,
+            "DecryptionFailed" => DecryptionFailureReason::DecryptionFailed,
+            "WrongRecipient" => DecryptionFailureReason::WrongRecipient,
+            "InvalidEnvelope" => DecryptionFailureReason::InvalidEnvelope,
+            other => {
+                // Handle Other(String) format: "Other(\"message\")"
+                if other.starts_with("Other(") {
+                    let msg = other
+                        .strip_prefix("Other(\"")
+                        .and_then(|s| s.strip_suffix("\")"))
+                        .unwrap_or(other);
+                    DecryptionFailureReason::Other(msg.to_string())
+                } else {
+                    DecryptionFailureReason::Other(other.to_string())
+                }
+            }
+        }
     }
 }
 

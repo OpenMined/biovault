@@ -7,9 +7,12 @@ use crate::syftbox::app::SyftBoxApp;
 use crate::syftbox::endpoint::Endpoint;
 use crate::syftbox::storage::WritePolicy;
 use crate::syftbox::types::{RpcRequest, RpcResponse};
+use syftbox_sdk::{has_syc_magic, parse_envelope};
 
 use super::db::MessageDb;
-use super::models::{Message, MessageStatus, MessageType, SyncStatus};
+use super::models::{
+    DecryptionFailureReason, FailedMessage, Message, MessageStatus, MessageType, SyncStatus,
+};
 
 #[derive(Debug, Serialize, Deserialize)]
 struct MessagePayload {
@@ -218,6 +221,195 @@ impl MessageSync {
         Ok(new_message_ids)
     }
 
+    /// Check for incoming messages and also capture decryption failures
+    /// Returns (new_message_ids, new_failed_count)
+    pub fn check_incoming_with_failures(&self, no_cleanup: bool) -> Result<(Vec<String>, usize)> {
+        let endpoint = Endpoint::new(&self.app, "/message")?;
+        let (requests, failures) = endpoint.check_requests_with_failures()?;
+
+        let mut new_message_ids = Vec::new();
+        let mut new_failed_count = 0;
+
+        // Process successful decryptions
+        for (request_path, rpc_request) in requests {
+            let body_bytes = match rpc_request.decode_body() {
+                Ok(b) => b,
+                Err(e) => {
+                    eprintln!("Failed to decode request body: {}", e);
+                    continue;
+                }
+            };
+            let payload: MessagePayload = match serde_json::from_slice(&body_bytes) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("Failed to parse message payload: {}", e);
+                    continue;
+                }
+            };
+
+            let mut msg = Message::new(payload.from.clone(), self.app.email.clone(), payload.body);
+
+            msg.id = payload.message_id;
+            msg.thread_id = payload.thread_id;
+            msg.parent_id = payload.parent_id;
+            msg.subject = payload.subject;
+            msg.message_type = match payload.message_type.as_str() {
+                "project" => MessageType::Project {
+                    project_name: String::new(),
+                    submission_id: String::new(),
+                    files_hash: None,
+                },
+                "request" => MessageType::Request {
+                    request_type: String::new(),
+                    params: None,
+                },
+                _ => MessageType::Text,
+            };
+            msg.metadata = payload.metadata;
+            msg.status = MessageStatus::Received;
+            msg.sync_status = SyncStatus::Synced;
+            msg.received_at = Some(Utc::now());
+            if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&payload.created_at) {
+                msg.created_at = dt.with_timezone(&Utc);
+            }
+
+            if self.db.get_message(&msg.id)?.is_none() {
+                self.db.insert_message(&msg)?;
+                new_message_ids.push(msg.id.clone());
+            }
+
+            // If we successfully decrypted, remove any previous failed record for this RPC ID
+            let _ = self.db.delete_failed_message_by_rpc_id(&rpc_request.id);
+
+            // Send ACK and clean up
+            let ack_response = RpcResponse::new(
+                &rpc_request,
+                self.app.email.clone(),
+                200,
+                b"Message received".to_vec(),
+            );
+            let _ = endpoint.send_response(&request_path, &rpc_request, &ack_response, no_cleanup);
+        }
+
+        // Process failures - extract envelope metadata and store
+        for (request_path, error_msg, raw_bytes) in failures {
+            // Extract RPC request ID from filename (UUID.request -> UUID)
+            let rpc_request_id = request_path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("unknown")
+                .to_string();
+
+            // Skip if we already have a failed record for this RPC ID
+            if self
+                .db
+                .get_failed_message_by_rpc_id(&rpc_request_id)?
+                .is_some()
+            {
+                continue;
+            }
+
+            // Try to extract envelope metadata
+            let (
+                sender_identity,
+                sender_fingerprint,
+                recipient_fingerprint,
+                filename_hint,
+                failure_reason,
+            ) = self.extract_envelope_metadata(&raw_bytes, &error_msg);
+
+            let mut failed = FailedMessage::new(
+                request_path.to_string_lossy().to_string(),
+                rpc_request_id,
+                sender_identity,
+                sender_fingerprint,
+                failure_reason,
+                error_msg,
+            );
+            failed.recipient_identity = Some(self.app.email.clone());
+            failed.recipient_fingerprint = recipient_fingerprint;
+            failed.filename_hint = filename_hint;
+
+            self.db.insert_failed_message(&failed)?;
+            new_failed_count += 1;
+        }
+
+        Ok((new_message_ids, new_failed_count))
+    }
+
+    /// Extract envelope metadata from raw bytes for failure reporting
+    fn extract_envelope_metadata(
+        &self,
+        raw_bytes: &[u8],
+        error_msg: &str,
+    ) -> (
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        DecryptionFailureReason,
+    ) {
+        // Default values if we can't parse the envelope
+        let mut sender_identity = "unknown".to_string();
+        let mut sender_fingerprint = "unknown".to_string();
+        let mut recipient_fingerprint = None;
+        let mut filename_hint = None;
+
+        // Determine failure reason from error message
+        let failure_reason = if error_msg.contains("sender bundle not cached")
+            || error_msg.contains("no cached bundle")
+        {
+            DecryptionFailureReason::SenderBundleNotCached
+        } else if error_msg.contains("recipient")
+            || error_msg.contains("not addressed")
+            || error_msg.contains("wrong recipient")
+        {
+            DecryptionFailureReason::WrongRecipient
+        } else if error_msg.contains("decrypt") || error_msg.contains("cipher") {
+            DecryptionFailureReason::DecryptionFailed
+        } else if error_msg.contains("fingerprint") || error_msg.contains("key mismatch") {
+            DecryptionFailureReason::RecipientKeyMismatch
+        } else {
+            DecryptionFailureReason::Other(error_msg.to_string())
+        };
+
+        // Try to parse the envelope
+        if has_syc_magic(raw_bytes) {
+            if let Ok(parsed) = parse_envelope(raw_bytes) {
+                sender_identity = parsed.prelude.sender.identity.clone();
+                sender_fingerprint = parsed.prelude.sender.ik_fingerprint.clone();
+
+                // Get recipient info from first wrapping
+                if let Some(wrapping) = parsed.prelude.wrappings.first() {
+                    if let Some(ref ri) = wrapping.recipient_identity {
+                        // We could use this if needed
+                        let _ = ri;
+                    }
+                }
+
+                // Get recipient fingerprint from first recipient
+                if let Some(recipient) = parsed.prelude.recipients.first() {
+                    if let Some(ref spk_fp) = recipient.spk_fingerprint {
+                        recipient_fingerprint = Some(spk_fp.clone());
+                    }
+                }
+
+                // Get filename hint if available
+                if let Some(ref meta) = parsed.prelude.public_meta {
+                    filename_hint = meta.filename_hint.clone();
+                }
+            }
+        }
+
+        (
+            sender_identity,
+            sender_fingerprint,
+            recipient_fingerprint,
+            filename_hint,
+            failure_reason,
+        )
+    }
+
     /// Check for ACK responses to sent messages
     pub fn check_acks(&self, no_cleanup: bool) -> Result<()> {
         let endpoint = Endpoint::new(&self.app, "/message")?;
@@ -270,6 +462,7 @@ impl MessageSync {
     }
 
     /// Silent sync - returns results without printing
+    /// Returns (new_message_ids, new_message_count)
     pub fn sync_quiet(&self) -> Result<(Vec<String>, usize)> {
         // Check for new incoming messages (always cleanup in quiet mode - used internally)
         let new_messages = self.check_incoming(false)?;
@@ -278,6 +471,33 @@ impl MessageSync {
         self.check_acks(false)?;
 
         Ok((new_messages.clone(), new_messages.len()))
+    }
+
+    /// Silent sync with failure tracking - returns (new_message_ids, new_message_count, failed_count)
+    pub fn sync_quiet_with_failures(&self) -> Result<(Vec<String>, usize, usize)> {
+        let (new_messages, failed_count) = self.check_incoming_with_failures(false)?;
+        self.check_acks(false)?;
+        Ok((new_messages.clone(), new_messages.len(), failed_count))
+    }
+
+    /// List failed messages from the database
+    pub fn list_failed_messages(&self, include_dismissed: bool) -> Result<Vec<FailedMessage>> {
+        self.db.list_failed_messages(include_dismissed)
+    }
+
+    /// Count non-dismissed failed messages
+    pub fn count_failed_messages(&self) -> Result<usize> {
+        self.db.count_failed_messages()
+    }
+
+    /// Dismiss a failed message
+    pub fn dismiss_failed_message(&self, id: &str) -> Result<bool> {
+        self.db.dismiss_failed_message(id)
+    }
+
+    /// Delete a failed message
+    pub fn delete_failed_message(&self, id: &str) -> Result<bool> {
+        self.db.delete_failed_message(id)
     }
 }
 
