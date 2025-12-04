@@ -87,7 +87,7 @@ fn ensure_virtualenv(project_dir: &Path, python_version: &str) -> Result<()> {
     if beaver_path.exists() {
         println!("🦫 Installing beaver from local editable path...");
         let beaver_canonical = beaver_path.canonicalize().unwrap_or(beaver_path);
-        let status = Command::new("uv")
+        let _status = Command::new("uv")
             .args([
                 "pip",
                 "install",
