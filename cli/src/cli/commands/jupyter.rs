@@ -1,6 +1,8 @@
 use crate::data::BioVaultDb;
 use crate::error::Result;
 use anyhow::anyhow;
+use std::fmt::Write as _;
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -38,15 +40,7 @@ fn ensure_virtualenv(project_dir: &Path, python_version: &str) -> Result<()> {
     );
 
     let status = Command::new("uv")
-        .args([
-            "pip",
-            "install",
-            "-U",
-            "--python",
-            ".venv",
-            "jupyterlab",
-            "bioscript",
-        ])
+        .args(["pip", "install", "-U", "jupyterlab"])
         .current_dir(project_dir)
         .status()?;
 
@@ -73,8 +67,6 @@ fn ensure_virtualenv(project_dir: &Path, python_version: &str) -> Result<()> {
                 "install",
                 "-e",
                 syftbox_canonical.to_str().unwrap_or("."),
-                "--python",
-                ".venv",
             ])
             .current_dir(project_dir)
             .status()?;
@@ -95,33 +87,15 @@ fn ensure_virtualenv(project_dir: &Path, python_version: &str) -> Result<()> {
     if beaver_path.exists() {
         println!("🦫 Installing beaver from local editable path...");
         let beaver_canonical = beaver_path.canonicalize().unwrap_or(beaver_path);
-        let status = Command::new("uv")
+        let _status = Command::new("uv")
             .args([
                 "pip",
                 "install",
                 "-e",
                 beaver_canonical.to_str().unwrap_or("."),
-                "--python",
-                ".venv",
             ])
             .current_dir(project_dir)
             .status()?;
-
-        if status.success() {
-            println!("✅ Beaver installed from: {}", beaver_canonical.display());
-        } else {
-            println!("⚠️ Failed to install beaver from local path, trying PyPI...");
-            let _ = Command::new("uv")
-                .args(["pip", "install", "-U", "--python", ".venv", "beaver"])
-                .current_dir(project_dir)
-                .status();
-        }
-    } else {
-        println!("🦫 Installing beaver from PyPI...");
-        let _ = Command::new("uv")
-            .args(["pip", "install", "-U", "--python", ".venv", "beaver"])
-            .current_dir(project_dir)
-            .status();
     }
 
     println!("✅ Virtualenv ready with jupyterlab, bioscript, syftbox-sdk, and beaver");
@@ -179,7 +153,7 @@ fn parse_runtime_file(path: &Path) -> Option<(JupyterRuntimeInfo, Option<i32>)> 
     Some((JupyterRuntimeInfo { port, url, token }, pid))
 }
 
-fn find_runtime_info(_pid: u32) -> Option<JupyterRuntimeInfo> {
+fn find_runtime_info(pid: u32) -> Option<JupyterRuntimeInfo> {
     let mut latest: Option<(SystemTime, JupyterRuntimeInfo)> = None;
 
     for dir in candidate_runtime_dirs() {
@@ -202,10 +176,17 @@ fn find_runtime_info(_pid: u32) -> Option<JupyterRuntimeInfo> {
                     continue;
                 }
 
-                let (info, _info_pid) = match parse_runtime_file(&path) {
+                let (info, info_pid_opt) = match parse_runtime_file(&path) {
                     Some(result) => result,
                     None => continue,
                 };
+
+                if let Some(info_pid) = info_pid_opt {
+                    if info_pid as u32 != pid {
+                        // Skip runtime files for other processes to avoid cross-app collisions
+                        continue;
+                    }
+                }
 
                 // Instead of matching exact PID (which fails with uv run wrapper),
                 // find the most recent jpserver file within the last 2 minutes
@@ -261,6 +242,19 @@ fn parse_jupyter_url_from_line(line: &str) -> Option<(i32, String, String)> {
         };
 
         return Some((port, url.to_string(), token));
+    }
+    None
+}
+
+fn find_available_port() -> Option<i32> {
+    // Bind to port 0 to let the OS pick an ephemeral port, then release it.
+    // Retry a few times in case of transient failures.
+    for _ in 0..10 {
+        if let Ok(listener) = TcpListener::bind("127.0.0.1:0") {
+            if let Ok(addr) = listener.local_addr() {
+                return Some(addr.port() as i32);
+            }
+        }
     }
     None
 }
@@ -352,7 +346,19 @@ pub async fn start(project_path: &str, python_version: &str) -> Result<()> {
     }
 
     // Launch Jupyter Lab
+    let chosen_port = find_available_port();
+
+    // Isolate Jupyter runtime files per session to avoid cross-instance detection
+    let runtime_dir = project_dir.join(".jupyter-runtime");
+    let _ = fs::create_dir_all(&runtime_dir);
+    std::env::set_var("JUPYTER_RUNTIME_DIR", &runtime_dir);
+    // Also point XDG_RUNTIME_DIR to keep jpserver files local (macOS/Linux)
+    std::env::set_var("XDG_RUNTIME_DIR", &runtime_dir);
+
     println!("🚀 Launching Jupyter Lab with: uv run --python .venv jupyter lab");
+    if let Some(port) = chosen_port {
+        println!("🎯 Requested port: {} (random to reduce conflicts)", port);
+    }
 
     if !venv_path
         .join(if cfg!(windows) {
@@ -371,9 +377,34 @@ pub async fn start(project_path: &str, python_version: &str) -> Result<()> {
 
     use std::process::Stdio;
 
+    let mut args: Vec<String> = vec![
+        "run",
+        "--python",
+        ".venv",
+        "jupyter",
+        "lab",
+        "--no-browser",
+        "--ServerApp.token=",
+        "--ServerApp.password=",
+        "--ServerApp.disable_check_xsrf=true",
+        "--ServerApp.allow_origin=*",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect();
+
+    if let Some(port) = chosen_port {
+        args.push("--port".into());
+        args.push(port.to_string());
+        // Avoid retries so we don't silently hop to a different port under race conditions.
+        args.push("--ServerApp.port_retries=0".into());
+    }
+
     let mut child = Command::new("uv")
-        .args(["run", "--python", ".venv", "jupyter", "lab", "--no-browser"])
+        .args(&args)
         .current_dir(&project_dir)
+        .env("JUPYTER_RUNTIME_DIR", &runtime_dir)
+        .env("XDG_RUNTIME_DIR", &runtime_dir)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
@@ -426,22 +457,67 @@ pub async fn start(project_path: &str, python_version: &str) -> Result<()> {
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
 
-    let runtime_info =
+    if runtime_info.is_none() {
+        if let Some(port) = chosen_port {
+            println!(
+                "⚠️  Jupyter runtime info not detected; falling back to chosen port {}",
+                port
+            );
+            runtime_info = Some(JupyterRuntimeInfo {
+                port: Some(port),
+                url: Some(format!("http://localhost:{}/lab", port)),
+                token: None,
+            });
+        }
+    }
+
+    let mut runtime_info =
         runtime_info.ok_or_else(|| anyhow!("Timed out waiting for Jupyter runtime information"))?;
+
+    // If Jupyter did not report a port, fall back to our chosen one
+    if runtime_info.port.is_none() {
+        runtime_info.port = chosen_port;
+    }
 
     if let Some(port) = runtime_info.port {
         wait_for_server_ready(port).await?;
     }
 
+    // Ensure the stored URL is usable: if token is empty/None, drop it; otherwise append if missing
+    let token_opt = runtime_info
+        .token
+        .as_ref()
+        .and_then(|t| if t.is_empty() { None } else { Some(t) });
+
+    let url_with_token = match (runtime_info.url.as_ref(), token_opt) {
+        (Some(url), Some(token)) => {
+            if url.contains("token=") {
+                Some(url.clone())
+            } else {
+                let mut new_url = url.clone();
+                if url.contains('?') {
+                    let _ = write!(new_url, "&token={}", token);
+                } else {
+                    let _ = write!(new_url, "?token={}", token);
+                }
+                Some(new_url)
+            }
+        }
+        (Some(url), None) => Some(url.clone()),
+        _ => runtime_info.url.clone(),
+    };
+
+    let store_token = runtime_info.token.clone().filter(|t| !t.is_empty());
+
     db.update_jupyter_session(
         &project_dir,
         runtime_info.port,
         Some(pid as i32),
-        runtime_info.url.as_deref(),
-        runtime_info.token.as_deref(),
+        url_with_token.as_deref(),
+        store_token.as_deref(),
     )?;
 
-    if let Some(url) = runtime_info.url.as_ref() {
+    if let Some(url) = url_with_token.as_ref().or(runtime_info.url.as_ref()) {
         println!("   Access at: {}", url);
     } else if let Some(port) = runtime_info.port {
         println!("   Access at: http://localhost:{}", port);
