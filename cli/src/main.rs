@@ -476,6 +476,12 @@ enum Commands {
         command: SyftboxCommands,
     },
 
+    #[command(about = "Manage Syft Crypto keys and bundles")]
+    Key {
+        #[command(subcommand)]
+        command: commands::key::KeyCommands,
+    },
+
     #[command(about = "Manage Syft Crypto vaults and bundles")]
     Syc {
         #[command(subcommand)]
@@ -1922,6 +1928,10 @@ async fn async_main_with(cli: Cli) -> Result<()> {
                     .await?;
             }
         },
+        Commands::Key { command } => {
+            let config = biovault::config::Config::load()?;
+            commands::key::handle(command, &config).await?;
+        }
         Commands::Syc { command } => {
             let config = biovault::config::Config::load()?;
             commands::syc::handle(command, &config).await?;

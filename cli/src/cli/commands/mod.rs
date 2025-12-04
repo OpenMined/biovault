@@ -9,6 +9,7 @@ pub mod inbox;
 pub mod info;
 pub mod init;
 pub mod jupyter;
+pub mod key;
 pub mod messages;
 pub mod participant;
 pub mod participants;
