@@ -175,3 +175,41 @@ CREATE TABLE IF NOT EXISTS run_configs (
 );
 
 CREATE INDEX IF NOT EXISTS idx_run_configs_pipeline_id ON run_configs(pipeline_id);
+
+-- NEW: Sessions (for collaborative Jupyter environments with beaver)
+-- Sessions allow data scientists to create collaborative Jupyter environments
+-- with optional peer invitations for data sharing via beaver
+CREATE TABLE IF NOT EXISTS sessions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL UNIQUE,     -- 12-char hex hash, matches beaver session format
+    name TEXT NOT NULL,                  -- User-friendly name
+    description TEXT,
+    session_path TEXT UNIQUE NOT NULL,   -- Path to session folder in BioVault Home
+    owner TEXT NOT NULL,                 -- Owner email
+    peer TEXT,                           -- Invited peer email (optional)
+    role TEXT DEFAULT 'owner',           -- 'owner' or 'collaborator'
+    status TEXT DEFAULT 'active',        -- 'pending', 'active', 'closed'
+    jupyter_port INTEGER,
+    jupyter_pid INTEGER,
+    jupyter_url TEXT,
+    jupyter_token TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_sessions_session_id ON sessions(session_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_name ON sessions(name);
+CREATE INDEX IF NOT EXISTS idx_sessions_peer ON sessions(peer);
+CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status);
+
+-- NEW: Session Messages (chat within a session)
+CREATE TABLE IF NOT EXISTS session_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id INTEGER NOT NULL,
+    sender TEXT NOT NULL,
+    body TEXT NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_session_messages_session_id ON session_messages(session_id);
