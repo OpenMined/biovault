@@ -1957,6 +1957,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     #[cfg(target_os = "macos")]
     async fn setup_ubuntu_returns_ok_when_apt_missing() {
         let _guard = SkipInstallGuard::new();
@@ -1964,6 +1965,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     #[cfg(target_os = "macos")]
     async fn setup_arch_returns_ok_when_pacman_missing() {
         let _guard = SkipInstallGuard::new();
@@ -1981,12 +1983,14 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn setup_google_colab_runs_without_panic() {
         let _guard = SkipInstallGuard::new();
         super::setup_google_colab(vec![], false).await.unwrap();
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn setup_macos_returns_ok_without_brew() {
         let _guard = SkipInstallGuard::new();
         // Only run when brew is not available; otherwise skip to avoid invoking installs
@@ -2002,6 +2006,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     #[cfg(target_os = "windows")]
     #[cfg_attr(
         not(feature = "e2e-tests"),

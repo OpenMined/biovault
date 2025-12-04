@@ -488,6 +488,18 @@ enum Commands {
         command: commands::syc::SycCommands,
     },
 
+    #[command(about = "Manage contacts (trusted peers)")]
+    Contacts {
+        #[command(subcommand)]
+        command: commands::contacts::ContactsCommands,
+    },
+
+    #[command(about = "Manage collaborative Jupyter sessions")]
+    Session {
+        #[command(subcommand)]
+        command: commands::sessions::SessionsCommands,
+    },
+
     #[command(about = "FASTQ file operations")]
     Fastq {
         #[command(subcommand)]
@@ -1935,6 +1947,14 @@ async fn async_main_with(cli: Cli) -> Result<()> {
         Commands::Syc { command } => {
             let config = biovault::config::Config::load()?;
             commands::syc::handle(command, &config).await?;
+        }
+        Commands::Contacts { command } => {
+            let config = biovault::config::Config::load()?;
+            commands::contacts::handle(command, &config).await?;
+        }
+        Commands::Session { command } => {
+            let config = biovault::config::Config::load()?;
+            commands::sessions::handle(command, &config).await?;
         }
         Commands::Fastq { command } => match command {
             FastqCommands::Combine {
