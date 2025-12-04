@@ -56,7 +56,75 @@ fn ensure_virtualenv(project_dir: &Path, python_version: &str) -> Result<()> {
         );
     }
 
-    println!("✅ Virtualenv ready with jupyterlab and bioscript");
+    // Path structure: project_dir is BIOVAULT_HOME/sessions/<session_id>
+    // biovault root is at BIOVAULT_HOME/../.. (e.g., workspace3/biovault)
+    // So from project_dir: ../../../..
+    let biovault_root = project_dir.join("..").join("..").join("..").join("..");
+
+    // Install syftbox-sdk first (beaver depends on it)
+    // syftbox-sdk is at biovault/syftbox-sdk/python
+    let syftbox_path = biovault_root.join("syftbox-sdk").join("python");
+    if syftbox_path.exists() {
+        println!("📦 Installing syftbox-sdk from local editable path...");
+        let syftbox_canonical = syftbox_path.canonicalize().unwrap_or(syftbox_path.clone());
+        let status = Command::new("uv")
+            .args([
+                "pip",
+                "install",
+                "-e",
+                syftbox_canonical.to_str().unwrap_or("."),
+                "--python",
+                ".venv",
+            ])
+            .current_dir(project_dir)
+            .status()?;
+
+        if status.success() {
+            println!(
+                "✅ syftbox-sdk installed from: {}",
+                syftbox_canonical.display()
+            );
+        } else {
+            println!("⚠️ Failed to install syftbox-sdk from local path");
+        }
+    }
+
+    // Install beaver from local editable path
+    // beaver is at biovault/biovault-beaver/python
+    let beaver_path = biovault_root.join("biovault-beaver").join("python");
+    if beaver_path.exists() {
+        println!("🦫 Installing beaver from local editable path...");
+        let beaver_canonical = beaver_path.canonicalize().unwrap_or(beaver_path);
+        let status = Command::new("uv")
+            .args([
+                "pip",
+                "install",
+                "-e",
+                beaver_canonical.to_str().unwrap_or("."),
+                "--python",
+                ".venv",
+            ])
+            .current_dir(project_dir)
+            .status()?;
+
+        if status.success() {
+            println!("✅ Beaver installed from: {}", beaver_canonical.display());
+        } else {
+            println!("⚠️ Failed to install beaver from local path, trying PyPI...");
+            let _ = Command::new("uv")
+                .args(["pip", "install", "-U", "--python", ".venv", "beaver"])
+                .current_dir(project_dir)
+                .status();
+        }
+    } else {
+        println!("🦫 Installing beaver from PyPI...");
+        let _ = Command::new("uv")
+            .args(["pip", "install", "-U", "--python", ".venv", "beaver"])
+            .current_dir(project_dir)
+            .status();
+    }
+
+    println!("✅ Virtualenv ready with jupyterlab, bioscript, syftbox-sdk, and beaver");
     Ok(())
 }
 
