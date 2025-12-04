@@ -1,6 +1,7 @@
 pub mod biobank;
 pub mod check;
 pub mod config_cmd;
+pub mod contacts;
 pub mod daemon;
 pub mod fastq;
 pub mod files;
@@ -21,6 +22,7 @@ pub mod run;
 pub mod run_dynamic;
 pub mod sample_data;
 pub mod samplesheet;
+pub mod sessions;
 pub mod setup;
 pub mod sql;
 pub mod submit;
