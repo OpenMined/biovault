@@ -477,21 +477,26 @@ steps:
       echo "Key files found: $KEY_COUNT"
       test "$KEY_COUNT" -gt 1 && echo "✓ Multiple keys present"
 
-  - name: Try to send message - should get multiple identities error
+  - name: Try to send message - should work with warning about multiple identities
     datasite: client1@sandbox.local
     run: |
       OUTPUT=$({{workspace}}/cli/target/release/bv message send \
         client2@sandbox.local \
-        "This should fail" 2>&1) || true
+        "Message with multiple keys" 2>&1)
       echo "$OUTPUT"
-      echo "$OUTPUT" | grep -qi "multiple identities" && echo "✓ Got multiple identities error"
+      # Should show warning about multiple keys but still succeed
+      echo "$OUTPUT" | grep -qi "Warning.*Multiple" && echo "✓ Got multiple identities warning"
+      echo "$OUTPUT" | grep -q "Message sent" && echo "✓ Message sent successfully despite multiple keys"
 
-  - name: Regenerate key to clean up multiple identities
+  - name: Clean up extra key files
     datasite: client1@sandbox.local
     run: |
-      rm -f .syc/keys/*.key
-      {{workspace}}/cli/target/release/bv key generate
-      echo "✓ Regenerated key"
+      # Keep only the first key file (alphabetically)
+      FIRST_KEY=$(ls .syc/keys/*.key 2>/dev/null | head -1)
+      for f in .syc/keys/*.key; do
+        [ "$f" != "$FIRST_KEY" ] && rm -f "$f"
+      done
+      echo "✓ Cleaned up extra keys"
 
   - name: Verify only one key file now
     datasite: client1@sandbox.local
