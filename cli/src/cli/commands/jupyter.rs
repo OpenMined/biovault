@@ -36,17 +36,17 @@ fn ensure_virtualenv(project_dir: &Path, python_version: &str) -> Result<()> {
     }
 
     println!(
-        "📦 Installing/Updating packages via: uv pip install -U --python .venv jupyterlab bioscript"
+        "📦 Installing/Updating packages via: uv pip install -U --python .venv jupyterlab cleon"
     );
 
     let status = Command::new("uv")
-        .args(["pip", "install", "-U", "jupyterlab"])
+        .args(["pip", "install", "-U", "jupyterlab", "cleon"])
         .current_dir(project_dir)
         .status()?;
 
     if !status.success() {
         return Err(
-            anyhow!("Failed to install required Python packages (jupyterlab/bioscript)").into(),
+            anyhow!("Failed to install required Python packages (jupyterlab/cleon)").into(),
         );
     }
 
@@ -98,7 +98,7 @@ fn ensure_virtualenv(project_dir: &Path, python_version: &str) -> Result<()> {
             .status()?;
     }
 
-    println!("✅ Virtualenv ready with jupyterlab, bioscript, syftbox-sdk, and beaver");
+    println!("✅ Virtualenv ready with jupyterlab, cleon, syftbox-sdk, and beaver");
     Ok(())
 }
 
