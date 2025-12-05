@@ -35,19 +35,26 @@ fn ensure_virtualenv(project_dir: &Path, python_version: &str) -> Result<()> {
         println!("✅ Using existing virtualenv");
     }
 
+    // Pinned version of biovault-beaver from PyPI (should match biovault/biovault-beaver/python version)
+    const BEAVER_VERSION: &str = "0.1.24";
+
     println!(
-        "📦 Installing/Updating packages via: uv pip install -U --python .venv jupyterlab bioscript"
+        "📦 Installing/Updating packages via: uv pip install -U jupyterlab cleon biovault-beaver=={}",
+        BEAVER_VERSION
     );
 
+    // Install base packages from PyPI including pinned biovault-beaver
+    let beaver_pkg = format!("biovault-beaver=={}", BEAVER_VERSION);
     let status = Command::new("uv")
-        .args(["pip", "install", "-U", "jupyterlab"])
+        .args(["pip", "install", "-U", "jupyterlab", "cleon", &beaver_pkg])
         .current_dir(project_dir)
         .status()?;
 
     if !status.success() {
-        return Err(
-            anyhow!("Failed to install required Python packages (jupyterlab/bioscript)").into(),
-        );
+        return Err(anyhow!(
+            "Failed to install required Python packages (jupyterlab/cleon/biovault-beaver)"
+        )
+        .into());
     }
 
     // Path structure: project_dir is BIOVAULT_HOME/sessions/<session_id>
@@ -55,50 +62,67 @@ fn ensure_virtualenv(project_dir: &Path, python_version: &str) -> Result<()> {
     // So from project_dir: ../../../..
     let biovault_root = project_dir.join("..").join("..").join("..").join("..");
 
-    // Install syftbox-sdk first (beaver depends on it)
-    // syftbox-sdk is at biovault/syftbox-sdk/python
+    // DEV MODE: If local source exists, install editable versions on top of PyPI packages
+    // This allows developers to test local changes while maintaining compatibility
     let syftbox_path = biovault_root.join("syftbox-sdk").join("python");
-    if syftbox_path.exists() {
-        println!("📦 Installing syftbox-sdk from local editable path...");
-        let syftbox_canonical = syftbox_path.canonicalize().unwrap_or(syftbox_path.clone());
-        let status = Command::new("uv")
-            .args([
-                "pip",
-                "install",
-                "-e",
-                syftbox_canonical.to_str().unwrap_or("."),
-            ])
-            .current_dir(project_dir)
-            .status()?;
-
-        if status.success() {
-            println!(
-                "✅ syftbox-sdk installed from: {}",
-                syftbox_canonical.display()
-            );
-        } else {
-            println!("⚠️ Failed to install syftbox-sdk from local path");
-        }
-    }
-
-    // Install beaver from local editable path
-    // beaver is at biovault/biovault-beaver/python
     let beaver_path = biovault_root.join("biovault-beaver").join("python");
-    if beaver_path.exists() {
-        println!("🦫 Installing beaver from local editable path...");
-        let beaver_canonical = beaver_path.canonicalize().unwrap_or(beaver_path);
-        let _status = Command::new("uv")
-            .args([
-                "pip",
-                "install",
-                "-e",
-                beaver_canonical.to_str().unwrap_or("."),
-            ])
-            .current_dir(project_dir)
-            .status()?;
+
+    if syftbox_path.exists() || beaver_path.exists() {
+        println!("🔧 DEV MODE: Local source detected, installing editable packages...");
+
+        // Install syftbox-sdk first (beaver depends on it)
+        if syftbox_path.exists() {
+            println!("📦 Installing syftbox-sdk from local editable path...");
+            let syftbox_canonical = syftbox_path.canonicalize().unwrap_or(syftbox_path.clone());
+            let status = Command::new("uv")
+                .args([
+                    "pip",
+                    "install",
+                    "-e",
+                    syftbox_canonical.to_str().unwrap_or("."),
+                ])
+                .current_dir(project_dir)
+                .status()?;
+
+            if status.success() {
+                println!(
+                    "✅ syftbox-sdk installed from: {}",
+                    syftbox_canonical.display()
+                );
+            } else {
+                println!("⚠️ Failed to install syftbox-sdk from local path");
+            }
+        }
+
+        // Install beaver from local editable path (overwrites PyPI version)
+        if beaver_path.exists() {
+            println!("🦫 Installing beaver from local editable path (overwriting PyPI version)...");
+            let beaver_canonical = beaver_path.canonicalize().unwrap_or(beaver_path);
+            let status = Command::new("uv")
+                .args([
+                    "pip",
+                    "install",
+                    "-e",
+                    beaver_canonical.to_str().unwrap_or("."),
+                ])
+                .current_dir(project_dir)
+                .status()?;
+
+            if status.success() {
+                println!("✅ beaver installed from: {}", beaver_canonical.display());
+            } else {
+                println!("⚠️ Failed to install beaver from local path");
+            }
+        }
+
+        println!("✅ Virtualenv ready with jupyterlab, cleon, and DEV beaver/syftbox-sdk");
+    } else {
+        println!(
+            "✅ Virtualenv ready with jupyterlab, cleon, and biovault-beaver=={}",
+            BEAVER_VERSION
+        );
     }
 
-    println!("✅ Virtualenv ready with jupyterlab, bioscript, syftbox-sdk, and beaver");
     Ok(())
 }
 
@@ -481,6 +505,7 @@ pub async fn start(project_path: &str, python_version: &str) -> Result<()> {
 
     if let Some(port) = runtime_info.port {
         wait_for_server_ready(port).await?;
+        println!("✅ Jupyter server is ready on port {}", port);
     }
 
     // Ensure the stored URL is usable: if token is empty/None, drop it; otherwise append if missing
@@ -517,13 +542,30 @@ pub async fn start(project_path: &str, python_version: &str) -> Result<()> {
         store_token.as_deref(),
     )?;
 
-    if let Some(url) = url_with_token.as_ref().or(runtime_info.url.as_ref()) {
+    // Determine the final URL to use
+    let final_url = if let Some(url) = url_with_token.as_ref().or(runtime_info.url.as_ref()) {
         println!("   Access at: {}", url);
+        Some(url.clone())
     } else if let Some(port) = runtime_info.port {
-        println!("   Access at: http://localhost:{}", port);
+        let url = format!("http://localhost:{}", port);
+        println!("   Access at: {}", url);
+        Some(url)
     } else {
         println!("   Access at: <unknown>");
+        None
+    };
+
+    // Open browser automatically
+    if let Some(url) = final_url {
+        println!("🌐 Opening browser...");
+        #[cfg(target_os = "macos")]
+        let _ = Command::new("open").arg(&url).spawn();
+        #[cfg(target_os = "linux")]
+        let _ = Command::new("xdg-open").arg(&url).spawn();
+        #[cfg(target_os = "windows")]
+        let _ = Command::new("cmd").args(["/C", "start", &url]).spawn();
     }
+
     println!("   Press Ctrl+C in the terminal running Jupyter to stop");
     println!("\n💡 Tip: Jupyter Lab is running in the background");
 
