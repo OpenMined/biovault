@@ -35,16 +35,17 @@ fn ensure_virtualenv(project_dir: &Path, python_version: &str) -> Result<()> {
         println!("✅ Using existing virtualenv");
     }
 
-    // Pinned version of biovault-beaver from PyPI (should match biovault/biovault-beaver/python version)
-    const BEAVER_VERSION: &str = "0.1.24";
+    // Version of biovault-beaver from PyPI - auto-detected from submodule at compile time
+    // Falls back to hardcoded version if env var not set (e.g., when building biovault CLI standalone)
+    let beaver_version = option_env!("BEAVER_VERSION").unwrap_or("0.1.26");
 
     println!(
         "📦 Installing/Updating packages via: uv pip install -U jupyterlab cleon biovault-beaver=={}",
-        BEAVER_VERSION
+        beaver_version
     );
 
     // Install base packages from PyPI including pinned biovault-beaver
-    let beaver_pkg = format!("biovault-beaver=={}", BEAVER_VERSION);
+    let beaver_pkg = format!("biovault-beaver=={}", beaver_version);
     let status = Command::new("uv")
         .args(["pip", "install", "-U", "jupyterlab", "cleon", &beaver_pkg])
         .current_dir(project_dir)
@@ -119,7 +120,7 @@ fn ensure_virtualenv(project_dir: &Path, python_version: &str) -> Result<()> {
     } else {
         println!(
             "✅ Virtualenv ready with jupyterlab, cleon, and biovault-beaver=={}",
-            BEAVER_VERSION
+            beaver_version
         );
     }
 
