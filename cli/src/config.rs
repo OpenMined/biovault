@@ -460,6 +460,14 @@ pub fn get_biovault_home() -> anyhow::Result<PathBuf> {
         return Ok(path);
     }
 
+    // Check if config.yaml exists in current directory (convenient for CLI usage in dev environments)
+    // This is checked AFTER SYFTBOX_DATA_DIR so sandbox tests work correctly
+    if let Ok(current_dir) = env::current_dir() {
+        if current_dir.join("config.yaml").exists() {
+            return Ok(current_dir);
+        }
+    }
+
     let home_dir =
         dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
 

@@ -315,6 +315,12 @@ fn import_file_with_metadata(
         .and_then(|e| e.to_str())
         .map(|e| format!(".{}", e));
 
+    let data_type = csv_row
+        .data_type
+        .clone()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "File".to_string());
+
     // Get or create participant if ID provided
     let db_participant_id: Option<i64> = if let Some(pid) = &csv_row.participant_id {
         Some(get_or_create_participant(db, pid)?)
@@ -339,7 +345,7 @@ fn import_file_with_metadata(
                 "UPDATE files SET participant_id = ?1, data_type = ?2, source = ?3, grch_version = ?4, updated_at = CURRENT_TIMESTAMP WHERE id = ?5",
                 params![
                     db_participant_id,
-                    csv_row.data_type,
+                    data_type,
                     csv_row.source,
                     csv_row.grch_version,
                     existing_id
@@ -354,7 +360,7 @@ fn import_file_with_metadata(
                     file_hash,
                     file_size as i64,
                     db_participant_id,
-                    csv_row.data_type,
+                    data_type,
                     csv_row.source,
                     csv_row.grch_version,
                     existing_id
@@ -372,7 +378,7 @@ fn import_file_with_metadata(
             file_hash,
             file_type,
             file_size as i64,
-            csv_row.data_type,
+            data_type,
             csv_row.source,
             csv_row.grch_version
         ],
@@ -382,10 +388,7 @@ fn import_file_with_metadata(
 
     // Build metadata snapshot from CSV values
     let mut metadata = GenotypeMetadata {
-        data_type: csv_row
-            .data_type
-            .clone()
-            .unwrap_or_else(|| "Unknown".to_string()),
+        data_type: data_type.clone(),
         source: csv_row.source.clone(),
         grch_version: csv_row.grch_version.clone(),
         row_count: csv_row.row_count,
@@ -507,7 +510,7 @@ fn import_file_with_participant(
 
     // Insert new file
     db.conn.execute(
-        "INSERT INTO files (participant_id, file_path, file_hash, file_type, file_size) VALUES (?1, ?2, ?3, ?4, ?5)",
+        "INSERT INTO files (participant_id, file_path, file_hash, file_type, file_size, data_type) VALUES (?1, ?2, ?3, ?4, ?5, 'File')",
         params![db_participant_id, file_path, file_hash, file_type, file_info.size as i64],
     )?;
 
@@ -1958,7 +1961,7 @@ pub fn import_files_as_pending(db: &BioVaultDb, files: Vec<CsvFileImport>) -> Re
                 "pending", // Placeholder hash until processed
                 file_type,
                 file_size,
-                file_info.data_type.as_deref().unwrap_or("Unknown"),
+                file_info.data_type.as_deref().unwrap_or("File"),
             ],
         );
 

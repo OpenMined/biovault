@@ -461,6 +461,12 @@ enum Commands {
         command: BiobankCommands,
     },
 
+    #[command(about = "Manage datasets and datacards")]
+    Datasets {
+        #[command(subcommand)]
+        command: DatasetCommands,
+    },
+
     #[command(about = "Manage BioVault configuration")]
     Config {
         #[command(subcommand)]
@@ -917,6 +923,79 @@ enum BiobankCommands {
 
         #[arg(long, help = "Unpublish all participants")]
         all: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum DatasetCommands {
+    #[command(about = "Publish a dataset manifest to SyftBox")]
+    Publish {
+        #[arg(
+            help = "Path to dataset manifest YAML",
+            required_unless_present = "name"
+        )]
+        manifest: Option<String>,
+
+        #[arg(
+            long,
+            help = "Publish from dataset stored in DB by name",
+            conflicts_with = "manifest"
+        )]
+        name: Option<String>,
+
+        #[arg(
+            long,
+            help = "Copy mock artifacts referenced in the manifest into the public dataset folder"
+        )]
+        copy_mock: bool,
+    },
+
+    #[command(about = "List datasets published to SyftBox")]
+    List,
+
+    #[command(about = "Generate a dataset manifest for editing")]
+    Init {
+        #[arg(help = "Dataset name")]
+        name: String,
+
+        #[arg(help = "Path to private asset file", required = false)]
+        private: Option<String>,
+
+        #[arg(
+            long = "private-id",
+            help = "File ID from the catalog to use as private asset"
+        )]
+        private_id: Option<i64>,
+
+        #[arg(long, help = "Path to mock asset file")]
+        mock: Option<String>,
+
+        #[arg(
+            long = "mock-id",
+            help = "File ID from the catalog to use as mock asset"
+        )]
+        mock_id: Option<i64>,
+
+        #[arg(long, help = "Description for the dataset")]
+        description: Option<String>,
+
+        #[arg(long, help = "Author (defaults to your datasite email)")]
+        author: Option<String>,
+
+        #[arg(long, help = "Version (default: 1.0.0)")]
+        version: Option<String>,
+
+        #[arg(
+            long = "asset-key",
+            help = "Key for the asset map (default: derived from file name)"
+        )]
+        asset_key: Option<String>,
+
+        #[arg(long = "asset-type", help = "Asset type (twin|file, default: twin)")]
+        asset_type: Option<String>,
+
+        #[arg(long, help = "Output path for generated manifest")]
+        output: Option<String>,
     },
 }
 
@@ -1904,6 +1983,46 @@ async fn async_main_with(cli: Cli) -> Result<()> {
                 all,
             } => {
                 commands::biobank::unpublish(participant_id, all).await?;
+            }
+        },
+        Commands::Datasets { command } => match command {
+            DatasetCommands::Publish {
+                manifest,
+                name,
+                copy_mock,
+            } => {
+                commands::datasets::publish(manifest, name, copy_mock).await?;
+            }
+            DatasetCommands::List => {
+                commands::datasets::list().await?;
+            }
+            DatasetCommands::Init {
+                name,
+                private,
+                private_id,
+                mock,
+                mock_id,
+                description,
+                author,
+                version,
+                asset_key,
+                asset_type,
+                output,
+            } => {
+                commands::datasets::init(
+                    name,
+                    private,
+                    private_id,
+                    mock,
+                    mock_id,
+                    description,
+                    author,
+                    version,
+                    asset_key,
+                    asset_type,
+                    output,
+                )
+                .await?;
             }
         },
         Commands::Config { command, json } => {

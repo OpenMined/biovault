@@ -173,6 +173,145 @@ impl BioVaultDb {
             info!("Migration complete: added processing timing columns");
         }
 
+        // Create datasets tables if missing
+        let datasets_exists = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='datasets'",
+                [],
+                |row| row.get::<_, i32>(0),
+            )
+            .map(|count| count > 0)
+            .unwrap_or(false);
+        if !datasets_exists {
+            info!("Creating datasets tables");
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS datasets (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL UNIQUE,
+                    version TEXT NOT NULL DEFAULT '1.0.0',
+                    author TEXT NOT NULL,
+                    description TEXT,
+                    schema TEXT NOT NULL,
+                    public_url TEXT,
+                    private_url TEXT,
+                    http_relay_servers TEXT,
+                    extra TEXT,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                );
+                 CREATE TABLE IF NOT EXISTS dataset_assets (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    dataset_id INTEGER NOT NULL,
+                    asset_key TEXT NOT NULL,
+                    asset_uuid TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    url TEXT NOT NULL,
+                    private_ref TEXT,
+                    mock_ref TEXT,
+                    extra TEXT,
+                    private_file_id TEXT,
+                    mock_file_id TEXT,
+                    private_path TEXT,
+                    mock_path TEXT,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (dataset_id) REFERENCES datasets(id) ON DELETE CASCADE,
+                    UNIQUE(dataset_id, asset_key)
+                );
+                 CREATE INDEX IF NOT EXISTS idx_dataset_assets_dataset_id ON dataset_assets(dataset_id);",
+            )?;
+            info!("Migration complete: added datasets tables");
+        }
+        // Add new asset link columns if missing and backfill from legacy mappings JSON
+        let add_column = |name: &str, col_type: &str| -> Result<bool> {
+            let exists: bool = conn
+                .query_row(
+                    &format!(
+                        "SELECT COUNT(*) FROM pragma_table_info('dataset_assets') WHERE name='{}'",
+                        name
+                    ),
+                    [],
+                    |row| row.get::<_, i32>(0),
+                )
+                .map(|count| count > 0)
+                .unwrap_or(false);
+            if !exists {
+                conn.execute(
+                    &format!(
+                        "ALTER TABLE dataset_assets ADD COLUMN {} {}",
+                        name, col_type
+                    ),
+                    [],
+                )?;
+            }
+            Ok(!exists)
+        };
+
+        let _ = add_column("private_file_id", "INTEGER")?;
+        let _ = add_column("mock_file_id", "INTEGER")?;
+        let _ = add_column("private_path", "TEXT")?;
+        let _ = add_column("mock_path", "TEXT")?;
+
+        let mappings_exists = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('dataset_assets') WHERE name='mappings'",
+                [],
+                |row| row.get::<_, i32>(0),
+            )
+            .map(|count| count > 0)
+            .unwrap_or(false);
+        if mappings_exists {
+            let mut stmt =
+                conn.prepare("SELECT id, mappings FROM dataset_assets WHERE mappings IS NOT NULL")?;
+            let rows = stmt.query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })?;
+            for row in rows.flatten() {
+                if let Ok(mapping_val) = serde_json::from_str::<serde_json::Value>(&row.1) {
+                    let mut private_file_id: Option<String> = None;
+                    let mut mock_file_id: Option<String> = None;
+                    let mut private_path: Option<String> = None;
+                    let mut mock_path: Option<String> = None;
+
+                    if let Some(obj) = mapping_val.get("private") {
+                        private_file_id = obj
+                            .get("db_file_id")
+                            .and_then(|v| v.as_i64())
+                            .map(|v| v.to_string());
+                        private_path = obj
+                            .get("file_path")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string());
+                    }
+                    if let Some(obj) = mapping_val.get("mock") {
+                        mock_file_id = obj
+                            .get("db_file_id")
+                            .and_then(|v| v.as_i64())
+                            .map(|v| v.to_string());
+                        mock_path = obj
+                            .get("file_path")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string());
+                    }
+
+                    conn.execute(
+                        "UPDATE dataset_assets SET private_file_id = COALESCE(private_file_id, ?1),
+                                                  mock_file_id = COALESCE(mock_file_id, ?2),
+                                                  private_path = COALESCE(private_path, ?3),
+                                                  mock_path = COALESCE(mock_path, ?4)
+                         WHERE id = ?5",
+                        rusqlite::params![
+                            private_file_id,
+                            mock_file_id,
+                            private_path,
+                            mock_path,
+                            row.0
+                        ],
+                    )?;
+                }
+            }
+        }
+
         // Migrate projects table to add version column and update unique constraint
         let projects_version_exists = conn
             .query_row(

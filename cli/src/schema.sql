@@ -73,6 +73,44 @@ CREATE INDEX IF NOT EXISTS idx_files_file_type ON files(file_type);
 CREATE INDEX IF NOT EXISTS idx_files_hash ON files(file_hash);
 -- idx_files_data_type and idx_files_status are created by migration after adding columns
 
+-- NEW: Datasets
+CREATE TABLE IF NOT EXISTS datasets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    version TEXT NOT NULL DEFAULT '1.0.0',
+    author TEXT NOT NULL,
+    description TEXT,
+    schema TEXT NOT NULL,
+    public_url TEXT,
+    private_url TEXT,
+    http_relay_servers TEXT, -- JSON array
+    extra TEXT,             -- JSON for future fields
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS dataset_assets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    dataset_id INTEGER NOT NULL,
+    asset_key TEXT NOT NULL,
+    asset_uuid TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    url TEXT NOT NULL,
+    private_ref TEXT,
+    mock_ref TEXT,
+    extra TEXT,
+    private_file_id INTEGER,
+    mock_file_id INTEGER,
+    private_path TEXT,
+    mock_path TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (dataset_id) REFERENCES datasets(id) ON DELETE CASCADE,
+    UNIQUE(dataset_id, asset_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_dataset_assets_dataset_id ON dataset_assets(dataset_id);
+
 -- NEW: Genotype Metadata (for files where data_type = 'Genotype')
 CREATE TABLE IF NOT EXISTS genotype_metadata (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
