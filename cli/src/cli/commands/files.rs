@@ -1004,7 +1004,7 @@ pub async fn analyze_csv(input_csv: String, output: String) -> Result<()> {
 
 pub async fn import_csv(
     csv_path: String,
-    non_interactive: bool,
+    _non_interactive: bool,
     format: String,
     save_skipped: Option<String>,
 ) -> Result<()> {
@@ -1081,220 +1081,57 @@ pub async fn import_csv(
         println!();
     }
 
-    let mut skipped_rows: Vec<CsvRow> = Vec::new();
+    // Apply defaults so participant_id and metadata can be optional
+    let skipped_rows: Vec<CsvRow> = Vec::new();
+    let mut defaulted_rows = 0usize;
+    for row in rows.iter_mut() {
+        let mut defaulted = false;
 
-    if !non_interactive && format != "json" {
-        use dialoguer::Confirm;
-
-        let is_blank_or_unknown = |value: &Option<String>| {
-            value
+        let normalize = |value: &mut Option<String>| {
+            if value
                 .as_ref()
                 .map(|s| s.trim().is_empty() || s.eq_ignore_ascii_case("unknown"))
                 .unwrap_or(true)
-        };
-
-        let mut skipped_total = 0usize;
-
-        // Check if row is missing any of the four critical fields: participant_id, data_type, source, grch_version
-        let is_incomplete = |row: &CsvRow| -> bool {
-            is_blank_or_unknown(&row.participant_id)
-                || is_blank_or_unknown(&row.data_type)
-                || is_blank_or_unknown(&row.source)
-                || is_blank_or_unknown(&row.grch_version)
-        };
-
-        let incomplete_count = rows.iter().filter(|row| is_incomplete(row)).count();
-
-        // Step 1: If there are incomplete rows, ask if user wants to skip them
-        if incomplete_count > 0 {
-            println!(
-                "{}",
-                format!(
-                    "  ⚠️  {} row(s) are missing metadata (participant_id, data_type, source, or grch_version)",
-                    incomplete_count
-                )
-                .yellow()
-            );
-
-            if Confirm::new()
-                .with_prompt(format!(
-                    "Skip all {} incomplete row(s) and import only complete files?",
-                    incomplete_count
-                ))
-                .default(false)
-                .interact()?
             {
-                // User wants to skip incomplete files - collect them before filtering
-                let to_skip: Vec<CsvRow> = rows
-                    .iter()
-                    .filter(|row| is_incomplete(row))
-                    .cloned()
-                    .collect();
-                skipped_rows.extend(to_skip);
-                rows.retain(|row| !is_incomplete(row));
-                skipped_total += incomplete_count;
-
-                if rows.is_empty() {
-                    println!("{}", "No rows left to import after filtering.".yellow());
-                    return Ok(());
-                }
+                *value = None;
+                true
             } else {
-                // User doesn't want to skip - offer to run detect-csv
-                println!();
-                if Confirm::new()
-                    .with_prompt("Run metadata detection (detect-csv) to fill in missing fields?")
-                    .default(true)
-                    .interact()?
-                {
-                    // Run detect-csv equivalent inline
-                    use std::io::Write;
-                    println!("{}", "🔍 Detecting metadata...".bold());
-
-                    let total_rows = rows.len();
-                    for (i, row) in rows.iter_mut().enumerate() {
-                        print!("\r  Processing... {}/{}", i + 1, total_rows);
-                        std::io::stdout().flush()?;
-
-                        match data::detect_genotype_metadata(&row.file_path) {
-                            Ok(metadata) => {
-                                // Only update if currently blank/unknown
-                                if is_blank_or_unknown(&row.data_type) {
-                                    row.data_type = Some(metadata.data_type);
-                                }
-                                if is_blank_or_unknown(&row.source) {
-                                    row.source = metadata.source;
-                                }
-                                if is_blank_or_unknown(&row.grch_version) {
-                                    row.grch_version = metadata.grch_version;
-                                }
-                            }
-                            Err(e) => {
-                                eprintln!("\n  Warning: Failed to detect {}: {}", row.file_path, e);
-                            }
-                        }
-                    }
-                    println!();
-                    println!("{}", "  ✓ Detection complete".green());
-                    println!();
-                }
-
-                // Step 2: Check if there are still incomplete rows, and ask category by category
-                // Recount after each skip to avoid double-counting rows with multiple missing fields
-
-                let missing_participant_id = rows
-                    .iter()
-                    .filter(|r| is_blank_or_unknown(&r.participant_id))
-                    .count();
-                if missing_participant_id > 0 {
-                    println!("  {} row(s) missing participant_id", missing_participant_id);
-                    if Confirm::new()
-                        .with_prompt(format!("Skip these {} row(s)?", missing_participant_id))
-                        .default(false)
-                        .interact()?
-                    {
-                        let to_skip: Vec<CsvRow> = rows
-                            .iter()
-                            .filter(|row| is_blank_or_unknown(&row.participant_id))
-                            .cloned()
-                            .collect();
-                        let before = rows.len();
-                        rows.retain(|row| !is_blank_or_unknown(&row.participant_id));
-                        let actually_removed = before - rows.len();
-                        skipped_rows.extend(to_skip);
-                        skipped_total += actually_removed;
-                    }
-                }
-
-                let missing_data_type = rows
-                    .iter()
-                    .filter(|r| is_blank_or_unknown(&r.data_type))
-                    .count();
-                if missing_data_type > 0 {
-                    println!("  {} row(s) missing data_type", missing_data_type);
-                    if Confirm::new()
-                        .with_prompt(format!("Skip these {} row(s)?", missing_data_type))
-                        .default(false)
-                        .interact()?
-                    {
-                        let to_skip: Vec<CsvRow> = rows
-                            .iter()
-                            .filter(|row| is_blank_or_unknown(&row.data_type))
-                            .cloned()
-                            .collect();
-                        let before = rows.len();
-                        rows.retain(|row| !is_blank_or_unknown(&row.data_type));
-                        let actually_removed = before - rows.len();
-                        skipped_rows.extend(to_skip);
-                        skipped_total += actually_removed;
-                    }
-                }
-
-                let missing_source = rows
-                    .iter()
-                    .filter(|r| is_blank_or_unknown(&r.source))
-                    .count();
-                if missing_source > 0 {
-                    println!("  {} row(s) missing source", missing_source);
-                    if Confirm::new()
-                        .with_prompt(format!("Skip these {} row(s)?", missing_source))
-                        .default(false)
-                        .interact()?
-                    {
-                        let to_skip: Vec<CsvRow> = rows
-                            .iter()
-                            .filter(|row| is_blank_or_unknown(&row.source))
-                            .cloned()
-                            .collect();
-                        let before = rows.len();
-                        rows.retain(|row| !is_blank_or_unknown(&row.source));
-                        let actually_removed = before - rows.len();
-                        skipped_rows.extend(to_skip);
-                        skipped_total += actually_removed;
-                    }
-                }
-
-                let missing_grch = rows
-                    .iter()
-                    .filter(|r| is_blank_or_unknown(&r.grch_version))
-                    .count();
-                if missing_grch > 0 {
-                    println!("  {} row(s) missing grch_version", missing_grch);
-                    if Confirm::new()
-                        .with_prompt(format!("Skip these {} row(s)?", missing_grch))
-                        .default(false)
-                        .interact()?
-                    {
-                        let to_skip: Vec<CsvRow> = rows
-                            .iter()
-                            .filter(|row| is_blank_or_unknown(&row.grch_version))
-                            .cloned()
-                            .collect();
-                        let before = rows.len();
-                        rows.retain(|row| !is_blank_or_unknown(&row.grch_version));
-                        let actually_removed = before - rows.len();
-                        skipped_rows.extend(to_skip);
-                        skipped_total += actually_removed;
-                    }
-                }
-
-                if rows.is_empty() {
-                    println!("{}", "No rows left to import after filtering.".yellow());
-                    return Ok(());
-                }
+                false
             }
+        };
+
+        if normalize(&mut row.participant_id) {
+            defaulted = true;
         }
 
-        if skipped_total > 0 {
-            println!(
-                "{}",
-                format!(
-                    "  ⏭️  Skipped {} row(s) due to incomplete metadata",
-                    skipped_total
-                )
-                .yellow()
-            );
-            println!();
+        if normalize(&mut row.data_type) {
+            row.data_type = Some("File".to_string());
+            defaulted = true;
         }
+
+        // Keep source/grch_version optional; clear "unknown" to None
+        if normalize(&mut row.source) {
+            defaulted = true;
+        }
+        if normalize(&mut row.grch_version) {
+            defaulted = true;
+        }
+
+        if defaulted {
+            defaulted_rows += 1;
+        }
+    }
+
+    if defaulted_rows > 0 && format != "json" {
+        println!(
+            "{}",
+            format!(
+                "ℹ️  Applied defaults to {} row(s): participant_id optional, data_type=>File when blank/unknown.",
+                defaulted_rows
+            )
+            .dimmed()
+        );
+        println!();
     }
 
     // Perform the actual import as pending (instant - no hashing or metadata detection)
@@ -1313,7 +1150,8 @@ pub async fn import_csv(
                     .data_type
                     .as_ref()
                     .filter(|s| !s.trim().is_empty())
-                    .cloned(),
+                    .cloned()
+                    .or_else(|| Some("File".to_string())),
                 source: r.source.as_ref().filter(|s| !s.trim().is_empty()).cloned(),
                 grch_version: r
                     .grch_version
@@ -1489,7 +1327,8 @@ pub async fn import_pending(csv_path: String, format: String) -> Result<()> {
                     .data_type
                     .as_ref()
                     .filter(|s| !s.trim().is_empty())
-                    .cloned(),
+                    .cloned()
+                    .or_else(|| Some("File".to_string())),
                 source: r.source.as_ref().filter(|s| !s.trim().is_empty()).cloned(),
                 grch_version: r
                     .grch_version

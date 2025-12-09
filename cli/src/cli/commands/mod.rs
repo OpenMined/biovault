@@ -3,6 +3,7 @@ pub mod check;
 pub mod config_cmd;
 pub mod contacts;
 pub mod daemon;
+pub mod datasets;
 pub mod fastq;
 pub mod files;
 pub mod hard_reset;

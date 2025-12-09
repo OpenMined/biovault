@@ -85,12 +85,14 @@ pub async fn execute(email: Option<&str>, quiet: bool) -> Result<()> {
 
     let config_file = biovault_dir.join("config.yaml");
 
-    if config_file.exists() {
+    // Step 1: Create config.yaml if it doesn't exist
+    let config = if config_file.exists() {
         println!(
             "Configuration file already exists at: {}",
             config_file.display()
         );
-        println!("Skipping initialization.");
+        // Load existing config
+        Config::load()?
     } else {
         // Show detected environment if in SyftBox virtualenv
         if is_syftbox_env() {
@@ -136,7 +138,11 @@ pub async fn execute(email: Option<&str>, quiet: bool) -> Result<()> {
         if let Some(ref syftbox_cfg) = syftbox_config {
             println!("  SyftBox config: {}", syftbox_cfg);
         }
+        config
+    };
 
+    // Step 2: Always ensure templates and directories exist (even if config existed)
+    {
         // Create env directory
         let env_dir = biovault_dir.join("env");
         if !env_dir.exists() {
