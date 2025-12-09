@@ -440,14 +440,6 @@ pub fn get_biovault_home() -> anyhow::Result<PathBuf> {
         return Ok(path);
     }
 
-    // Check if config.yaml exists in current directory (convenient for CLI usage in dev environments)
-    // This takes priority over persisted pointer so devs can easily work in sandbox directories
-    if let Ok(current_dir) = env::current_dir() {
-        if current_dir.join("config.yaml").exists() {
-            return Ok(current_dir);
-        }
-    }
-
     // If the user has already picked a home (persisted pointer), respect it even
     // inside a SyftBox virtualenv to avoid creating a second .biovault.
     if let Some(persisted) = read_persisted_home() {
@@ -462,17 +454,18 @@ pub fn get_biovault_home() -> anyhow::Result<PathBuf> {
 
     // Check for SyftBox virtualenv
     if let Some(syftbox_data_dir) = get_env_var("SYFTBOX_DATA_DIR") {
-        let data_dir = PathBuf::from(&syftbox_data_dir);
-        // First check if config.yaml exists directly in SYFTBOX_DATA_DIR (new layout)
-        if data_dir.join("config.yaml").exists() {
-            return Ok(data_dir);
+        let path = PathBuf::from(syftbox_data_dir).join(".biovault");
+        fs::create_dir_all(&path)
+            .with_context(|| format!("Failed to create biovault directory: {}", path.display()))?;
+        return Ok(path);
+    }
+
+    // Check if config.yaml exists in current directory (convenient for CLI usage in dev environments)
+    // This is checked AFTER SYFTBOX_DATA_DIR so sandbox tests work correctly
+    if let Ok(current_dir) = env::current_dir() {
+        if current_dir.join("config.yaml").exists() {
+            return Ok(current_dir);
         }
-        // Check .biovault subdirectory (legacy layout) - only if config exists there
-        let legacy_path = data_dir.join(".biovault");
-        if legacy_path.join("config.yaml").exists() {
-            return Ok(legacy_path);
-        }
-        // SYFTBOX_DATA_DIR is set but no config found - continue to other fallbacks
     }
 
     let home_dir =
