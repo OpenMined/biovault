@@ -1,8 +1,11 @@
 use crate::cli::commands::datasets::{DatasetAsset, DatasetManifest};
+use crate::config::get_biovault_home;
 use crate::data::db::BioVaultDb;
 use anyhow::{Context, Result};
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use std::fs;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct DatasetRecord {
@@ -30,6 +33,12 @@ pub struct DatasetAssetRecord {
     pub mock_file_id: Option<i64>,
     pub private_path: Option<String>,
     pub mock_path: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+struct LocalMappingFile {
+    #[serde(default)]
+    mappings: BTreeMap<String, String>,
 }
 
 /// Remove a dataset (and its assets via cascade) by name. Returns rows deleted (0 or 1).
@@ -280,6 +289,38 @@ pub fn list_datasets_with_assets(
     }
 
     Ok(out)
+}
+
+/// Persist private URL -> local path mappings to BIOVAULT_HOME/mapping.yaml
+pub fn update_local_mappings(entries: &[(String, String)]) -> Result<()> {
+    if entries.is_empty() {
+        return Ok(());
+    }
+
+    let mapping_path = get_biovault_home()?.join("mapping.yaml");
+    let mut mapping = if mapping_path.exists() {
+        let raw = fs::read_to_string(&mapping_path)
+            .with_context(|| format!("Failed to read {}", mapping_path.display()))?;
+        serde_yaml::from_str::<LocalMappingFile>(&raw).unwrap_or_default()
+    } else {
+        LocalMappingFile::default()
+    };
+
+    for (public_ref, private_path) in entries {
+        mapping
+            .mappings
+            .insert(public_ref.clone(), private_path.clone());
+    }
+
+    let yaml = serde_yaml::to_string(&mapping)?;
+    if let Some(parent) = mapping_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create {}", parent.display()))?;
+    }
+    fs::write(&mapping_path, yaml)
+        .with_context(|| format!("Failed to write {}", mapping_path.display()))?;
+
+    Ok(())
 }
 
 /// Convert DB rows into manifest structs so publish can emit YAML

@@ -202,6 +202,8 @@ pub async fn publish(
     let public_manifest_path = public_dir.join("dataset.yaml");
     storage.write_plaintext_file(&public_manifest_path, yaml.as_bytes(), true)?;
 
+    let mut mapping_updates: Vec<(String, String)> = Vec::new();
+
     // Optionally copy mock artifacts alongside public manifest
     if copy_mock {
         let assets_dir = public_dir.join("assets");
@@ -210,6 +212,14 @@ pub async fn publish(
             .with_context(|| format!("Failed to create {}", assets_dir.display()))?;
 
         for (asset_key, asset) in &manifest.assets {
+            if let (Some(priv_url), Some(priv_path)) = (
+                manifest.private_url.as_ref(),
+                resolve_private_source(&db, asset),
+            ) {
+                let private_fragment = format!("{}#assets.{}", priv_url, asset_key);
+                mapping_updates.push((private_fragment, priv_path));
+            }
+
             // Prefer an internal source hint to avoid copying from published URLs
             // Use mappings.mock -> (db_file_id or file_path) if available; fallback to mock field
             let mock_source = if let Some(mapping) = &asset.mappings {
@@ -273,6 +283,21 @@ pub async fn publish(
                 })?;
             }
         }
+    } else {
+        // Even when not copying mocks, still capture private mappings for local lookup
+        for (asset_key, asset) in &manifest.assets {
+            if let (Some(priv_url), Some(priv_path)) = (
+                manifest.private_url.as_ref(),
+                resolve_private_source(&db, asset),
+            ) {
+                let private_fragment = format!("{}#assets.{}", priv_url, asset_key);
+                mapping_updates.push((private_fragment, priv_path));
+            }
+        }
+    }
+
+    if !mapping_updates.is_empty() {
+        update_local_mappings(mapping_updates)?;
     }
 
     // Update datasets.yaml index
@@ -526,4 +551,34 @@ fn resolve_file_path(db: &BioVaultDb, file_id: i64) -> Result<String> {
 
 fn resolve_file_path_by_id(db: &BioVaultDb, file_id: i64) -> Result<String> {
     resolve_file_path(db, file_id)
+}
+
+fn resolve_private_source(db: &BioVaultDb, asset: &DatasetAsset) -> Option<String> {
+    let mapping = asset.mappings.as_ref()?;
+    if let Some(ep) = &mapping.private {
+        if let Some(id) = ep.db_file_id {
+            return resolve_file_path_by_id(db, id)
+                .ok()
+                .or_else(|| ep.file_path.clone());
+        }
+        if ep.file_path.is_some() {
+            return ep.file_path.clone();
+        }
+    }
+    None
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[allow(dead_code)]
+struct LocalMappingFile {
+    #[serde(default)]
+    mappings: BTreeMap<String, String>,
+}
+
+fn update_local_mappings(entries: Vec<(String, String)>) -> Result<()> {
+    if entries.is_empty() {
+        return Ok(());
+    }
+
+    crate::data::datasets::update_local_mappings(&entries)
 }
