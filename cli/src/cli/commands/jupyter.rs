@@ -12,14 +12,51 @@ use std::fs;
 use std::io::{self, BufRead, BufReader};
 use std::time::{Duration, SystemTime};
 use tokio::net::TcpStream;
+use tracing::{info, warn};
 
-fn ensure_virtualenv(project_dir: &Path, python_version: &str) -> Result<()> {
+fn resolve_uv_path() -> Result<String> {
+    if let Ok(env_path) = env::var("BIOVAULT_BUNDLED_UV") {
+        if !env_path.trim().is_empty() {
+            let p = PathBuf::from(env_path.trim());
+            if p.exists() {
+                println!(
+                    "🔧 Using bundled uv from BIOVAULT_BUNDLED_UV={}",
+                    p.display()
+                );
+                info!("Using bundled uv: {}", p.display());
+                return Ok(p.display().to_string());
+            } else {
+                warn!("BIOVAULT_BUNDLED_UV is set but missing: {}", p.display());
+                return Err(anyhow!(
+                    "BIOVAULT_BUNDLED_UV is set to '{}' but the file does not exist",
+                    p.display()
+                )
+                .into());
+            }
+        }
+    }
+
+    if let Ok(p) = which::which("uv") {
+        let s = p.display().to_string();
+        println!("🔧 Using uv from PATH: {}", s);
+        info!("Using uv from PATH: {}", s);
+        return Ok(s);
+    }
+
+    warn!("uv not found in BIOVAULT_BUNDLED_UV or PATH");
+    Err(anyhow!(
+        "uv not found. Set BIOVAULT_BUNDLED_UV to the bundled binary or install uv on PATH."
+    )
+    .into())
+}
+
+fn ensure_virtualenv(project_dir: &Path, python_version: &str, uv_bin: &str) -> Result<()> {
     let venv_path = project_dir.join(".venv");
 
     if !venv_path.exists() {
         println!("📦 Creating virtualenv with Python {}...", python_version);
 
-        let status = Command::new("uv")
+        let status = Command::new(uv_bin)
             .args(["venv", "--python", python_version, ".venv"])
             .current_dir(project_dir)
             .status()?;
@@ -46,7 +83,7 @@ fn ensure_virtualenv(project_dir: &Path, python_version: &str) -> Result<()> {
 
     // Install base packages from PyPI including pinned biovault-beaver with syftbox-sdk
     let beaver_pkg = format!("biovault-beaver[syftbox]=={}", beaver_version);
-    let status = Command::new("uv")
+    let status = Command::new(uv_bin)
         .args([
             "pip",
             "install",
@@ -84,7 +121,7 @@ fn ensure_virtualenv(project_dir: &Path, python_version: &str) -> Result<()> {
         if syftbox_path.exists() {
             println!("📦 Installing syftbox-sdk from local editable path...");
             let syftbox_canonical = syftbox_path.canonicalize().unwrap_or(syftbox_path.clone());
-            let status = Command::new("uv")
+            let status = Command::new(uv_bin)
                 .args([
                     "pip",
                     "install",
@@ -110,7 +147,7 @@ fn ensure_virtualenv(project_dir: &Path, python_version: &str) -> Result<()> {
         if beaver_path.exists() {
             println!("🦫 Installing beaver from local editable path (overwriting PyPI version)...");
             let beaver_canonical = beaver_path.canonicalize().unwrap_or(beaver_path);
-            let status = Command::new("uv")
+            let status = Command::new(uv_bin)
                 .args([
                     "pip",
                     "install",
@@ -312,6 +349,8 @@ async fn wait_for_server_ready(port: i32) -> Result<()> {
 }
 
 pub async fn start(project_path: &str, python_version: &str) -> Result<()> {
+    let uv_bin = resolve_uv_path()?;
+
     // Check if project_path is a number (list index)
     let project_dir = if let Ok(index) = project_path.parse::<usize>() {
         if index == 0 {
@@ -348,7 +387,7 @@ pub async fn start(project_path: &str, python_version: &str) -> Result<()> {
 
     let venv_path = project_dir.join(".venv");
 
-    ensure_virtualenv(&project_dir, python_version)?;
+    ensure_virtualenv(&project_dir, python_version, &uv_bin)?;
 
     // Register/update in database
     let db = BioVaultDb::new()?;
@@ -438,7 +477,7 @@ pub async fn start(project_path: &str, python_version: &str) -> Result<()> {
         args.push("--ServerApp.port_retries=0".into());
     }
 
-    let mut child = Command::new("uv")
+    let mut child = Command::new(&uv_bin)
         .args(&args)
         .current_dir(&project_dir)
         .env("JUPYTER_RUNTIME_DIR", &runtime_dir)
@@ -446,6 +485,11 @@ pub async fn start(project_path: &str, python_version: &str) -> Result<()> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
+    info!(
+        "Launching Jupyter with uv at {}: {:?}",
+        uv_bin,
+        Command::new(&uv_bin).args(&args)
+    );
 
     let pid = child.id();
     println!("✅ Jupyter Lab started (PID: {})", pid);
@@ -587,6 +631,7 @@ pub async fn start(project_path: &str, python_version: &str) -> Result<()> {
 }
 
 pub async fn stop(project_path: &str) -> Result<()> {
+    let uv_bin = resolve_uv_path()?;
     // Check if project_path is a number (list index)
     let project_dir = if let Ok(index) = project_path.parse::<usize>() {
         if index == 0 {
@@ -625,7 +670,7 @@ pub async fn stop(project_path: &str) -> Result<()> {
 
     println!("🛑 Stopping Jupyter Lab with: uv run --python .venv jupyter lab stop...");
 
-    let status = Command::new("uv")
+    let status = Command::new(&uv_bin)
         .args(["run", "--python", ".venv", "jupyter", "lab", "stop"])
         .current_dir(&project_dir)
         .status()?;
@@ -692,7 +737,8 @@ pub async fn reset(project_path: &str, python_version: &str) -> Result<()> {
 
     // Create fresh venv without launching Jupyter
     println!("🔄 Creating fresh virtualenv...");
-    ensure_virtualenv(&project_dir, python_version)?;
+    let uv_bin = resolve_uv_path()?;
+    ensure_virtualenv(&project_dir, python_version, &uv_bin)?;
 
     db.register_dev_env(&project_dir, python_version, "jupyter", true)?;
     db.update_jupyter_session(&project_dir, None, None, None, None)?;
