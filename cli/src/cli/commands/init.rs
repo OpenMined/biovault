@@ -8,6 +8,8 @@ use std::io::IsTerminal;
 use std::path::PathBuf;
 use tracing::info;
 
+const PLACEHOLDER_EMAIL: &str = "setup@pending";
+
 pub async fn execute(email: Option<&str>, quiet: bool) -> Result<()> {
     // Check if config already exists before prompting for location
     let default_biovault_dir = get_biovault_home()?;
@@ -84,6 +86,21 @@ pub async fn execute(email: Option<&str>, quiet: bool) -> Result<()> {
     }
 
     let config_file = biovault_dir.join("config.yaml");
+    let syc_vault = {
+        let colocated = syc::vault_path_for_home(&biovault_dir);
+        if colocated.exists() {
+            colocated
+        } else {
+            let legacy = dirs::home_dir()
+                .map(|h| h.join(".syc"))
+                .unwrap_or_else(|| PathBuf::from(".syc"));
+            if legacy.exists() {
+                legacy
+            } else {
+                colocated
+            }
+        }
+    };
 
     // Step 1: Create config.yaml if it doesn't exist
     let config = if config_file.exists() {
@@ -92,7 +109,22 @@ pub async fn execute(email: Option<&str>, quiet: bool) -> Result<()> {
             config_file.display()
         );
         // Load existing config
-        Config::load()?
+        let mut existing = Config::load()?;
+        let current_email = existing.email.trim();
+        if (current_email.is_empty() || current_email == PLACEHOLDER_EMAIL) && !email.is_empty() {
+            existing.email = email.to_string();
+            existing.save(&config_file)?;
+            println!(
+                "Updated config email from placeholder to: {}",
+                existing.email
+            );
+        } else if current_email != email {
+            println!(
+                "Keeping existing config email ({}), ignoring provided {}",
+                existing.email, email
+            );
+        }
+        existing
     } else {
         // Show detected environment if in SyftBox virtualenv
         if is_syftbox_env() {
@@ -214,29 +246,34 @@ pub async fn execute(email: Option<&str>, quiet: bool) -> Result<()> {
         );
 
         match config.get_syftbox_data_dir() {
-            Ok(data_root) => match syc::provision_local_identity(&config.email, &data_root, None) {
-                Ok(outcome) => {
-                    if outcome.generated {
-                        println!("✓ Generated Syft Crypto identity for {}", outcome.identity);
-                        if let Some(mnemonic) = outcome.recovery_mnemonic.as_deref() {
-                            println!("  Recovery mnemonic (store securely!): {}", mnemonic);
+            Ok(data_root) => {
+                match syc::provision_local_identity(&config.email, &data_root, Some(&syc_vault)) {
+                    Ok(outcome) => {
+                        if outcome.generated {
+                            println!("✓ Generated Syft Crypto identity for {}", outcome.identity);
+                            if let Some(mnemonic) = outcome.recovery_mnemonic.as_deref() {
+                                println!("  Recovery mnemonic (store securely!): {}", mnemonic);
+                            }
+                        } else {
+                            println!("✓ Syft Crypto identity detected for {}", outcome.identity);
                         }
-                    } else {
-                        println!("✓ Syft Crypto identity detected for {}", outcome.identity);
+                        println!("  Vault directory: {}", outcome.vault_path.display());
+                        println!(
+                            "  Public bundle published at: {}",
+                            outcome.public_bundle_path.display()
+                        );
+                        println!("  Syft vault location: {}", syc_vault.display());
                     }
-                    println!("  Vault directory: {}", outcome.vault_path.display());
-                    println!(
-                        "  Public bundle published at: {}",
-                        outcome.public_bundle_path.display()
-                    );
-                }
-                Err(err) => {
-                    eprintln!("⚠️  Unable to provision Syft Crypto identity automatically: {err}");
-                    eprintln!(
+                    Err(err) => {
+                        eprintln!(
+                            "⚠️  Unable to provision Syft Crypto identity automatically: {err}"
+                        );
+                        eprintln!(
                         "    Run 'bv syc import --bundle <path> --expected-identity <email>' once your peer shares a bundle."
                     );
+                    }
                 }
-            },
+            }
             Err(err) => {
                 println!(
                     "⚠️  Skipping Syft Crypto identity provisioning (no SyftBox config): {err}"

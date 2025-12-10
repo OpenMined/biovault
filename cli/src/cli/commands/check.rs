@@ -6,6 +6,7 @@ use anyhow::anyhow;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::env;
+use std::fs;
 #[cfg(target_os = "macos")]
 use std::io::Write;
 #[cfg(target_os = "macos")]
@@ -1420,6 +1421,16 @@ fn get_docker_version(version_source: Option<&str>) -> Option<String> {
 
 fn get_syftbox_version(version_source: Option<&str>) -> Option<String> {
     let mut command = command_for_version(version_source, "syftbox")?;
+
+    // Keep syftbox probes sandboxed to the BioVault home so we don't litter the user's real HOME with ~/.syftbox logs/config.
+    if let Ok(home) = crate::config::get_biovault_home() {
+        let syftbox_dir = home.join(".syftbox");
+        let _ = fs::create_dir_all(syftbox_dir.join("logs"));
+        command.env("HOME", &home);
+        command.env("SYFTBOX_DATA_DIR", &home);
+        command.env("SYFTBOX_CONFIG_PATH", syftbox_dir.join("config.json"));
+    }
+
     let output = command.arg("--version").output().ok()?;
     if !output.status.success() {
         return None;
