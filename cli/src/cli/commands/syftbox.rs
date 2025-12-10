@@ -355,6 +355,9 @@ fn resolve_data_dir(
     config: &Config,
     syftbox_config: &SyftboxConfigFile,
 ) -> Result<PathBuf> {
+    let default_data_dir = Config::default_syftbox_data_dir()?;
+    let legacy_default = dirs::home_dir().map(|h| h.join("SyftBox"));
+
     if let Some(dir) = override_dir {
         if !dir.trim().is_empty() {
             return Ok(PathBuf::from(dir));
@@ -362,13 +365,25 @@ fn resolve_data_dir(
     }
 
     if !syftbox_config.data_dir.trim().is_empty() {
-        return Ok(PathBuf::from(syftbox_config.data_dir.trim()));
+        let candidate = PathBuf::from(syftbox_config.data_dir.trim());
+        if let Some(legacy) = &legacy_default {
+            if &candidate == legacy {
+                return Ok(default_data_dir);
+            }
+        }
+        return Ok(candidate);
     }
 
     if let Some(creds) = config.syftbox_credentials.as_ref() {
         if let Some(dir) = creds.data_dir.as_ref() {
             if !dir.trim().is_empty() {
-                return Ok(PathBuf::from(dir.trim()));
+                let candidate = PathBuf::from(dir.trim());
+                if let Some(legacy) = &legacy_default {
+                    if &candidate == legacy {
+                        return Ok(default_data_dir);
+                    }
+                }
+                return Ok(candidate);
             }
         }
     }
@@ -379,9 +394,7 @@ fn resolve_data_dir(
         }
     }
 
-    dirs::home_dir()
-        .map(|home| home.join("SyftBox"))
-        .ok_or_else(|| anyhow!("Could not determine default SyftBox data directory"))
+    Ok(default_data_dir)
 }
 
 fn maybe_load_config() -> Result<Option<(Config, PathBuf)>> {

@@ -3,6 +3,12 @@ use crate::error::Error;
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
+fn default_syftbox_path_str() -> String {
+    Config::default_syftbox_config_path()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "<BioVault syftbox/config.json>".to_string())
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ConfigDisplay {
     pub config_file: String,
@@ -20,7 +26,7 @@ pub async fn show(json: bool) -> crate::error::Result<()> {
     let syftbox_config_str = if let Some(ref syftbox_path) = config.syftbox_config {
         syftbox_path.clone()
     } else {
-        "~/.syftbox/config.json (default)".to_string()
+        format!("{} (default)", default_syftbox_path_str())
     };
 
     let syftbox_data_dir_str = match config.get_syftbox_data_dir() {
@@ -112,7 +118,10 @@ pub async fn set_syftbox(path: Option<String>) -> crate::error::Result<()> {
         config.syftbox_config = None;
         config.save(&config_path)?;
 
-        println!("✓ SyftBox config path reset to default: ~/.syftbox/config.json");
+        println!(
+            "✓ SyftBox config path reset to default: {}",
+            default_syftbox_path_str()
+        );
     }
 
     match config.get_syftbox_data_dir() {

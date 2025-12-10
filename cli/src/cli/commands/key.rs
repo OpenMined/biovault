@@ -19,7 +19,7 @@ pub enum KeyCommands {
         email: Option<String>,
         #[arg(
             long,
-            help = "Override SyftBox data dir (defaults to ~/.syftbox/config.json data_dir)"
+            help = "Override SyftBox data dir (defaults to BioVault SyftBox config data_dir)"
         )]
         data_dir: Option<PathBuf>,
         #[arg(
