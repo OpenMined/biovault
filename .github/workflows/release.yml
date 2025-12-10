@@ -165,7 +165,8 @@ jobs:
       - name: Update version in Cargo.toml
         shell: bash
         run: |
-          sed -i 's/^version = .*/version = "${{ needs.check-version.outputs.new_version }}"/' cli/Cargo.toml
+          # Only update the package version (line 3), not dependency versions
+          sed -i '3s/^version = .*/version = "${{ needs.check-version.outputs.new_version }}"/' cli/Cargo.toml
           # Update Cargo.lock
           cd cli && cargo update --workspace
       
