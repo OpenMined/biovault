@@ -500,6 +500,12 @@ enum Commands {
         command: commands::contacts::ContactsCommands,
     },
 
+    #[command(about = "Network discovery and status")]
+    Network {
+        #[command(subcommand)]
+        command: commands::network::NetworkCommands,
+    },
+
     #[command(about = "Manage collaborative Jupyter sessions")]
     Session {
         #[command(subcommand)]
@@ -2070,6 +2076,10 @@ async fn async_main_with(cli: Cli) -> Result<()> {
         Commands::Contacts { command } => {
             let config = biovault::config::Config::load()?;
             commands::contacts::handle(command, &config).await?;
+        }
+        Commands::Network { command } => {
+            let config = biovault::config::Config::load()?;
+            commands::network::handle(command, &config).await?;
         }
         Commands::Session { command } => {
             let config = biovault::config::Config::load()?;

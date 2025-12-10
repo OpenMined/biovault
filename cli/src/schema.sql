@@ -251,3 +251,20 @@ CREATE TABLE IF NOT EXISTS session_messages (
 );
 
 CREATE INDEX IF NOT EXISTS idx_session_messages_session_id ON session_messages(session_id);
+
+-- NEW: Session Datasets (datasets associated with a session)
+-- Links sessions to datasets for collaborative analysis
+CREATE TABLE IF NOT EXISTS session_datasets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,             -- References sessions.session_id
+    dataset_public_url TEXT NOT NULL,     -- syft:// URL to the dataset manifest
+    dataset_owner TEXT NOT NULL,          -- Owner email of the dataset
+    dataset_name TEXT NOT NULL,           -- Name of the dataset
+    role TEXT DEFAULT 'shared',           -- 'shared' (using shared data) or 'yours' (your own data)
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (session_id) REFERENCES sessions(session_id) ON DELETE CASCADE,
+    UNIQUE(session_id, dataset_public_url)
+);
+
+CREATE INDEX IF NOT EXISTS idx_session_datasets_session_id ON session_datasets(session_id);
+CREATE INDEX IF NOT EXISTS idx_session_datasets_owner ON session_datasets(dataset_owner);

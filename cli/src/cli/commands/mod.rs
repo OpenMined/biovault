@@ -13,6 +13,7 @@ pub mod init;
 pub mod jupyter;
 pub mod key;
 pub mod messages;
+pub mod network;
 pub mod participant;
 pub mod participants;
 pub mod pipeline;

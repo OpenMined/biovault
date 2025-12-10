@@ -7,6 +7,7 @@ pub mod pipelines;
 pub mod project_editor;
 pub mod projects;
 pub mod response;
+pub mod sessions;
 
 pub use datasets::*;
 pub use db::BioVaultDb;
@@ -17,3 +18,4 @@ pub use pipelines::*;
 pub use project_editor::*;
 pub use projects::*;
 pub use response::CliResponse;
+pub use sessions::*;
