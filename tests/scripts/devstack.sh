@@ -130,6 +130,8 @@ ensure_bv_binary() {
 
 stop_stack() {
   echo "Stopping SyftBox devstack at $SANDBOX_DIR..."
+  # Stop any Jupyter processes in the sandbox first
+  pkill -f "jupyter.*$SANDBOX_DIR" 2>/dev/null || true
   if [[ -d "$SYFTBOX_DIR" ]]; then
     (cd "$SYFTBOX_DIR" && GOCACHE="$GO_CACHE_DIR" go run ./cmd/devstack stop --path "$SANDBOX_DIR") || true
   fi
