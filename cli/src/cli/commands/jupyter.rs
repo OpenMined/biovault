@@ -76,13 +76,17 @@ fn ensure_virtualenv(project_dir: &Path, python_version: &str, uv_bin: &str) -> 
     // Falls back to hardcoded version if env var not set (e.g., when building biovault CLI standalone)
     let beaver_version = option_env!("BEAVER_VERSION").unwrap_or("0.1.26");
 
+    // Ensure uv is available inside the virtualenv PATH (symlink/copy bundled uv)
+    link_uv_into_venv(&venv_path, uv_bin);
+
     println!(
-        "📦 Installing/Updating packages via: uv pip install -U jupyterlab cleon biovault-beaver[syftbox,lib-support]=={}",
+        "📦 Installing/Updating packages via: uv pip install -U jupyterlab cleon biovault-beaver[lib-support]=={}",
         beaver_version
     );
 
-    // Install base packages from PyPI including pinned biovault-beaver with syftbox-sdk
-    let beaver_pkg = format!("biovault-beaver[syftbox,lib-support]=={}", beaver_version);
+    // Install base packages from PyPI including pinned biovault-beaver
+    // Note: syftbox-sdk is a direct dependency of biovault-beaver, not an extra
+    let beaver_pkg = format!("biovault-beaver[lib-support]=={}", beaver_version);
     let status = Command::new(uv_bin)
         .args([
             "pip",
@@ -177,6 +181,59 @@ fn ensure_virtualenv(project_dir: &Path, python_version: &str, uv_bin: &str) -> 
     }
 
     Ok(())
+}
+
+/// Place the resolved uv binary into the virtualenv's bin directory for notebook use.
+fn link_uv_into_venv(venv_path: &Path, uv_bin: &str) {
+    let uv_src = PathBuf::from(uv_bin);
+    if !uv_src.exists() {
+        println!(
+            "⚠️  uv binary not found at {}; skipping venv link",
+            uv_src.display()
+        );
+        return;
+    }
+
+    let target = venv_path.join("bin").join("uv");
+    if target.exists() {
+        return;
+    }
+
+    #[cfg(unix)]
+    {
+        if let Err(e) = std::os::unix::fs::symlink(&uv_src, &target) {
+            println!(
+                "⚠️  Failed to symlink uv into venv ({} -> {}): {}",
+                uv_src.display(),
+                target.display(),
+                e
+            );
+        } else {
+            println!(
+                "✅ Linked uv into venv: {} -> {}",
+                target.display(),
+                uv_src.display()
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        if let Err(e) = std::fs::copy(&uv_src, &target) {
+            println!(
+                "⚠️  Failed to copy uv into venv ({} -> {}): {}",
+                uv_src.display(),
+                target.display(),
+                e
+            );
+        } else {
+            println!(
+                "✅ Copied uv into venv: {} -> {}",
+                target.display(),
+                uv_src.display()
+            );
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
