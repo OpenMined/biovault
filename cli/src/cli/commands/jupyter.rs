@@ -47,7 +47,16 @@ fn ensure_virtualenv(project_dir: &Path, python_version: &str) -> Result<()> {
     // Install base packages from PyPI including pinned biovault-beaver with syftbox-sdk
     let beaver_pkg = format!("biovault-beaver[syftbox]=={}", beaver_version);
     let status = Command::new("uv")
-        .args(["pip", "install", "-U", "jupyterlab", "cleon", &beaver_pkg])
+        .args([
+            "pip",
+            "install",
+            "--python",
+            ".venv",
+            "-U",
+            "jupyterlab",
+            "cleon",
+            &beaver_pkg,
+        ])
         .current_dir(project_dir)
         .status()?;
 
@@ -79,6 +88,8 @@ fn ensure_virtualenv(project_dir: &Path, python_version: &str) -> Result<()> {
                 .args([
                     "pip",
                     "install",
+                    "--python",
+                    ".venv",
                     "-e",
                     syftbox_canonical.to_str().unwrap_or("."),
                 ])
@@ -103,6 +114,8 @@ fn ensure_virtualenv(project_dir: &Path, python_version: &str) -> Result<()> {
                 .args([
                     "pip",
                     "install",
+                    "--python",
+                    ".venv",
                     "-e",
                     beaver_canonical.to_str().unwrap_or("."),
                 ])
