@@ -4,6 +4,9 @@
 //! with peer invitations for secure data sharing.
 
 use crate::config::Config;
+use crate::data::sessions::{
+    add_session_dataset, get_session_datasets, remove_session_dataset, AddSessionDatasetRequest,
+};
 use crate::data::BioVaultDb;
 use crate::messages::{Message, MessageDb, MessageStatus};
 use anyhow::{Context, Result};
@@ -27,6 +30,12 @@ pub enum SessionsCommands {
 
         #[arg(long, help = "Session description")]
         description: Option<String>,
+
+        #[arg(
+            long = "dataset",
+            help = "Dataset URL(s) to associate (syft://owner/public/...)"
+        )]
+        datasets: Vec<String>,
     },
 
     #[command(about = "List all sessions")]
@@ -63,6 +72,9 @@ pub enum SessionsCommands {
     Accept {
         #[arg(help = "Session ID from invitation")]
         session_id: String,
+
+        #[arg(long = "dataset", help = "Dataset URL(s) to associate when accepting")]
+        datasets: Vec<String>,
     },
 
     #[command(about = "Reject a session invitation")]
@@ -90,6 +102,39 @@ pub enum SessionsCommands {
 
         #[arg(long, help = "Skip confirmation prompt")]
         yes: bool,
+    },
+
+    #[command(about = "Add a dataset to an existing session")]
+    AddDataset {
+        #[arg(help = "Session ID")]
+        session_id: String,
+
+        #[arg(help = "Dataset URL (syft://owner/public/biovault/datasets/name/dataset.yaml)")]
+        dataset_url: String,
+
+        #[arg(
+            long,
+            help = "Role: 'shared' (using shared data) or 'yours' (your data)"
+        )]
+        role: Option<String>,
+    },
+
+    #[command(about = "Remove a dataset from a session")]
+    RemoveDataset {
+        #[arg(help = "Session ID")]
+        session_id: String,
+
+        #[arg(help = "Dataset URL to remove")]
+        dataset_url: String,
+    },
+
+    #[command(about = "List datasets associated with a session")]
+    ListDatasets {
+        #[arg(help = "Session ID")]
+        session_id: String,
+
+        #[arg(long, help = "Output as JSON")]
+        json: bool,
     },
 }
 
@@ -125,12 +170,16 @@ pub async fn handle(command: SessionsCommands, config: &Config) -> Result<()> {
             name,
             peer,
             description,
-        } => create_session(config, &name, peer, description),
+            datasets,
+        } => create_session(config, &name, peer, description, datasets),
         SessionsCommands::List { json } => list_sessions(config, json),
         SessionsCommands::Show { session_id, json } => show_session(config, &session_id, json),
         SessionsCommands::Invite { session_id, peer } => invite_peer(config, &session_id, &peer),
         SessionsCommands::Invitations { json } => list_invitations(config, json),
-        SessionsCommands::Accept { session_id } => accept_invitation(config, &session_id),
+        SessionsCommands::Accept {
+            session_id,
+            datasets,
+        } => accept_invitation(config, &session_id, datasets),
         SessionsCommands::Reject { session_id, reason } => {
             reject_invitation(config, &session_id, reason)
         }
@@ -139,6 +188,18 @@ pub async fn handle(command: SessionsCommands, config: &Config) -> Result<()> {
             message,
         } => send_chat_message(config, &session_id, &message),
         SessionsCommands::Delete { session_id, yes } => delete_session(config, &session_id, yes),
+        SessionsCommands::AddDataset {
+            session_id,
+            dataset_url,
+            role,
+        } => add_dataset_to_session(config, &session_id, &dataset_url, role),
+        SessionsCommands::RemoveDataset {
+            session_id,
+            dataset_url,
+        } => remove_dataset_from_session(config, &session_id, &dataset_url),
+        SessionsCommands::ListDatasets { session_id, json } => {
+            list_session_datasets(config, &session_id, json)
+        }
     }
 }
 
@@ -174,6 +235,7 @@ fn create_session(
     name: &str,
     peer: Option<String>,
     description: Option<String>,
+    datasets: Vec<String>,
 ) -> Result<()> {
     let db = BioVaultDb::new()?;
     let session_id = generate_session_id();
@@ -194,12 +256,38 @@ fn create_session(
         rusqlite::params![&session_id, name, &description, &session_path_str, &owner, &peer],
     )?;
 
-    // Write session config file
+    // Associate datasets with the session
+    let mut dataset_infos = Vec::new();
+    for dataset_url in &datasets {
+        if let Some(info) = parse_dataset_url(dataset_url) {
+            let request = AddSessionDatasetRequest {
+                session_id: session_id.clone(),
+                dataset_public_url: dataset_url.clone(),
+                dataset_owner: info.owner.clone(),
+                dataset_name: info.name.clone(),
+                role: Some("shared".to_string()),
+            };
+            add_session_dataset(&db, &request)?;
+            dataset_infos.push(info);
+        } else {
+            eprintln!(
+                "⚠️  Warning: Could not parse dataset URL: {}",
+                dataset_url.yellow()
+            );
+        }
+    }
+
+    // Write session config file with datasets
     let session_config = serde_json::json!({
         "session_id": &session_id,
         "name": name,
         "owner": &owner,
         "peer": &peer,
+        "datasets": dataset_infos.iter().map(|d| serde_json::json!({
+            "owner": d.owner,
+            "name": d.name,
+            "public_url": format!("syft://{}/public/biovault/datasets/{}/dataset.yaml", d.owner, d.name),
+        })).collect::<Vec<_>>(),
         "created_at": Utc::now().to_rfc3339(),
     });
     let config_path = session_path.join("session.json");
@@ -208,6 +296,14 @@ fn create_session(
     println!("\n✅ Session created: {}", name.green());
     println!("   📁 ID: {}", session_id.cyan());
     println!("   📂 Path: {}", session_path_str);
+
+    // Show associated datasets
+    if !dataset_infos.is_empty() {
+        println!("   📊 Datasets:");
+        for info in &dataset_infos {
+            println!("      - {}/{}", info.owner, info.name);
+        }
+    }
 
     // Send invitation if peer specified
     if let Some(peer_email) = &peer {
@@ -221,6 +317,42 @@ fn create_session(
     );
 
     Ok(())
+}
+
+/// Parsed dataset URL info
+#[derive(Debug, Clone)]
+struct DatasetUrlInfo {
+    owner: String,
+    name: String,
+}
+
+/// Parse a syft:// dataset URL to extract owner and name
+fn parse_dataset_url(url: &str) -> Option<DatasetUrlInfo> {
+    // Format: syft://owner@domain/public/biovault/datasets/name/dataset.yaml
+    if !url.starts_with("syft://") {
+        return None;
+    }
+
+    let remainder = &url[7..]; // Skip "syft://"
+    let parts: Vec<&str> = remainder.split('/').collect();
+
+    if parts.len() < 5 {
+        return None;
+    }
+
+    let owner = parts[0].to_string();
+
+    // Find "datasets" in the path and get the next part as name
+    for (i, part) in parts.iter().enumerate() {
+        if *part == "datasets" && i + 1 < parts.len() {
+            return Some(DatasetUrlInfo {
+                owner,
+                name: parts[i + 1].to_string(),
+            });
+        }
+    }
+
+    None
 }
 
 /// Send a session invitation via RPC and messaging
@@ -587,7 +719,7 @@ fn session_exists(_config: &Config, session_id: &str) -> Result<bool> {
 }
 
 /// Accept a session invitation
-fn accept_invitation(config: &Config, session_id: &str) -> Result<()> {
+fn accept_invitation(config: &Config, session_id: &str, datasets: Vec<String>) -> Result<()> {
     let my_rpc_dir = get_my_rpc_session_dir(config)?;
     let request_file = my_rpc_dir.join(format!("{}.request", session_id));
 
@@ -635,12 +767,33 @@ fn accept_invitation(config: &Config, session_id: &str) -> Result<()> {
         ],
     )?;
 
-    // Write session config
+    // Associate datasets with the session (as provider since we're accepting)
+    let mut dataset_infos = Vec::new();
+    for dataset_url in &datasets {
+        if let Some(info) = parse_dataset_url(dataset_url) {
+            let request = AddSessionDatasetRequest {
+                session_id: session_id.to_string(),
+                dataset_public_url: dataset_url.clone(),
+                dataset_owner: info.owner.clone(),
+                dataset_name: info.name.clone(),
+                role: Some("provider".to_string()),
+            };
+            add_session_dataset(&db, &request)?;
+            dataset_infos.push(info);
+        }
+    }
+
+    // Write session config with datasets
     let session_config = serde_json::json!({
         "session_id": session_id,
         "name": &session_name,
         "owner": &config.email,
         "peer": &invitation.requester,
+        "datasets": dataset_infos.iter().map(|d| serde_json::json!({
+            "owner": d.owner,
+            "name": d.name,
+            "public_url": format!("syft://{}/public/biovault/datasets/{}/dataset.yaml", d.owner, d.name),
+        })).collect::<Vec<_>>(),
         "created_at": Utc::now().to_rfc3339(),
     });
     fs::write(
@@ -669,6 +822,15 @@ fn accept_invitation(config: &Config, session_id: &str) -> Result<()> {
         invitation.requester.green()
     );
     println!("   Session: {} [{}]", session_name, session_id.cyan());
+
+    // Show associated datasets
+    if !dataset_infos.is_empty() {
+        println!("   📊 Datasets provided:");
+        for info in &dataset_infos {
+            println!("      - {}/{}", info.owner, info.name);
+        }
+    }
+
     println!(
         "\nStart Jupyter: {}",
         format!("bv jupyter start {}", session_path.display()).cyan()
@@ -809,12 +971,120 @@ fn delete_session(_config: &Config, session_id: &str, skip_confirm: bool) -> Res
         }
     }
 
-    // Delete from database
+    // Delete from database (session_datasets will be cascade deleted)
     db.connection()
         .execute("DELETE FROM sessions WHERE session_id = ?1", [session_id])?;
 
     println!("\n🗑️  Deleted session: {}", session_id.yellow());
     println!("   Files preserved at: {}", session_path);
+
+    Ok(())
+}
+
+/// Add a dataset to an existing session
+fn add_dataset_to_session(
+    _config: &Config,
+    session_id: &str,
+    dataset_url: &str,
+    role: Option<String>,
+) -> Result<()> {
+    let db = BioVaultDb::new()?;
+
+    // Verify session exists
+    let _: i64 = db
+        .connection()
+        .query_row(
+            "SELECT id FROM sessions WHERE session_id = ?1",
+            [session_id],
+            |row| row.get(0),
+        )
+        .context(format!("Session not found: {}", session_id))?;
+
+    let info = parse_dataset_url(dataset_url)
+        .ok_or_else(|| anyhow::anyhow!("Invalid dataset URL: {}", dataset_url))?;
+
+    let request = AddSessionDatasetRequest {
+        session_id: session_id.to_string(),
+        dataset_public_url: dataset_url.to_string(),
+        dataset_owner: info.owner.clone(),
+        dataset_name: info.name.clone(),
+        role,
+    };
+
+    add_session_dataset(&db, &request)?;
+
+    println!(
+        "✅ Added dataset {}/{} to session {}",
+        info.owner.cyan(),
+        info.name.green(),
+        session_id.cyan()
+    );
+
+    Ok(())
+}
+
+/// Remove a dataset from a session
+fn remove_dataset_from_session(
+    _config: &Config,
+    session_id: &str,
+    dataset_url: &str,
+) -> Result<()> {
+    let db = BioVaultDb::new()?;
+
+    let removed = remove_session_dataset(&db, session_id, dataset_url)?;
+
+    if removed {
+        println!("✅ Removed dataset from session {}", session_id.cyan());
+    } else {
+        println!("⚠️  Dataset not found in session {}", session_id.yellow());
+    }
+
+    Ok(())
+}
+
+/// List datasets associated with a session
+fn list_session_datasets(_config: &Config, session_id: &str, json_output: bool) -> Result<()> {
+    let db = BioVaultDb::new()?;
+
+    let datasets = get_session_datasets(&db, session_id)?;
+
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&datasets)?);
+        return Ok(());
+    }
+
+    if datasets.is_empty() {
+        println!("No datasets associated with session {}", session_id.cyan());
+        println!(
+            "\nAdd a dataset with: {}",
+            format!("bv session add-dataset {} <dataset-url>", session_id).cyan()
+        );
+        return Ok(());
+    }
+
+    println!(
+        "\n📊 Datasets for session {} ({} total)",
+        session_id.cyan(),
+        datasets.len()
+    );
+    println!("═══════════════════════════════════════════════════════════════\n");
+
+    for dataset in &datasets {
+        let role_badge = if dataset.role == "provider" {
+            "(provider)".blue()
+        } else {
+            "(shared)".dimmed()
+        };
+
+        println!(
+            "  📁 {}/{} {}",
+            dataset.dataset_owner.cyan(),
+            dataset.dataset_name.green(),
+            role_badge
+        );
+        println!("     URL: {}", dataset.dataset_public_url.dimmed());
+        println!();
+    }
 
     Ok(())
 }
