@@ -254,8 +254,13 @@ impl Config {
         // Try to load existing config, but preserve the email if it exists
         let mut config = match Self::load() {
             Ok(existing) => existing,
-            Err(_) => Self::new("setup@pending".to_string()),
+            Err(_) => Self::new(String::new()),
         };
+
+        // Avoid persisting placeholder onboarding values when dependency paths are saved early.
+        if config.email.trim() == "setup@pending" {
+            config.email.clear();
+        }
 
         let normalized = path.and_then(|p| {
             let trimmed = p.trim();

@@ -498,7 +498,21 @@ fn resolve_vault_default(vault_override: Option<&Path>) -> PathBuf {
     if let Some(env_vault) = std::env::var_os("SYC_VAULT") {
         return PathBuf::from(env_vault);
     }
-    // Default to global ~/.syc to reduce accidental churn; override via SYC_VAULT or explicit flag.
+    // Keep vault colocated with BioVault home so desktop/CLI share the same keys by default.
+    if let Ok(home) = crate::config::get_biovault_home() {
+        let colocated = syftbox_sdk::syftbox::syc::vault_path_for_home(&home);
+        if colocated.exists() {
+            return colocated;
+        }
+        let legacy = dirs::home_dir()
+            .map(|h| h.join(".syc"))
+            .unwrap_or_else(|| PathBuf::from(".syc"));
+        if legacy.exists() {
+            return legacy;
+        }
+        return colocated;
+    }
+    // Fallback to legacy global location.
     dirs::home_dir()
         .map(|h| h.join(".syc"))
         .unwrap_or_else(|| PathBuf::from(".syc"))
