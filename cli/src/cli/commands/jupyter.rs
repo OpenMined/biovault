@@ -77,12 +77,12 @@ fn ensure_virtualenv(project_dir: &Path, python_version: &str, uv_bin: &str) -> 
     let beaver_version = option_env!("BEAVER_VERSION").unwrap_or("0.1.26");
 
     println!(
-        "📦 Installing/Updating packages via: uv pip install -U jupyterlab cleon biovault-beaver[syftbox]=={}",
+        "📦 Installing/Updating packages via: uv pip install -U jupyterlab cleon biovault-beaver[syftbox,lib-support]=={}",
         beaver_version
     );
 
     // Install base packages from PyPI including pinned biovault-beaver with syftbox-sdk
-    let beaver_pkg = format!("biovault-beaver[syftbox]=={}", beaver_version);
+    let beaver_pkg = format!("biovault-beaver[syftbox,lib-support]=={}", beaver_version);
     let status = Command::new(uv_bin)
         .args([
             "pip",
@@ -147,6 +147,8 @@ fn ensure_virtualenv(project_dir: &Path, python_version: &str, uv_bin: &str) -> 
         if beaver_path.exists() {
             println!("🦫 Installing beaver from local editable path (overwriting PyPI version)...");
             let beaver_canonical = beaver_path.canonicalize().unwrap_or(beaver_path);
+            let beaver_with_extras =
+                format!("{}[lib-support]", beaver_canonical.to_str().unwrap_or("."));
             let status = Command::new(uv_bin)
                 .args([
                     "pip",
@@ -154,7 +156,7 @@ fn ensure_virtualenv(project_dir: &Path, python_version: &str, uv_bin: &str) -> 
                     "--python",
                     ".venv",
                     "-e",
-                    beaver_canonical.to_str().unwrap_or("."),
+                    &beaver_with_extras,
                 ])
                 .current_dir(project_dir)
                 .status()?;
