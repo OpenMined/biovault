@@ -62,10 +62,7 @@ impl MessageSync {
 
         let rpc_request = RpcRequest::new(
             msg.from.clone(),
-            format!(
-                "syft://{}@openmined.org/app_data/biovault/rpc/message",
-                msg.to
-            ),
+            format!("syft://{}/app_data/biovault/rpc/message", msg.to),
             "POST".to_string(),
             serde_json::to_vec(&payload)?,
         );
