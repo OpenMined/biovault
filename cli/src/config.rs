@@ -2,6 +2,7 @@ use crate::error::Error;
 use crate::Result;
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::cell::RefCell;
 use std::env;
 use std::fs;
@@ -297,14 +298,49 @@ impl Config {
             )
         })?;
 
-        let syftbox_config: SyftBoxConfig = serde_json::from_str(&content).with_context(|| {
+        let mut json: Value = serde_json::from_str(&content).with_context(|| {
             format!(
                 "Failed to parse SyftBox config: {}",
                 syftbox_config_path.display()
             )
         })?;
+        let raw_data_dir = json
+            .get("data_dir")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .trim();
+        let default_data_dir = Self::default_syftbox_data_dir()?;
+        let legacy_default = dirs::home_dir().map(|h| h.join("SyftBox"));
+        let mut dir = if raw_data_dir.is_empty() {
+            default_data_dir.clone()
+        } else {
+            PathBuf::from(raw_data_dir)
+        };
+        if dir.as_os_str().is_empty() {
+            dir = default_data_dir.clone();
+        } else if let Some(legacy) = &legacy_default {
+            if &dir == legacy {
+                dir = default_data_dir.clone();
+            }
+        }
 
-        Ok(PathBuf::from(syftbox_config.data_dir))
+        // If we normalized away the legacy path, persist the new default to the config file
+        if dir != Path::new(raw_data_dir) {
+            if let Some(map) = json.as_object_mut() {
+                map.insert(
+                    "data_dir".to_string(),
+                    Value::String(dir.to_string_lossy().into_owned()),
+                );
+                if let Ok(serialized) = serde_json::to_string_pretty(&json) {
+                    if let Some(parent) = syftbox_config_path.parent() {
+                        let _ = fs::create_dir_all(parent);
+                    }
+                    let _ = fs::write(&syftbox_config_path, serialized);
+                }
+            }
+        }
+
+        Ok(dir)
     }
 
     pub fn get_config_path() -> crate::error::Result<PathBuf> {
@@ -315,7 +351,7 @@ impl Config {
         // Priority order:
         // 1. SYFTBOX_CONFIG_PATH env var
         // 2. Config specified in BioVault config
-        // 3. ~/.syftbox/config.json (default)
+        // 3. {BIOVAULT_HOME}/syftbox/config.json (default)
 
         if let Ok(config_path) = env::var("SYFTBOX_CONFIG_PATH") {
             return Ok(PathBuf::from(config_path));
@@ -325,9 +361,15 @@ impl Config {
             return Ok(PathBuf::from(path));
         }
 
-        let home_dir = dirs::home_dir()
-            .ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
-        Ok(home_dir.join(".syftbox").join("config.json"))
+        Self::default_syftbox_config_path()
+    }
+
+    pub fn default_syftbox_config_path() -> crate::error::Result<PathBuf> {
+        Ok(get_biovault_home()?.join("syftbox").join("config.json"))
+    }
+
+    pub fn default_syftbox_data_dir() -> crate::error::Result<PathBuf> {
+        Ok(get_biovault_home()?)
     }
 
     pub fn load() -> crate::error::Result<Self> {

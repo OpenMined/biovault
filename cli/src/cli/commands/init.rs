@@ -279,6 +279,9 @@ pub async fn execute(email: Option<&str>, quiet: bool) -> Result<()> {
         println!("  - Dynamic templates: {}", dynamic_dir.display());
 
         // Initialize SyftBox RPC folders for messaging if SyftBox is configured
+        let default_syftbox_config = Config::default_syftbox_config_path()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| "<BioVault syftbox/config.json>".to_string());
         match config.get_syftbox_data_dir() {
             Ok(data_dir) => {
                 let app = crate::syftbox::SyftBoxApp::new(&data_dir, &config.email, "biovault")?;
@@ -292,8 +295,8 @@ pub async fn execute(email: Option<&str>, quiet: bool) -> Result<()> {
             Err(e) => {
                 // Not fatal: user might not be in a SyftBox env yet
                 println!(
-                    "⚠️  Skipped SyftBox RPC init (no data dir): {}\n    Hint: set SYFTBOX_DATA_DIR or configure ~/.syftbox/config.json and re-run 'bv init'",
-                    e
+                    "⚠️  Skipped SyftBox RPC init (no data dir): {}\n    Hint: set SYFTBOX_DATA_DIR or configure {} and re-run 'bv init'",
+                    e, default_syftbox_config
                 );
             }
         }
