@@ -1676,6 +1676,9 @@ async fn async_main_with(cli: Cli) -> Result<()> {
         .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(filter_level)))
         .try_init();
 
+    // Ensure Syft Crypto uses the BioVault-managed vault path by default
+    biovault::config::ensure_syc_vault_env()?;
+
     // Random version check on startup (10% chance)
     let _ = commands::update::check_and_notify_random().await;
 
