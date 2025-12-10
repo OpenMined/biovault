@@ -40,12 +40,12 @@ fn ensure_virtualenv(project_dir: &Path, python_version: &str) -> Result<()> {
     let beaver_version = option_env!("BEAVER_VERSION").unwrap_or("0.1.26");
 
     println!(
-        "📦 Installing/Updating packages via: uv pip install -U jupyterlab cleon biovault-beaver=={}",
+        "📦 Installing/Updating packages via: uv pip install -U jupyterlab cleon biovault-beaver[syftbox]=={}",
         beaver_version
     );
 
-    // Install base packages from PyPI including pinned biovault-beaver
-    let beaver_pkg = format!("biovault-beaver=={}", beaver_version);
+    // Install base packages from PyPI including pinned biovault-beaver with syftbox-sdk
+    let beaver_pkg = format!("biovault-beaver[syftbox]=={}", beaver_version);
     let status = Command::new("uv")
         .args([
             "pip",
@@ -132,7 +132,7 @@ fn ensure_virtualenv(project_dir: &Path, python_version: &str) -> Result<()> {
         println!("✅ Virtualenv ready with jupyterlab, cleon, and DEV beaver/syftbox-sdk");
     } else {
         println!(
-            "✅ Virtualenv ready with jupyterlab, cleon, and biovault-beaver=={}",
+            "✅ Virtualenv ready with jupyterlab, cleon, biovault-beaver=={}, and syftbox-sdk",
             beaver_version
         );
     }
