@@ -690,7 +690,6 @@ pub async fn start(project_path: &str, python_version: &str) -> Result<()> {
 }
 
 pub async fn stop(project_path: &str) -> Result<()> {
-    let uv_bin = resolve_uv_path()?;
     // Check if project_path is a number (list index)
     let project_dir = if let Ok(index) = project_path.parse::<usize>() {
         if index == 0 {
@@ -727,21 +726,38 @@ pub async fn stop(project_path: &str) -> Result<()> {
         return Ok(());
     }
 
-    println!("🛑 Stopping Jupyter Lab with: uv run --python .venv jupyter lab stop...");
+    // Get PID from database and kill the process directly
+    let db = BioVaultDb::new()?;
+    let canonical_path = project_dir
+        .canonicalize()
+        .unwrap_or_else(|_| project_dir.clone());
+    let env_info = db.get_dev_env(canonical_path.to_str().unwrap_or(""))?;
 
-    let status = Command::new(&uv_bin)
-        .args(["run", "--python", ".venv", "jupyter", "lab", "stop"])
-        .current_dir(&project_dir)
-        .status()?;
+    let mut stopped = false;
+    if let Some(env) = &env_info {
+        if let Some(pid) = env.jupyter_pid {
+            println!("🛑 Stopping Jupyter server (PID: {})...", pid);
+            let kill_status = Command::new("kill").arg(pid.to_string()).status();
 
-    if status.success() {
-        println!("✅ Jupyter Lab stopped");
-    } else {
-        println!("⚠️  Could not stop Jupyter Lab (may not be running)");
+            match kill_status {
+                Ok(status) if status.success() => {
+                    println!("✅ Jupyter server stopped");
+                    stopped = true;
+                }
+                _ => {
+                    // Process might already be dead, try SIGKILL
+                    let _ = Command::new("kill").args(["-9", &pid.to_string()]).status();
+                    stopped = true;
+                }
+            }
+        }
+    }
+
+    if !stopped {
+        println!("⚠️  No Jupyter process found to stop");
     }
 
     // Clear session info from database
-    let db = BioVaultDb::new()?;
     db.update_jupyter_session(&project_dir, None, None, None, None)?;
 
     Ok(())
