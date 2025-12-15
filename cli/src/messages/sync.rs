@@ -112,112 +112,7 @@ impl MessageSync {
 
     /// Check for incoming messages
     pub fn check_incoming(&self, no_cleanup: bool) -> Result<Vec<String>> {
-        let endpoint = Endpoint::new(&self.app, "/message")?;
-        let requests = endpoint.check_requests()?;
-
-        let mut new_message_ids = Vec::new();
-
-        for (request_path, rpc_request) in requests {
-            // Parse the message payload
-            let body_bytes = rpc_request
-                .decode_body()
-                .context("Failed to decode request body")?;
-            let payload: MessagePayload =
-                serde_json::from_slice(&body_bytes).context("Failed to parse message payload")?;
-
-            // Create local message from received payload
-            let mut msg = Message::new(
-                payload.from.clone(),
-                self.app.email.clone(), // We are the recipient
-                payload.body,
-            );
-
-            msg.id = payload.message_id;
-            msg.thread_id = payload.thread_id;
-            msg.parent_id = payload.parent_id;
-            msg.subject = payload.subject;
-            // Parse message type from string
-            msg.message_type = match payload.message_type.as_str() {
-                "project" => MessageType::Project {
-                    project_name: String::new(),
-                    submission_id: String::new(),
-                    files_hash: None,
-                },
-                "request" => MessageType::Request {
-                    request_type: String::new(),
-                    params: None,
-                },
-                _ => MessageType::Text,
-            };
-            msg.metadata = payload.metadata;
-            msg.status = MessageStatus::Received;
-            msg.sync_status = SyncStatus::Synced;
-            msg.received_at = Some(Utc::now());
-            msg.created_at =
-                chrono::DateTime::parse_from_rfc3339(&payload.created_at)?.with_timezone(&Utc);
-
-            // Check if message already exists before inserting
-            if self.db.get_message(&msg.id)?.is_none() {
-                // Save to database
-                self.db.insert_message(&msg)?;
-                new_message_ids.push(msg.id.clone());
-            }
-
-            // Process status-update requests to update original message metadata
-            // Status update: detect via metadata.status_update and update original message metadata
-            if let Some(meta) = &msg.metadata {
-                if let Some(update) = meta.get("status_update") {
-                    if let (Some(orig_id), Some(status)) = (
-                        update.get("message_id").and_then(|v| v.as_str()),
-                        update.get("status").and_then(|v| v.as_str()),
-                    ) {
-                        if let Some(mut orig) = self.db.get_message(orig_id)? {
-                            // Work on a cloned metadata value to avoid moving out of 'orig'
-                            let mut md = orig.metadata.clone().unwrap_or(serde_json::json!({}));
-                            // Ensure object shape
-                            if !md.is_object() {
-                                md = serde_json::json!({});
-                            }
-                            if let Some(obj) = md.as_object_mut() {
-                                obj.insert(
-                                    "remote_status".to_string(),
-                                    serde_json::Value::String(status.to_string()),
-                                );
-                                if let Some(reason) = update.get("reason").and_then(|v| v.as_str())
-                                {
-                                    obj.insert(
-                                        "remote_reason".to_string(),
-                                        serde_json::Value::String(reason.to_string()),
-                                    );
-                                }
-                                if let Some(results_path) =
-                                    meta.get("results_path").and_then(|v| v.as_str())
-                                {
-                                    obj.insert(
-                                        "results_path".to_string(),
-                                        serde_json::Value::String(results_path.to_string()),
-                                    );
-                                }
-                            }
-                            orig.metadata = Some(md);
-                            self.db.update_message(&orig)?;
-                        }
-                    }
-                }
-            }
-
-            // Send ACK response
-            let ack_response = RpcResponse::new(
-                &rpc_request,
-                self.app.email.clone(),
-                200,
-                b"Message received".to_vec(),
-            );
-            endpoint.send_response(&request_path, &rpc_request, &ack_response, no_cleanup)?;
-
-            // Silent - will be shown when listing messages
-        }
-
+        let (new_message_ids, _new_failed) = self.check_incoming_with_failures(no_cleanup)?;
         Ok(new_message_ids)
     }
 
@@ -308,6 +203,11 @@ impl MessageSync {
             {
                 continue;
             }
+
+            eprintln!(
+                "⚠️  Failed to decrypt/parse incoming message (rpc_id={}): {}",
+                rpc_request_id, error_msg
+            );
 
             // Try to extract envelope metadata
             let (
@@ -449,27 +349,24 @@ impl MessageSync {
 
     /// Full sync cycle: check incoming, send pending, check acks (verbose)
     pub fn sync(&self, no_cleanup: bool) -> Result<()> {
-        // Check for new incoming messages
-        let new_messages = self.check_incoming(no_cleanup)?;
-        if !new_messages.is_empty() {
-            println!("📬 {} new message(s) received", new_messages.len());
+        let (new_message_ids, new_failed_count) = self.check_incoming_with_failures(no_cleanup)?;
+        if !new_message_ids.is_empty() {
+            println!("📬 {} new message(s) received", new_message_ids.len());
         }
-
-        // Check for ACK responses
+        if new_failed_count > 0 {
+            eprintln!(
+                "⚠️  Recorded {} message decryption failure(s) (see failed_messages table).",
+                new_failed_count
+            );
+        }
         self.check_acks(no_cleanup)?;
-
         Ok(())
     }
 
     /// Silent sync - returns results without printing
     /// Returns (new_message_ids, new_message_count)
     pub fn sync_quiet(&self) -> Result<(Vec<String>, usize)> {
-        // Check for new incoming messages (always cleanup in quiet mode - used internally)
-        let new_messages = self.check_incoming(false)?;
-
-        // Check for ACK responses
-        self.check_acks(false)?;
-
+        let (new_messages, _count, _failed_count) = self.sync_quiet_with_failures()?;
         Ok((new_messages.clone(), new_messages.len()))
     }
 

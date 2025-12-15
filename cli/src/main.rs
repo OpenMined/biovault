@@ -1671,10 +1671,14 @@ fn main() -> Result<()> {
 async fn async_main_with(cli: Cli) -> Result<()> {
     let filter_level = if cli.verbose { "debug" } else { "info" };
 
+    // Send logs to stderr so stdout remains parseable for `--json` outputs and piping.
     let _ = tracing_subscriber::registry()
-        .with(fmt::layer())
+        .with(fmt::layer().with_writer(std::io::stderr))
         .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(filter_level)))
         .try_init();
+
+    // Ensure Syft Crypto uses the BioVault-managed vault path by default
+    biovault::config::ensure_syc_vault_env()?;
 
     // Random version check on startup (10% chance)
     let _ = commands::update::check_and_notify_random().await;

@@ -15,6 +15,7 @@ jobs:
         scenario:
           - tests/scenarios/import-and-run.yaml
           - tests/scenarios/inbox-ping-pong.yaml
+          - tests/scenarios/messaging-core.yaml
           - tests/scenarios/break-nextflow.yaml
           - tests/scenarios/key-management.yaml
 
