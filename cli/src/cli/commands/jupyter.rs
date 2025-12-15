@@ -115,8 +115,14 @@ fn ensure_virtualenv(project_dir: &Path, python_version: &str, uv_bin: &str) -> 
 
     // DEV MODE: If local source exists, install editable versions on top of PyPI packages
     // This allows developers to test local changes while maintaining compatibility
-    let syftbox_path = biovault_root.join("syftbox-sdk").join("python");
-    let beaver_path = biovault_root.join("biovault-beaver").join("python");
+    let syftbox_path = biovault_root
+        .join("biovault")
+        .join("syftbox-sdk")
+        .join("python");
+    let beaver_path = biovault_root
+        .join("biovault")
+        .join("biovault-beaver")
+        .join("python");
 
     if syftbox_path.exists() || beaver_path.exists() {
         println!("🔧 DEV MODE: Local source detected, installing editable packages...");

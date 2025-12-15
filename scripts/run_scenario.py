@@ -435,6 +435,7 @@ def run_step(step: Dict[str, Any], variables: Dict[str, str]):
         import time
         import glob
         expanded = replace_vars(wait_for, variables)
+        wait_for_new = bool(step.get("wait_for_new", False))
 
         if datasite:
             # Wait for file in datasite directory
@@ -444,16 +445,16 @@ def run_step(step: Dict[str, Any], variables: Dict[str, str]):
             wait_path = ROOT / expanded
 
         initial_matches: set[str] = set()
-        if "*" in str(wait_path):
+        if wait_for_new and "*" in str(wait_path):
             initial_matches = set(glob.glob(str(wait_path)))
 
         for i in range(timeout):
             # Support glob patterns
             if '*' in str(wait_path):
                 matches = set(glob.glob(str(wait_path)))
-                new_matches = sorted(matches - initial_matches)
-                if new_matches:
-                    print(f"✓ Found: {new_matches[0]}")
+                candidates = sorted(matches - initial_matches) if wait_for_new else sorted(matches)
+                if candidates:
+                    print(f"✓ Found: {candidates[0]}")
                     return
             elif wait_path.exists():
                 print(f"✓ Found: {wait_path}")
