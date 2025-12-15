@@ -19,4 +19,10 @@ echo "Running scenario: $SCENARIO"
 export SCENARIO_JAVA_HOME="${JAVA_HOME:-}"
 export SCENARIO_USER_PATH="$PATH"
 
-uv run --with pyyaml "$ROOT_DIR/scripts/run_scenario.py" "$SCENARIO"
+if python3 -c 'import yaml' >/dev/null 2>&1; then
+  python3 "$ROOT_DIR/scripts/run_scenario.py" "$SCENARIO"
+  exit 0
+fi
+
+python3 "$ROOT_DIR/scripts/run_scenario.py" "$SCENARIO"
+exit 0

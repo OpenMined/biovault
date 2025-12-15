@@ -312,7 +312,7 @@ fn create_session(
     }
 
     println!(
-        "\nStart Jupyter with: {}",
+        "\n(Optional) Start Jupyter with: {}",
         format!("bv jupyter start {}", session_path_str).cyan()
     );
 
@@ -386,25 +386,21 @@ fn send_session_invitation(
     let db_path = crate::cli::commands::messages::get_message_db_path(config)?;
     let db = MessageDb::new(&db_path)?;
 
-    let metadata = serde_json::json!({
-        "session_invite": {
-            "session_id": session_id,
-            "session_name": session_name,
-            "from": owner,
-            "description": description,
-            "created_at": Utc::now().to_rfc3339(),
-        }
-    });
-
-    let mut msg = Message::new(
-        owner.to_string(),
-        peer_email.to_string(),
-        format!(
-            "{} invited you to the session \"{}\" (ID: {}).",
-            owner, session_name, session_id
-        ),
+    let created_at = Utc::now().to_rfc3339();
+    let metadata = crate::messages::session::invite_metadata(
+        session_id,
+        session_name,
+        owner,
+        description,
+        &created_at,
     );
-    msg.subject = Some(format!("Session Invite: {}", session_name));
+
+    let mut msg = Message::new(owner.to_string(), peer_email.to_string(), {
+        crate::messages::session::invite_body(owner, session_name, session_id)
+    });
+    // Use session_id as the thread id so all session messages group reliably.
+    msg.thread_id = Some(session_id.to_string());
+    msg.subject = Some(crate::messages::session::subject(session_name));
     msg.metadata = Some(metadata);
     msg.status = MessageStatus::Sent;
 
@@ -417,6 +413,25 @@ fn send_session_invitation(
     let _ = sync.send_message(&msg.id);
 
     Ok(())
+}
+
+fn find_session_invite_message(db: &MessageDb, session_id: &str) -> Option<Message> {
+    let mut matches: Vec<Message> = db
+        .list_messages(None)
+        .ok()?
+        .into_iter()
+        .filter(|m| {
+            let Some(meta) = m.metadata.as_ref() else {
+                return false;
+            };
+            meta.get("session_invite")
+                .and_then(|invite| invite.get("session_id"))
+                .and_then(|v| v.as_str())
+                == Some(session_id)
+        })
+        .collect();
+    matches.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+    matches.into_iter().next()
 }
 
 /// List all sessions
@@ -552,7 +567,7 @@ fn show_session(_config: &Config, session_id: &str, json_output: bool) -> Result
     }
 
     println!(
-        "\nStart Jupyter: {}",
+        "\n(Optional) Start Jupyter: {}",
         format!("bv jupyter start {}", session.session_path).cyan()
     );
 
@@ -817,6 +832,42 @@ fn accept_invitation(config: &Config, session_id: &str, datasets: Vec<String>) -
         serde_json::to_string_pretty(&response)?,
     )?;
 
+    // Notify requester via messaging (threaded by session_id)
+    if let Ok((msg_db, msg_sync)) =
+        crate::cli::commands::messages::init_message_system_quiet(config)
+    {
+        let replied_to = find_session_invite_message(&msg_db, session_id).map(|m| m.id);
+        let now = Utc::now().to_rfc3339();
+        let metadata = crate::messages::session::invite_response_metadata(
+            session_id,
+            &session_name,
+            &config.email,
+            true,
+            &None,
+            &now,
+            &now,
+        );
+
+        let mut msg = Message::new(
+            config.email.clone(),
+            invitation.requester.clone(),
+            crate::messages::session::invite_response_body(
+                &config.email,
+                &session_name,
+                session_id,
+                true,
+                &None,
+            ),
+        );
+        msg.thread_id = Some(session_id.to_string());
+        msg.parent_id = replied_to;
+        msg.subject = Some(crate::messages::session::subject(&session_name));
+        msg.metadata = Some(metadata);
+        msg.status = MessageStatus::Sent;
+        let _ = msg_db.insert_message(&msg);
+        let _ = msg_sync.send_message(&msg.id);
+    }
+
     println!(
         "\n✅ Accepted invitation from {}",
         invitation.requester.green()
@@ -832,7 +883,7 @@ fn accept_invitation(config: &Config, session_id: &str, datasets: Vec<String>) -
     }
 
     println!(
-        "\nStart Jupyter: {}",
+        "\n(Optional) Start Jupyter: {}",
         format!("bv jupyter start {}", session_path.display()).cyan()
     );
 
@@ -864,13 +915,53 @@ fn reject_invitation(config: &Config, session_id: &str, reason: Option<String>) 
         "session_id": session_id,
         "status": "rejected",
         "rejected_at": Utc::now().to_rfc3339(),
-        "reason": reason,
+        "reason": reason.clone(),
         "responder": &config.email,
     });
     fs::write(
         requester_rpc.join(format!("{}.response", session_id)),
         serde_json::to_string_pretty(&response)?,
     )?;
+
+    // Notify requester via messaging (threaded by session_id)
+    if let Ok((msg_db, msg_sync)) =
+        crate::cli::commands::messages::init_message_system_quiet(config)
+    {
+        let session_name = invitation
+            .session_name
+            .clone()
+            .unwrap_or_else(|| format!("Session with {}", invitation.requester));
+        let replied_to = find_session_invite_message(&msg_db, session_id).map(|m| m.id);
+        let now = Utc::now().to_rfc3339();
+        let metadata = crate::messages::session::invite_response_metadata(
+            session_id,
+            &session_name,
+            &config.email,
+            false,
+            &reason,
+            &now,
+            &now,
+        );
+
+        let mut msg = Message::new(
+            config.email.clone(),
+            invitation.requester.clone(),
+            crate::messages::session::invite_response_body(
+                &config.email,
+                &session_name,
+                session_id,
+                false,
+                &reason,
+            ),
+        );
+        msg.thread_id = Some(session_id.to_string());
+        msg.parent_id = replied_to;
+        msg.subject = Some(crate::messages::session::subject(&session_name));
+        msg.metadata = Some(metadata);
+        msg.status = MessageStatus::Sent;
+        let _ = msg_db.insert_message(&msg);
+        let _ = msg_sync.send_message(&msg.id);
+    }
 
     println!(
         "\n❌ Rejected invitation from {}",
@@ -885,41 +976,32 @@ fn send_chat_message(config: &Config, session_id: &str, message: &str) -> Result
     let db = BioVaultDb::new()?;
 
     // Get session details
-    let (name, peer, role): (String, Option<String>, String) = db
+    let (name, peer): (String, Option<String>) = db
         .connection()
         .query_row(
-            "SELECT name, peer, role FROM sessions WHERE session_id = ?1",
+            "SELECT name, peer FROM sessions WHERE session_id = ?1",
             [session_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .context(format!("Session not found: {}", session_id))?;
 
-    let recipient = if role == "owner" {
-        peer.ok_or_else(|| anyhow::anyhow!("No peer set for this session"))?
-    } else {
-        // Get owner from session
-        db.connection().query_row(
-            "SELECT owner FROM sessions WHERE session_id = ?1",
-            [session_id],
-            |row| row.get(0),
-        )?
-    };
+    // In this DB model, `peer` always stores "the other person" regardless of role.
+    let recipient = peer.ok_or_else(|| anyhow::anyhow!("No peer set for this session"))?;
 
     // Send via messaging system
     let db_path = crate::cli::commands::messages::get_message_db_path(config)?;
     let msg_db = MessageDb::new(&db_path)?;
 
-    let metadata = serde_json::json!({
-        "session_chat": {
-            "session_id": session_id,
-            "session_name": name,
-            "from": &config.email,
-            "created_at": Utc::now().to_rfc3339(),
-        }
-    });
+    let metadata = crate::messages::session::chat_metadata(
+        session_id,
+        &name,
+        &config.email,
+        &Utc::now().to_rfc3339(),
+    );
 
     let mut msg = Message::new(config.email.clone(), recipient.clone(), message.to_string());
-    msg.subject = Some(format!("Session: {}", name));
+    msg.thread_id = Some(session_id.to_string());
+    msg.subject = Some(crate::messages::session::subject(&name));
     msg.metadata = Some(metadata);
     msg.status = MessageStatus::Sent;
 
