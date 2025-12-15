@@ -1,0 +1,424 @@
+# Messaging Core Scenario (single run)
+# Covers:
+# - basic message thread + subject preservation on reply
+# - session invite accept flow + threaded status message + session chat both ways
+# - session invite reject flow + threaded status message + no session created
+#
+# Run with: ./test-scenario.sh tests/scenarios/messaging-core.yaml
+
+setup:
+  server:
+    - "./tests/scripts/devstack.sh --reset --clients client1@sandbox.local,client2@sandbox.local"
+
+steps:
+  - name: Wait for client1 public key to sync
+    datasite: client2@sandbox.local
+    wait_for: datasites/client1@sandbox.local/public/crypto/did.json
+    timeout: 30
+
+  - name: Wait for client2 public key to sync
+    datasite: client1@sandbox.local
+    wait_for: datasites/client2@sandbox.local/public/crypto/did.json
+    timeout: 30
+
+  - name: Client1 imports client2 public key
+    datasite: client1@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv key import \
+        datasites/client2@sandbox.local/public/crypto/did.json \
+        --email client2@sandbox.local
+
+  - name: Client2 imports client1 public key
+    datasite: client2@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv key import \
+        datasites/client1@sandbox.local/public/crypto/did.json \
+        --email client1@sandbox.local
+
+  # ---------------------------------------------------------------------------
+  # Message threading: reply should keep thread_id + subject
+  # ---------------------------------------------------------------------------
+
+  - name: Client1 sends a message with a subject
+    datasite: client1@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv message send \
+        client2@sandbox.local \
+        "Hello from client1 (thread test)" \
+        --subject "Thread Test"
+
+  - name: Wait for message request to arrive at client2
+    datasite: client2@sandbox.local
+    wait_for: datasites/client2@sandbox.local/app_data/biovault/rpc/message/*.request
+    timeout: 30
+
+  - name: Client2 syncs messages to ingest the request
+    datasite: client2@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv message sync
+
+  - name: Client2 captures inbox JSON
+    datasite: client2@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv inbox --plain --json
+    capture: c2_inbox_json
+
+  - name: Extract original message id
+    datasite: client2@sandbox.local
+    run: |
+      jq -r '.messages[] | select(.from=="client1@sandbox.local") | .id' <<< '{{c2_inbox_json}}' | head -n 1
+    capture: original_msg_id
+
+  - name: Extract original thread id
+    datasite: client2@sandbox.local
+    run: |
+      jq -r '.messages[] | select(.id=="{{original_msg_id}}") | .thread_id' <<< '{{c2_inbox_json}}'
+    capture: thread_id
+
+  - name: Assert original message has correct subject
+    datasite: client2@sandbox.local
+    run: |
+      jq -e '.messages[] | select(.id=="{{original_msg_id}}") | select(.subject=="Thread Test")' <<< '{{c2_inbox_json}}' >/dev/null
+
+  - name: Client2 replies (should inherit thread_id and subject)
+    datasite: client2@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv message reply \
+        "{{original_msg_id}}" \
+        "Reply from client2 (thread test)"
+
+  - name: Wait for reply request to arrive at client1
+    datasite: client1@sandbox.local
+    wait_for: datasites/client1@sandbox.local/app_data/biovault/rpc/message/*.request
+    timeout: 30
+
+  - name: Client1 syncs messages to ingest the reply
+    datasite: client1@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv message sync
+
+  - name: Client1 captures all messages JSON
+    datasite: client1@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv inbox --plain --all --json
+    capture: c1_all_json
+
+  - name: Assert reply is threaded and subject is preserved
+    datasite: client1@sandbox.local
+    run: |
+      jq -e '
+        .messages
+        | map(select(.parent_id=="{{original_msg_id}}"))
+        | .[0]
+        | select(.thread_id=="{{thread_id}}")
+        | select(.subject=="Thread Test")
+      ' <<< '{{c1_all_json}}' >/dev/null
+
+  # ---------------------------------------------------------------------------
+  # Sync idempotency (deterministic)
+  # ---------------------------------------------------------------------------
+
+  - name: Capture message count (client1) before idempotent sync
+    datasite: client1@sandbox.local
+    run: |
+      jq -r '.messages | length' <<< '{{c1_all_json}}'
+    capture: c1_msg_count_before
+
+  - name: Client1 runs message sync 5 times (should be idempotent)
+    datasite: client1@sandbox.local
+    run: |
+      for _ in {1..5}; do
+        {{workspace}}/cli/target/release/bv message sync
+      done
+
+  - name: Client1 captures all messages JSON after idempotent sync
+    datasite: client1@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv inbox --plain --all --json
+    capture: c1_all_json_after_idempotent
+
+  - name: Assert message count unchanged after idempotent sync (client1)
+    datasite: client1@sandbox.local
+    run: |
+      AFTER=$(jq -r '.messages | length' <<< '{{c1_all_json_after_idempotent}}')
+      echo "before={{c1_msg_count_before}} after=${AFTER}"
+      test "${AFTER}" -eq "{{c1_msg_count_before}}"
+
+  # ---------------------------------------------------------------------------
+  # Session invite accept + chat
+  # ---------------------------------------------------------------------------
+
+  - name: Client1 creates a session and invites client2 (accept path)
+    datasite: client1@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv session create \
+        "Scenario Session Accept" \
+        --peer client2@sandbox.local \
+        --description "accept-path"
+
+  - name: Capture session list JSON (client1)
+    datasite: client1@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv session list --json
+    capture: c1_sessions_json
+
+  - name: Extract session id for Scenario Session Accept
+    datasite: client1@sandbox.local
+    run: |
+      jq -r '
+        map(select(.name=="Scenario Session Accept"))
+        | .[0].session_id // empty
+      ' <<< '{{c1_sessions_json}}'
+    capture: session_id_accept
+
+  - name: Assert client1 wrote a session invite message with thread_id=session_id (accept)
+    datasite: client1@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv inbox --plain --sent --json | jq -e '
+        .messages[]
+        | select(.metadata.session_invite.session_id=="{{session_id_accept}}")
+        | select(.thread_id=="{{session_id_accept}}")
+        | select(.subject=="Session: Scenario Session Accept")
+      ' >/dev/null
+
+  - name: Wait for session invite request file to arrive at client2 (accept)
+    datasite: client2@sandbox.local
+    wait_for: datasites/client2@sandbox.local/app_data/biovault/rpc/session/{{session_id_accept}}.request
+    timeout: 30
+
+  - name: Client2 syncs messages to ingest the invite (accept)
+    datasite: client2@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv message sync
+
+  - name: Client2 lists invitations and asserts session_id present (accept)
+    datasite: client2@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv session invitations --json | jq -e '.[] | select(.session_id=="{{session_id_accept}}")' >/dev/null
+
+  - name: Client2 accepts the invitation
+    datasite: client2@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv session accept "{{session_id_accept}}"
+
+  - name: Wait for RPC response file to sync back to client1 (accept)
+    datasite: client1@sandbox.local
+    wait_for: datasites/client1@sandbox.local/app_data/biovault/rpc/session/{{session_id_accept}}.response
+    timeout: 30
+
+  - name: Wait for accept status message request to arrive at client1
+    datasite: client1@sandbox.local
+    wait_for: datasites/client1@sandbox.local/app_data/biovault/rpc/message/*.request
+    timeout: 30
+
+  - name: Client1 syncs messages to ingest accept status message
+    datasite: client1@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv message sync
+
+  - name: Client1 asserts it received the accept status message in the session thread
+    datasite: client1@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv inbox --plain --all --json | jq -e '
+        .messages[]
+        | select(.metadata.session_invite_response.session_id=="{{session_id_accept}}")
+        | select(.metadata.session_invite_response.status=="accepted")
+        | select(.thread_id=="{{session_id_accept}}")
+        | select(.subject=="Session: Scenario Session Accept")
+      ' >/dev/null
+
+  - name: Client1 sends a session chat message (accept)
+    datasite: client1@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv session chat "{{session_id_accept}}" "hello from owner"
+
+  - name: Wait for session chat message request to arrive at client2 (accept)
+    datasite: client2@sandbox.local
+    wait_for: datasites/client2@sandbox.local/app_data/biovault/rpc/message/*.request
+    timeout: 30
+
+  - name: Client2 syncs messages to ingest session chat (accept)
+    datasite: client2@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv message sync
+
+  - name: Client2 asserts it received the session chat in the session thread (accept)
+    datasite: client2@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv inbox --plain --all --json | jq -e '
+        .messages[]
+        | select(.metadata.session_chat.session_id=="{{session_id_accept}}")
+        | select(.from=="client1@sandbox.local")
+        | select(.thread_id=="{{session_id_accept}}")
+        | select(.subject=="Session: Scenario Session Accept")
+      ' >/dev/null
+
+  - name: Client2 sends a session chat reply (accept)
+    datasite: client2@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv session chat "{{session_id_accept}}" "hello from peer"
+
+  - name: Wait for peer chat message request to arrive at client1 (accept)
+    datasite: client1@sandbox.local
+    wait_for: datasites/client1@sandbox.local/app_data/biovault/rpc/message/*.request
+    timeout: 30
+
+  - name: Client1 syncs messages to ingest peer chat (accept)
+    datasite: client1@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv message sync
+
+  - name: Client1 asserts it received peer chat in the same session thread (accept)
+    datasite: client1@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv inbox --plain --all --json | jq -e '
+        .messages[]
+        | select(.metadata.session_chat.session_id=="{{session_id_accept}}")
+        | select(.from=="client2@sandbox.local")
+        | select(.thread_id=="{{session_id_accept}}")
+        | select(.subject=="Session: Scenario Session Accept")
+      ' >/dev/null
+
+  # ---------------------------------------------------------------------------
+  # Session invite reject
+  # ---------------------------------------------------------------------------
+
+  - name: Client1 creates a session and invites client2 (reject path)
+    datasite: client1@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv session create \
+        "Scenario Session Reject" \
+        --peer client2@sandbox.local \
+        --description "reject-path"
+
+  - name: Capture session list JSON (client1) after reject invite creation
+    datasite: client1@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv session list --json
+    capture: c1_sessions_json2
+
+  - name: Extract session id for Scenario Session Reject
+    datasite: client1@sandbox.local
+    run: |
+      jq -r '
+        map(select(.name=="Scenario Session Reject"))
+        | .[0].session_id // empty
+      ' <<< '{{c1_sessions_json2}}'
+    capture: session_id_reject
+
+  - name: Wait for session invite request file to arrive at client2 (reject)
+    datasite: client2@sandbox.local
+    wait_for: datasites/client2@sandbox.local/app_data/biovault/rpc/session/{{session_id_reject}}.request
+    timeout: 30
+
+  - name: Client2 syncs messages to ingest the invite (reject)
+    datasite: client2@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv message sync
+
+  - name: Client2 rejects the invitation with a reason
+    datasite: client2@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv session reject "{{session_id_reject}}" --reason "not today"
+
+  - name: Wait for RPC rejection response file to sync back to client1
+    datasite: client1@sandbox.local
+    wait_for: datasites/client1@sandbox.local/app_data/biovault/rpc/session/{{session_id_reject}}.response
+    timeout: 30
+
+  - name: Wait for reject status message request to arrive at client1
+    datasite: client1@sandbox.local
+    wait_for: datasites/client1@sandbox.local/app_data/biovault/rpc/message/*.request
+    timeout: 30
+
+  - name: Client1 syncs messages to ingest reject status message
+    datasite: client1@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv message sync
+
+  - name: Client1 asserts it received the reject status message in the session thread
+    datasite: client1@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv inbox --plain --all --json | jq -e '
+        .messages[]
+        | select(.metadata.session_invite_response.session_id=="{{session_id_reject}}")
+        | select(.metadata.session_invite_response.status=="rejected")
+        | select(.thread_id=="{{session_id_reject}}")
+        | select(.subject=="Session: Scenario Session Reject")
+      ' >/dev/null
+
+  - name: Client2 asserts no session record was created on reject
+    datasite: client2@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv session list --json | jq -e 'map(select(.session_id=="{{session_id_reject}}")) | length == 0' >/dev/null
+
+  # ---------------------------------------------------------------------------
+  # Key rotation breaks decrypt -> failed-message recorded -> re-import fixes
+  # ---------------------------------------------------------------------------
+
+  - name: Client2 rotates its key and publishes a new did bundle
+    datasite: client2@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv key wipe
+      {{workspace}}/cli/target/release/bv key generate --force
+      {{workspace}}/cli/target/release/bv key export \
+        --output datasites/client2@sandbox.local/public/crypto/did-rotated.json
+
+  - name: Wait for rotated client2 did to sync to client1
+    datasite: client1@sandbox.local
+    wait_for: datasites/client2@sandbox.local/public/crypto/did-rotated.json
+    timeout: 30
+
+  - name: Client2 sends a message after rotating its key
+    datasite: client2@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv message send \
+        client1@sandbox.local \
+        "Hello from client2 after key rotation" \
+        --subject "Key Rotation"
+
+  - name: Wait for rotated-key message request to arrive at client1
+    datasite: client1@sandbox.local
+    wait_for: datasites/client1@sandbox.local/app_data/biovault/rpc/message/*.request
+    timeout: 30
+
+  - name: Client1 syncs messages (should record decrypt failure, not crash)
+    datasite: client1@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv message sync
+
+  - name: Client1 asserts a failed message was recorded for client2
+    datasite: client1@sandbox.local
+    run: |
+      COUNT=$(sqlite3 .biovault/data/messages.db "SELECT COUNT(*) FROM failed_messages WHERE dismissed = 0 AND sender_identity = 'client2@sandbox.local';")
+      echo "failed_count=${COUNT}"
+      test "${COUNT}" -ge 1
+
+  - name: Client1 imports the rotated client2 public key (ignore TOFU)
+    datasite: client1@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv key import \
+        datasites/client2@sandbox.local/public/crypto/did-rotated.json \
+        --email client2@sandbox.local \
+        --ignore-tofu
+
+  - name: Client1 re-syncs messages (should successfully decrypt and clear failed record)
+    datasite: client1@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv message sync
+
+  - name: Client1 asserts it received the post-rotation message
+    datasite: client1@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv inbox --plain --all --json | jq -e '
+        .messages[]
+        | select(.from=="client2@sandbox.local")
+        | select(.subject=="Key Rotation")
+      ' >/dev/null
+
+  - name: Client1 asserts failed_messages record for rotated message was cleared
+    datasite: client1@sandbox.local
+    run: |
+      COUNT=$(sqlite3 .biovault/data/messages.db "SELECT COUNT(*) FROM failed_messages WHERE dismissed = 0 AND sender_identity = 'client2@sandbox.local';")
+      echo "failed_count=${COUNT}"
+      test "${COUNT}" -eq 0
