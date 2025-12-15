@@ -204,6 +204,11 @@ impl MessageSync {
                 continue;
             }
 
+            eprintln!(
+                "⚠️  Failed to decrypt/parse incoming message (rpc_id={}): {}",
+                rpc_request_id, error_msg
+            );
+
             // Try to extract envelope metadata
             let (
                 sender_identity,
