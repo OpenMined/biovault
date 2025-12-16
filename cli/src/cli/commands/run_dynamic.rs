@@ -566,10 +566,8 @@ fn ensure_nextflow_runner_image(docker_bin: &str) -> Result<&'static str> {
     // fails with exit code 125 and messages like:
     //   "client version 1.32 is too old. Minimum supported API version is 1.44"
     //
-    // We build a small local wrapper image that injects a modern docker client binary.
-    const NEXTFLOW_BASE_IMAGE: &str = "nextflow/nextflow:25.10.2";
-    const NEXTFLOW_RUNNER_IMAGE: &str = "biovault/nextflow-runner:25.10.2";
-    const DOCKER_CLI_VERSION: &str = "28.0.1";
+    // We use a pre-built image from GitHub Container Registry that includes a modern docker client.
+    const NEXTFLOW_RUNNER_IMAGE: &str = "ghcr.io/openmined/nextflow-runner:25.10.2";
 
     // Check if runner image exists locally
     let mut check_cmd = Command::new(docker_bin);
@@ -592,80 +590,16 @@ fn ensure_nextflow_runner_image(docker_bin: &str) -> Result<&'static str> {
         return Ok(NEXTFLOW_RUNNER_IMAGE);
     }
 
+    // Pull the pre-built image from GitHub Container Registry
     append_desktop_log(&format!(
-        "[Pipeline] Building Nextflow runner image {} (base: {}, docker-cli: {})",
-        NEXTFLOW_RUNNER_IMAGE, NEXTFLOW_BASE_IMAGE, DOCKER_CLI_VERSION
+        "[Pipeline] Pulling Nextflow runner image from {}",
+        NEXTFLOW_RUNNER_IMAGE
     ));
 
-    // Ensure base image is present (credential helper PATH issues handled here)
-    pull_docker_image_if_needed(docker_bin, NEXTFLOW_BASE_IMAGE)?;
-
-    // Create a temp build context with a Dockerfile.
-    let mut ctx_dir = std::env::temp_dir();
-    let unique = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    ctx_dir.push(format!("biovault-nextflow-runner-{}", unique));
-    fs::create_dir_all(&ctx_dir).context("Failed to create temp dir for Docker build")?;
-
-    let dockerfile_path = ctx_dir.join("Dockerfile");
-    let dockerfile = format!(
-        r#"FROM {base}
-USER root
-ARG DOCKER_CLI_VERSION={docker_cli}
-RUN set -eux; \
-  if ! command -v tar >/dev/null 2>&1; then \
-    if command -v dnf >/dev/null 2>&1; then dnf -y install tar gzip && dnf clean all; \
-    elif command -v yum >/dev/null 2>&1; then yum -y install tar gzip && yum clean all; \
-    elif command -v apt-get >/dev/null 2>&1; then apt-get update && apt-get install -y --no-install-recommends tar gzip && rm -rf /var/lib/apt/lists/*; \
-    elif command -v apk >/dev/null 2>&1; then apk add --no-cache tar gzip; \
-    else echo "Missing 'tar' and no known package manager found" >&2; exit 1; \
-    fi; \
-  fi; \
-  curl -fsSL "https://download.docker.com/linux/static/stable/x86_64/docker-${{DOCKER_CLI_VERSION}}.tgz" -o /tmp/docker.tgz; \
-  tar -xzf /tmp/docker.tgz -C /tmp; \
-  mv /tmp/docker/docker /usr/local/bin/docker; \
-  chmod +x /usr/local/bin/docker; \
-  rm -rf /tmp/docker /tmp/docker.tgz; \
-  docker --version
-"#,
-        base = NEXTFLOW_BASE_IMAGE,
-        docker_cli = DOCKER_CLI_VERSION
-    );
-    fs::write(&dockerfile_path, dockerfile).context("Failed to write Dockerfile")?;
-
-    let mut build_cmd = Command::new(docker_bin);
-    build_cmd
-        .arg("build")
-        .arg("-t")
-        .arg(NEXTFLOW_RUNNER_IMAGE)
-        .arg("--build-arg")
-        .arg(format!("DOCKER_CLI_VERSION={}", DOCKER_CLI_VERSION))
-        .arg(ctx_dir.as_os_str());
-
-    if let Some(docker_path) = build_docker_path(docker_bin) {
-        build_cmd.env("PATH", &docker_path);
-    }
-
-    let output = build_cmd
-        .output()
-        .context("Failed to execute docker build for Nextflow runner")?;
-
-    if !output.status.success() {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        append_desktop_log(&format!(
-            "[Pipeline] Failed to build Nextflow runner image (status {:?}). stdout: {} stderr: {}",
-            output.status.code(),
-            stdout,
-            stderr
-        ));
-        return Err(anyhow::anyhow!("Failed to build Nextflow runner image").into());
-    }
+    pull_docker_image_if_needed(docker_bin, NEXTFLOW_RUNNER_IMAGE)?;
 
     append_desktop_log(&format!(
-        "[Pipeline] Built Nextflow runner image {} successfully",
+        "[Pipeline] Nextflow runner image {} ready",
         NEXTFLOW_RUNNER_IMAGE
     ));
     Ok(NEXTFLOW_RUNNER_IMAGE)
@@ -827,7 +761,7 @@ pub async fn execute_dynamic(
         // Build/get Nextflow runner image with modern Docker CLI
         // Skip image pulling in dry-run mode - use placeholder
         let nextflow_image = if dry_run {
-            "biovault/nextflow-runner:latest"
+            "ghcr.io/openmined/nextflow-runner:latest"
         } else {
             ensure_nextflow_runner_image(&docker_bin)?
         };
