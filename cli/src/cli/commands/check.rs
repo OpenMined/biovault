@@ -18,6 +18,16 @@ use std::sync::{Arc, OnceLock};
 #[cfg(target_os = "macos")]
 use tempfile::NamedTempFile;
 
+#[cfg(target_os = "windows")]
+fn configure_child_process(cmd: &mut Command) {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+    cmd.creation_flags(CREATE_NO_WINDOW);
+}
+
+#[cfg(not(target_os = "windows"))]
+fn configure_child_process(_cmd: &mut Command) {}
+
 #[cfg(target_os = "macos")]
 type HomebrewLogger = Arc<dyn Fn(&str) + Send + Sync>;
 
@@ -74,9 +84,11 @@ fn java_bin_from_prefix(prefix: &str) -> Option<String> {
 }
 
 fn is_valid_java_binary(path: &str) -> bool {
-    Command::new(path)
-        .arg("-version")
-        .output()
+    let mut cmd = Command::new(path);
+    cmd.arg("-version");
+    configure_child_process(&mut cmd);
+
+    cmd.output()
         .map(|output| {
             if !output.status.success() {
                 return false;
@@ -95,8 +107,24 @@ fn bundled_env_key(dep: &str) -> Option<&'static str> {
     match dep {
         "java" => Some("BIOVAULT_BUNDLED_JAVA"),
         "nextflow" => Some("BIOVAULT_BUNDLED_NEXTFLOW"),
+        "syftbox" => Some("SYFTBOX_BINARY"),
         "uv" => Some("BIOVAULT_BUNDLED_UV"),
         _ => None,
+    }
+}
+
+fn resolve_bundled_env_path(dep: &str) -> Option<String> {
+    let env_key = bundled_env_key(dep)?;
+    let env_bin = std::env::var(env_key).ok()?;
+    let trimmed = env_bin.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let p = Path::new(trimmed);
+    if p.exists() {
+        Some(trimmed.to_string())
+    } else {
+        None
     }
 }
 
@@ -144,6 +172,17 @@ fn adjust_java_binary(mut current: Option<String>) -> Option<String> {
         }
     }
 
+    #[cfg(target_os = "windows")]
+    {
+        if current.is_none() {
+            if let Some(java_path) = check_java_in_windows_not_in_path() {
+                if is_valid_java_binary(&java_path) {
+                    return Some(java_path);
+                }
+            }
+        }
+    }
+
     current
 }
 
@@ -159,7 +198,10 @@ fn version_path_from_sources<'a>(
 
 fn get_java_version_string(path: Option<&str>) -> Option<String> {
     let command = path.unwrap_or("java");
-    let output = Command::new(command).arg("-version").output().ok()?;
+    let mut cmd = Command::new(command);
+    cmd.arg("-version");
+    configure_child_process(&mut cmd);
+    let output = cmd.output().ok()?;
     if !output.status.success() {
         return None;
     }
@@ -169,7 +211,10 @@ fn get_java_version_string(path: Option<&str>) -> Option<String> {
 
 fn check_java_version_with_info_at(path: Option<&str>, min_version: u32) -> (bool, Option<String>) {
     let command = path.unwrap_or("java");
-    let output = Command::new(command).arg("-version").output();
+    let mut cmd = Command::new(command);
+    cmd.arg("-version");
+    configure_child_process(&mut cmd);
+    let output = cmd.output();
 
     match output {
         Ok(output) => {
@@ -346,30 +391,39 @@ pub fn check_single_dependency(
             // Verify this is actually the right tool by checking its version
             let is_valid = match dep.name.as_str() {
                 "java" => is_valid_java_binary(custom),
-                "docker" => Command::new(custom)
-                    .arg("--version")
-                    .output()
-                    .map(|output| {
-                        let version_str = String::from_utf8_lossy(&output.stdout);
-                        version_str.contains("Docker")
-                    })
-                    .unwrap_or(false),
-                "nextflow" => Command::new(custom)
-                    .arg("-version")
-                    .output()
-                    .map(|output| {
-                        let version_str = String::from_utf8_lossy(&output.stdout);
-                        version_str.contains("nextflow") || version_str.contains("version")
-                    })
-                    .unwrap_or(false),
-                "syftbox" => Command::new(custom)
-                    .arg("--version")
-                    .output()
-                    .map(|output| {
-                        let version_str = String::from_utf8_lossy(&output.stdout);
-                        version_str.contains("syftbox") || version_str.contains("version")
-                    })
-                    .unwrap_or(false),
+                "docker" => {
+                    let mut cmd = Command::new(custom);
+                    cmd.arg("--version");
+                    configure_child_process(&mut cmd);
+                    cmd.output()
+                        .map(|output| {
+                            let version_str = String::from_utf8_lossy(&output.stdout);
+                            version_str.contains("Docker")
+                        })
+                        .unwrap_or(false)
+                }
+                "nextflow" => {
+                    let mut cmd = Command::new(custom);
+                    cmd.arg("-version");
+                    configure_child_process(&mut cmd);
+                    cmd.output()
+                        .map(|output| {
+                            let version_str = String::from_utf8_lossy(&output.stdout);
+                            version_str.contains("nextflow") || version_str.contains("version")
+                        })
+                        .unwrap_or(false)
+                }
+                "syftbox" => {
+                    let mut cmd = Command::new(custom);
+                    cmd.arg("--version");
+                    configure_child_process(&mut cmd);
+                    cmd.output()
+                        .map(|output| {
+                            let version_str = String::from_utf8_lossy(&output.stdout);
+                            version_str.contains("syftbox") || version_str.contains("version")
+                        })
+                        .unwrap_or(false)
+                }
                 _ => true,
             };
 
@@ -400,6 +454,7 @@ pub fn check_single_dependency(
     };
 
     let mut binary_path = direct_path
+        .or_else(|| resolve_bundled_env_path(&dep.name))
         .or_else(|| {
             which::which(&dep.name)
                 .ok()
@@ -1320,7 +1375,10 @@ fn check_version(tool: &str, min_version: u32) -> bool {
 #[allow(dead_code)]
 fn check_java_version(min_version: u32) -> bool {
     // Try to execute java -version
-    let output = Command::new("java").arg("-version").output();
+    let mut command = Command::new("java");
+    command.arg("-version");
+    configure_child_process(&mut command);
+    let output = command.output();
 
     match output {
         Ok(output) => {
@@ -1441,6 +1499,7 @@ fn get_syftbox_version(version_source: Option<&str>) -> Option<String> {
 
 fn get_nextflow_version(version_source: Option<&str>) -> Option<String> {
     let mut command = command_for_version(version_source, "nextflow")?;
+    configure_child_process(&mut command);
     let output = command.arg("-version").output().ok()?;
     if !output.status.success() {
         return None;
@@ -1455,7 +1514,10 @@ fn get_nextflow_version(version_source: Option<&str>) -> Option<String> {
 }
 
 fn check_java_version_with_info(min_version: u32) -> (bool, Option<String>) {
-    let output = Command::new("java").arg("-version").output();
+    let mut command = Command::new("java");
+    command.arg("-version");
+    configure_child_process(&mut command);
+    let output = command.output();
 
     match output {
         Ok(output) => {
@@ -1559,6 +1621,10 @@ fn check_java_in_brew_not_in_path() -> Option<String> {
 fn check_uv_in_windows_not_in_path() -> Option<String> {
     // Check common UV installation locations on Windows
     let possible_locations = [
+        // WinGet Links directory (primary location for winget-installed apps)
+        env::var("LOCALAPPDATA")
+            .ok()
+            .map(|p| format!("{}\\Microsoft\\WinGet\\Links\\uv.exe", p)),
         // WinGet typically installs here
         env::var("LOCALAPPDATA")
             .ok()
@@ -1594,8 +1660,70 @@ fn check_uv_in_windows_not_in_path() -> Option<String> {
     None
 }
 
+#[cfg(target_os = "windows")]
+fn check_java_in_windows_not_in_path() -> Option<String> {
+    // Check Microsoft OpenJDK installation locations on Windows
+    let program_files =
+        env::var("PROGRAMFILES").unwrap_or_else(|_| "C:\\Program Files".to_string());
+    let microsoft_dir = std::path::Path::new(&program_files).join("Microsoft");
+
+    if microsoft_dir.exists() {
+        // Look for jdk-* directories (e.g., jdk-17.0.17.10-hotspot)
+        if let Ok(entries) = std::fs::read_dir(&microsoft_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                    if name.starts_with("jdk-") {
+                        let java_exe = path.join("bin").join("java.exe");
+                        if java_exe.exists() {
+                            return Some(java_exe.display().to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Also check Oracle JDK locations
+    let java_dir = std::path::Path::new(&program_files).join("Java");
+    if java_dir.exists() {
+        if let Ok(entries) = std::fs::read_dir(&java_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                    if name.starts_with("jdk") || name.starts_with("jre") {
+                        let java_exe = path.join("bin").join("java.exe");
+                        if java_exe.exists() {
+                            return Some(java_exe.display().to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Check AdoptOpenJDK/Eclipse Temurin locations
+    let eclipse_dir = std::path::Path::new(&program_files).join("Eclipse Adoptium");
+    if eclipse_dir.exists() {
+        if let Ok(entries) = std::fs::read_dir(&eclipse_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let java_exe = path.join("bin").join("java.exe");
+                if java_exe.exists() {
+                    return Some(java_exe.display().to_string());
+                }
+            }
+        }
+    }
+
+    None
+}
+
 fn get_uv_version(uv_path: &str) -> Option<String> {
-    let output = Command::new(uv_path).arg("--version").output().ok()?;
+    let mut command = Command::new(uv_path);
+    command.arg("--version");
+    configure_child_process(&mut command);
+    let output = command.output().ok()?;
     if !output.status.success() {
         return None;
     }

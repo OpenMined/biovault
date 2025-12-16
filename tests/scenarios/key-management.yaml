@@ -439,7 +439,14 @@ steps:
   # PHASE 9: Recipient Removes Sender's Key
   # ============================================================
 
-  - name: "Phase 9: Client2 removes Client1's imported key"
+  - name: "Phase 9: Clean up old messages before testing"
+    datasite: client2@sandbox.local
+    run: |
+      rm -f datasites/client2@sandbox.local/app_data/biovault/rpc/message/*.request
+      rm -f datasites/client2@sandbox.local/app_data/biovault/rpc/message/*.response
+      echo "✓ Cleaned old messages"
+
+  - name: Client2 removes Client1's imported key
     datasite: client2@sandbox.local
     run: |
       VAULT=".biovault/.syc"
