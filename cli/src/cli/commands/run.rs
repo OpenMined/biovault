@@ -332,7 +332,11 @@ fn forward_nextflow_task_logs(
     let mut remaining_lines = MAX_LINES_PER_TICK;
     let mut files_seen = 0usize;
 
-    for entry in WalkDir::new(work_dir).follow_links(false).into_iter().flatten() {
+    for entry in WalkDir::new(work_dir)
+        .follow_links(false)
+        .into_iter()
+        .flatten()
+    {
         if remaining_lines == 0 || files_seen >= MAX_FILES_PER_TICK {
             break;
         }
@@ -468,7 +472,8 @@ pub(crate) fn execute_with_logging(
     });
 
     let log_forwarder = nextflow_log_path.and_then(spawn_nextflow_log_forwarder);
-    let task_log_forwarder = work_dir.and_then(|dir| spawn_nextflow_task_log_forwarder(dir, project_root));
+    let task_log_forwarder =
+        work_dir.and_then(|dir| spawn_nextflow_task_log_forwarder(dir, project_root));
 
     let status = child
         .wait()
@@ -1401,14 +1406,13 @@ async fn execute_sheet_workflow(params: &RunParams, config: &ProjectConfig) -> a
         .as_ref()
         .map(PathBuf::from)
         .unwrap_or_else(|| project_path.join("work"));
-    let status =
-        execute_with_logging(
-            cmd,
-            Some(nextflow_log_path),
-            Some(task_work_dir),
-            Some(project_path.clone()),
-        )
-            .context("Failed to execute Nextflow")?;
+    let status = execute_with_logging(
+        cmd,
+        Some(nextflow_log_path),
+        Some(task_work_dir),
+        Some(project_path.clone()),
+    )
+    .context("Failed to execute Nextflow")?;
 
     if !status.success() {
         append_desktop_log("ERROR", "Nextflow execution failed");
@@ -1679,14 +1683,13 @@ pub async fn execute(params: RunParams) -> anyhow::Result<()> {
         .clone()
         .map(PathBuf::from)
         .unwrap_or_else(|| project_path.join("work"));
-    let status =
-        execute_with_logging(
-            cmd,
-            Some(nextflow_log_path),
-            Some(task_work_dir),
-            Some(project_path.clone()),
-        )
-            .context("Failed to execute Nextflow")?;
+    let status = execute_with_logging(
+        cmd,
+        Some(nextflow_log_path),
+        Some(task_work_dir),
+        Some(project_path.clone()),
+    )
+    .context("Failed to execute Nextflow")?;
 
     if !status.success() {
         append_desktop_log("ERROR", "Nextflow execution failed");

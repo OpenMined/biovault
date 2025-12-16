@@ -138,14 +138,28 @@ fn windows_path_to_docker(path: &Path) -> String {
     let unix_path = path_str.replace('\\', "/");
     // Convert drive letter: C:/... -> /c/...
     if unix_path.len() >= 2 && unix_path.chars().nth(1) == Some(':') {
-        let drive = unix_path.chars().next().unwrap().to_lowercase().next().unwrap();
+        let drive = unix_path
+            .chars()
+            .next()
+            .unwrap()
+            .to_lowercase()
+            .next()
+            .unwrap();
         format!("/{}{}", drive, &unix_path[2..])
     } else if unix_path.starts_with("\\\\?\\") || unix_path.starts_with("//?/") {
         // Handle extended path prefix \\?\C:\... or //?/C:/...
-        let stripped = unix_path.trim_start_matches("\\\\?\\").trim_start_matches("//?/");
+        let stripped = unix_path
+            .trim_start_matches("\\\\?\\")
+            .trim_start_matches("//?/");
         let stripped = stripped.replace('\\', "/");
         if stripped.len() >= 2 && stripped.chars().nth(1) == Some(':') {
-            let drive = stripped.chars().next().unwrap().to_lowercase().next().unwrap();
+            let drive = stripped
+                .chars()
+                .next()
+                .unwrap()
+                .to_lowercase()
+                .next()
+                .unwrap();
             format!("/{}{}", drive, &stripped[2..])
         } else {
             format!("/{}", stripped)
@@ -186,7 +200,7 @@ fn remap_json_paths_for_docker(value: &JsonValue) -> JsonValue {
 }
 
 /// Normalize a Windows path string (strip extended prefix, convert to backslashes)
-/// This version is available in all builds for use by extract_paths_from_json
+#[cfg(target_os = "windows")]
 fn normalize_windows_path_str(s: &str) -> String {
     // Strip extended-length path prefix if present
     let stripped = if s.starts_with("\\\\?\\") {
@@ -210,26 +224,42 @@ fn extract_paths_from_json(value: &JsonValue, paths: &mut Vec<PathBuf>) {
                 // Normalize: strip extended prefix and convert forward slashes to backslashes
                 let normalized = normalize_windows_path_str(s);
                 let path = Path::new(&normalized);
-                append_desktop_log(&format!("[JSON Extract] Found path: {} (normalized: {}, exists: {})",
-                    s, normalized, path.exists()));
+                append_desktop_log(&format!(
+                    "[JSON Extract] Found path: {} (normalized: {}, exists: {})",
+                    s,
+                    normalized,
+                    path.exists()
+                ));
                 if path.exists() {
                     // Get the parent directory for files, or the path itself for directories
                     if path.is_file() {
                         if let Some(parent) = path.parent() {
-                            append_desktop_log(&format!("[JSON Extract] Adding parent dir: {}", parent.display()));
+                            append_desktop_log(&format!(
+                                "[JSON Extract] Adding parent dir: {}",
+                                parent.display()
+                            ));
                             paths.push(parent.to_path_buf());
                         }
                         // If it's a CSV file, also extract paths from inside it
                         if s.to_lowercase().ends_with(".csv") {
-                            append_desktop_log(&format!("[JSON Extract] Reading CSV for embedded paths: {}", s));
+                            append_desktop_log(&format!(
+                                "[JSON Extract] Reading CSV for embedded paths: {}",
+                                s
+                            ));
                             if let Ok(content) = fs::read_to_string(&path) {
                                 extract_paths_from_csv(&content, paths);
                             } else {
-                                append_desktop_log(&format!("[JSON Extract] ERROR: Failed to read CSV: {}", s));
+                                append_desktop_log(&format!(
+                                    "[JSON Extract] ERROR: Failed to read CSV: {}",
+                                    s
+                                ));
                             }
                         }
                     } else {
-                        append_desktop_log(&format!("[JSON Extract] Adding directory: {}", path.display()));
+                        append_desktop_log(&format!(
+                            "[JSON Extract] Adding directory: {}",
+                            path.display()
+                        ));
                         paths.push(path.to_path_buf());
                     }
                 }
@@ -278,8 +308,11 @@ fn looks_like_windows_absolute_path(s: &str) -> bool {
 /// Extract Windows paths from CSV content
 #[cfg(target_os = "windows")]
 fn extract_paths_from_csv(content: &str, paths: &mut Vec<PathBuf>) {
-    append_desktop_log(&format!("[CSV Extract] Processing CSV content ({} bytes, {} lines)",
-        content.len(), content.lines().count()));
+    append_desktop_log(&format!(
+        "[CSV Extract] Processing CSV content ({} bytes, {} lines)",
+        content.len(),
+        content.lines().count()
+    ));
 
     let mut found_count = 0;
     let mut added_count = 0;
@@ -293,17 +326,27 @@ fn extract_paths_from_csv(content: &str, paths: &mut Vec<PathBuf>) {
                 // Normalize: strip extended prefix and convert forward slashes to backslashes
                 let normalized = normalize_windows_path_str(field);
                 let path = Path::new(&normalized);
-                append_desktop_log(&format!("[CSV Extract] Found path: {} (normalized: {}, exists: {})",
-                    field, normalized, path.exists()));
+                append_desktop_log(&format!(
+                    "[CSV Extract] Found path: {} (normalized: {}, exists: {})",
+                    field,
+                    normalized,
+                    path.exists()
+                ));
                 if path.exists() {
                     if path.is_file() {
                         if let Some(parent) = path.parent() {
-                            append_desktop_log(&format!("[CSV Extract] Adding parent dir: {}", parent.display()));
+                            append_desktop_log(&format!(
+                                "[CSV Extract] Adding parent dir: {}",
+                                parent.display()
+                            ));
                             paths.push(parent.to_path_buf());
                             added_count += 1;
                         }
                     } else {
-                        append_desktop_log(&format!("[CSV Extract] Adding directory: {}", path.display()));
+                        append_desktop_log(&format!(
+                            "[CSV Extract] Adding directory: {}",
+                            path.display()
+                        ));
                         paths.push(path.to_path_buf());
                         added_count += 1;
                     }
@@ -312,7 +355,10 @@ fn extract_paths_from_csv(content: &str, paths: &mut Vec<PathBuf>) {
         }
     }
 
-    append_desktop_log(&format!("[CSV Extract] Found {} paths, added {} mount candidates", found_count, added_count));
+    append_desktop_log(&format!(
+        "[CSV Extract] Found {} paths, added {} mount candidates",
+        found_count, added_count
+    ));
 }
 
 /// Rewrite a CSV file converting Windows paths to Docker-compatible paths
@@ -330,7 +376,7 @@ fn rewrite_csv_with_docker_paths(csv_path: &Path) -> Result<()> {
         for field in line.split(',') {
             let trimmed = field.trim();
             let (was_quoted, inner) = if trimmed.starts_with('"') && trimmed.ends_with('"') {
-                (true, &trimmed[1..trimmed.len()-1])
+                (true, &trimmed[1..trimmed.len() - 1])
             } else {
                 (false, trimmed)
             };
@@ -352,7 +398,11 @@ fn rewrite_csv_with_docker_paths(csv_path: &Path) -> Result<()> {
         new_lines.push(new_fields.join(","));
     }
 
-    append_desktop_log(&format!("[CSV Rewrite] Converted {} paths in {}", converted_count, csv_path.display()));
+    append_desktop_log(&format!(
+        "[CSV Rewrite] Converted {} paths in {}",
+        converted_count,
+        csv_path.display()
+    ));
 
     let new_content = new_lines.join("\n");
     fs::write(csv_path, new_content)
@@ -457,12 +507,19 @@ fn build_docker_path(_docker_bin: &str) -> Option<String> {
 }
 
 /// Pull a Docker image if not already present (needed on Windows for credential helper PATH issues)
+#[cfg(target_os = "windows")]
 fn pull_docker_image_if_needed(docker_bin: &str, image: &str) -> Result<()> {
-    append_desktop_log(&format!("[Pipeline] Checking if image {} is available...", image));
+    append_desktop_log(&format!(
+        "[Pipeline] Checking if image {} is available...",
+        image
+    ));
 
     // Check if image exists locally
     let mut check_cmd = Command::new(docker_bin);
-    check_cmd.arg("image").arg("inspect").arg(image)
+    check_cmd
+        .arg("image")
+        .arg("inspect")
+        .arg(image)
         .stdout(Stdio::null())
         .stderr(Stdio::null());
 
@@ -472,7 +529,10 @@ fn pull_docker_image_if_needed(docker_bin: &str, image: &str) -> Result<()> {
     }
 
     if check_cmd.status().map(|s| s.success()).unwrap_or(false) {
-        append_desktop_log(&format!("[Pipeline] Image {} is already available locally", image));
+        append_desktop_log(&format!(
+            "[Pipeline] Image {} is already available locally",
+            image
+        ));
         return Ok(());
     }
 
@@ -488,8 +548,7 @@ fn pull_docker_image_if_needed(docker_bin: &str, image: &str) -> Result<()> {
         pull_cmd.env("PATH", &docker_path);
     }
 
-    let status = pull_cmd.status()
-        .context("Failed to execute docker pull")?;
+    let status = pull_cmd.status().context("Failed to execute docker pull")?;
 
     if !status.success() {
         append_desktop_log(&format!("[Pipeline] Failed to pull image {}", image));
@@ -619,9 +678,7 @@ fn ensure_nextflow_runner_image(_docker_bin: &str) -> Result<&'static str> {
 
 fn check_docker_running(docker_bin: &str) -> Result<()> {
     let mut cmd = Command::new(docker_bin);
-    cmd.arg("info")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+    cmd.arg("info").stdout(Stdio::null()).stderr(Stdio::null());
 
     // Add Docker PATH for credential helpers on Windows
     if let Some(docker_path) = build_docker_path(docker_bin) {
@@ -780,8 +837,8 @@ pub async fn execute_dynamic(
 
         // Extract paths from inputs that need to be mounted (must do before rewriting CSVs)
         // This is Windows-specific: extract paths from CSV files and rewrite them for Docker
-        let inputs_json_value: JsonValue = serde_json::to_value(&inputs_json)
-            .context("Failed to convert inputs to JSON value")?;
+        let inputs_json_value: JsonValue =
+            serde_json::to_value(&inputs_json).context("Failed to convert inputs to JSON value")?;
 
         #[cfg(target_os = "windows")]
         let mount_roots = {
@@ -791,7 +848,10 @@ pub async fn execute_dynamic(
 
             // Rewrite CSV files to convert Windows paths to Docker-compatible paths
             append_desktop_log("[Pipeline] Rewriting CSV files with Docker-compatible paths...");
-            append_desktop_log(&format!("[Pipeline] inputs_json: {}", serde_json::to_string(&inputs_json_value).unwrap_or_default()));
+            append_desktop_log(&format!(
+                "[Pipeline] inputs_json: {}",
+                serde_json::to_string(&inputs_json_value).unwrap_or_default()
+            ));
             rewrite_input_csvs_for_docker(&inputs_json_value)?;
 
             roots
@@ -800,11 +860,26 @@ pub async fn execute_dynamic(
         #[cfg(not(target_os = "windows"))]
         let mount_roots: Vec<PathBuf> = Vec::new();
 
-        append_desktop_log(&format!("[Pipeline] Docker path mappings:"));
-        append_desktop_log(&format!("  biovault_home: {} -> {}", biovault_home.display(), docker_biovault_home));
-        append_desktop_log(&format!("  project_path: {} -> {}", project_path.display(), docker_project_path));
-        append_desktop_log(&format!("  template: {} -> {}", template_abs.display(), docker_template));
-        append_desktop_log(&format!("[Pipeline] Additional data mounts: {:?}", mount_roots));
+        append_desktop_log("[Pipeline] Docker path mappings:");
+        append_desktop_log(&format!(
+            "  biovault_home: {} -> {}",
+            biovault_home.display(),
+            docker_biovault_home
+        ));
+        append_desktop_log(&format!(
+            "  project_path: {} -> {}",
+            project_path.display(),
+            docker_project_path
+        ));
+        append_desktop_log(&format!(
+            "  template: {} -> {}",
+            template_abs.display(),
+            docker_template
+        ));
+        append_desktop_log(&format!(
+            "[Pipeline] Additional data mounts: {:?}",
+            mount_roots
+        ));
 
         let mut docker_cmd = Command::new(&docker_bin);
 
@@ -824,16 +899,30 @@ pub async fn execute_dynamic(
             .arg("/var/run/docker.sock:/var/run/docker.sock")
             // Mount the BioVault home directory
             .arg("-v")
-            .arg(format!("{}:{}", windows_path_to_docker(&biovault_home), docker_biovault_home))
+            .arg(format!(
+                "{}:{}",
+                windows_path_to_docker(&biovault_home),
+                docker_biovault_home
+            ))
             // Mount the project path (may be same as above, Docker handles duplicates)
             .arg("-v")
-            .arg(format!("{}:{}", windows_path_to_docker(project_path), docker_project_path));
+            .arg(format!(
+                "{}:{}",
+                windows_path_to_docker(project_path),
+                docker_project_path
+            ));
 
         // Mount additional data directories discovered from inputs
         for mount_path in &mount_roots {
             let docker_mount = windows_path_to_docker(mount_path);
-            append_desktop_log(&format!("[Pipeline] Adding mount: {} -> {}", mount_path.display(), docker_mount));
-            docker_cmd.arg("-v").arg(format!("{}:{}", docker_mount, docker_mount));
+            append_desktop_log(&format!(
+                "[Pipeline] Adding mount: {} -> {}",
+                mount_path.display(),
+                docker_mount
+            ));
+            docker_cmd
+                .arg("-v")
+                .arg(format!("{}:{}", docker_mount, docker_mount));
         }
 
         docker_cmd
@@ -859,8 +948,8 @@ pub async fn execute_dynamic(
         }
 
         // Re-encode JSON with Docker paths (inputs_json_value already created above)
-        let params_json_value: JsonValue = serde_json::to_value(&params_json)
-            .context("Failed to convert params to JSON value")?;
+        let params_json_value: JsonValue =
+            serde_json::to_value(&params_json).context("Failed to convert params to JSON value")?;
         let docker_inputs_json = remap_json_paths_for_docker(&inputs_json_value);
         let docker_params_json = remap_json_paths_for_docker(&params_json_value);
         let docker_inputs_json_str = serde_json::to_string(&docker_inputs_json)
@@ -916,7 +1005,9 @@ pub async fn execute_dynamic(
             ));
             native_cmd.env("PATH", path_env);
         } else {
-            append_desktop_log("[Pipeline] WARNING: Could not build augmented PATH, using system PATH");
+            append_desktop_log(
+                "[Pipeline] WARNING: Could not build augmented PATH, using system PATH",
+            );
         }
 
         native_cmd.arg("-log").arg(&nextflow_log_path);
@@ -964,14 +1055,13 @@ pub async fn execute_dynamic(
 
     cmd.current_dir(project_path);
     let work_dir = project_path.join("work");
-    let status =
-        execute_with_logging(
-            cmd,
-            Some(nextflow_log_path),
-            Some(work_dir),
-            Some(project_path.to_path_buf()),
-        )
-        .context("Failed to execute nextflow")?;
+    let status = execute_with_logging(
+        cmd,
+        Some(nextflow_log_path),
+        Some(work_dir),
+        Some(project_path.to_path_buf()),
+    )
+    .context("Failed to execute nextflow")?;
 
     if !status.success() {
         append_desktop_log(&format!(

@@ -396,33 +396,33 @@ pub fn check_single_dependency(
                     cmd.arg("--version");
                     configure_child_process(&mut cmd);
                     cmd.output()
-                    .map(|output| {
-                        let version_str = String::from_utf8_lossy(&output.stdout);
-                        version_str.contains("Docker")
-                    })
-                    .unwrap_or(false)
+                        .map(|output| {
+                            let version_str = String::from_utf8_lossy(&output.stdout);
+                            version_str.contains("Docker")
+                        })
+                        .unwrap_or(false)
                 }
                 "nextflow" => {
                     let mut cmd = Command::new(custom);
                     cmd.arg("-version");
                     configure_child_process(&mut cmd);
                     cmd.output()
-                    .map(|output| {
-                        let version_str = String::from_utf8_lossy(&output.stdout);
-                        version_str.contains("nextflow") || version_str.contains("version")
-                    })
-                    .unwrap_or(false)
+                        .map(|output| {
+                            let version_str = String::from_utf8_lossy(&output.stdout);
+                            version_str.contains("nextflow") || version_str.contains("version")
+                        })
+                        .unwrap_or(false)
                 }
                 "syftbox" => {
                     let mut cmd = Command::new(custom);
                     cmd.arg("--version");
                     configure_child_process(&mut cmd);
                     cmd.output()
-                    .map(|output| {
-                        let version_str = String::from_utf8_lossy(&output.stdout);
-                        version_str.contains("syftbox") || version_str.contains("version")
-                    })
-                    .unwrap_or(false)
+                        .map(|output| {
+                            let version_str = String::from_utf8_lossy(&output.stdout);
+                            version_str.contains("syftbox") || version_str.contains("version")
+                        })
+                        .unwrap_or(false)
                 }
                 _ => true,
             };
@@ -1663,7 +1663,8 @@ fn check_uv_in_windows_not_in_path() -> Option<String> {
 #[cfg(target_os = "windows")]
 fn check_java_in_windows_not_in_path() -> Option<String> {
     // Check Microsoft OpenJDK installation locations on Windows
-    let program_files = env::var("PROGRAMFILES").unwrap_or_else(|_| "C:\\Program Files".to_string());
+    let program_files =
+        env::var("PROGRAMFILES").unwrap_or_else(|_| "C:\\Program Files".to_string());
     let microsoft_dir = std::path::Path::new(&program_files).join("Microsoft");
 
     if microsoft_dir.exists() {

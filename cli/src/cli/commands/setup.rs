@@ -141,10 +141,9 @@ pub async fn install_single_dependency(name: &str) -> Result<Option<String>> {
             if let Some(envs) = &dep.environments {
                 if let Some(env_cfg) = envs.get(&env_key) {
                     if env_cfg.skip {
-                        let reason = env_cfg
-                            .skip_reason
-                            .clone()
-                            .unwrap_or_else(|| format!("{} cannot be auto-installed on this platform", name));
+                        let reason = env_cfg.skip_reason.clone().unwrap_or_else(|| {
+                            format!("{} cannot be auto-installed on this platform", name)
+                        });
                         eprintln!("⏭️  {} is skipped on {}: {}", name, env_key, reason);
                         return Err(anyhow!("{}", reason).into());
                     }
