@@ -810,7 +810,8 @@ pub async fn execute_dynamic(
         resolve_binary_path(config.as_ref(), "docker").unwrap_or_else(|| "docker".to_string());
 
     // Check Docker availability (required for both Windows Docker execution and workflow containers)
-    if run_settings.require_docker || should_use_docker_for_nextflow() {
+    // Skip Docker checks in dry-run mode
+    if !dry_run && (run_settings.require_docker || should_use_docker_for_nextflow()) {
         append_desktop_log("[Pipeline] Checking Docker availability...");
         if let Err(err) = check_docker_running(&docker_bin) {
             append_desktop_log(&format!("[Pipeline] Docker check failed: {}", err));
@@ -824,7 +825,12 @@ pub async fn execute_dynamic(
         append_desktop_log("[Pipeline] Using Docker to run Nextflow (Windows mode)");
 
         // Build/get Nextflow runner image with modern Docker CLI
-        let nextflow_image = ensure_nextflow_runner_image(&docker_bin)?;
+        // Skip image pulling in dry-run mode - use placeholder
+        let nextflow_image = if dry_run {
+            "biovault/nextflow-runner:latest"
+        } else {
+            ensure_nextflow_runner_image(&docker_bin)?
+        };
 
         // Convert all paths to Docker-compatible format
         let docker_biovault_home = windows_path_to_docker(&biovault_home);
@@ -847,12 +853,15 @@ pub async fn execute_dynamic(
             let roots = get_unique_mount_roots(data_paths);
 
             // Rewrite CSV files to convert Windows paths to Docker-compatible paths
-            append_desktop_log("[Pipeline] Rewriting CSV files with Docker-compatible paths...");
-            append_desktop_log(&format!(
-                "[Pipeline] inputs_json: {}",
-                serde_json::to_string(&inputs_json_value).unwrap_or_default()
-            ));
-            rewrite_input_csvs_for_docker(&inputs_json_value)?;
+            // Skip in dry-run mode since this modifies files
+            if !dry_run {
+                append_desktop_log("[Pipeline] Rewriting CSV files with Docker-compatible paths...");
+                append_desktop_log(&format!(
+                    "[Pipeline] inputs_json: {}",
+                    serde_json::to_string(&inputs_json_value).unwrap_or_default()
+                ));
+                rewrite_input_csvs_for_docker(&inputs_json_value)?;
+            }
 
             roots
         };
