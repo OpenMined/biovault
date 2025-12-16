@@ -124,11 +124,511 @@ impl Default for RunSettings {
     }
 }
 
-fn check_docker_running(docker_bin: &str) -> Result<()> {
-    let status = Command::new(docker_bin)
-        .arg("info")
+/// Check if we should use Docker to run Nextflow (Windows only)
+fn should_use_docker_for_nextflow() -> bool {
+    cfg!(target_os = "windows")
+}
+
+/// Convert a Windows path to a Docker-compatible path for volume mounts
+/// e.g., C:\Users\foo -> /c/Users/foo
+#[cfg(target_os = "windows")]
+fn windows_path_to_docker(path: &Path) -> String {
+    let path_str = path.to_string_lossy();
+    // Convert backslashes to forward slashes
+    let unix_path = path_str.replace('\\', "/");
+    // Convert drive letter: C:/... -> /c/...
+    if unix_path.len() >= 2 && unix_path.chars().nth(1) == Some(':') {
+        let drive = unix_path.chars().next().unwrap().to_lowercase().next().unwrap();
+        format!("/{}{}", drive, &unix_path[2..])
+    } else if unix_path.starts_with("\\\\?\\") || unix_path.starts_with("//?/") {
+        // Handle extended path prefix \\?\C:\... or //?/C:/...
+        let stripped = unix_path.trim_start_matches("\\\\?\\").trim_start_matches("//?/");
+        let stripped = stripped.replace('\\', "/");
+        if stripped.len() >= 2 && stripped.chars().nth(1) == Some(':') {
+            let drive = stripped.chars().next().unwrap().to_lowercase().next().unwrap();
+            format!("/{}{}", drive, &stripped[2..])
+        } else {
+            format!("/{}", stripped)
+        }
+    } else {
+        unix_path
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn windows_path_to_docker(path: &Path) -> String {
+    path.to_string_lossy().to_string()
+}
+
+/// Recursively remap Windows paths in JSON values to Docker-compatible paths
+fn remap_json_paths_for_docker(value: &JsonValue) -> JsonValue {
+    match value {
+        JsonValue::String(s) => {
+            // Check if it looks like a Windows path (contains backslash or drive letter)
+            if s.contains('\\') || (s.len() >= 2 && s.chars().nth(1) == Some(':')) {
+                JsonValue::String(windows_path_to_docker(Path::new(s)))
+            } else {
+                value.clone()
+            }
+        }
+        JsonValue::Object(map) => {
+            let mut new_map = serde_json::Map::new();
+            for (k, v) in map {
+                new_map.insert(k.clone(), remap_json_paths_for_docker(v));
+            }
+            JsonValue::Object(new_map)
+        }
+        JsonValue::Array(arr) => {
+            JsonValue::Array(arr.iter().map(remap_json_paths_for_docker).collect())
+        }
+        _ => value.clone(),
+    }
+}
+
+/// Normalize a Windows path string (strip extended prefix, convert to backslashes)
+/// This version is available in all builds for use by extract_paths_from_json
+fn normalize_windows_path_str(s: &str) -> String {
+    // Strip extended-length path prefix if present
+    let stripped = if s.starts_with("\\\\?\\") {
+        &s[4..]
+    } else if s.starts_with("//?/") {
+        &s[4..]
+    } else {
+        s
+    };
+    // Convert forward slashes to backslashes
+    stripped.replace('/', "\\")
+}
+
+/// Extract all file/directory paths from a JSON value (for Docker volume mounting)
+#[cfg(target_os = "windows")]
+fn extract_paths_from_json(value: &JsonValue, paths: &mut Vec<PathBuf>) {
+    match value {
+        JsonValue::String(s) => {
+            // Check if it looks like a Windows path (with drive letter)
+            if looks_like_windows_absolute_path(s) {
+                // Normalize: strip extended prefix and convert forward slashes to backslashes
+                let normalized = normalize_windows_path_str(s);
+                let path = Path::new(&normalized);
+                append_desktop_log(&format!("[JSON Extract] Found path: {} (normalized: {}, exists: {})",
+                    s, normalized, path.exists()));
+                if path.exists() {
+                    // Get the parent directory for files, or the path itself for directories
+                    if path.is_file() {
+                        if let Some(parent) = path.parent() {
+                            append_desktop_log(&format!("[JSON Extract] Adding parent dir: {}", parent.display()));
+                            paths.push(parent.to_path_buf());
+                        }
+                        // If it's a CSV file, also extract paths from inside it
+                        if s.to_lowercase().ends_with(".csv") {
+                            append_desktop_log(&format!("[JSON Extract] Reading CSV for embedded paths: {}", s));
+                            if let Ok(content) = fs::read_to_string(&path) {
+                                extract_paths_from_csv(&content, paths);
+                            } else {
+                                append_desktop_log(&format!("[JSON Extract] ERROR: Failed to read CSV: {}", s));
+                            }
+                        }
+                    } else {
+                        append_desktop_log(&format!("[JSON Extract] Adding directory: {}", path.display()));
+                        paths.push(path.to_path_buf());
+                    }
+                }
+            }
+        }
+        JsonValue::Object(map) => {
+            for v in map.values() {
+                extract_paths_from_json(v, paths);
+            }
+        }
+        JsonValue::Array(arr) => {
+            for v in arr {
+                extract_paths_from_json(v, paths);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Check if a string looks like a Windows absolute path
+#[cfg(target_os = "windows")]
+fn looks_like_windows_absolute_path(s: &str) -> bool {
+    // Handle extended-length path prefix: \\?\C:\... or //?/C:/...
+    let stripped = if s.starts_with("\\\\?\\") {
+        &s[4..]
+    } else if s.starts_with("//?/") {
+        &s[4..]
+    } else {
+        s
+    };
+
+    if stripped.len() < 3 {
+        return false;
+    }
+
+    let chars: Vec<char> = stripped.chars().take(3).collect();
+    // Check for drive letter pattern: X:\ or X:/
+    if chars.len() >= 3 && chars[1] == ':' {
+        let first = chars[0];
+        let third = chars[2];
+        return first.is_ascii_alphabetic() && (third == '\\' || third == '/');
+    }
+    false
+}
+
+/// Extract Windows paths from CSV content
+#[cfg(target_os = "windows")]
+fn extract_paths_from_csv(content: &str, paths: &mut Vec<PathBuf>) {
+    append_desktop_log(&format!("[CSV Extract] Processing CSV content ({} bytes, {} lines)",
+        content.len(), content.lines().count()));
+
+    let mut found_count = 0;
+    let mut added_count = 0;
+
+    for line in content.lines() {
+        for field in line.split(',') {
+            let field = field.trim().trim_matches('"');
+            // Accept both backslash (C:\) and forward slash (C:/) Windows paths
+            if looks_like_windows_absolute_path(field) {
+                found_count += 1;
+                // Normalize: strip extended prefix and convert forward slashes to backslashes
+                let normalized = normalize_windows_path_str(field);
+                let path = Path::new(&normalized);
+                append_desktop_log(&format!("[CSV Extract] Found path: {} (normalized: {}, exists: {})",
+                    field, normalized, path.exists()));
+                if path.exists() {
+                    if path.is_file() {
+                        if let Some(parent) = path.parent() {
+                            append_desktop_log(&format!("[CSV Extract] Adding parent dir: {}", parent.display()));
+                            paths.push(parent.to_path_buf());
+                            added_count += 1;
+                        }
+                    } else {
+                        append_desktop_log(&format!("[CSV Extract] Adding directory: {}", path.display()));
+                        paths.push(path.to_path_buf());
+                        added_count += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    append_desktop_log(&format!("[CSV Extract] Found {} paths, added {} mount candidates", found_count, added_count));
+}
+
+/// Rewrite a CSV file converting Windows paths to Docker-compatible paths
+#[cfg(target_os = "windows")]
+fn rewrite_csv_with_docker_paths(csv_path: &Path) -> Result<()> {
+    let content = fs::read_to_string(csv_path)
+        .with_context(|| format!("Failed to read CSV: {}", csv_path.display()))?;
+
+    append_desktop_log(&format!("[CSV Rewrite] Processing: {}", csv_path.display()));
+    let mut converted_count = 0;
+
+    let mut new_lines = Vec::new();
+    for line in content.lines() {
+        let mut new_fields = Vec::new();
+        for field in line.split(',') {
+            let trimmed = field.trim();
+            let (was_quoted, inner) = if trimmed.starts_with('"') && trimmed.ends_with('"') {
+                (true, &trimmed[1..trimmed.len()-1])
+            } else {
+                (false, trimmed)
+            };
+
+            // Check if it's a Windows path (with backslash or forward slash)
+            let new_value = if looks_like_windows_absolute_path(inner) {
+                converted_count += 1;
+                windows_path_to_docker(Path::new(inner))
+            } else {
+                inner.to_string()
+            };
+
+            if was_quoted {
+                new_fields.push(format!("\"{}\"", new_value));
+            } else {
+                new_fields.push(new_value);
+            }
+        }
+        new_lines.push(new_fields.join(","));
+    }
+
+    append_desktop_log(&format!("[CSV Rewrite] Converted {} paths in {}", converted_count, csv_path.display()));
+
+    let new_content = new_lines.join("\n");
+    fs::write(csv_path, new_content)
+        .with_context(|| format!("Failed to write converted CSV: {}", csv_path.display()))?;
+
+    Ok(())
+}
+
+/// Check if a string looks like a Windows path
+#[cfg(target_os = "windows")]
+fn is_windows_path(s: &str) -> bool {
+    // Regular path: C:\...
+    if s.len() >= 2 && s.chars().nth(1) == Some(':') {
+        return true;
+    }
+    // Extended path: \\?\C:\...
+    if s.starts_with("\\\\?\\") || s.starts_with("//?/") {
+        return true;
+    }
+    false
+}
+
+/// Find and rewrite all CSV files referenced in inputs JSON
+#[cfg(target_os = "windows")]
+fn rewrite_input_csvs_for_docker(value: &JsonValue) -> Result<()> {
+    match value {
+        JsonValue::String(s) => {
+            if is_windows_path(s) && s.to_lowercase().ends_with(".csv") {
+                let path = Path::new(s);
+                if path.exists() && path.is_file() {
+                    append_desktop_log(&format!("[Pipeline] Rewriting CSV: {}", s));
+                    rewrite_csv_with_docker_paths(path)?;
+                }
+            }
+        }
+        JsonValue::Object(map) => {
+            for v in map.values() {
+                rewrite_input_csvs_for_docker(v)?;
+            }
+        }
+        JsonValue::Array(arr) => {
+            for v in arr {
+                rewrite_input_csvs_for_docker(v)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Get unique root directories that need to be mounted (deduplicates nested paths)
+#[cfg(target_os = "windows")]
+fn get_unique_mount_roots(paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    use std::collections::HashSet;
+
+    let mut roots: Vec<PathBuf> = Vec::new();
+    let mut seen: HashSet<PathBuf> = HashSet::new();
+
+    for path in paths {
+        // Canonicalize to resolve symlinks and normalize
+        let canonical = path.canonicalize().unwrap_or(path);
+
+        // Check if this path is already covered by an existing root
+        let mut is_covered = false;
+        for root in &roots {
+            if canonical.starts_with(root) {
+                is_covered = true;
+                break;
+            }
+        }
+
+        if !is_covered && !seen.contains(&canonical) {
+            // Remove any existing roots that are children of this new path
+            roots.retain(|r| !r.starts_with(&canonical));
+            roots.push(canonical.clone());
+            seen.insert(canonical);
+        }
+    }
+
+    roots
+}
+
+/// Build a PATH that includes Docker's bin directory (needed for credential helpers on Windows)
+#[cfg(target_os = "windows")]
+fn build_docker_path(docker_bin: &str) -> Option<String> {
+    let docker_path = Path::new(docker_bin);
+    let docker_dir = docker_path.parent()?;
+
+    let mut paths = vec![docker_dir.to_path_buf()];
+    if let Some(existing) = std::env::var_os("PATH") {
+        paths.extend(std::env::split_paths(&existing));
+    }
+
+    std::env::join_paths(paths)
+        .ok()
+        .and_then(|joined| joined.into_string().ok())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn build_docker_path(_docker_bin: &str) -> Option<String> {
+    None
+}
+
+/// Pull a Docker image if not already present (needed on Windows for credential helper PATH issues)
+fn pull_docker_image_if_needed(docker_bin: &str, image: &str) -> Result<()> {
+    append_desktop_log(&format!("[Pipeline] Checking if image {} is available...", image));
+
+    // Check if image exists locally
+    let mut check_cmd = Command::new(docker_bin);
+    check_cmd.arg("image").arg("inspect").arg(image)
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::null());
+
+    // Add Docker PATH for credential helpers on Windows
+    if let Some(docker_path) = build_docker_path(docker_bin) {
+        check_cmd.env("PATH", &docker_path);
+    }
+
+    if check_cmd.status().map(|s| s.success()).unwrap_or(false) {
+        append_desktop_log(&format!("[Pipeline] Image {} is already available locally", image));
+        return Ok(());
+    }
+
+    // Pull the image
+    append_desktop_log(&format!("[Pipeline] Pulling image {}...", image));
+    println!("📦 Pulling Docker image: {}", image);
+
+    let mut pull_cmd = Command::new(docker_bin);
+    pull_cmd.arg("pull").arg(image);
+
+    // Add Docker PATH for credential helpers on Windows
+    if let Some(docker_path) = build_docker_path(docker_bin) {
+        pull_cmd.env("PATH", &docker_path);
+    }
+
+    let status = pull_cmd.status()
+        .context("Failed to execute docker pull")?;
+
+    if !status.success() {
+        append_desktop_log(&format!("[Pipeline] Failed to pull image {}", image));
+        return Err(anyhow::anyhow!("Failed to pull Docker image: {}", image).into());
+    }
+
+    append_desktop_log(&format!("[Pipeline] Successfully pulled image {}", image));
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn ensure_nextflow_runner_image(docker_bin: &str) -> Result<&'static str> {
+    // The stock `nextflow/nextflow` image includes an outdated Docker CLI (17.x), which cannot
+    // talk to modern Docker daemons. When the workflow uses `container` directives, each task
+    // fails with exit code 125 and messages like:
+    //   "client version 1.32 is too old. Minimum supported API version is 1.44"
+    //
+    // We build a small local wrapper image that injects a modern docker client binary.
+    const NEXTFLOW_BASE_IMAGE: &str = "nextflow/nextflow:25.10.2";
+    const NEXTFLOW_RUNNER_IMAGE: &str = "biovault/nextflow-runner:25.10.2";
+    const DOCKER_CLI_VERSION: &str = "28.0.1";
+
+    // Check if runner image exists locally
+    let mut check_cmd = Command::new(docker_bin);
+    check_cmd
+        .arg("image")
+        .arg("inspect")
+        .arg(NEXTFLOW_RUNNER_IMAGE)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+
+    if let Some(docker_path) = build_docker_path(docker_bin) {
+        check_cmd.env("PATH", &docker_path);
+    }
+
+    if check_cmd.status().map(|s| s.success()).unwrap_or(false) {
+        append_desktop_log(&format!(
+            "[Pipeline] Using Nextflow runner image: {}",
+            NEXTFLOW_RUNNER_IMAGE
+        ));
+        return Ok(NEXTFLOW_RUNNER_IMAGE);
+    }
+
+    append_desktop_log(&format!(
+        "[Pipeline] Building Nextflow runner image {} (base: {}, docker-cli: {})",
+        NEXTFLOW_RUNNER_IMAGE, NEXTFLOW_BASE_IMAGE, DOCKER_CLI_VERSION
+    ));
+
+    // Ensure base image is present (credential helper PATH issues handled here)
+    pull_docker_image_if_needed(docker_bin, NEXTFLOW_BASE_IMAGE)?;
+
+    // Create a temp build context with a Dockerfile.
+    let mut ctx_dir = std::env::temp_dir();
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    ctx_dir.push(format!("biovault-nextflow-runner-{}", unique));
+    fs::create_dir_all(&ctx_dir).context("Failed to create temp dir for Docker build")?;
+
+    let dockerfile_path = ctx_dir.join("Dockerfile");
+    let dockerfile = format!(
+        r#"FROM {base}
+USER root
+ARG DOCKER_CLI_VERSION={docker_cli}
+RUN set -eux; \
+  if ! command -v tar >/dev/null 2>&1; then \
+    if command -v dnf >/dev/null 2>&1; then dnf -y install tar gzip && dnf clean all; \
+    elif command -v yum >/dev/null 2>&1; then yum -y install tar gzip && yum clean all; \
+    elif command -v apt-get >/dev/null 2>&1; then apt-get update && apt-get install -y --no-install-recommends tar gzip && rm -rf /var/lib/apt/lists/*; \
+    elif command -v apk >/dev/null 2>&1; then apk add --no-cache tar gzip; \
+    else echo "Missing 'tar' and no known package manager found" >&2; exit 1; \
+    fi; \
+  fi; \
+  curl -fsSL "https://download.docker.com/linux/static/stable/x86_64/docker-${{DOCKER_CLI_VERSION}}.tgz" -o /tmp/docker.tgz; \
+  tar -xzf /tmp/docker.tgz -C /tmp; \
+  mv /tmp/docker/docker /usr/local/bin/docker; \
+  chmod +x /usr/local/bin/docker; \
+  rm -rf /tmp/docker /tmp/docker.tgz; \
+  docker --version
+"#,
+        base = NEXTFLOW_BASE_IMAGE,
+        docker_cli = DOCKER_CLI_VERSION
+    );
+    fs::write(&dockerfile_path, dockerfile).context("Failed to write Dockerfile")?;
+
+    let mut build_cmd = Command::new(docker_bin);
+    build_cmd
+        .arg("build")
+        .arg("-t")
+        .arg(NEXTFLOW_RUNNER_IMAGE)
+        .arg("--build-arg")
+        .arg(format!("DOCKER_CLI_VERSION={}", DOCKER_CLI_VERSION))
+        .arg(ctx_dir.as_os_str());
+
+    if let Some(docker_path) = build_docker_path(docker_bin) {
+        build_cmd.env("PATH", &docker_path);
+    }
+
+    let output = build_cmd
+        .output()
+        .context("Failed to execute docker build for Nextflow runner")?;
+
+    if !output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        append_desktop_log(&format!(
+            "[Pipeline] Failed to build Nextflow runner image (status {:?}). stdout: {} stderr: {}",
+            output.status.code(),
+            stdout,
+            stderr
+        ));
+        return Err(anyhow::anyhow!("Failed to build Nextflow runner image").into());
+    }
+
+    append_desktop_log(&format!(
+        "[Pipeline] Built Nextflow runner image {} successfully",
+        NEXTFLOW_RUNNER_IMAGE
+    ));
+    Ok(NEXTFLOW_RUNNER_IMAGE)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn ensure_nextflow_runner_image(_docker_bin: &str) -> Result<&'static str> {
+    Ok("nextflow/nextflow:25.10.2")
+}
+
+fn check_docker_running(docker_bin: &str) -> Result<()> {
+    let mut cmd = Command::new(docker_bin);
+    cmd.arg("info")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+
+    // Add Docker PATH for credential helpers on Windows
+    if let Some(docker_path) = build_docker_path(docker_bin) {
+        cmd.env("PATH", &docker_path);
+    }
+
+    let status = cmd
         .status()
         .with_context(|| format!("Failed to execute '{}'", docker_bin))?;
 
@@ -252,34 +752,8 @@ pub async fn execute_dynamic(
     let docker_bin =
         resolve_binary_path(config.as_ref(), "docker").unwrap_or_else(|| "docker".to_string());
 
-    // Log environment details for debugging
-    append_desktop_log(&format!(
-        "[Pipeline] Using nextflow binary: {}",
-        nextflow_bin
-    ));
-
-    // Log original PATH from environment
-    if let Some(original_path) = std::env::var_os("PATH") {
-        append_desktop_log(&format!(
-            "[Pipeline] Original PATH from environment: {}",
-            original_path.to_string_lossy()
-        ));
-    } else {
-        append_desktop_log("[Pipeline] WARNING: No PATH environment variable found!");
-    }
-
-    let mut cmd = Command::new(&nextflow_bin);
-
-    append_desktop_log("[Pipeline] Preferred binary paths:");
-    for binary in ["nextflow", "java", "docker"] {
-        if let Some(path) = resolve_binary_path(config.as_ref(), binary) {
-            append_desktop_log(&format!("  {} = {}", binary, path));
-        } else {
-            append_desktop_log(&format!("  {} = <not configured>", binary));
-        }
-    }
-
-    if run_settings.require_docker {
+    // Check Docker availability (required for both Windows Docker execution and workflow containers)
+    if run_settings.require_docker || should_use_docker_for_nextflow() {
         append_desktop_log("[Pipeline] Checking Docker availability...");
         if let Err(err) = check_docker_running(&docker_bin) {
             append_desktop_log(&format!("[Pipeline] Docker check failed: {}", err));
@@ -288,38 +762,189 @@ pub async fn execute_dynamic(
         append_desktop_log("[Pipeline] Docker is running (docker info succeeded)");
     }
 
-    if let Some(path_env) = build_augmented_path(config.as_ref()) {
-        append_desktop_log(&format!(
-            "[Pipeline] Final augmented PATH for nextflow: {}",
-            path_env
-        ));
-        cmd.env("PATH", path_env);
+    // Build command - use Docker on Windows, native Nextflow elsewhere
+    let mut cmd = if should_use_docker_for_nextflow() {
+        append_desktop_log("[Pipeline] Using Docker to run Nextflow (Windows mode)");
+
+        // Build/get Nextflow runner image with modern Docker CLI
+        let nextflow_image = ensure_nextflow_runner_image(&docker_bin)?;
+
+        // Convert all paths to Docker-compatible format
+        let docker_biovault_home = windows_path_to_docker(&biovault_home);
+        let docker_project_path = windows_path_to_docker(project_path);
+        let docker_template = windows_path_to_docker(&template_abs);
+        let docker_workflow = windows_path_to_docker(&workflow_abs);
+        let docker_project_spec = windows_path_to_docker(&project_spec_abs);
+        let docker_log_path = windows_path_to_docker(&nextflow_log_path);
+        let docker_results = windows_path_to_docker(Path::new(results_path));
+
+        // Extract paths from inputs that need to be mounted (must do before rewriting CSVs)
+        // This is Windows-specific: extract paths from CSV files and rewrite them for Docker
+        let inputs_json_value: JsonValue = serde_json::to_value(&inputs_json)
+            .context("Failed to convert inputs to JSON value")?;
+
+        #[cfg(target_os = "windows")]
+        let mount_roots = {
+            let mut data_paths: Vec<PathBuf> = Vec::new();
+            extract_paths_from_json(&inputs_json_value, &mut data_paths);
+            let roots = get_unique_mount_roots(data_paths);
+
+            // Rewrite CSV files to convert Windows paths to Docker-compatible paths
+            append_desktop_log("[Pipeline] Rewriting CSV files with Docker-compatible paths...");
+            append_desktop_log(&format!("[Pipeline] inputs_json: {}", serde_json::to_string(&inputs_json_value).unwrap_or_default()));
+            rewrite_input_csvs_for_docker(&inputs_json_value)?;
+
+            roots
+        };
+
+        #[cfg(not(target_os = "windows"))]
+        let mount_roots: Vec<PathBuf> = Vec::new();
+
+        append_desktop_log(&format!("[Pipeline] Docker path mappings:"));
+        append_desktop_log(&format!("  biovault_home: {} -> {}", biovault_home.display(), docker_biovault_home));
+        append_desktop_log(&format!("  project_path: {} -> {}", project_path.display(), docker_project_path));
+        append_desktop_log(&format!("  template: {} -> {}", template_abs.display(), docker_template));
+        append_desktop_log(&format!("[Pipeline] Additional data mounts: {:?}", mount_roots));
+
+        let mut docker_cmd = Command::new(&docker_bin);
+
+        // Add Docker PATH for credential helpers on Windows
+        if let Some(docker_path) = build_docker_path(&docker_bin) {
+            docker_cmd.env("PATH", docker_path);
+        }
+
+        docker_cmd
+            .arg("run")
+            .arg("--rm")
+            // Mount Docker Desktop engine socket so Nextflow-in-Docker can launch workflow containers.
+            //
+            // With Docker Desktop (Linux containers), the daemon runs in a Linux VM and provides a Unix socket.
+            // Binding it into the Nextflow container allows Nextflow to launch workflow containers.
+            .arg("-v")
+            .arg("/var/run/docker.sock:/var/run/docker.sock")
+            // Mount the BioVault home directory
+            .arg("-v")
+            .arg(format!("{}:{}", windows_path_to_docker(&biovault_home), docker_biovault_home))
+            // Mount the project path (may be same as above, Docker handles duplicates)
+            .arg("-v")
+            .arg(format!("{}:{}", windows_path_to_docker(project_path), docker_project_path));
+
+        // Mount additional data directories discovered from inputs
+        for mount_path in &mount_roots {
+            let docker_mount = windows_path_to_docker(mount_path);
+            append_desktop_log(&format!("[Pipeline] Adding mount: {} -> {}", mount_path.display(), docker_mount));
+            docker_cmd.arg("-v").arg(format!("{}:{}", docker_mount, docker_mount));
+        }
+
+        docker_cmd
+            // Set working directory
+            .arg("-w")
+            .arg(&docker_project_path)
+            // Use Nextflow runner image with modern Docker CLI
+            .arg(nextflow_image)
+            // Nextflow command (container entrypoint is bash, not nextflow)
+            .arg("nextflow")
+            // Nextflow arguments
+            .arg("-log")
+            .arg(&docker_log_path)
+            .arg("run")
+            .arg(&docker_template);
+
+        if resume {
+            docker_cmd.arg("-resume");
+        }
+
+        for extra in &nextflow_args {
+            docker_cmd.arg(extra);
+        }
+
+        // Re-encode JSON with Docker paths (inputs_json_value already created above)
+        let params_json_value: JsonValue = serde_json::to_value(&params_json)
+            .context("Failed to convert params to JSON value")?;
+        let docker_inputs_json = remap_json_paths_for_docker(&inputs_json_value);
+        let docker_params_json = remap_json_paths_for_docker(&params_json_value);
+        let docker_inputs_json_str = serde_json::to_string(&docker_inputs_json)
+            .context("Failed to encode Docker inputs metadata to JSON")?;
+        let docker_params_json_str = serde_json::to_string(&docker_params_json)
+            .context("Failed to encode Docker parameters metadata to JSON")?;
+
+        docker_cmd
+            .arg("--work_flow_file")
+            .arg(&docker_workflow)
+            .arg("--project_spec")
+            .arg(&docker_project_spec)
+            .arg("--inputs_json")
+            .arg(docker_inputs_json_str)
+            .arg("--params_json")
+            .arg(docker_params_json_str)
+            .arg("--results_dir")
+            .arg(&docker_results);
+
+        docker_cmd
     } else {
-        append_desktop_log("[Pipeline] WARNING: Could not build augmented PATH, using system PATH");
-    }
+        // Native Nextflow execution (macOS, Linux)
+        append_desktop_log(&format!(
+            "[Pipeline] Using native nextflow binary: {}",
+            nextflow_bin
+        ));
 
-    cmd.arg("-log").arg(&nextflow_log_path);
+        // Log original PATH from environment
+        if let Some(original_path) = std::env::var_os("PATH") {
+            append_desktop_log(&format!(
+                "[Pipeline] Original PATH from environment: {}",
+                original_path.to_string_lossy()
+            ));
+        } else {
+            append_desktop_log("[Pipeline] WARNING: No PATH environment variable found!");
+        }
 
-    cmd.arg("run").arg(&template_abs);
+        let mut native_cmd = Command::new(&nextflow_bin);
 
-    if resume {
-        cmd.arg("-resume");
-    }
+        append_desktop_log("[Pipeline] Preferred binary paths:");
+        for binary in ["nextflow", "java", "docker"] {
+            if let Some(path) = resolve_binary_path(config.as_ref(), binary) {
+                append_desktop_log(&format!("  {} = {}", binary, path));
+            } else {
+                append_desktop_log(&format!("  {} = <not configured>", binary));
+            }
+        }
 
-    for extra in &nextflow_args {
-        cmd.arg(extra);
-    }
+        if let Some(path_env) = build_augmented_path(config.as_ref()) {
+            append_desktop_log(&format!(
+                "[Pipeline] Final augmented PATH for nextflow: {}",
+                path_env
+            ));
+            native_cmd.env("PATH", path_env);
+        } else {
+            append_desktop_log("[Pipeline] WARNING: Could not build augmented PATH, using system PATH");
+        }
 
-    cmd.arg("--work_flow_file")
-        .arg(&workflow_abs)
-        .arg("--project_spec")
-        .arg(&project_spec_abs)
-        .arg("--inputs_json")
-        .arg(inputs_json_str)
-        .arg("--params_json")
-        .arg(params_json_str)
-        .arg("--results_dir")
-        .arg(results_path);
+        native_cmd.arg("-log").arg(&nextflow_log_path);
+
+        native_cmd.arg("run").arg(&template_abs);
+
+        if resume {
+            native_cmd.arg("-resume");
+        }
+
+        for extra in &nextflow_args {
+            native_cmd.arg(extra);
+        }
+
+        native_cmd
+            .arg("--work_flow_file")
+            .arg(&workflow_abs)
+            .arg("--project_spec")
+            .arg(&project_spec_abs)
+            .arg("--inputs_json")
+            .arg(inputs_json_str)
+            .arg("--params_json")
+            .arg(params_json_str)
+            .arg("--results_dir")
+            .arg(results_path);
+
+        native_cmd
+    };
 
     let display_cmd = format_command(&cmd);
 
@@ -338,8 +963,15 @@ pub async fn execute_dynamic(
     append_desktop_log(&format!("[Pipeline] Nextflow command: {}", display_cmd));
 
     cmd.current_dir(project_path);
+    let work_dir = project_path.join("work");
     let status =
-        execute_with_logging(cmd, Some(nextflow_log_path)).context("Failed to execute nextflow")?;
+        execute_with_logging(
+            cmd,
+            Some(nextflow_log_path),
+            Some(work_dir),
+            Some(project_path.to_path_buf()),
+        )
+        .context("Failed to execute nextflow")?;
 
     if !status.success() {
         append_desktop_log(&format!(

@@ -20,6 +20,17 @@ use std::thread;
 use std::time::Duration;
 // use tempfile::TempDir; // no longer needed since we don't copy templates
 use tracing::{debug, info};
+use walkdir::WalkDir;
+
+#[cfg(target_os = "windows")]
+fn configure_child_process(cmd: &mut Command) {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+    cmd.creation_flags(CREATE_NO_WINDOW);
+}
+
+#[cfg(not(target_os = "windows"))]
+fn configure_child_process(_cmd: &mut Command) {}
 
 #[derive(Debug, Serialize, Deserialize)]
 struct ProjectConfig {
@@ -282,12 +293,127 @@ fn should_forward_nextflow_line(line: &str) -> bool {
         && !line.contains("] DEBUG ")
 }
 
+fn spawn_nextflow_task_log_forwarder(
+    work_dir: PathBuf,
+    project_root: Option<PathBuf>,
+) -> Option<LogTailHandle> {
+    match std::env::var("BIOVAULT_DESKTOP_LOG_FILE") {
+        Ok(path) if !path.is_empty() => path,
+        _ => return None,
+    };
+
+    let stop_flag = Arc::new(AtomicBool::new(false));
+    let thread_flag = stop_flag.clone();
+
+    let handle = thread::spawn(move || {
+        let mut offsets: HashMap<PathBuf, u64> = HashMap::new();
+        while !thread_flag.load(Ordering::SeqCst) {
+            forward_nextflow_task_logs(&work_dir, project_root.as_deref(), &mut offsets);
+            thread::sleep(Duration::from_millis(750));
+        }
+        forward_nextflow_task_logs(&work_dir, project_root.as_deref(), &mut offsets);
+    });
+
+    Some(LogTailHandle { stop_flag, handle })
+}
+
+fn forward_nextflow_task_logs(
+    work_dir: &Path,
+    project_root: Option<&Path>,
+    offsets: &mut HashMap<PathBuf, u64>,
+) {
+    const MAX_FILES_PER_TICK: usize = 250;
+    const MAX_LINES_PER_TICK: usize = 2000;
+
+    if !work_dir.exists() {
+        return;
+    }
+
+    let mut remaining_lines = MAX_LINES_PER_TICK;
+    let mut files_seen = 0usize;
+
+    for entry in WalkDir::new(work_dir).follow_links(false).into_iter().flatten() {
+        if remaining_lines == 0 || files_seen >= MAX_FILES_PER_TICK {
+            break;
+        }
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let file_name = entry.file_name().to_string_lossy();
+        let is_task_log = matches!(
+            file_name.as_ref(),
+            ".command.log" | ".command.out" | ".command.err"
+        );
+        if !is_task_log {
+            continue;
+        }
+        files_seen += 1;
+
+        let path = entry.path().to_path_buf();
+        let offset = offsets.entry(path.clone()).or_insert(0);
+
+        if let Ok(metadata) = fs::metadata(&path) {
+            if metadata.len() < *offset {
+                *offset = 0;
+            }
+        }
+
+        let mut file = match std::fs::File::open(&path) {
+            Ok(file) => file,
+            Err(_) => continue,
+        };
+        if file.seek(SeekFrom::Start(*offset)).is_err() {
+            continue;
+        }
+
+        let rel = project_root
+            .and_then(|root| path.strip_prefix(root).ok())
+            .unwrap_or(path.as_path())
+            .to_string_lossy()
+            .to_string();
+        let label = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "task".to_string());
+
+        let mut reader = BufReader::new(file);
+        let mut line = String::new();
+        loop {
+            if remaining_lines == 0 {
+                break;
+            }
+
+            line.clear();
+            match reader.read_line(&mut line) {
+                Ok(0) => break,
+                Ok(n) => {
+                    *offset += n as u64;
+                    let trimmed = line.trim_end_matches(['\r', '\n']);
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+                    let sanitized = sanitize_stream_line(trimmed);
+                    if sanitized.is_empty() {
+                        continue;
+                    }
+                    append_desktop_log("INFO", &format!("[Task {} {}] {}", label, rel, sanitized));
+                    remaining_lines -= 1;
+                }
+                Err(_) => break,
+            }
+        }
+    }
+}
+
 pub(crate) fn execute_with_logging(
     mut cmd: Command,
     nextflow_log_path: Option<PathBuf>,
+    work_dir: Option<PathBuf>,
+    project_root: Option<PathBuf>,
 ) -> anyhow::Result<std::process::ExitStatus> {
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
+    configure_child_process(&mut cmd);
 
     let mut child = cmd.spawn().context("Failed to execute Nextflow")?;
 
@@ -342,6 +468,7 @@ pub(crate) fn execute_with_logging(
     });
 
     let log_forwarder = nextflow_log_path.and_then(spawn_nextflow_log_forwarder);
+    let task_log_forwarder = work_dir.and_then(|dir| spawn_nextflow_task_log_forwarder(dir, project_root));
 
     let status = child
         .wait()
@@ -354,6 +481,9 @@ pub(crate) fn execute_with_logging(
         let _ = handle.join();
     }
     if let Some(forwarder) = log_forwarder {
+        forwarder.stop();
+    }
+    if let Some(forwarder) = task_log_forwarder {
         forwarder.stop();
     }
 
@@ -1265,8 +1395,20 @@ async fn execute_sheet_workflow(params: &RunParams, config: &ProjectConfig) -> a
     // Execute Nextflow
     println!("Executing Nextflow sheet workflow...");
     append_desktop_log("INFO", "Executing Nextflow sheet workflow...");
+
+    let task_work_dir = params
+        .work_dir
+        .as_ref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| project_path.join("work"));
     let status =
-        execute_with_logging(cmd, Some(nextflow_log_path)).context("Failed to execute Nextflow")?;
+        execute_with_logging(
+            cmd,
+            Some(nextflow_log_path),
+            Some(task_work_dir),
+            Some(project_path.clone()),
+        )
+            .context("Failed to execute Nextflow")?;
 
     if !status.success() {
         append_desktop_log("ERROR", "Nextflow execution failed");
@@ -1479,7 +1621,7 @@ pub async fn execute(params: RunParams) -> anyhow::Result<()> {
         cmd.arg("-resume");
     }
 
-    if let Some(work_dir) = params.work_dir {
+    if let Some(work_dir) = &params.work_dir {
         cmd.arg("-work-dir");
         cmd.arg(work_dir);
     }
@@ -1531,8 +1673,20 @@ pub async fn execute(params: RunParams) -> anyhow::Result<()> {
     // Execute Nextflow
     println!("Executing Nextflow workflow...");
     append_desktop_log("INFO", "Executing Nextflow workflow...");
+
+    let task_work_dir = params
+        .work_dir
+        .clone()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| project_path.join("work"));
     let status =
-        execute_with_logging(cmd, Some(nextflow_log_path)).context("Failed to execute Nextflow")?;
+        execute_with_logging(
+            cmd,
+            Some(nextflow_log_path),
+            Some(task_work_dir),
+            Some(project_path.clone()),
+        )
+            .context("Failed to execute Nextflow")?;
 
     if !status.success() {
         append_desktop_log("ERROR", "Nextflow execution failed");

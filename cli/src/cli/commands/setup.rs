@@ -132,6 +132,27 @@ pub async fn execute(dependencies: Vec<String>, force: bool) -> Result<()> {
 pub async fn install_single_dependency(name: &str) -> Result<Option<String>> {
     eprintln!("🔧 install_single_dependency('{}') called", name);
 
+    // Check if this dependency is skipped on the current platform BEFORE trying to install
+    // This prevents showing "installed successfully" for deps that can't be auto-installed
+    let deps_yaml = include_str!("../../deps.yaml");
+    if let Ok(config) = serde_yaml::from_str::<DependencyConfig>(deps_yaml) {
+        let env_key = get_environment_key();
+        if let Some(dep) = config.dependencies.iter().find(|d| d.name == name) {
+            if let Some(envs) = &dep.environments {
+                if let Some(env_cfg) = envs.get(&env_key) {
+                    if env_cfg.skip {
+                        let reason = env_cfg
+                            .skip_reason
+                            .clone()
+                            .unwrap_or_else(|| format!("{} cannot be auto-installed on this platform", name));
+                        eprintln!("⏭️  {} is skipped on {}: {}", name, env_key, reason);
+                        return Err(anyhow!("{}", reason).into());
+                    }
+                }
+            }
+        }
+    }
+
     // Install the dependency
     execute(vec![name.to_string()], false).await?;
 
@@ -216,6 +237,18 @@ fn detect_system() -> SystemType {
     }
 
     SystemType::Unknown
+}
+
+/// Returns the environment key used in deps.yaml for the current platform.
+fn get_environment_key() -> String {
+    match detect_system() {
+        SystemType::GoogleColab => "google_colab".to_string(),
+        SystemType::MacOs => "macos".to_string(),
+        SystemType::Ubuntu => "ubuntu".to_string(),
+        SystemType::ArchLinux => "arch".to_string(),
+        SystemType::Windows => "windows".to_string(),
+        SystemType::Unknown => "unknown".to_string(),
+    }
 }
 
 fn is_google_colab() -> bool {
