@@ -855,7 +855,9 @@ pub async fn execute_dynamic(
             // Rewrite CSV files to convert Windows paths to Docker-compatible paths
             // Skip in dry-run mode since this modifies files
             if !dry_run {
-                append_desktop_log("[Pipeline] Rewriting CSV files with Docker-compatible paths...");
+                append_desktop_log(
+                    "[Pipeline] Rewriting CSV files with Docker-compatible paths...",
+                );
                 append_desktop_log(&format!(
                     "[Pipeline] inputs_json: {}",
                     serde_json::to_string(&inputs_json_value).unwrap_or_default()
