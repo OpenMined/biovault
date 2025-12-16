@@ -45,15 +45,15 @@ dependencies:
           - sudo pacman -S --noconfirm jdk-openjdk
         verify_command: java -version
       windows:
-        install_commands:
-          - winget install Microsoft.OpenJDK
-        verify_command: java -version
-    
+        skip: true
+        skip_reason: "Not required - Nextflow runs via Docker container on Windows"
+
   - name: docker
     check_running: true
     install_instructions: |
-      Install Docker Desktop from https://www.docker.com/products/docker-desktop/
-      Or via Homebrew: brew install --cask docker
+      Windows: winget install Docker.DockerDesktop --accept-source-agreements --accept-package-agreements
+      macOS: brew install --cask docker
+      Or download from https://www.docker.com/products/docker-desktop/
     description: Container runtime for running bioinformatics workflows
     website: https://www.docker.com
     environments:
@@ -77,16 +77,16 @@ dependencies:
           - sudo pacman -S --noconfirm docker
         verify_command: docker --version
       windows:
-        skip: true
-        skip_reason: "Docker Desktop for Windows requires manual installation from docker.com"
-    
+        install_commands:
+          - winget install Docker.DockerDesktop --accept-source-agreements --accept-package-agreements
+        verify_command: docker --version
+
   - name: nextflow
     check_running: false
     install_instructions: |
-      Install via curl: curl -s https://get.nextflow.io | bash
-      Or via Homebrew: brew install nextflow
+      Download from https://www.nextflow.io/
     description: Workflow management system for bioinformatics pipelines
-    website: https://get.nextflow.io
+    website: https://www.nextflow.io
     environments:
       google_colab:
         install_commands:
@@ -112,8 +112,8 @@ dependencies:
         verify_command: nextflow -version
       windows:
         skip: true
-        skip_reason: "Nextflow doesn't have a Windows CLI installer. Please use WSL or Docker to run Nextflow on Windows"
-  
+        skip_reason: "Not required - runs via Docker container on Windows"
+
   - name: syftbox
     check_running: false
     install_instructions: |
@@ -141,7 +141,7 @@ dependencies:
         verify_command: syftbox -v
       windows:
         skip: true
-        skip_reason: "SyftBox for Windows requires manual installation from GitHub releases"
+        skip_reason: "Manual install required. Download from https://github.com/OpenMined/syftbox/releases"
 
   - name: uv
     check_running: false
