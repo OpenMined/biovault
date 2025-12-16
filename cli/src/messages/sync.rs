@@ -47,6 +47,16 @@ impl MessageSync {
         Ok(Self { db, app })
     }
 
+    fn syftbox_auth_enabled() -> bool {
+        match std::env::var("SYFTBOX_AUTH_ENABLED") {
+            Ok(v) => {
+                let v = v.trim().to_lowercase();
+                !(v.is_empty() || v == "0" || v == "false" || v == "no")
+            }
+            Err(_) => true,
+        }
+    }
+
     fn send_via_send_handler(&self, from: &str, to: &str, body: &[u8]) -> Result<String> {
         let server_url = std::env::var("SYFTBOX_SERVER_URL")
             .context("SYFTBOX_SERVER_URL is required to send messages via the server")?;
@@ -55,17 +65,25 @@ impl MessageSync {
             anyhow::bail!("SYFTBOX_SERVER_URL is empty");
         }
 
-        // Use the SyftBox access token from config so the send handler has auth.
-        let access_token = Config::load()
-            .ok()
-            .and_then(|c| c.syftbox_credentials)
-            .and_then(|c| c.access_token)
-            .filter(|t| !t.trim().is_empty())
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "SyftBox access token is missing. Re-authenticate in Settings → SyftBox."
-                )
-            })?;
+        // In dev mode (SYFTBOX_AUTH_ENABLED=0/false/no), SyftBox can accept unauthenticated send handler requests.
+        // In auth-enabled mode, require a token so the send handler has auth.
+        let auth_enabled = Self::syftbox_auth_enabled();
+        let access_token = if auth_enabled {
+            Some(
+                Config::load()
+                    .ok()
+                    .and_then(|c| c.syftbox_credentials)
+                    .and_then(|c| c.access_token)
+                    .filter(|t| !t.trim().is_empty())
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "SyftBox access token is missing. Re-authenticate in Settings → SyftBox."
+                        )
+                    })?,
+            )
+        } else {
+            None
+        };
 
         let target_syft_url = format!("syft://{}/app_data/biovault/rpc/message", to);
         let mut url = Url::parse(&format!("{}/api/v1/send/msg", server_url))
@@ -78,11 +96,14 @@ impl MessageSync {
             .build()
             .context("Failed to build HTTP client")?;
 
-        let resp = client
+        let mut req = client
             .post(url)
             .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .bearer_auth(access_token)
-            .body(body.to_vec())
+            .body(body.to_vec());
+        if let Some(token) = access_token {
+            req = req.bearer_auth(token);
+        }
+        let resp = req
             .send()
             .context("Failed to send message via send handler")?;
 
@@ -129,55 +150,62 @@ impl MessageSync {
         msg.sent_at = Some(Utc::now());
         self.db.update_message(&msg)?;
 
-        let mut mode = "send-handler";
-        let send_result: Result<String> = match std::env::var("SYFTBOX_SERVER_URL") {
-            Ok(url) if !url.trim().is_empty() => {
-                self.send_via_send_handler(&msg.from, &msg.to, &payload_bytes)
-            }
-            _ => {
-                // Fallback for offline/dev tests: write request directly to recipient's datasite RPC folder.
-                // NOTE: This will not deliver across a real SyftBox network because non-owner paths are not uploaded.
-                mode = "filesystem";
-                let rpc_request = RpcRequest::new(
-                    msg.from.clone(),
-                    format!("syft://{}/app_data/biovault/rpc/message", msg.to),
-                    "POST".to_string(),
-                    payload_bytes.clone(),
-                );
+        // Default transport: write request directly into the recipient's RPC folder.
+        // SyftBox sync will upload this write if ACL permits it, delivering the request to the peer.
+        //
+        // Optional override: set BIOVAULT_USE_SEND_HANDLER=1 to use the SyftBox HTTP send handler instead.
+        let prefer_send_handler = matches!(
+            std::env::var("BIOVAULT_USE_SEND_HANDLER")
+                .ok()
+                .as_deref()
+                .map(str::trim)
+                .map(str::to_lowercase)
+                .as_deref(),
+            Some("1" | "true" | "yes")
+        );
 
-                let recipient_rpc_dir = self
-                    .app
-                    .data_dir
-                    .join("datasites")
-                    .join(&msg.to)
-                    .join("app_data")
-                    .join("biovault")
-                    .join("rpc")
-                    .join("message");
+        let mut mode = "filesystem";
+        let send_result: Result<String> = if prefer_send_handler {
+            mode = "send-handler";
+            self.send_via_send_handler(&msg.from, &msg.to, &payload_bytes)
+        } else {
+            let rpc_request = RpcRequest::new(
+                msg.from.clone(),
+                format!("syft://{}/app_data/biovault/rpc/message", msg.to),
+                "POST".to_string(),
+                payload_bytes.clone(),
+            );
 
-                self.app
-                    .storage
-                    .ensure_dir(&recipient_rpc_dir)
-                    .with_context(|| {
-                        format!("Failed to prepare RPC dir {:?}", recipient_rpc_dir)
-                    })?;
+            let recipient_rpc_dir = self
+                .app
+                .data_dir
+                .join("datasites")
+                .join(&msg.to)
+                .join("app_data")
+                .join("biovault")
+                .join("rpc")
+                .join("message");
 
-                let request_path = recipient_rpc_dir.join(format!("{}.request", rpc_request.id));
+            self.app
+                .storage
+                .ensure_dir(&recipient_rpc_dir)
+                .with_context(|| format!("Failed to prepare RPC dir {:?}", recipient_rpc_dir))?;
 
-                let write_policy = WritePolicy::Envelope {
-                    recipients: vec![msg.to.clone()],
-                    hint: Some(format!("message-{}", rpc_request.id)),
-                };
+            let request_path = recipient_rpc_dir.join(format!("{}.request", rpc_request.id));
 
-                self.app.storage.write_json_with_shadow(
-                    &request_path,
-                    &rpc_request,
-                    write_policy,
-                    true,
-                )?;
+            let write_policy = WritePolicy::Envelope {
+                recipients: vec![msg.to.clone()],
+                hint: Some(format!("message-{}", rpc_request.id)),
+            };
 
-                Ok(rpc_request.id)
-            }
+            self.app.storage.write_json_with_shadow(
+                &request_path,
+                &rpc_request,
+                write_policy,
+                true,
+            )?;
+
+            Ok(rpc_request.id)
         };
 
         match send_result {
