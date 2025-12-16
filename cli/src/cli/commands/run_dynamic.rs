@@ -640,10 +640,17 @@ fn check_docker_running(docker_bin: &str) -> Result<()> {
     // Add a more helpful hint when the socket is reachable but permission is denied.
     let lowered = stderr.to_ascii_lowercase();
     if lowered.contains("permission denied") || lowered.contains("connect: permission denied") {
-        base_msg.push_str(
-            " It looks like this session cannot access /var/run/docker.sock. \
+        if std::env::var_os("APPIMAGE").is_some() {
+            base_msg.push_str(
+                " It looks like this session cannot access /var/run/docker.sock. \
 If you recently added your user to the docker group, log out and back in (do not rely on 'newgrp docker' inside the AppImage), then relaunch the app.",
-        );
+            );
+        } else {
+            base_msg.push_str(
+                " It looks like this session cannot access /var/run/docker.sock. \
+If you recently added your user to the docker group, log out and back in, then retry.",
+            );
+        }
     }
 
     if !stderr.trim().is_empty() {
