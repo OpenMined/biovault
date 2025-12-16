@@ -753,15 +753,23 @@ pub async fn start(project_path: &str, python_version: &str) -> Result<()> {
         None
     };
 
-    // Open browser automatically
+    // Open browser automatically (unless JUPYTER_SKIP_BROWSER is set for test mode)
+    let skip_browser = env::var("JUPYTER_SKIP_BROWSER")
+        .map(|v| !v.is_empty() && v != "0")
+        .unwrap_or(false);
+
     if let Some(url) = final_url {
-        println!("🌐 Opening browser...");
-        #[cfg(target_os = "macos")]
-        let _ = Command::new("open").arg(&url).spawn();
-        #[cfg(target_os = "linux")]
-        let _ = Command::new("xdg-open").arg(&url).spawn();
-        #[cfg(target_os = "windows")]
-        let _ = Command::new("cmd").args(["/C", "start", &url]).spawn();
+        if skip_browser {
+            println!("🌐 Browser open skipped (JUPYTER_SKIP_BROWSER set)");
+        } else {
+            println!("🌐 Opening browser...");
+            #[cfg(target_os = "macos")]
+            let _ = Command::new("open").arg(&url).spawn();
+            #[cfg(target_os = "linux")]
+            let _ = Command::new("xdg-open").arg(&url).spawn();
+            #[cfg(target_os = "windows")]
+            let _ = Command::new("cmd").args(["/C", "start", &url]).spawn();
+        }
     }
 
     println!("   Press Ctrl+C in the terminal running Jupyter to stop");
