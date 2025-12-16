@@ -160,7 +160,6 @@ bootstrap_biovault() {
 
 start_stack() {
   require_bin go
-  ensure_bv_binary
   [[ -d "$SYFTBOX_DIR" ]] || { echo "Missing syftbox checkout at $SYFTBOX_DIR" >&2; exit 1; }
 
   mkdir -p "$SANDBOX_DIR"
@@ -186,6 +185,7 @@ start_stack() {
   if (( SKIP_KEYS )); then
     echo "Skipping key generation (--skip-keys)"
   else
+    ensure_bv_binary
     for email in "${CLIENTS[@]}"; do
       bootstrap_biovault "$email"
     done
