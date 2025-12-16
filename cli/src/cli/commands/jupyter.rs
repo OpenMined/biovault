@@ -622,6 +622,9 @@ pub async fn start(project_path: &str, python_version: &str) -> Result<()> {
         .current_dir(&project_dir)
         .env("JUPYTER_RUNTIME_DIR", &runtime_dir)
         .env("XDG_RUNTIME_DIR", &runtime_dir)
+        // Ensure the runner's Python environment doesn't bleed into uv/venv processes.
+        .env_remove("PYTHONHOME")
+        .env_remove("PYTHONPATH")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
