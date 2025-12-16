@@ -1,5 +1,7 @@
 use anyhow::{Context, Result};
 use chrono::Utc;
+use reqwest::blocking::Client as BlockingClient;
+use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -33,10 +35,55 @@ pub struct MessageSync {
     app: SyftBoxApp,
 }
 
+#[derive(Debug, Deserialize)]
+struct SendHandlerResponse {
+    request_id: String,
+}
+
 impl MessageSync {
     pub fn new(db_path: &Path, app: SyftBoxApp) -> Result<Self> {
         let db = MessageDb::new(db_path)?;
         Ok(Self { db, app })
+    }
+
+    fn send_via_send_handler(&self, from: &str, to: &str, body: &[u8]) -> Result<String> {
+        let server_url = std::env::var("SYFTBOX_SERVER_URL")
+            .context("SYFTBOX_SERVER_URL is required to send messages via the server")?;
+        let server_url = server_url.trim().trim_end_matches('/');
+        if server_url.is_empty() {
+            anyhow::bail!("SYFTBOX_SERVER_URL is empty");
+        }
+
+        let target_syft_url = format!("syft://{}/app_data/biovault/rpc/message", to);
+        let mut url = Url::parse(&format!("{}/api/v1/send/msg", server_url))
+            .context("Failed to build send handler URL")?;
+        url.query_pairs_mut()
+            .append_pair("x-syft-url", &target_syft_url)
+            .append_pair("x-syft-from", from);
+
+        let client = BlockingClient::builder()
+            .build()
+            .context("Failed to build HTTP client")?;
+
+        let resp = client
+            .post(url)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body.to_vec())
+            .send()
+            .context("Failed to send message via send handler")?;
+
+        let status = resp.status();
+        let resp_text = resp
+            .text()
+            .context("Failed to read send handler response body")?;
+
+        if status.is_client_error() || status.is_server_error() {
+            anyhow::bail!("Send handler error {}: {}", status, resp_text);
+        }
+
+        let parsed: SendHandlerResponse = serde_json::from_str(&resp_text)
+            .with_context(|| format!("Failed to parse send handler response: {}", resp_text))?;
+        Ok(parsed.request_id)
     }
 
     /// Send a message via RPC
@@ -60,164 +107,83 @@ impl MessageSync {
             created_at: msg.created_at.to_rfc3339(),
         };
 
-        let rpc_request = RpcRequest::new(
-            msg.from.clone(),
-            format!(
-                "syft://{}@openmined.org/app_data/biovault/rpc/message",
-                msg.to
-            ),
-            "POST".to_string(),
-            serde_json::to_vec(&payload)?,
-        );
+        let payload_bytes = serde_json::to_vec(&payload)?;
 
-        // Update message with RPC tracking
-        msg.rpc_request_id = Some(rpc_request.id.clone());
+        // Mark as sent (we'll set rpc_request_id after successful send)
         msg.sync_status = SyncStatus::Syncing;
         msg.status = MessageStatus::Sent;
         msg.sent_at = Some(Utc::now());
         self.db.update_message(&msg)?;
 
-        // Write request directly to recipient's datasite RPC folder
-        let recipient_rpc_dir = self
-            .app
-            .data_dir
-            .join("datasites")
-            .join(&msg.to)
-            .join("app_data")
-            .join("biovault")
-            .join("rpc")
-            .join("message");
+        let mut mode = "send-handler";
+        let send_result: Result<String> = match std::env::var("SYFTBOX_SERVER_URL") {
+            Ok(url) if !url.trim().is_empty() => {
+                self.send_via_send_handler(&msg.from, &msg.to, &payload_bytes)
+            }
+            _ => {
+                // Fallback for offline/dev tests: write request directly to recipient's datasite RPC folder.
+                // NOTE: This will not deliver across a real SyftBox network because non-owner paths are not uploaded.
+                mode = "filesystem";
+                let rpc_request = RpcRequest::new(
+                    msg.from.clone(),
+                    format!("syft://{}/app_data/biovault/rpc/message", msg.to),
+                    "POST".to_string(),
+                    payload_bytes.clone(),
+                );
 
-        self.app
-            .storage
-            .ensure_dir(&recipient_rpc_dir)
-            .with_context(|| format!("Failed to prepare RPC dir {:?}", recipient_rpc_dir))?;
+                let recipient_rpc_dir = self
+                    .app
+                    .data_dir
+                    .join("datasites")
+                    .join(&msg.to)
+                    .join("app_data")
+                    .join("biovault")
+                    .join("rpc")
+                    .join("message");
 
-        let request_filename = format!("{}.request", rpc_request.id);
-        let request_path = recipient_rpc_dir.join(request_filename);
+                self.app
+                    .storage
+                    .ensure_dir(&recipient_rpc_dir)
+                    .with_context(|| {
+                        format!("Failed to prepare RPC dir {:?}", recipient_rpc_dir)
+                    })?;
 
-        let write_policy = WritePolicy::Envelope {
-            recipients: vec![msg.to.clone()],
-            hint: Some(format!("message-{}", rpc_request.id)),
+                let request_path = recipient_rpc_dir.join(format!("{}.request", rpc_request.id));
+
+                let write_policy = WritePolicy::Envelope {
+                    recipients: vec![msg.to.clone()],
+                    hint: Some(format!("message-{}", rpc_request.id)),
+                };
+
+                self.app.storage.write_json_with_shadow(
+                    &request_path,
+                    &rpc_request,
+                    write_policy,
+                    true,
+                )?;
+
+                Ok(rpc_request.id)
+            }
         };
 
-        self.app
-            .storage
-            .write_json_with_shadow(&request_path, &rpc_request, write_policy, true)?;
-
-        println!("📤 Message sent to {}", msg.to);
-        println!("Request written to: {:?}", request_path);
-        Ok(())
+        match send_result {
+            Ok(request_id) => {
+                msg.rpc_request_id = Some(request_id.clone());
+                self.db.update_message(&msg)?;
+                println!("📤 Message sent to {} ({})", msg.to, mode);
+                Ok(())
+            }
+            Err(e) => {
+                msg.sync_status = SyncStatus::Failed;
+                let _ = self.db.update_message(&msg);
+                Err(e)
+            }
+        }
     }
 
     /// Check for incoming messages
     pub fn check_incoming(&self, no_cleanup: bool) -> Result<Vec<String>> {
-        let endpoint = Endpoint::new(&self.app, "/message")?;
-        let requests = endpoint.check_requests()?;
-
-        let mut new_message_ids = Vec::new();
-
-        for (request_path, rpc_request) in requests {
-            // Parse the message payload
-            let body_bytes = rpc_request
-                .decode_body()
-                .context("Failed to decode request body")?;
-            let payload: MessagePayload =
-                serde_json::from_slice(&body_bytes).context("Failed to parse message payload")?;
-
-            // Create local message from received payload
-            let mut msg = Message::new(
-                payload.from.clone(),
-                self.app.email.clone(), // We are the recipient
-                payload.body,
-            );
-
-            msg.id = payload.message_id;
-            msg.thread_id = payload.thread_id;
-            msg.parent_id = payload.parent_id;
-            msg.subject = payload.subject;
-            // Parse message type from string
-            msg.message_type = match payload.message_type.as_str() {
-                "project" => MessageType::Project {
-                    project_name: String::new(),
-                    submission_id: String::new(),
-                    files_hash: None,
-                },
-                "request" => MessageType::Request {
-                    request_type: String::new(),
-                    params: None,
-                },
-                _ => MessageType::Text,
-            };
-            msg.metadata = payload.metadata;
-            msg.status = MessageStatus::Received;
-            msg.sync_status = SyncStatus::Synced;
-            msg.received_at = Some(Utc::now());
-            msg.created_at =
-                chrono::DateTime::parse_from_rfc3339(&payload.created_at)?.with_timezone(&Utc);
-
-            // Check if message already exists before inserting
-            if self.db.get_message(&msg.id)?.is_none() {
-                // Save to database
-                self.db.insert_message(&msg)?;
-                new_message_ids.push(msg.id.clone());
-            }
-
-            // Process status-update requests to update original message metadata
-            // Status update: detect via metadata.status_update and update original message metadata
-            if let Some(meta) = &msg.metadata {
-                if let Some(update) = meta.get("status_update") {
-                    if let (Some(orig_id), Some(status)) = (
-                        update.get("message_id").and_then(|v| v.as_str()),
-                        update.get("status").and_then(|v| v.as_str()),
-                    ) {
-                        if let Some(mut orig) = self.db.get_message(orig_id)? {
-                            // Work on a cloned metadata value to avoid moving out of 'orig'
-                            let mut md = orig.metadata.clone().unwrap_or(serde_json::json!({}));
-                            // Ensure object shape
-                            if !md.is_object() {
-                                md = serde_json::json!({});
-                            }
-                            if let Some(obj) = md.as_object_mut() {
-                                obj.insert(
-                                    "remote_status".to_string(),
-                                    serde_json::Value::String(status.to_string()),
-                                );
-                                if let Some(reason) = update.get("reason").and_then(|v| v.as_str())
-                                {
-                                    obj.insert(
-                                        "remote_reason".to_string(),
-                                        serde_json::Value::String(reason.to_string()),
-                                    );
-                                }
-                                if let Some(results_path) =
-                                    meta.get("results_path").and_then(|v| v.as_str())
-                                {
-                                    obj.insert(
-                                        "results_path".to_string(),
-                                        serde_json::Value::String(results_path.to_string()),
-                                    );
-                                }
-                            }
-                            orig.metadata = Some(md);
-                            self.db.update_message(&orig)?;
-                        }
-                    }
-                }
-            }
-
-            // Send ACK response
-            let ack_response = RpcResponse::new(
-                &rpc_request,
-                self.app.email.clone(),
-                200,
-                b"Message received".to_vec(),
-            );
-            endpoint.send_response(&request_path, &rpc_request, &ack_response, no_cleanup)?;
-
-            // Silent - will be shown when listing messages
-        }
-
+        let (new_message_ids, _new_failed) = self.check_incoming_with_failures(no_cleanup)?;
         Ok(new_message_ids)
     }
 
@@ -308,6 +274,11 @@ impl MessageSync {
             {
                 continue;
             }
+
+            eprintln!(
+                "⚠️  Failed to decrypt/parse incoming message (rpc_id={}): {}",
+                rpc_request_id, error_msg
+            );
 
             // Try to extract envelope metadata
             let (
@@ -449,27 +420,24 @@ impl MessageSync {
 
     /// Full sync cycle: check incoming, send pending, check acks (verbose)
     pub fn sync(&self, no_cleanup: bool) -> Result<()> {
-        // Check for new incoming messages
-        let new_messages = self.check_incoming(no_cleanup)?;
-        if !new_messages.is_empty() {
-            println!("📬 {} new message(s) received", new_messages.len());
+        let (new_message_ids, new_failed_count) = self.check_incoming_with_failures(no_cleanup)?;
+        if !new_message_ids.is_empty() {
+            println!("📬 {} new message(s) received", new_message_ids.len());
         }
-
-        // Check for ACK responses
+        if new_failed_count > 0 {
+            eprintln!(
+                "⚠️  Recorded {} message decryption failure(s) (see failed_messages table).",
+                new_failed_count
+            );
+        }
         self.check_acks(no_cleanup)?;
-
         Ok(())
     }
 
     /// Silent sync - returns results without printing
     /// Returns (new_message_ids, new_message_count)
     pub fn sync_quiet(&self) -> Result<(Vec<String>, usize)> {
-        // Check for new incoming messages (always cleanup in quiet mode - used internally)
-        let new_messages = self.check_incoming(false)?;
-
-        // Check for ACK responses
-        self.check_acks(false)?;
-
+        let (new_messages, _count, _failed_count) = self.sync_quiet_with_failures()?;
         Ok((new_messages.clone(), new_messages.len()))
     }
 

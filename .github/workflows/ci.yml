@@ -65,6 +65,82 @@ jobs:
       - name: Build
         run: cd cli && cargo build --verbose
 
+  chaos:
+    name: Chaos (short)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      CHAOS_BUILD_PROFILE: dev
+      CHAOS_DURATION: 2m
+      RUST_BACKTRACE: "1"
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v2
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.91.0
+
+      - name: Cache Rust dependencies and build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: 'cli -> target'
+
+      - name: Setup Go (syftbox)
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: syftbox/go.mod
+          cache: true
+          cache-dependency-path: syftbox/go.sum
+
+      - name: Install Nextflow
+        run: |
+          curl -fsSL https://get.nextflow.io | bash
+          sudo mv nextflow /usr/local/bin/
+          chmod +x /usr/local/bin/nextflow
+          nextflow -version
+
+      - name: Compute chaos seed (from commit)
+        id: seed
+        run: |
+          python3 - <<'PY'
+          import os
+          sha = os.environ.get("GITHUB_SHA", "")
+          seed = int(sha[:8], 16) if len(sha) >= 8 else 1
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+              fh.write(f"seed={seed}\n")
+          print(f"seed={seed}")
+          PY
+
+      - name: Run chaos
+        run: |
+          echo "Replay command:"
+          echo "  cd biovault && CHAOS_BUILD_PROFILE=${CHAOS_BUILD_PROFILE} CHAOS_DURATION=${CHAOS_DURATION} ./test-chaos.sh --seed \"${{ steps.seed.outputs.seed }}\""
+          ./test-chaos.sh --seed "${{ steps.seed.outputs.seed }}"
+
+      - name: Show logs on failure
+        if: failure()
+        run: |
+          echo "=== Sandbox Directory Structure ==="
+          find sandbox -type d -maxdepth 2 2>/dev/null || true
+          echo ""
+          echo "=== Client Logs ==="
+          find sandbox -name "*.log" -exec echo "--- {} ---" \; -exec cat {} \; 2>/dev/null || true
+
+      - name: Cleanup devstack
+        if: always()
+        run: |
+          chmod +x ./tests/scripts/devstack.sh
+          ./tests/scripts/devstack.sh --stop --reset || true
+
   # Run scenario tests by calling the reusable workflow
   scenario-tests:
     uses: ./.github/workflows/biovault-scenario-tests.yml

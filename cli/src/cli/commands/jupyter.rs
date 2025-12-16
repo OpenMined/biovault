@@ -109,12 +109,14 @@ fn ensure_virtualenv(project_dir: &Path, python_version: &str, uv_bin: &str) -> 
     }
 
     // Path structure: project_dir is BIOVAULT_HOME/sessions/<session_id>
-    // biovault root is at BIOVAULT_HOME/../.. (e.g., workspace3/biovault)
-    // So from project_dir: ../../../..
+    // BIOVAULT_HOME is like: workspace3/biovault/sandbox/client1@sandbox.local
+    // biovault submodule root is at BIOVAULT_HOME/../.. (e.g., workspace3/biovault)
+    // So from project_dir (BIOVAULT_HOME/sessions/<id>): 4 levels up
     let biovault_root = project_dir.join("..").join("..").join("..").join("..");
 
     // DEV MODE: If local source exists, install editable versions on top of PyPI packages
     // This allows developers to test local changes while maintaining compatibility
+    // Note: biovault_root IS the biovault submodule, so paths are directly under it
     let syftbox_path = biovault_root.join("syftbox-sdk").join("python");
     let beaver_path = biovault_root.join("biovault-beaver").join("python");
 
@@ -122,28 +124,91 @@ fn ensure_virtualenv(project_dir: &Path, python_version: &str, uv_bin: &str) -> 
         println!("🔧 DEV MODE: Local source detected, installing editable packages...");
 
         // Install syftbox-sdk first (beaver depends on it)
+        // Prefer pre-built wheel to avoid slow maturin rebuilds
         if syftbox_path.exists() {
-            println!("📦 Installing syftbox-sdk from local editable path...");
-            let syftbox_canonical = syftbox_path.canonicalize().unwrap_or(syftbox_path.clone());
-            let status = Command::new(uv_bin)
-                .args([
-                    "pip",
-                    "install",
-                    "--python",
-                    ".venv",
-                    "-e",
-                    syftbox_canonical.to_str().unwrap_or("."),
-                ])
-                .current_dir(project_dir)
-                .status()?;
+            let wheels_dir = syftbox_path.join("target").join("wheels");
+            let wheel_exists = wheels_dir.exists()
+                && std::fs::read_dir(&wheels_dir)
+                    .map(|mut d| {
+                        d.any(|e| {
+                            e.map(|e| {
+                                e.path()
+                                    .extension()
+                                    .map(|ext| ext == "whl")
+                                    .unwrap_or(false)
+                            })
+                            .unwrap_or(false)
+                        })
+                    })
+                    .unwrap_or(false);
 
-            if status.success() {
-                println!(
-                    "✅ syftbox-sdk installed from: {}",
-                    syftbox_canonical.display()
-                );
+            if wheel_exists {
+                // Use pre-built wheel (much faster than editable install)
+                println!("📦 Installing syftbox-sdk from pre-built wheel...");
+                let wheels_canonical = wheels_dir.canonicalize().unwrap_or(wheels_dir);
+                let status = Command::new(uv_bin)
+                    .args([
+                        "pip",
+                        "install",
+                        "--python",
+                        ".venv",
+                        "--find-links",
+                        wheels_canonical.to_str().unwrap_or("."),
+                        "--reinstall-package",
+                        "syftbox-sdk",
+                        "syftbox-sdk",
+                    ])
+                    .current_dir(project_dir)
+                    .status()?;
+
+                if status.success() {
+                    println!(
+                        "✅ syftbox-sdk installed from wheel: {}",
+                        wheels_canonical.display()
+                    );
+                } else {
+                    println!(
+                        "⚠️ Failed to install syftbox-sdk from wheel, falling back to editable..."
+                    );
+                    // Fall back to editable install
+                    let syftbox_canonical =
+                        syftbox_path.canonicalize().unwrap_or(syftbox_path.clone());
+                    let _ = Command::new(uv_bin)
+                        .args([
+                            "pip",
+                            "install",
+                            "--python",
+                            ".venv",
+                            "-e",
+                            syftbox_canonical.to_str().unwrap_or("."),
+                        ])
+                        .current_dir(project_dir)
+                        .status();
+                }
             } else {
-                println!("⚠️ Failed to install syftbox-sdk from local path");
+                // No wheel found, use editable install (slower, triggers maturin)
+                println!("📦 Installing syftbox-sdk from source (no pre-built wheel found)...");
+                let syftbox_canonical = syftbox_path.canonicalize().unwrap_or(syftbox_path.clone());
+                let status = Command::new(uv_bin)
+                    .args([
+                        "pip",
+                        "install",
+                        "--python",
+                        ".venv",
+                        "-e",
+                        syftbox_canonical.to_str().unwrap_or("."),
+                    ])
+                    .current_dir(project_dir)
+                    .status()?;
+
+                if status.success() {
+                    println!(
+                        "✅ syftbox-sdk installed from: {}",
+                        syftbox_canonical.display()
+                    );
+                } else {
+                    println!("⚠️ Failed to install syftbox-sdk from local path");
+                }
             }
         }
 

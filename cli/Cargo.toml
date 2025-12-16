@@ -1,6 +1,6 @@
 [package]
 name = "biovault"
-version = "0.1.112"
+version = "0.1.116"
 edition = "2021"
 authors = ["Madhava Jay <madhava@openmined.org>"]
 description = "A bioinformatics data vault CLI tool"
@@ -27,7 +27,7 @@ dirs = "5.0"
 sysinfo = "0.30"
 which = "6.0"
 tempfile = "3.12"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json", "blocking"] }
 indicatif = "0.17"
 futures-util = "0.3"
 blake3 = { version = "1.5", features = ["rayon"] }

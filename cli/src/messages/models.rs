@@ -57,13 +57,21 @@ impl Message {
     }
 
     pub fn reply_to(original: &Message, from: String, body: String) -> Self {
+        let thread_id = original
+            .thread_id
+            .clone()
+            .or_else(|| Some(original.id.clone()));
+        let subject = original
+            .subject
+            .as_ref()
+            .and_then(|s| (!s.trim().is_empty()).then(|| s.clone()));
         Self {
             id: Uuid::new_v4().to_string(),
-            thread_id: original.thread_id.clone(),
+            thread_id,
             parent_id: Some(original.id.clone()),
             from,
             to: original.from.clone(), // Reply goes back to sender
-            subject: None,             // Will be handled in display
+            subject,
             body,
             message_type: MessageType::Text,
             metadata: None,
