@@ -53,6 +53,22 @@ fn resolve_uv_path() -> Result<String> {
 fn ensure_virtualenv(project_dir: &Path, python_version: &str, uv_bin: &str) -> Result<()> {
     let venv_path = project_dir.join(".venv");
 
+    // Version of biovault-beaver from PyPI - auto-detected from submodule at compile time
+    // Falls back to hardcoded version if env var not set (e.g., when building biovault CLI standalone)
+    let beaver_version = option_env!("BEAVER_VERSION").unwrap_or("0.1.30");
+
+    // Marker file to track if dependencies are already installed
+    // Includes version to trigger reinstall on beaver version changes
+    let deps_marker = venv_path.join(format!(".deps-installed-{}", beaver_version));
+
+    // Check if venv exists AND deps are already installed
+    if venv_path.exists() && deps_marker.exists() {
+        println!("✅ Using existing virtualenv with dependencies");
+        // Ensure uv is available inside the virtualenv PATH
+        link_uv_into_venv(&venv_path, uv_bin);
+        return Ok(());
+    }
+
     if !venv_path.exists() {
         println!("📦 Creating virtualenv with Python {}...", python_version);
 
@@ -69,18 +85,14 @@ fn ensure_virtualenv(project_dir: &Path, python_version: &str, uv_bin: &str) -> 
             .into());
         }
     } else {
-        println!("✅ Using existing virtualenv");
+        println!("📦 Virtualenv exists but dependencies need install/update...");
     }
-
-    // Version of biovault-beaver from PyPI - auto-detected from submodule at compile time
-    // Falls back to hardcoded version if env var not set (e.g., when building biovault CLI standalone)
-    let beaver_version = option_env!("BEAVER_VERSION").unwrap_or("0.1.26");
 
     // Ensure uv is available inside the virtualenv PATH (symlink/copy bundled uv)
     link_uv_into_venv(&venv_path, uv_bin);
 
     println!(
-        "📦 Installing/Updating packages via: uv pip install -U jupyterlab cleon biovault-beaver[lib-support]=={}",
+        "📦 Installing packages: jupyterlab cleon biovault-beaver[lib-support]=={}",
         beaver_version
     );
 
@@ -93,7 +105,6 @@ fn ensure_virtualenv(project_dir: &Path, python_version: &str, uv_bin: &str) -> 
             "install",
             "--python",
             ".venv",
-            "-U",
             "jupyterlab",
             "cleon",
             &beaver_pkg,
@@ -243,6 +254,11 @@ fn ensure_virtualenv(project_dir: &Path, python_version: &str, uv_bin: &str) -> 
             "✅ Virtualenv ready with jupyterlab, cleon, biovault-beaver=={}, and syftbox-sdk",
             beaver_version
         );
+    }
+
+    // Create marker file to skip reinstall on next launch
+    if let Err(e) = fs::write(&deps_marker, beaver_version) {
+        warn!("Failed to create deps marker file: {}", e);
     }
 
     Ok(())
