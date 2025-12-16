@@ -5,6 +5,7 @@ use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+use crate::config::Config;
 use crate::syftbox::app::SyftBoxApp;
 use crate::syftbox::endpoint::Endpoint;
 use crate::syftbox::storage::WritePolicy;
@@ -54,6 +55,18 @@ impl MessageSync {
             anyhow::bail!("SYFTBOX_SERVER_URL is empty");
         }
 
+        // Use the SyftBox access token from config so the send handler has auth.
+        let access_token = Config::load()
+            .ok()
+            .and_then(|c| c.syftbox_credentials)
+            .and_then(|c| c.access_token)
+            .filter(|t| !t.trim().is_empty())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "SyftBox access token is missing. Re-authenticate in Settings → SyftBox."
+                )
+            })?;
+
         let target_syft_url = format!("syft://{}/app_data/biovault/rpc/message", to);
         let mut url = Url::parse(&format!("{}/api/v1/send/msg", server_url))
             .context("Failed to build send handler URL")?;
@@ -68,6 +81,7 @@ impl MessageSync {
         let resp = client
             .post(url)
             .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .bearer_auth(access_token)
             .body(body.to_vec())
             .send()
             .context("Failed to send message via send handler")?;
