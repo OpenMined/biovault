@@ -383,6 +383,30 @@ pub fn check_single_dependency(
         });
     }
 
+    // On Windows, Nextflow and Java are run via Docker, so we treat them as satisfied (not required)
+    // to avoid blocking onboarding/UI and to avoid prompting for installation.
+    if std::env::consts::OS == "windows" && (dep.name == "java" || dep.name == "nextflow") {
+        let reason = dep
+            .environments
+            .as_ref()
+            .and_then(|envs| envs.get("windows"))
+            .and_then(|cfg| cfg.skip_reason.clone())
+            .unwrap_or_else(|| "Not required on Windows (runs via Docker)".to_string());
+
+        return Ok(DependencyResult {
+            name: dep.name.clone(),
+            found: true,
+            path: None,
+            version: None,
+            running: None,
+            skipped: true,
+            skip_reason: Some(reason),
+            description: Some(dep.description.clone()),
+            website: dep.website.clone(),
+            install_instructions: Some(dep.install_instructions.clone()),
+        });
+    }
+
     // Check if the binary exists at custom path or in PATH
     let mut fallback_path: Option<String> = custom_path.clone();
 
@@ -643,6 +667,30 @@ pub fn check_dependencies_result() -> Result<DependencyCheckResult> {
         let custom_path = bv_config
             .as_ref()
             .and_then(|cfg| cfg.get_binary_path(&dep.name));
+
+        // On Windows, Nextflow and Java are run via Docker, so we treat them as satisfied (not required).
+        if current_os == "windows" && (dep.name == "java" || dep.name == "nextflow") {
+            let reason = dep
+                .environments
+                .as_ref()
+                .and_then(|envs| envs.get("windows"))
+                .and_then(|cfg| cfg.skip_reason.clone())
+                .unwrap_or_else(|| "Not required on Windows (runs via Docker)".to_string());
+
+            results.push(DependencyResult {
+                name: dep.name.clone(),
+                found: true,
+                path: None,
+                version: None,
+                running: None,
+                skipped: true,
+                skip_reason: Some(reason),
+                description: Some(dep.description.clone()),
+                website: dep.website.clone(),
+                install_instructions: Some(dep.install_instructions.clone()),
+            });
+            continue;
+        }
 
         // Priority for syftbox: SYFTBOX_BINARY env -> custom path -> PATH -> well-known locations -> sbenv
         let mut binary_path = None;
