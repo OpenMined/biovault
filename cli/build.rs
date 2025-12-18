@@ -5,9 +5,41 @@ use std::path::Path;
 fn main() {
     println!("cargo:rerun-if-changed=examples/");
     println!("cargo:rerun-if-changed=examples/examples.yaml");
+    println!("cargo:rerun-if-changed=../biovault-beaver/python/src/beaver/__init__.py");
+
+    // Expose the biovault-beaver version (from submodule) to the biovault CLI crate at compile time.
+    // This is used to pin the PyPI dependency when creating a Jupyter venv.
+    println!(
+        "cargo:rustc-env=BEAVER_VERSION={}",
+        beaver_version_from_submodule()
+    );
 
     // Generate a rust file with embedded examples data
     generate_examples_module();
+}
+
+fn beaver_version_from_submodule() -> String {
+    let fallback = "0.1.30".to_string();
+    let beaver_init_path = Path::new("../biovault-beaver/python/src/beaver/__init__.py");
+    let content = match fs::read_to_string(beaver_init_path) {
+        Ok(c) => c,
+        Err(_) => return fallback,
+    };
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if !trimmed.starts_with("__version__") {
+            continue;
+        }
+
+        if let Some(start) = trimmed.find('"') {
+            if let Some(end) = trimmed[start + 1..].find('"') {
+                return trimmed[start + 1..start + 1 + end].to_string();
+            }
+        }
+    }
+
+    fallback
 }
 
 fn generate_examples_module() {

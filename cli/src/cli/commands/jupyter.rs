@@ -914,6 +914,9 @@ pub async fn start(project_path: &str, python_version: &str) -> Result<()> {
         .current_dir(&project_dir)
         .env("JUPYTER_RUNTIME_DIR", &runtime_dir)
         .env("XDG_RUNTIME_DIR", &runtime_dir)
+        // Ensure the runner's Python environment doesn't bleed into uv/venv processes.
+        .env_remove("PYTHONHOME")
+        .env_remove("PYTHONPATH")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     hide_console_window(&mut cmd);
@@ -1046,19 +1049,27 @@ pub async fn start(project_path: &str, python_version: &str) -> Result<()> {
         None
     };
 
-    // Open browser automatically
+    // Open browser automatically (unless JUPYTER_SKIP_BROWSER is set for test mode)
+    let skip_browser = env::var("JUPYTER_SKIP_BROWSER")
+        .map(|v| !v.is_empty() && v != "0")
+        .unwrap_or(false);
+
     if let Some(url) = final_url {
-        println!("🌐 Opening browser...");
-        #[cfg(target_os = "macos")]
-        let _ = Command::new("open").arg(&url).spawn();
-        #[cfg(target_os = "linux")]
-        let _ = Command::new("xdg-open").arg(&url).spawn();
-        #[cfg(target_os = "windows")]
-        {
-            let mut cmd = Command::new("cmd");
-            cmd.args(["/C", "start", "", &url]);
-            hide_console_window(&mut cmd);
-            let _ = cmd.spawn();
+        if skip_browser {
+            println!("🌐 Browser open skipped (JUPYTER_SKIP_BROWSER set)");
+        } else {
+            println!("🌐 Opening browser...");
+            #[cfg(target_os = "macos")]
+            let _ = Command::new("open").arg(&url).spawn();
+            #[cfg(target_os = "linux")]
+            let _ = Command::new("xdg-open").arg(&url).spawn();
+            #[cfg(target_os = "windows")]
+            {
+                let mut cmd = Command::new("cmd");
+                cmd.args(["/C", "start", "", &url]);
+                hide_console_window(&mut cmd);
+                let _ = cmd.spawn();
+            }
         }
     }
 

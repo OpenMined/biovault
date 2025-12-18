@@ -613,6 +613,57 @@ fn ensure_nextflow_runner_image(_docker_bin: &str) -> Result<&'static str> {
     Ok("nextflow/nextflow:25.10.2")
 }
 
+#[cfg(target_os = "linux")]
+fn check_docker_running(docker_bin: &str) -> Result<()> {
+    let mut cmd = Command::new(docker_bin);
+    cmd.arg("info")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    // Add Docker PATH for credential helpers on Windows
+    if let Some(docker_path) = build_docker_path(docker_bin) {
+        cmd.env("PATH", &docker_path);
+    }
+
+    let output = cmd
+        .output()
+        .with_context(|| format!("Failed to execute '{}'", docker_bin))?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let mut base_msg = format!(
+        "Docker daemon is not running ({} exited with {:?}). Please start Docker Desktop or the Docker service and retry.",
+        docker_bin,
+        output.status.code()
+    );
+
+    // Add a more helpful hint when the socket is reachable but permission is denied.
+    let lowered = stderr.to_ascii_lowercase();
+    if lowered.contains("permission denied") || lowered.contains("connect: permission denied") {
+        if std::env::var_os("APPIMAGE").is_some() {
+            base_msg.push_str(
+                " It looks like this session cannot access /var/run/docker.sock. \
+If you recently added your user to the docker group, log out and back in (do not rely on 'newgrp docker' inside the AppImage), then relaunch the app.",
+            );
+        } else {
+            base_msg.push_str(
+                " It looks like this session cannot access /var/run/docker.sock. \
+If you recently added your user to the docker group, log out and back in, then retry.",
+            );
+        }
+    }
+
+    if !stderr.trim().is_empty() {
+        base_msg.push_str(&format!(" Stderr: {}", stderr.trim()));
+    }
+
+    Err(anyhow::anyhow!(base_msg).into())
+}
+
+#[cfg(not(target_os = "linux"))]
 fn check_docker_running(docker_bin: &str) -> Result<()> {
     let mut cmd = Command::new(docker_bin);
     super::configure_child_process(&mut cmd);

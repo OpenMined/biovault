@@ -591,8 +591,7 @@ mod tests {
         ms_sender.db.insert_message(&m).unwrap();
         ms_sender.send_message(&m.id).unwrap();
 
-        // Create a failure response file for the same request id
-        let endpoint = Endpoint::new(&app_sender, "/message").unwrap();
+        // Get the request ID that was assigned during send
         let req_id = ms_sender
             .db
             .get_message(&m.id)
@@ -600,6 +599,18 @@ mod tests {
             .unwrap()
             .rpc_request_id
             .unwrap();
+
+        // Create a failure response file in the recipient's endpoint folder (where the request was sent).
+        // check_responses scans other people's folders to find responses to our requests.
+        let recipient_endpoint_path = app_sender
+            .data_dir
+            .join("datasites")
+            .join(&m.to)
+            .join("app_data")
+            .join("biovault")
+            .join("rpc")
+            .join("message");
+
         // Build a dummy RpcResponse with non-200 code
         let dummy_req = RpcRequest::new(
             "x".into(),
@@ -607,10 +618,10 @@ mod tests {
             "POST".into(),
             b"{}".to_vec(),
         );
-        let mut resp = RpcResponse::new(&dummy_req, "bob@example.com".into(), 500, b"err".to_vec());
+        let mut resp = RpcResponse::new(&dummy_req, m.to.clone(), 500, b"err".to_vec());
         // Force response id to match the request id we need to ack
         resp.id = req_id.clone();
-        let resp_path = endpoint.path.join(format!("{}.response", req_id));
+        let resp_path = recipient_endpoint_path.join(format!("{}.response", req_id));
         app_sender
             .storage
             .write_plaintext_file(
