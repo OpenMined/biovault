@@ -119,11 +119,30 @@ pub fn upsert_dataset(db: &mut BioVaultDb, manifest: &DatasetManifest) -> Result
                 asset.id.clone().unwrap_or_else(|| "".into()),
                 asset.kind.clone().unwrap_or_else(|| "file".into()),
                 asset.url.clone().unwrap_or_else(|| "".into()),
-                asset.private.clone(),
+                asset
+                    .private
+                    .clone()
+                    .and_then(|v| {
+                        // For single assets: extract string directly
+                        // For twin_list: serialize the object to JSON
+                        if let Some(s) = v.as_str() {
+                            Some(s.to_string())
+                        } else {
+                            serde_json::to_string(&v).ok()
+                        }
+                    }),
                 asset
                     .mock
                     .clone()
-                    .and_then(|v| v.as_str().map(|s| s.to_string())),
+                    .and_then(|v| {
+                        // For single assets: extract string directly
+                        // For twin_list: serialize the object to JSON
+                        if let Some(s) = v.as_str() {
+                            Some(s.to_string())
+                        } else {
+                            serde_json::to_string(&v).ok()
+                        }
+                    }),
                 serde_json::to_string(&extra_json).unwrap_or_else(|_| "{}".into()),
                 asset
                     .mappings
@@ -323,6 +342,81 @@ pub fn update_local_mappings(entries: &[(String, String)]) -> Result<()> {
     Ok(())
 }
 
+/// Load mappings from BIOVAULT_HOME/mapping.yaml
+fn load_local_mappings() -> Result<BTreeMap<String, String>> {
+    let mapping_path = get_biovault_home()?.join("mapping.yaml");
+    if mapping_path.exists() {
+        let raw = fs::read_to_string(&mapping_path)
+            .with_context(|| format!("Failed to read {}", mapping_path.display()))?;
+        let mapping: LocalMappingFile = serde_yaml::from_str(&raw).unwrap_or_default();
+        Ok(mapping.mappings)
+    } else {
+        Ok(BTreeMap::new())
+    }
+}
+
+/// Resolve a syft:// or file:// URL to a local filesystem path.
+///
+/// For file:// URLs: strips prefix and returns the path directly
+/// For public syft:// URLs (containing "/public/"): resolves directly to the datasite path
+/// For private syft:// URLs with #fragment: looks up in mapping.yaml
+///
+/// Example URLs:
+/// - `file:///path/to/file.txt` → /path/to/file.txt
+/// - `syft://user@example.com/public/biovault/datasets/test/assets/file.txt` → datasite path
+/// - `syft://user@example.com/private/biovault/datasets/test/dataset.yaml#assets.asset_1.private` → mapping.yaml lookup
+pub fn resolve_syft_url(data_dir: &std::path::Path, url: &str) -> Result<std::path::PathBuf> {
+    use syftbox_sdk::SyftURL;
+
+    // Handle file:// URLs - just strip the prefix
+    if url.starts_with("file://") {
+        let path = url.strip_prefix("file://").unwrap_or(url);
+        return Ok(std::path::PathBuf::from(path));
+    }
+
+    let parsed = SyftURL::parse(url)
+        .map_err(|e| anyhow::anyhow!("Failed to parse syft URL '{}': {}", url, e))?;
+
+    // Check if URL has a fragment (indicates private reference needing mapping lookup)
+    if let Some(ref _fragment) = parsed.fragment {
+        // Look up in mapping.yaml using the full URL with fragment
+        let mappings = load_local_mappings()?;
+        if let Some(local_path) = mappings.get(url) {
+            return Ok(std::path::PathBuf::from(local_path));
+        }
+        // If not in mappings, fall through to direct resolution
+    }
+
+    // Direct resolution: syft://email/path → data_dir/datasites/email/path
+    Ok(data_dir
+        .join("datasites")
+        .join(&parsed.email)
+        .join(&parsed.path))
+}
+
+/// Batch resolve multiple syft:// URLs to local paths
+pub fn resolve_syft_urls(
+    data_dir: &std::path::Path,
+    urls: &[String],
+) -> Result<Vec<(String, Option<String>)>> {
+    let mut results = Vec::with_capacity(urls.len());
+    for url in urls {
+        match resolve_syft_url(data_dir, url) {
+            Ok(path) => {
+                if path.exists() {
+                    results.push((url.clone(), Some(path.to_string_lossy().to_string())));
+                } else {
+                    results.push((url.clone(), None));
+                }
+            }
+            Err(_) => {
+                results.push((url.clone(), None));
+            }
+        }
+    }
+    Ok(results)
+}
+
 /// Convert DB rows into manifest structs so publish can emit YAML
 pub fn build_manifest_from_db(
     dataset: &DatasetRecord,
@@ -346,19 +440,29 @@ pub fn build_manifest_from_db(
             id: Some(a.asset_uuid.clone()),
             kind: Some(a.kind.clone()),
             url: Some(a.url.clone()),
-            private: a.private_ref.clone(),
-            mock: a.mock_ref.clone().map(serde_yaml::Value::String),
+            private: a.private_ref.clone().map(|s| {
+                // Try to parse as JSON (for twin_list objects), fallback to string
+                serde_json::from_str::<serde_yaml::Value>(&s)
+                    .unwrap_or_else(|_| serde_yaml::Value::String(s))
+            }),
+            mock: a.mock_ref.clone().map(|s| {
+                // Try to parse as JSON (for twin_list objects), fallback to string
+                serde_json::from_str::<serde_yaml::Value>(&s)
+                    .unwrap_or_else(|_| serde_yaml::Value::String(s))
+            }),
             mappings: Some(crate::cli::commands::datasets::DatasetAssetMapping {
                 private: Some(
                     crate::cli::commands::datasets::DatasetAssetMappingEndpoint {
                         file_path: a.private_path.clone(),
                         db_file_id: a.private_file_id,
+                        entries: None,
                     },
                 ),
                 mock: Some(
                     crate::cli::commands::datasets::DatasetAssetMappingEndpoint {
                         file_path: a.mock_path.clone(),
                         db_file_id: a.mock_file_id,
+                        entries: None,
                     },
                 ),
             }),
@@ -399,16 +503,18 @@ mod tests {
             id: Some("asset-uuid".to_string()),
             kind: Some("twin".to_string()),
             url: Some("{root.private_url}#assets.sc_rnaseq".to_string()),
-            private: Some("{url}.private".to_string()),
+            private: Some(serde_yaml::Value::String("{url}.private".to_string())),
             mock: Some(serde_yaml::Value::String("syft://public/mock".to_string())),
             mappings: Some(DatasetAssetMapping {
                 private: Some(DatasetAssetMappingEndpoint {
                     file_path: Some("/path/private.h5ad".to_string()),
                     db_file_id: Some(2),
+                    entries: None,
                 }),
                 mock: Some(DatasetAssetMappingEndpoint {
                     file_path: Some("/path/mock.h5ad".to_string()),
                     db_file_id: Some(1),
+                    entries: None,
                 }),
             }),
             ..Default::default()
