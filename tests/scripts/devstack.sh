@@ -1,6 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# GitHub Actions Windows runners often provide `python` but not `python3` on PATH.
+# Normalize so the rest of the script can keep using `python3`.
+if ! command -v python3 >/dev/null 2>&1; then
+  if command -v python >/dev/null 2>&1; then
+    python3() { python "$@"; }
+  else
+    echo "Missing required tool: python3 (or python)" >&2
+    exit 1
+  fi
+fi
+
 usage() {
   cat <<'EOF'
 Usage: ./devstack.sh [--clients email1,email2] [--sandbox DIR] [--reset] [--stop] [--status]
