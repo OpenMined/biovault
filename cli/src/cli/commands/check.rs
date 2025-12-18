@@ -536,8 +536,10 @@ pub fn check_single_dependency(
     } else if let Some(sbenv_path) = syftbox_sbenv_path {
         // Syftbox found in ~/.sbenv/binaries
         // Get version from the syftbox binary
-        let version = Command::new(&sbenv_path)
-            .arg("--version")
+        let mut cmd = Command::new(&sbenv_path);
+        cmd.arg("--version");
+        configure_child_process(&mut cmd);
+        let version = cmd
             .output()
             .ok()
             .filter(|output| output.status.success())
@@ -774,8 +776,10 @@ pub fn check_dependencies_result() -> Result<DependencyCheckResult> {
             });
         } else if let Some(sbenv_path) = syftbox_sbenv_path {
             // Syftbox found in ~/.sbenv/binaries
-            let version = Command::new(&sbenv_path)
-                .arg("--version")
+            let mut cmd = Command::new(&sbenv_path);
+            cmd.arg("--version");
+            configure_child_process(&mut cmd);
+            let version = cmd
                 .output()
                 .ok()
                 .filter(|output| output.status.success())
@@ -1129,8 +1133,10 @@ pub async fn execute(json: bool) -> Result<()> {
             });
         } else if let Some(sbenv_path) = syftbox_sbenv_path {
             // Syftbox found in ~/.sbenv/binaries
-            let version = Command::new(&sbenv_path)
-                .arg("--version")
+            let mut cmd = Command::new(&sbenv_path);
+            cmd.arg("--version");
+            configure_child_process(&mut cmd);
+            let version = cmd
                 .output()
                 .ok()
                 .filter(|output| output.status.success())
@@ -1294,9 +1300,10 @@ fn check_if_running(service: &str) -> bool {
     match service {
         "docker" => {
             // Check if Docker daemon is running
-            Command::new("docker")
-                .arg("info")
-                .output()
+            let mut cmd = Command::new("docker");
+            cmd.arg("info");
+            configure_child_process(&mut cmd);
+            cmd.output()
                 .map(|output| output.status.success())
                 .unwrap_or(false)
         }

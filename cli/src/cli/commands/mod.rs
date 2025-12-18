@@ -31,3 +31,22 @@ pub mod submit;
 pub mod syc;
 pub mod syftbox;
 pub mod update;
+
+/// Configure a child process command to avoid flashing a console window when the CLI library
+/// is used from the Desktop GUI on Windows.
+#[cfg(target_os = "windows")]
+pub(crate) fn configure_child_process(cmd: &mut std::process::Command) {
+    let hide = std::env::var_os("BIOVAULT_HIDE_CONSOLE").is_some()
+        || std::env::var_os("BIOVAULT_DESKTOP").is_some();
+
+    if !hide {
+        return;
+    }
+
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+    cmd.creation_flags(CREATE_NO_WINDOW);
+}
+
+#[cfg(not(target_os = "windows"))]
+pub(crate) fn configure_child_process(_cmd: &mut std::process::Command) {}

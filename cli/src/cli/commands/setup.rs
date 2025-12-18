@@ -1017,7 +1017,9 @@ fn install_docker_desktop_from_dmg() -> Result<()> {
 
 // Minimal java version detection to respect min_version in deps.yaml
 fn java_major_version() -> Option<u32> {
-    let out = Command::new("java").arg("-version").output().ok()?;
+    let mut cmd = Command::new("java");
+    super::configure_child_process(&mut cmd);
+    let out = cmd.arg("-version").output().ok()?;
     let text = String::from_utf8_lossy(&out.stderr);
     parse_java_version(&text)
 }
@@ -1414,22 +1416,28 @@ async fn setup_windows(dependencies: Vec<String>, _force: bool) -> Result<()> {
     println!("\nSetting up Windows environment...\n");
 
     // Check for WinGet availability
-    let winget_exists = Command::new("winget")
-        .arg("--version")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
+    let winget_exists = {
+        let mut cmd = Command::new("winget");
+        super::configure_child_process(&mut cmd);
+        cmd.arg("--version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    };
 
     // Check for Chocolatey availability (fallback)
-    let choco_exists = Command::new("choco")
-        .arg("-v")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
+    let choco_exists = {
+        let mut cmd = Command::new("choco");
+        super::configure_child_process(&mut cmd);
+        cmd.arg("-v")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    };
 
     if winget_exists {
         println!("✓ WinGet found");
@@ -1493,14 +1501,17 @@ async fn setup_windows(dependencies: Vec<String>, _force: bool) -> Result<()> {
                     // Determine if installation is required
                     let mut need_install = true;
                     if let Some(verify_cmd) = &env_cfg.verify_command {
-                        let verified = Command::new("powershell")
-                            .arg("-Command")
-                            .arg(verify_cmd)
-                            .stdout(Stdio::null())
-                            .stderr(Stdio::null())
-                            .status()
-                            .map(|s| s.success())
-                            .unwrap_or(false);
+                        let verified = {
+                            let mut cmd = Command::new("powershell");
+                            super::configure_child_process(&mut cmd);
+                            cmd.arg("-Command")
+                                .arg(verify_cmd)
+                                .stdout(Stdio::null())
+                                .stderr(Stdio::null())
+                                .status()
+                                .map(|s| s.success())
+                                .unwrap_or(false)
+                        };
                         if verified {
                             need_install = false;
                         }
@@ -1532,9 +1543,9 @@ async fn setup_windows(dependencies: Vec<String>, _force: bool) -> Result<()> {
                         println!("   Running: {}", cmd);
                         let status = if cmd.starts_with("winget") {
                             if winget_exists {
-                                Command::new("winget")
-                                    .args(cmd.split_whitespace().skip(1))
-                                    .status()
+                                let mut winget = Command::new("winget");
+                                super::configure_child_process(&mut winget);
+                                winget.args(cmd.split_whitespace().skip(1)).status()
                             } else {
                                 // Chocolatey fallback for common packages
                                 let mut parts = cmd.split_whitespace();
@@ -1545,7 +1556,9 @@ async fn setup_windows(dependencies: Vec<String>, _force: bool) -> Result<()> {
                                 if choco_pkg.is_empty() {
                                     Err(std::io::Error::other("No Chocolatey mapping for package"))
                                 } else {
-                                    Command::new("choco")
+                                    let mut choco = Command::new("choco");
+                                    super::configure_child_process(&mut choco);
+                                    choco
                                         .arg("install")
                                         .arg(choco_pkg)
                                         .arg("-y")
@@ -1553,7 +1566,9 @@ async fn setup_windows(dependencies: Vec<String>, _force: bool) -> Result<()> {
                                 }
                             }
                         } else {
-                            Command::new("powershell").arg("-Command").arg(cmd).status()
+                            let mut powershell = Command::new("powershell");
+                            super::configure_child_process(&mut powershell);
+                            powershell.arg("-Command").arg(cmd).status()
                         };
 
                         match status {
@@ -1569,14 +1584,17 @@ async fn setup_windows(dependencies: Vec<String>, _force: bool) -> Result<()> {
                     if all_ok {
                         if let Some(verify_cmd) = &env_cfg.verify_command {
                             print!("   Verifying installation... ");
-                            let ok = Command::new("powershell")
-                                .arg("-Command")
-                                .arg(verify_cmd)
-                                .stdout(Stdio::null())
-                                .stderr(Stdio::null())
-                                .status()
-                                .map(|s| s.success())
-                                .unwrap_or(false);
+                            let ok = {
+                                let mut cmd = Command::new("powershell");
+                                super::configure_child_process(&mut cmd);
+                                cmd.arg("-Command")
+                                    .arg(verify_cmd)
+                                    .stdout(Stdio::null())
+                                    .stderr(Stdio::null())
+                                    .status()
+                                    .map(|s| s.success())
+                                    .unwrap_or(false)
+                            };
                             if ok {
                                 println!("✓");
                                 success_count += 1;
