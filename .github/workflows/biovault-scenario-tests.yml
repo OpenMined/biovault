@@ -25,11 +25,6 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Update submodules
-        run: |
-          chmod +x submodules.sh
-          ./submodules.sh
-
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
         with:
