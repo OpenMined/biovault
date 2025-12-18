@@ -244,10 +244,7 @@ fn ensure_virtualenv(project_dir: &Path, python_version: &str, uv_bin: &str) -> 
     // Marker file to track if dependencies are already installed
     // Includes version to trigger reinstall on beaver version changes
     let deps_marker = venv_path.join(format!(".deps-installed-{}", beaver_version));
-    let pyfory_marker = venv_path.join(format!(
-        ".deps-installed-{}-pyfory-x86_64",
-        beaver_version
-    ));
+    let pyfory_marker = venv_path.join(format!(".deps-installed-{}-pyfory-x86_64", beaver_version));
     let needs_base_install = !venv_path.exists() || !deps_marker.exists();
     let needs_pyfory_fix = is_macos_intel() && (needs_base_install || !pyfory_marker.exists());
 
