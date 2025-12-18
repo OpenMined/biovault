@@ -1558,11 +1558,7 @@ async fn setup_windows(dependencies: Vec<String>, _force: bool) -> Result<()> {
                                 } else {
                                     let mut choco = Command::new("choco");
                                     super::configure_child_process(&mut choco);
-                                    choco
-                                        .arg("install")
-                                        .arg(choco_pkg)
-                                        .arg("-y")
-                                        .status()
+                                    choco.arg("install").arg(choco_pkg).arg("-y").status()
                                 }
                             }
                         } else {

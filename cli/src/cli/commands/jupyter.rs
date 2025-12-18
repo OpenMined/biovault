@@ -15,12 +15,12 @@ use std::time::{Duration, SystemTime};
 use tokio::net::TcpStream;
 use tracing::{info, warn};
 
-fn hide_console_window(cmd: &mut Command) {
+fn hide_console_window(_cmd: &mut Command) {
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x08000000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
+        _cmd.creation_flags(CREATE_NO_WINDOW);
     }
 }
 
@@ -137,12 +137,7 @@ async fn remove_dir_all_with_retry(path: &Path, max_wait: Duration) -> io::Resul
         }
     }
 
-    Err(last_err.unwrap_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::Other,
-            "Timed out while removing directory",
-        )
-    }))
+    Err(last_err.unwrap_or_else(|| io::Error::other("Timed out while removing directory")))
 }
 
 fn format_process_output(output: &std::process::Output) -> String {
