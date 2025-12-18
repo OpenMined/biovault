@@ -361,6 +361,27 @@ start_stack() {
   echo "Starting SyftBox devstack via syftbox/cmd/devstack..."
   (cd "$SYFTBOX_DIR" && go run ./cmd/devstack start "${args[@]}")
 
+  if (( EMBEDDED_MODE )); then
+    local state_path="$SANDBOX_DIR/relay/state.json"
+    if [[ -f "$state_path" ]]; then
+      python3 - <<'PY' "$state_path" || true
+import json, sys
+path = sys.argv[1]
+data = json.load(open(path))
+clients = data.get("clients", [])
+bad = [c for c in clients if (c.get("pid") or 0) > 0 or (c.get("bin_path") or "")]
+if bad:
+    sys.stderr.write("WARNING: sbdev started one or more syftbox client daemons even though embedded mode was requested.\n")
+    sys.stderr.write(f"  See: {path}\n")
+PY
+    fi
+
+    if [[ -f "$SANDBOX_DIR/relay/bin/syftbox" || -f "$SANDBOX_DIR/relay/bin/syftbox.exe" ]]; then
+      echo "WARNING: Found $SANDBOX_DIR/relay/bin/syftbox (client binary). Embedded mode should not require it." >&2
+      echo "  If this was a non-reset run, it may be leftover; check $SANDBOX_DIR/relay/state.json for client pid/bin_path." >&2
+    fi
+  fi
+
   if (( SKIP_KEYS )); then
     echo "Skipping key generation (--skip-keys)"
   else
