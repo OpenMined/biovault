@@ -516,6 +516,7 @@ fn pull_docker_image_if_needed(docker_bin: &str, image: &str) -> Result<()> {
 
     // Check if image exists locally
     let mut check_cmd = Command::new(docker_bin);
+    super::configure_child_process(&mut check_cmd);
     check_cmd
         .arg("image")
         .arg("inspect")
@@ -541,6 +542,7 @@ fn pull_docker_image_if_needed(docker_bin: &str, image: &str) -> Result<()> {
     println!("📦 Pulling Docker image: {}", image);
 
     let mut pull_cmd = Command::new(docker_bin);
+    super::configure_child_process(&mut pull_cmd);
     pull_cmd.arg("pull").arg(image);
 
     // Add Docker PATH for credential helpers on Windows
@@ -571,6 +573,7 @@ fn ensure_nextflow_runner_image(docker_bin: &str) -> Result<&'static str> {
 
     // Check if runner image exists locally
     let mut check_cmd = Command::new(docker_bin);
+    super::configure_child_process(&mut check_cmd);
     check_cmd
         .arg("image")
         .arg("inspect")
@@ -663,6 +666,7 @@ If you recently added your user to the docker group, log out and back in, then r
 #[cfg(not(target_os = "linux"))]
 fn check_docker_running(docker_bin: &str) -> Result<()> {
     let mut cmd = Command::new(docker_bin);
+    super::configure_child_process(&mut cmd);
     cmd.arg("info").stdout(Stdio::null()).stderr(Stdio::null());
 
     // Add Docker PATH for credential helpers on Windows
@@ -878,6 +882,7 @@ pub async fn execute_dynamic(
         ));
 
         let mut docker_cmd = Command::new(&docker_bin);
+        super::configure_child_process(&mut docker_cmd);
 
         // Add Docker PATH for credential helpers on Windows
         if let Some(docker_path) = build_docker_path(&docker_bin) {
@@ -984,6 +989,7 @@ pub async fn execute_dynamic(
         }
 
         let mut native_cmd = Command::new(&nextflow_bin);
+        super::configure_child_process(&mut native_cmd);
 
         append_desktop_log("[Pipeline] Preferred binary paths:");
         for binary in ["nextflow", "java", "docker"] {

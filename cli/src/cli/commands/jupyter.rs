@@ -1,6 +1,7 @@
 use crate::data::BioVaultDb;
 use crate::error::Result;
 use anyhow::anyhow;
+use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
@@ -13,6 +14,182 @@ use std::io::{self, BufRead, BufReader};
 use std::time::{Duration, SystemTime};
 use tokio::net::TcpStream;
 use tracing::{info, warn};
+
+fn hide_console_window(_cmd: &mut Command) {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        _cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+}
+
+fn is_pid_alive(pid: i32) -> bool {
+    if pid <= 0 {
+        return false;
+    }
+
+    if cfg!(windows) {
+        // Use CSV format for more reliable parsing across locales.
+        let filter = format!("PID eq {}", pid);
+        let mut cmd = Command::new("tasklist");
+        cmd.args(["/FI", &filter, "/FO", "CSV", "/NH"]);
+        hide_console_window(&mut cmd);
+        let output = cmd.output();
+
+        let Ok(output) = output else {
+            return false;
+        };
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stdout = stdout.trim();
+        if stdout.is_empty() {
+            return false;
+        }
+
+        // When no task matches, tasklist prints an INFO line (often with exit code 0).
+        if stdout.starts_with("INFO:") {
+            return false;
+        }
+
+        let pid_needle = format!(",\"{}\",", pid);
+        stdout.lines().any(|line| line.contains(&pid_needle))
+    } else {
+        Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+}
+
+fn terminate_pid(pid: i32) -> Result<()> {
+    if pid <= 0 || !is_pid_alive(pid) {
+        return Ok(());
+    }
+
+    if cfg!(windows) {
+        let mut cmd = Command::new("taskkill");
+        cmd.args(["/PID", &pid.to_string(), "/T", "/F"]);
+        hide_console_window(&mut cmd);
+        let output = cmd.output()?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            return Err(anyhow!(
+                "Failed to stop Jupyter process (PID: {}) via taskkill (status: {}). stdout='{}' stderr='{}'",
+                pid,
+                output.status,
+                stdout.trim(),
+                stderr.trim()
+            )
+            .into());
+        }
+
+        Ok(())
+    } else {
+        let kill_status = Command::new("kill").arg(pid.to_string()).status();
+        match kill_status {
+            Ok(status) if status.success() => Ok(()),
+            _ => {
+                let status = Command::new("kill")
+                    .args(["-9", &pid.to_string()])
+                    .status()?;
+                if status.success() {
+                    Ok(())
+                } else {
+                    Err(anyhow!("Failed to stop Jupyter process (PID: {})", pid).into())
+                }
+            }
+        }
+    }
+}
+
+async fn wait_for_pid_exit(pid: i32, timeout: Duration) -> bool {
+    let deadline = SystemTime::now() + timeout;
+    while SystemTime::now() < deadline {
+        if !is_pid_alive(pid) {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    !is_pid_alive(pid)
+}
+
+async fn remove_dir_all_with_retry(path: &Path, max_wait: Duration) -> io::Result<()> {
+    let deadline = SystemTime::now() + max_wait;
+    let mut last_err: Option<io::Error> = None;
+
+    while SystemTime::now() < deadline {
+        match fs::remove_dir_all(path) {
+            Ok(()) => return Ok(()),
+            Err(err) => {
+                let raw = err.raw_os_error();
+                let retryable = matches!(raw, Some(5) | Some(32) | Some(145))
+                    || err.kind() == io::ErrorKind::PermissionDenied;
+                if !retryable {
+                    return Err(err);
+                }
+                last_err = Some(err);
+                tokio::time::sleep(Duration::from_millis(300)).await;
+            }
+        }
+    }
+
+    Err(last_err.unwrap_or_else(|| io::Error::other("Timed out while removing directory")))
+}
+
+fn format_process_output(output: &std::process::Output) -> String {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    let stdout_trim = stdout.trim();
+    let stderr_trim = stderr.trim();
+
+    let mut msg = String::new();
+    if !stdout_trim.is_empty() {
+        msg.push_str("stdout:\n");
+        msg.push_str(stdout_trim);
+        msg.push('\n');
+    }
+    if !stderr_trim.is_empty() {
+        msg.push_str("stderr:\n");
+        msg.push_str(stderr_trim);
+        msg.push('\n');
+    }
+    msg
+}
+
+fn output_indicates_windows_file_lock(output: &std::process::Output) -> bool {
+    let stdout = String::from_utf8_lossy(&output.stdout).to_lowercase();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_lowercase();
+    let combined = format!("{}\n{}", stdout, stderr);
+
+    combined.contains("os error 32")
+        || combined.contains("os error 5")
+        || combined.contains("the process cannot access the file")
+        || combined.contains("access is denied")
+        || combined.contains("being used by another process")
+}
+
+fn best_effort_stop_jupyter_for_project(project_dir: &Path) {
+    // Try DB PID first (may be a wrapper PID), then runtime jpserver PID(s).
+    if let Ok(db) = BioVaultDb::new() {
+        if let Ok(canonical) = project_dir.canonicalize() {
+            if let Ok(Some(env)) = db.get_dev_env(canonical.to_string_lossy().as_ref()) {
+                if let Some(pid) = env.jupyter_pid {
+                    let _ = terminate_pid(pid);
+                }
+            }
+        }
+    }
+
+    let runtime_dir = project_dir.join(".jupyter-runtime");
+    for pid in find_project_runtime_pids(&runtime_dir) {
+        let _ = terminate_pid(pid);
+    }
+}
 
 fn resolve_uv_path() -> Result<String> {
     if let Ok(env_path) = env::var("BIOVAULT_BUNDLED_UV") {
@@ -52,6 +229,7 @@ fn resolve_uv_path() -> Result<String> {
 
 fn ensure_virtualenv(project_dir: &Path, python_version: &str, uv_bin: &str) -> Result<()> {
     let venv_path = project_dir.join(".venv");
+    let capture_output = std::env::var_os("BIOVAULT_DESKTOP_LOG_FILE").is_some();
 
     // Version of biovault-beaver from PyPI - auto-detected from submodule at compile time
     // Falls back to hardcoded version if env var not set (e.g., when building biovault CLI standalone)
@@ -72,17 +250,33 @@ fn ensure_virtualenv(project_dir: &Path, python_version: &str, uv_bin: &str) -> 
     if !venv_path.exists() {
         println!("📦 Creating virtualenv with Python {}...", python_version);
 
-        let status = Command::new(uv_bin)
-            .args(["venv", "--python", python_version, ".venv"])
-            .current_dir(project_dir)
-            .status()?;
-
-        if !status.success() {
-            return Err(anyhow!(
-                "Failed to create virtualenv. Try: bv python install {}",
-                python_version
-            )
-            .into());
+        if capture_output {
+            let mut cmd = Command::new(uv_bin);
+            cmd.args(["venv", "--python", python_version, ".venv"]);
+            cmd.current_dir(project_dir);
+            hide_console_window(&mut cmd);
+            let output = cmd.output()?;
+            if !output.status.success() {
+                return Err(anyhow!(
+                    "Failed to create virtualenv. Try: bv python install {}\n{}",
+                    python_version,
+                    format_process_output(&output)
+                )
+                .into());
+            }
+        } else {
+            let mut cmd = Command::new(uv_bin);
+            cmd.args(["venv", "--python", python_version, ".venv"]);
+            cmd.current_dir(project_dir);
+            hide_console_window(&mut cmd);
+            let status = cmd.status()?;
+            if !status.success() {
+                return Err(anyhow!(
+                    "Failed to create virtualenv. Try: bv python install {}",
+                    python_version
+                )
+                .into());
+            }
         }
     } else {
         println!("📦 Virtualenv exists but dependencies need install/update...");
@@ -99,8 +293,9 @@ fn ensure_virtualenv(project_dir: &Path, python_version: &str, uv_bin: &str) -> 
     // Install base packages from PyPI including pinned biovault-beaver
     // Note: syftbox-sdk is a direct dependency of biovault-beaver, not an extra
     let beaver_pkg = format!("biovault-beaver[lib-support]=={}", beaver_version);
-    let status = Command::new(uv_bin)
-        .args([
+    if capture_output {
+        let mut cmd = Command::new(uv_bin);
+        cmd.args([
             "pip",
             "install",
             "--python",
@@ -108,15 +303,72 @@ fn ensure_virtualenv(project_dir: &Path, python_version: &str, uv_bin: &str) -> 
             "jupyterlab",
             "cleon",
             &beaver_pkg,
-        ])
-        .current_dir(project_dir)
-        .status()?;
+        ]);
+        cmd.current_dir(project_dir);
+        hide_console_window(&mut cmd);
+        let output = cmd.output()?;
 
-    if !status.success() {
-        return Err(anyhow!(
-            "Failed to install required Python packages (jupyterlab/cleon/biovault-beaver)"
-        )
-        .into());
+        if !output.status.success() {
+            if cfg!(windows) && output_indicates_windows_file_lock(&output) {
+                // Windows often locks entrypoint exes (like .venv/Scripts/jupyter.exe) while Jupyter is running.
+                // Try a best-effort stop and retry once.
+                best_effort_stop_jupyter_for_project(project_dir);
+                std::thread::sleep(Duration::from_millis(500));
+
+                let mut cmd = Command::new(uv_bin);
+                cmd.args([
+                    "pip",
+                    "install",
+                    "--python",
+                    ".venv",
+                    "jupyterlab",
+                    "cleon",
+                    &beaver_pkg,
+                ]);
+                cmd.current_dir(project_dir);
+                hide_console_window(&mut cmd);
+                let retry = cmd.output()?;
+
+                if retry.status.success() {
+                    // Proceed with the rest of environment setup (DEV overlays, marker file, etc.)
+                    // now that package installation succeeded.
+                } else {
+                    return Err(anyhow!(
+                        "Failed to install required Python packages (jupyterlab/cleon/biovault-beaver) after retrying. {}\n{}",
+                        "Ensure all Jupyter/Python processes for this session are stopped, then retry.",
+                        format_process_output(&retry)
+                    )
+                    .into());
+                }
+            }
+
+            return Err(anyhow!(
+                "Failed to install required Python packages (jupyterlab/cleon/biovault-beaver). If you see file access errors on Windows, stop all running Jupyter/Python processes and retry.\n{}",
+                format_process_output(&output)
+            )
+            .into());
+        }
+    } else {
+        let mut cmd = Command::new(uv_bin);
+        cmd.args([
+            "pip",
+            "install",
+            "--python",
+            ".venv",
+            "jupyterlab",
+            "cleon",
+            &beaver_pkg,
+        ]);
+        cmd.current_dir(project_dir);
+        hide_console_window(&mut cmd);
+        let status = cmd.status()?;
+
+        if !status.success() {
+            return Err(anyhow!(
+                "Failed to install required Python packages (jupyterlab/cleon/biovault-beaver)"
+            )
+            .into());
+        }
     }
 
     // Path structure: project_dir is BIOVAULT_HOME/sessions/<session_id>
@@ -157,20 +409,21 @@ fn ensure_virtualenv(project_dir: &Path, python_version: &str, uv_bin: &str) -> 
                 // Use pre-built wheel (much faster than editable install)
                 println!("📦 Installing syftbox-sdk from pre-built wheel...");
                 let wheels_canonical = wheels_dir.canonicalize().unwrap_or(wheels_dir);
-                let status = Command::new(uv_bin)
-                    .args([
-                        "pip",
-                        "install",
-                        "--python",
-                        ".venv",
-                        "--find-links",
-                        wheels_canonical.to_str().unwrap_or("."),
-                        "--reinstall-package",
-                        "syftbox-sdk",
-                        "syftbox-sdk",
-                    ])
-                    .current_dir(project_dir)
-                    .status()?;
+                let mut cmd = Command::new(uv_bin);
+                cmd.args([
+                    "pip",
+                    "install",
+                    "--python",
+                    ".venv",
+                    "--find-links",
+                    wheels_canonical.to_str().unwrap_or("."),
+                    "--reinstall-package",
+                    "syftbox-sdk",
+                    "syftbox-sdk",
+                ]);
+                cmd.current_dir(project_dir);
+                hide_console_window(&mut cmd);
+                let status = cmd.status()?;
 
                 if status.success() {
                     println!(
@@ -184,33 +437,35 @@ fn ensure_virtualenv(project_dir: &Path, python_version: &str, uv_bin: &str) -> 
                     // Fall back to editable install
                     let syftbox_canonical =
                         syftbox_path.canonicalize().unwrap_or(syftbox_path.clone());
-                    let _ = Command::new(uv_bin)
-                        .args([
-                            "pip",
-                            "install",
-                            "--python",
-                            ".venv",
-                            "-e",
-                            syftbox_canonical.to_str().unwrap_or("."),
-                        ])
-                        .current_dir(project_dir)
-                        .status();
-                }
-            } else {
-                // No wheel found, use editable install (slower, triggers maturin)
-                println!("📦 Installing syftbox-sdk from source (no pre-built wheel found)...");
-                let syftbox_canonical = syftbox_path.canonicalize().unwrap_or(syftbox_path.clone());
-                let status = Command::new(uv_bin)
-                    .args([
+                    let mut cmd = Command::new(uv_bin);
+                    cmd.args([
                         "pip",
                         "install",
                         "--python",
                         ".venv",
                         "-e",
                         syftbox_canonical.to_str().unwrap_or("."),
-                    ])
-                    .current_dir(project_dir)
-                    .status()?;
+                    ]);
+                    cmd.current_dir(project_dir);
+                    hide_console_window(&mut cmd);
+                    let _ = cmd.status();
+                }
+            } else {
+                // No wheel found, use editable install (slower, triggers maturin)
+                println!("📦 Installing syftbox-sdk from source (no pre-built wheel found)...");
+                let syftbox_canonical = syftbox_path.canonicalize().unwrap_or(syftbox_path.clone());
+                let mut cmd = Command::new(uv_bin);
+                cmd.args([
+                    "pip",
+                    "install",
+                    "--python",
+                    ".venv",
+                    "-e",
+                    syftbox_canonical.to_str().unwrap_or("."),
+                ]);
+                cmd.current_dir(project_dir);
+                hide_console_window(&mut cmd);
+                let status = cmd.status()?;
 
                 if status.success() {
                     println!(
@@ -229,17 +484,18 @@ fn ensure_virtualenv(project_dir: &Path, python_version: &str, uv_bin: &str) -> 
             let beaver_canonical = beaver_path.canonicalize().unwrap_or(beaver_path);
             let beaver_with_extras =
                 format!("{}[lib-support]", beaver_canonical.to_str().unwrap_or("."));
-            let status = Command::new(uv_bin)
-                .args([
-                    "pip",
-                    "install",
-                    "--python",
-                    ".venv",
-                    "-e",
-                    &beaver_with_extras,
-                ])
-                .current_dir(project_dir)
-                .status()?;
+            let mut cmd = Command::new(uv_bin);
+            cmd.args([
+                "pip",
+                "install",
+                "--python",
+                ".venv",
+                "-e",
+                &beaver_with_extras,
+            ]);
+            cmd.current_dir(project_dir);
+            hide_console_window(&mut cmd);
+            let status = cmd.status()?;
 
             if status.success() {
                 println!("✅ beaver installed from: {}", beaver_canonical.display());
@@ -368,8 +624,42 @@ fn parse_runtime_file(path: &Path) -> Option<(JupyterRuntimeInfo, Option<i32>)> 
     Some((JupyterRuntimeInfo { port, url, token }, pid))
 }
 
+fn find_project_runtime_pids(runtime_dir: &Path) -> Vec<i32> {
+    if !runtime_dir.exists() {
+        return Vec::new();
+    }
+
+    let mut pids = BTreeSet::<i32>::new();
+    let Ok(entries) = fs::read_dir(runtime_dir) else {
+        return Vec::new();
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if !file_name.starts_with("jpserver-") {
+            continue;
+        }
+
+        let Some((_info, pid_opt)) = parse_runtime_file(&path) else {
+            continue;
+        };
+
+        if let Some(pid) = pid_opt {
+            pids.insert(pid);
+        }
+    }
+
+    pids.into_iter().collect()
+}
+
 fn find_runtime_info(pid: u32) -> Option<JupyterRuntimeInfo> {
-    let mut latest: Option<(SystemTime, JupyterRuntimeInfo)> = None;
+    let mut latest: Option<((bool, SystemTime), JupyterRuntimeInfo)> = None;
 
     for dir in candidate_runtime_dirs() {
         if !dir.exists() {
@@ -396,15 +686,11 @@ fn find_runtime_info(pid: u32) -> Option<JupyterRuntimeInfo> {
                     None => continue,
                 };
 
-                if let Some(info_pid) = info_pid_opt {
-                    if info_pid as u32 != pid {
-                        // Skip runtime files for other processes to avoid cross-app collisions
-                        continue;
-                    }
-                }
-
                 // Instead of matching exact PID (which fails with uv run wrapper),
-                // find the most recent jpserver file within the last 2 minutes
+                // find the most recent jpserver file within the last 2 minutes.
+                //
+                // If the runtime file includes a PID, use it to prefer an exact match,
+                // but don't hard-require it (uv may wrap/spawn a different PID).
                 if let Ok(metadata) = entry.metadata() {
                     if let Ok(modified) = metadata.modified() {
                         if let Ok(elapsed) = modified.elapsed() {
@@ -413,9 +699,13 @@ fn find_runtime_info(pid: u32) -> Option<JupyterRuntimeInfo> {
                             }
                         }
 
+                        let prefers_exact_pid =
+                            info_pid_opt.map(|p| p as u32 == pid).unwrap_or(false);
+                        let score = (prefers_exact_pid, modified);
+
                         match &latest {
-                            Some((best_time, _)) if modified <= *best_time => {}
-                            _ => latest = Some((modified, info.clone())),
+                            Some((best_score, _)) if score <= *best_score => {}
+                            _ => latest = Some((score, info.clone())),
                         }
                     }
                 }
@@ -527,22 +817,14 @@ pub async fn start(project_path: &str, python_version: &str) -> Result<()> {
 
     let venv_path = project_dir.join(".venv");
 
-    ensure_virtualenv(&project_dir, python_version, &uv_bin)?;
-
-    // Register/update in database
     let db = BioVaultDb::new()?;
-    db.register_dev_env(&project_dir, python_version, "jupyter", true)?;
 
     // Check if Jupyter is already running for this project
     let canonical_path = project_dir.canonicalize()?;
     if let Some(env) = db.get_dev_env(canonical_path.to_str().unwrap())? {
         if let Some(pid) = env.jupyter_pid {
             // Check if process is still alive
-            let is_alive = std::process::Command::new("kill")
-                .args(["-0", &pid.to_string()])
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false);
+            let is_alive = is_pid_alive(pid);
 
             if is_alive {
                 println!("✅ Jupyter Lab already running (PID: {})", pid);
@@ -561,6 +843,11 @@ pub async fn start(project_path: &str, python_version: &str) -> Result<()> {
             }
         }
     }
+
+    ensure_virtualenv(&project_dir, python_version, &uv_bin)?;
+
+    // Register/update in database
+    db.register_dev_env(&project_dir, python_version, "jupyter", true)?;
 
     // Launch Jupyter Lab
     let chosen_port = find_available_port();
@@ -617,8 +904,8 @@ pub async fn start(project_path: &str, python_version: &str) -> Result<()> {
         args.push("--ServerApp.port_retries=0".into());
     }
 
-    let mut child = Command::new(&uv_bin)
-        .args(&args)
+    let mut cmd = Command::new(&uv_bin);
+    cmd.args(&args)
         .current_dir(&project_dir)
         .env("JUPYTER_RUNTIME_DIR", &runtime_dir)
         .env("XDG_RUNTIME_DIR", &runtime_dir)
@@ -626,8 +913,9 @@ pub async fn start(project_path: &str, python_version: &str) -> Result<()> {
         .env_remove("PYTHONHOME")
         .env_remove("PYTHONPATH")
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
+        .stderr(Stdio::piped());
+    hide_console_window(&mut cmd);
+    let mut child = cmd.spawn()?;
     info!(
         "Launching Jupyter with uv at {}: {:?}",
         uv_bin,
@@ -771,7 +1059,12 @@ pub async fn start(project_path: &str, python_version: &str) -> Result<()> {
             #[cfg(target_os = "linux")]
             let _ = Command::new("xdg-open").arg(&url).spawn();
             #[cfg(target_os = "windows")]
-            let _ = Command::new("cmd").args(["/C", "start", &url]).spawn();
+            {
+                let mut cmd = Command::new("cmd");
+                cmd.args(["/C", "start", "", &url]);
+                hide_console_window(&mut cmd);
+                let _ = cmd.spawn();
+            }
         }
     }
 
@@ -815,7 +1108,6 @@ pub async fn stop(project_path: &str) -> Result<()> {
             "⚠️  Virtualenv not found for {}. Nothing to stop.",
             project_dir.display()
         );
-        return Ok(());
     }
 
     // Get PID from database and kill the process directly
@@ -826,22 +1118,26 @@ pub async fn stop(project_path: &str) -> Result<()> {
     let env_info = db.get_dev_env(canonical_path.to_str().unwrap_or(""))?;
 
     let mut stopped = false;
+    let mut extra_pids: Vec<i32> = Vec::new();
     if let Some(env) = &env_info {
         if let Some(pid) = env.jupyter_pid {
             println!("🛑 Stopping Jupyter server (PID: {})...", pid);
-            let kill_status = Command::new("kill").arg(pid.to_string()).status();
+            terminate_pid(pid)?;
+            let _ = wait_for_pid_exit(pid, Duration::from_secs(5)).await;
+            println!("✅ Jupyter server stopped");
+            stopped = true;
+        }
+    }
 
-            match kill_status {
-                Ok(status) if status.success() => {
-                    println!("✅ Jupyter server stopped");
-                    stopped = true;
-                }
-                _ => {
-                    // Process might already be dead, try SIGKILL
-                    let _ = Command::new("kill").args(["-9", &pid.to_string()]).status();
-                    stopped = true;
-                }
-            }
+    // Also stop the actual Jupyter ServerApp PID from jpserver runtime files (Windows frequently locks jupyter.exe).
+    let runtime_dir = project_dir.join(".jupyter-runtime");
+    extra_pids.extend(find_project_runtime_pids(&runtime_dir));
+    for pid in extra_pids {
+        if is_pid_alive(pid) {
+            println!("🛑 Stopping Jupyter runtime PID: {}...", pid);
+            let _ = terminate_pid(pid);
+            let _ = wait_for_pid_exit(pid, Duration::from_secs(5)).await;
+            stopped = true;
         }
     }
 
@@ -886,13 +1182,13 @@ pub async fn reset(project_path: &str, python_version: &str) -> Result<()> {
 
     // Stop Jupyter if running
     if let Some(path_str) = project_dir.to_str() {
-        let _ = stop(path_str).await;
+        stop(path_str).await?;
     }
 
     // Remove old venv
     if venv_path.exists() {
         println!("🗑️  Removing old virtualenv...");
-        std::fs::remove_dir_all(&venv_path)?;
+        remove_dir_all_with_retry(&venv_path, Duration::from_secs(10)).await?;
         println!("✅ Old virtualenv removed");
     }
 
@@ -919,10 +1215,10 @@ pub async fn status() -> Result<()> {
 
     // Try to find running Jupyter processes
     let output = if cfg!(windows) {
-        match Command::new("tasklist")
-            .args(["/FI", "IMAGENAME eq jupyter.exe"])
-            .output()
-        {
+        let mut cmd = Command::new("tasklist");
+        cmd.args(["/FI", "IMAGENAME eq jupyter.exe"]);
+        hide_console_window(&mut cmd);
+        match cmd.output() {
             Ok(out) => out,
             Err(err) => {
                 if err.kind() == io::ErrorKind::NotFound {

@@ -383,6 +383,30 @@ pub fn check_single_dependency(
         });
     }
 
+    // On Windows, Nextflow and Java are run via Docker, so we treat them as satisfied (not required)
+    // to avoid blocking onboarding/UI and to avoid prompting for installation.
+    if std::env::consts::OS == "windows" && (dep.name == "java" || dep.name == "nextflow") {
+        let reason = dep
+            .environments
+            .as_ref()
+            .and_then(|envs| envs.get("windows"))
+            .and_then(|cfg| cfg.skip_reason.clone())
+            .unwrap_or_else(|| "Not required on Windows (runs via Docker)".to_string());
+
+        return Ok(DependencyResult {
+            name: dep.name.clone(),
+            found: true,
+            path: None,
+            version: None,
+            running: None,
+            skipped: true,
+            skip_reason: Some(reason),
+            description: Some(dep.description.clone()),
+            website: dep.website.clone(),
+            install_instructions: Some(dep.install_instructions.clone()),
+        });
+    }
+
     // Check if the binary exists at custom path or in PATH
     let mut fallback_path: Option<String> = custom_path.clone();
 
@@ -512,8 +536,10 @@ pub fn check_single_dependency(
     } else if let Some(sbenv_path) = syftbox_sbenv_path {
         // Syftbox found in ~/.sbenv/binaries
         // Get version from the syftbox binary
-        let version = Command::new(&sbenv_path)
-            .arg("--version")
+        let mut cmd = Command::new(&sbenv_path);
+        cmd.arg("--version");
+        configure_child_process(&mut cmd);
+        let version = cmd
             .output()
             .ok()
             .filter(|output| output.status.success())
@@ -644,6 +670,30 @@ pub fn check_dependencies_result() -> Result<DependencyCheckResult> {
             .as_ref()
             .and_then(|cfg| cfg.get_binary_path(&dep.name));
 
+        // On Windows, Nextflow and Java are run via Docker, so we treat them as satisfied (not required).
+        if current_os == "windows" && (dep.name == "java" || dep.name == "nextflow") {
+            let reason = dep
+                .environments
+                .as_ref()
+                .and_then(|envs| envs.get("windows"))
+                .and_then(|cfg| cfg.skip_reason.clone())
+                .unwrap_or_else(|| "Not required on Windows (runs via Docker)".to_string());
+
+            results.push(DependencyResult {
+                name: dep.name.clone(),
+                found: true,
+                path: None,
+                version: None,
+                running: None,
+                skipped: true,
+                skip_reason: Some(reason),
+                description: Some(dep.description.clone()),
+                website: dep.website.clone(),
+                install_instructions: Some(dep.install_instructions.clone()),
+            });
+            continue;
+        }
+
         // Priority for syftbox: SYFTBOX_BINARY env -> custom path -> PATH -> well-known locations -> sbenv
         let mut binary_path = None;
 
@@ -726,8 +776,10 @@ pub fn check_dependencies_result() -> Result<DependencyCheckResult> {
             });
         } else if let Some(sbenv_path) = syftbox_sbenv_path {
             // Syftbox found in ~/.sbenv/binaries
-            let version = Command::new(&sbenv_path)
-                .arg("--version")
+            let mut cmd = Command::new(&sbenv_path);
+            cmd.arg("--version");
+            configure_child_process(&mut cmd);
+            let version = cmd
                 .output()
                 .ok()
                 .filter(|output| output.status.success())
@@ -1081,8 +1133,10 @@ pub async fn execute(json: bool) -> Result<()> {
             });
         } else if let Some(sbenv_path) = syftbox_sbenv_path {
             // Syftbox found in ~/.sbenv/binaries
-            let version = Command::new(&sbenv_path)
-                .arg("--version")
+            let mut cmd = Command::new(&sbenv_path);
+            cmd.arg("--version");
+            configure_child_process(&mut cmd);
+            let version = cmd
                 .output()
                 .ok()
                 .filter(|output| output.status.success())
@@ -1246,9 +1300,10 @@ fn check_if_running(service: &str) -> bool {
     match service {
         "docker" => {
             // Check if Docker daemon is running
-            Command::new("docker")
-                .arg("info")
-                .output()
+            let mut cmd = Command::new("docker");
+            cmd.arg("info");
+            configure_child_process(&mut cmd);
+            cmd.output()
                 .map(|output| output.status.success())
                 .unwrap_or(false)
         }
