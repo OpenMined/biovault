@@ -10,7 +10,8 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 ROOT = Path(__file__).resolve().parent.parent
-SANDBOX_ROOT = ROOT / "sandbox"
+_SANDBOX_ENV = os.environ.get("SANDBOX_DIR") or os.environ.get("SCENARIO_SANDBOX_DIR")
+SANDBOX_ROOT = Path(_SANDBOX_ENV).resolve() if _SANDBOX_ENV else (ROOT / "sandbox").resolve()
 JAVA_HOME_OVERRIDE: Optional[str] = None
 
 
@@ -566,7 +567,14 @@ def main():
     args = parser.parse_args()
 
     scenario = load_scenario(args.scenario)
-    variables: Dict[str, str] = {"workspace": str(ROOT)}
+    variables: Dict[str, str] = {"workspace": str(ROOT), "sandbox": str(SANDBOX_ROOT)}
+
+    print(f"Using sandbox: {SANDBOX_ROOT}")
+    requested_client_mode = os.environ.get("BV_DEVSTACK_CLIENT_MODE")
+    if requested_client_mode:
+        print(f"SyftBox client mode (env BV_DEVSTACK_CLIENT_MODE): {requested_client_mode}")
+    else:
+        print("SyftBox client mode: go (default)")
 
     setup = scenario.get("setup", {})
     execute_commands(setup.get("server"), variables)

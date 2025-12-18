@@ -23,12 +23,20 @@ used in the scenario tests.
 Options:
   --clients list   Comma-separated client emails (default: client1@sandbox.local,client2@sandbox.local)
   --sandbox DIR    Sandbox root path (default: ./sandbox)
+  --client-mode MODE  Client implementation: go|rust|mixed (default: go)
+  --rust-client-bin PATH  Path to Rust syftbox client binary (default: syftbox/rust/target/release/syftbox-rs)
+  --skip-rust-build Skip building the Rust client (assumes binary exists)
   --reset          Remove any existing devstack state before starting (also removes sandbox on stop)
   --skip-sync-check Skip the sbdev sync probe after boot (faster, less safe)
   --skip-keys      Skip key generation (for manual key management testing)
   --stop           Stop the devstack instead of starting it
   --status         Print the current devstack state (relay/state.json) and exit
   -h, --help       Show this message
+
+Environment (optional defaults when flags not provided):
+  BV_DEVSTACK_CLIENT_MODE      go|rust|mixed
+  BV_DEVSTACK_RUST_CLIENT_BIN  Path to Rust client binary
+  BV_DEVSTACK_SKIP_RUST_BUILD  Set to 1 to skip building Rust client
 EOF
 }
 
@@ -41,6 +49,10 @@ RESET_FLAG=0
 SKIP_SYNC_CHECK=0
 SKIP_KEYS=0
 RAW_CLIENTS=()
+CLIENT_MODE=""
+CLIENT_MODE_EXPLICIT=0
+RUST_CLIENT_BIN=""
+SKIP_RUST_BUILD=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -53,6 +65,32 @@ while [[ $# -gt 0 ]]; do
       [[ $# -lt 2 ]] && { echo "Missing value for --sandbox" >&2; usage >&2; exit 1; }
       SANDBOX_DIR="$2"
       shift
+      ;;
+    --client-mode)
+      [[ $# -lt 2 ]] && { echo "Missing value for --client-mode" >&2; usage >&2; exit 1; }
+      CLIENT_MODE="$2"
+      CLIENT_MODE_EXPLICIT=1
+      shift
+      ;;
+    --rust-client-bin)
+      [[ $# -lt 2 ]] && { echo "Missing value for --rust-client-bin" >&2; usage >&2; exit 1; }
+      RUST_CLIENT_BIN="$2"
+      CLIENT_MODE_EXPLICIT=1
+      if [[ -z "$CLIENT_MODE" ]]; then
+        CLIENT_MODE="rust"
+      fi
+      shift
+      ;;
+    --skip-rust-build)
+      SKIP_RUST_BUILD=1
+      ;;
+    --rust)
+      CLIENT_MODE="rust"
+      CLIENT_MODE_EXPLICIT=1
+      ;;
+    --mixed)
+      CLIENT_MODE="mixed"
+      CLIENT_MODE_EXPLICIT=1
       ;;
     --reset)
       RESET_FLAG=1
@@ -82,6 +120,23 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
+if (( ! CLIENT_MODE_EXPLICIT )) && [[ -n "${BV_DEVSTACK_CLIENT_MODE:-}" ]]; then
+  CLIENT_MODE="${BV_DEVSTACK_CLIENT_MODE}"
+  CLIENT_MODE_EXPLICIT=1
+fi
+
+if [[ -z "$RUST_CLIENT_BIN" ]] && [[ -n "${BV_DEVSTACK_RUST_CLIENT_BIN:-}" ]]; then
+  RUST_CLIENT_BIN="${BV_DEVSTACK_RUST_CLIENT_BIN}"
+  CLIENT_MODE_EXPLICIT=1
+  if [[ -z "$CLIENT_MODE" ]]; then
+    CLIENT_MODE="rust"
+  fi
+fi
+
+if (( ! SKIP_RUST_BUILD )) && [[ "${BV_DEVSTACK_SKIP_RUST_BUILD:-0}" == "1" ]]; then
+  SKIP_RUST_BUILD=1
+fi
+
 abs_path() {
   python3 - <<'PY' "$1"
 import os, sys
@@ -97,6 +152,13 @@ require_bin() {
 
 require_file() {
   [[ -f "$1" ]] || { echo "Missing required file: $1" >&2; exit 1; }
+}
+
+is_windows() {
+  case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 declare -a CLIENTS=()
@@ -169,6 +231,57 @@ bootstrap_biovault() {
   "$BV_BIN" init --quiet "$email" >/dev/null
 }
 
+configure_syftbox_clients() {
+  if (( ! CLIENT_MODE_EXPLICIT )); then
+    return 0
+  fi
+
+  local mode
+  mode="$(printf '%s' "${CLIENT_MODE:-go}" | tr '[:upper:]' '[:lower:]')"
+  case "$mode" in
+    ""|go)
+      unset SBDEV_CLIENT_BIN SBDEV_CLIENT_MODE SBDEV_RUST_CLIENT_BIN
+      return 0
+      ;;
+    rust|mixed)
+      ;;
+    *)
+      echo "Invalid --client-mode: $mode (expected go|rust|mixed)" >&2
+      exit 1
+      ;;
+  esac
+
+  local rust_bin
+  rust_bin="$RUST_CLIENT_BIN"
+  if [[ -z "$rust_bin" ]]; then
+    rust_bin="$SYFTBOX_DIR/rust/target/release/syftbox-rs"
+    if is_windows; then
+      rust_bin="${rust_bin}.exe"
+    fi
+  fi
+
+  rust_bin="$(abs_path "$rust_bin")"
+
+  if (( ! SKIP_RUST_BUILD )); then
+    require_bin cargo
+    echo "Building Rust SyftBox client..."
+    (cd "$SYFTBOX_DIR/rust" && cargo build --release)
+  fi
+
+  [[ -f "$rust_bin" ]] || { echo "Rust SyftBox client binary not found at $rust_bin" >&2; exit 1; }
+
+  if [[ "$mode" == "rust" ]]; then
+    export SBDEV_CLIENT_BIN="$rust_bin"
+    unset SBDEV_CLIENT_MODE SBDEV_RUST_CLIENT_BIN
+  else
+    unset SBDEV_CLIENT_BIN
+    export SBDEV_CLIENT_MODE="$mode"
+    export SBDEV_RUST_CLIENT_BIN="$rust_bin"
+  fi
+
+  echo "Using SyftBox Rust client ($mode): $rust_bin"
+}
+
 start_stack() {
   require_bin go
   [[ -d "$SYFTBOX_DIR" ]] || { echo "Missing syftbox checkout at $SYFTBOX_DIR" >&2; exit 1; }
@@ -189,6 +302,7 @@ start_stack() {
   [[ -n "${NXF_DISABLE_JAVA_VERSION_CHECK:-}" ]] && export NXF_DISABLE_JAVA_VERSION_CHECK
   [[ -n "${NXF_IGNORE_JAVA_VERSION:-}" ]] && export NXF_IGNORE_JAVA_VERSION
   [[ -n "${NXF_OPTS:-}" ]] && export NXF_OPTS
+  configure_syftbox_clients
 
   echo "Starting SyftBox devstack via syftbox/cmd/devstack..."
   (cd "$SYFTBOX_DIR" && go run ./cmd/devstack start "${args[@]}")
