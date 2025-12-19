@@ -15,6 +15,8 @@ use std::time::{Duration, SystemTime};
 use tokio::net::TcpStream;
 use tracing::{info, warn};
 
+const PYFORY_MACOS_INTEL_WHEEL: &str = "https://files.pythonhosted.org/packages/35/c5/b2de2a2dc0d2b74002924cdd46a6e6d3bccc5380181ca0dc850855608bfe/pyfory-0.13.2-cp312-cp312-macosx_10_13_x86_64.whl";
+
 fn hide_console_window(_cmd: &mut Command) {
     #[cfg(target_os = "windows")]
     {
@@ -227,6 +229,10 @@ fn resolve_uv_path() -> Result<String> {
     .into())
 }
 
+fn is_macos_intel() -> bool {
+    cfg!(target_os = "macos") && cfg!(target_arch = "x86_64")
+}
+
 fn ensure_virtualenv(project_dir: &Path, python_version: &str, uv_bin: &str) -> Result<()> {
     let venv_path = project_dir.join(".venv");
     let capture_output = std::env::var_os("BIOVAULT_DESKTOP_LOG_FILE").is_some();
@@ -238,9 +244,12 @@ fn ensure_virtualenv(project_dir: &Path, python_version: &str, uv_bin: &str) -> 
     // Marker file to track if dependencies are already installed
     // Includes version to trigger reinstall on beaver version changes
     let deps_marker = venv_path.join(format!(".deps-installed-{}", beaver_version));
+    let pyfory_marker = venv_path.join(format!(".deps-installed-{}-pyfory-x86_64", beaver_version));
+    let needs_base_install = !venv_path.exists() || !deps_marker.exists();
+    let needs_pyfory_fix = is_macos_intel() && (needs_base_install || !pyfory_marker.exists());
 
     // Check if venv exists AND deps are already installed
-    if venv_path.exists() && deps_marker.exists() {
+    if !needs_base_install && !needs_pyfory_fix {
         println!("✅ Using existing virtualenv with dependencies");
         // Ensure uv is available inside the virtualenv PATH
         link_uv_into_venv(&venv_path, uv_bin);
@@ -278,96 +287,98 @@ fn ensure_virtualenv(project_dir: &Path, python_version: &str, uv_bin: &str) -> 
                 .into());
             }
         }
-    } else {
+    } else if needs_base_install {
         println!("📦 Virtualenv exists but dependencies need install/update...");
     }
 
     // Ensure uv is available inside the virtualenv PATH (symlink/copy bundled uv)
     link_uv_into_venv(&venv_path, uv_bin);
 
-    println!(
-        "📦 Installing packages: jupyterlab cleon biovault-beaver[lib-support]=={}",
-        beaver_version
-    );
+    if needs_base_install {
+        println!(
+            "📦 Installing packages: jupyterlab cleon biovault-beaver[lib-support]=={}",
+            beaver_version
+        );
 
-    // Install base packages from PyPI including pinned biovault-beaver
-    // Note: syftbox-sdk is a direct dependency of biovault-beaver, not an extra
-    let beaver_pkg = format!("biovault-beaver[lib-support]=={}", beaver_version);
-    if capture_output {
-        let mut cmd = Command::new(uv_bin);
-        cmd.args([
-            "pip",
-            "install",
-            "--python",
-            ".venv",
-            "jupyterlab",
-            "cleon",
-            &beaver_pkg,
-        ]);
-        cmd.current_dir(project_dir);
-        hide_console_window(&mut cmd);
-        let output = cmd.output()?;
+        // Install base packages from PyPI including pinned biovault-beaver
+        // Note: syftbox-sdk is a direct dependency of biovault-beaver, not an extra
+        let beaver_pkg = format!("biovault-beaver[lib-support]=={}", beaver_version);
+        if capture_output {
+            let mut cmd = Command::new(uv_bin);
+            cmd.args([
+                "pip",
+                "install",
+                "--python",
+                ".venv",
+                "jupyterlab",
+                "cleon",
+                &beaver_pkg,
+            ]);
+            cmd.current_dir(project_dir);
+            hide_console_window(&mut cmd);
+            let output = cmd.output()?;
 
-        if !output.status.success() {
-            if cfg!(windows) && output_indicates_windows_file_lock(&output) {
-                // Windows often locks entrypoint exes (like .venv/Scripts/jupyter.exe) while Jupyter is running.
-                // Try a best-effort stop and retry once.
-                best_effort_stop_jupyter_for_project(project_dir);
-                std::thread::sleep(Duration::from_millis(500));
+            if !output.status.success() {
+                if cfg!(windows) && output_indicates_windows_file_lock(&output) {
+                    // Windows often locks entrypoint exes (like .venv/Scripts/jupyter.exe) while Jupyter is running.
+                    // Try a best-effort stop and retry once.
+                    best_effort_stop_jupyter_for_project(project_dir);
+                    std::thread::sleep(Duration::from_millis(500));
 
-                let mut cmd = Command::new(uv_bin);
-                cmd.args([
-                    "pip",
-                    "install",
-                    "--python",
-                    ".venv",
-                    "jupyterlab",
-                    "cleon",
-                    &beaver_pkg,
-                ]);
-                cmd.current_dir(project_dir);
-                hide_console_window(&mut cmd);
-                let retry = cmd.output()?;
+                    let mut cmd = Command::new(uv_bin);
+                    cmd.args([
+                        "pip",
+                        "install",
+                        "--python",
+                        ".venv",
+                        "jupyterlab",
+                        "cleon",
+                        &beaver_pkg,
+                    ]);
+                    cmd.current_dir(project_dir);
+                    hide_console_window(&mut cmd);
+                    let retry = cmd.output()?;
 
-                if retry.status.success() {
-                    // Proceed with the rest of environment setup (DEV overlays, marker file, etc.)
-                    // now that package installation succeeded.
-                } else {
-                    return Err(anyhow!(
-                        "Failed to install required Python packages (jupyterlab/cleon/biovault-beaver) after retrying. {}\n{}",
-                        "Ensure all Jupyter/Python processes for this session are stopped, then retry.",
-                        format_process_output(&retry)
-                    )
-                    .into());
+                    if retry.status.success() {
+                        // Proceed with the rest of environment setup (DEV overlays, marker file, etc.)
+                        // now that package installation succeeded.
+                    } else {
+                        return Err(anyhow!(
+                            "Failed to install required Python packages (jupyterlab/cleon/biovault-beaver) after retrying. {}\n{}",
+                            "Ensure all Jupyter/Python processes for this session are stopped, then retry.",
+                            format_process_output(&retry)
+                        )
+                        .into());
+                    }
                 }
+
+                return Err(anyhow!(
+                    "Failed to install required Python packages (jupyterlab/cleon/biovault-beaver). If you see file access errors on Windows, stop all running Jupyter/Python processes and retry.\n{}",
+                    format_process_output(&output)
+                )
+                .into());
             }
+        } else {
+            let mut cmd = Command::new(uv_bin);
+            cmd.args([
+                "pip",
+                "install",
+                "--python",
+                ".venv",
+                "jupyterlab",
+                "cleon",
+                &beaver_pkg,
+            ]);
+            cmd.current_dir(project_dir);
+            hide_console_window(&mut cmd);
+            let status = cmd.status()?;
 
-            return Err(anyhow!(
-                "Failed to install required Python packages (jupyterlab/cleon/biovault-beaver). If you see file access errors on Windows, stop all running Jupyter/Python processes and retry.\n{}",
-                format_process_output(&output)
-            )
-            .into());
-        }
-    } else {
-        let mut cmd = Command::new(uv_bin);
-        cmd.args([
-            "pip",
-            "install",
-            "--python",
-            ".venv",
-            "jupyterlab",
-            "cleon",
-            &beaver_pkg,
-        ]);
-        cmd.current_dir(project_dir);
-        hide_console_window(&mut cmd);
-        let status = cmd.status()?;
-
-        if !status.success() {
-            return Err(anyhow!(
-                "Failed to install required Python packages (jupyterlab/cleon/biovault-beaver)"
-            )
-            .into());
+            if !status.success() {
+                return Err(anyhow!(
+                    "Failed to install required Python packages (jupyterlab/cleon/biovault-beaver)"
+                )
+                .into());
+            }
         }
     }
 
@@ -383,7 +394,7 @@ fn ensure_virtualenv(project_dir: &Path, python_version: &str, uv_bin: &str) -> 
     let syftbox_path = biovault_root.join("syftbox-sdk").join("python");
     let beaver_path = biovault_root.join("biovault-beaver").join("python");
 
-    if syftbox_path.exists() || beaver_path.exists() {
+    if needs_base_install && (syftbox_path.exists() || beaver_path.exists()) {
         println!("🔧 DEV MODE: Local source detected, installing editable packages...");
 
         // Install syftbox-sdk first (beaver depends on it)
@@ -505,16 +516,66 @@ fn ensure_virtualenv(project_dir: &Path, python_version: &str, uv_bin: &str) -> 
         }
 
         println!("✅ Virtualenv ready with jupyterlab, cleon, and DEV beaver/syftbox-sdk");
-    } else {
+    } else if needs_base_install {
         println!(
             "✅ Virtualenv ready with jupyterlab, cleon, biovault-beaver=={}, and syftbox-sdk",
             beaver_version
         );
     }
 
+    if needs_pyfory_fix {
+        println!("🛠️ macOS Intel detected; forcing pyfory reinstall...");
+        if capture_output {
+            let mut cmd = Command::new(uv_bin);
+            cmd.args([
+                "pip",
+                "install",
+                "--python",
+                ".venv",
+                "--force-reinstall",
+                PYFORY_MACOS_INTEL_WHEEL,
+            ]);
+            cmd.current_dir(project_dir);
+            hide_console_window(&mut cmd);
+            let output = cmd.output()?;
+            if !output.status.success() {
+                return Err(anyhow!(
+                    "Failed to force-reinstall pyfory (macOS Intel). Try reinstalling Jupyter dependencies.\n{}",
+                    format_process_output(&output)
+                )
+                .into());
+            }
+        } else {
+            let mut cmd = Command::new(uv_bin);
+            cmd.args([
+                "pip",
+                "install",
+                "--python",
+                ".venv",
+                "--force-reinstall",
+                PYFORY_MACOS_INTEL_WHEEL,
+            ]);
+            cmd.current_dir(project_dir);
+            hide_console_window(&mut cmd);
+            let status = cmd.status()?;
+            if !status.success() {
+                return Err(anyhow!(
+                    "Failed to force-reinstall pyfory (macOS Intel). Try reinstalling Jupyter dependencies."
+                )
+                .into());
+            }
+        }
+
+        if let Err(e) = fs::write(&pyfory_marker, "pyfory") {
+            warn!("Failed to create pyfory marker file: {}", e);
+        }
+    }
+
     // Create marker file to skip reinstall on next launch
-    if let Err(e) = fs::write(&deps_marker, beaver_version) {
-        warn!("Failed to create deps marker file: {}", e);
+    if needs_base_install {
+        if let Err(e) = fs::write(&deps_marker, beaver_version) {
+            warn!("Failed to create deps marker file: {}", e);
+        }
     }
 
     Ok(())

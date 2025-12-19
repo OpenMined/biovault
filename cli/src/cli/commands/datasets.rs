@@ -40,8 +40,9 @@ pub struct DatasetAsset {
     pub kind: Option<String>,
     #[serde(default)]
     pub url: Option<String>,
+    /// For twin_list: { url, type }. For single: string reference like "{url}.private"
     #[serde(default)]
-    pub private: Option<String>,
+    pub private: Option<YamlValue>,
     #[serde(default)]
     pub mock: Option<YamlValue>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -56,6 +57,9 @@ pub struct DatasetAssetMappingEndpoint {
     pub file_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub db_file_id: Option<i64>,
+    /// For twin_list: array of entry objects with id, file_path, participant_id, etc.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entries: Option<Vec<YamlValue>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -195,8 +199,43 @@ pub async fn publish(
     for asset in manifest_for_write.assets.values_mut() {
         asset.extra.remove("mock_source_path");
         asset.mappings = None;
+
+        // For twin_list assets, strip internal fields from mock entries
+        if let Some(mock_val) = asset.mock.as_mut() {
+            if let Some(mock_map) = mock_val.as_mapping_mut() {
+                if let Some(entries_val) =
+                    mock_map.get_mut(YamlValue::String("entries".to_string()))
+                {
+                    if let Some(entries_seq) = entries_val.as_sequence_mut() {
+                        for entry in entries_seq.iter_mut() {
+                            if let Some(entry_map) = entry.as_mapping_mut() {
+                                // Remove internal fields (not for public YAML)
+                                entry_map.remove(YamlValue::String("file_path".to_string()));
+                                entry_map.remove(YamlValue::String("source_path".to_string()));
+                                entry_map.remove(YamlValue::String("db_file_id".to_string()));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // For twin_list assets, strip entries from private field (keep only type and url)
+        // Private entries must never appear in the public YAML
+        if let Some(priv_val) = asset.private.as_mut() {
+            if let Some(priv_map) = priv_val.as_mapping_mut() {
+                // Remove entries array - this contains private file paths
+                priv_map.remove(YamlValue::String("entries".to_string()));
+                // Also remove any internal fields that shouldn't be public
+                priv_map.remove(YamlValue::String("file_path".to_string()));
+                priv_map.remove(YamlValue::String("db_file_id".to_string()));
+            }
+        }
     }
     manifest_for_write.extra.remove("mock_source_path");
+    // Remove top-level file lists (used internally for file copying)
+    manifest_for_write.extra.remove("mock_files");
+    manifest_for_write.extra.remove("private_files");
 
     let yaml = serde_yaml::to_string(&manifest_for_write)?;
     let public_manifest_path = public_dir.join("dataset.yaml");
@@ -210,6 +249,63 @@ pub async fn publish(
         storage
             .ensure_dir(&assets_dir)
             .with_context(|| format!("Failed to create {}", assets_dir.display()))?;
+
+        // Collect expected filenames from manifest to clean up stale files later
+        let mut expected_files: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+
+        // First pass: collect all expected filenames
+        for (asset_key, asset) in &manifest.assets {
+            // CSV file for this asset
+            expected_files.insert(format!("{}.csv", asset_key));
+
+            // For twin_list, collect all mock entry filenames
+            if asset.kind.as_deref() == Some("twin_list") {
+                if let Some(mock_value) = &asset.mock {
+                    let entries = mock_value
+                        .as_mapping()
+                        .and_then(|m| m.get(YamlValue::String("entries".to_string())))
+                        .and_then(|v| v.as_sequence());
+                    if let Some(entry_list) = entries {
+                        for entry in entry_list {
+                            if let Some(entry_map) = entry.as_mapping() {
+                                // Get filename from URL or source_path
+                                let filename = entry_map
+                                    .get(YamlValue::String("url".to_string()))
+                                    .and_then(|v| v.as_str())
+                                    .and_then(|url| url.split('/').next_back())
+                                    .or_else(|| {
+                                        entry_map
+                                            .get(YamlValue::String("source_path".to_string()))
+                                            .and_then(|v| v.as_str())
+                                            .and_then(|p| std::path::Path::new(p).file_name())
+                                            .and_then(|n| n.to_str())
+                                    });
+                                if let Some(f) = filename {
+                                    expected_files.insert(f.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Clean up stale files in assets directory
+        if assets_dir.exists() {
+            if let Ok(entries) = fs::read_dir(&assets_dir) {
+                for entry in entries.flatten() {
+                    let filename = entry.file_name().to_string_lossy().to_string();
+                    if !expected_files.contains(&filename) {
+                        if let Err(e) = fs::remove_file(entry.path()) {
+                            eprintln!("⚠️  Failed to remove stale file {}: {}", filename, e);
+                        } else {
+                            println!("  🗑️  Removed stale asset: {}", filename);
+                        }
+                    }
+                }
+            }
+        }
 
         for (asset_key, asset) in &manifest.assets {
             if let (Some(priv_url), Some(priv_path)) = (
@@ -246,6 +342,102 @@ pub async fn publish(
             } else {
                 None
             };
+
+            // Handle twin_list assets - copy each entry file and generate CSV
+            if asset.kind.as_deref() == Some("twin_list") {
+                if let Some(mock_value) = &asset.mock {
+                    // Extract entries from mock object: { type, url, entries: [...] }
+                    let entries = mock_value
+                        .as_mapping()
+                        .and_then(|m| m.get(YamlValue::String("entries".to_string())))
+                        .and_then(|v| v.as_sequence());
+
+                    if let Some(entry_list) = entries {
+                        let mut csv_rows: Vec<String> = Vec::new();
+                        csv_rows.push("participant_id,file".to_string());
+
+                        for entry in entry_list {
+                            let entry_map = match entry.as_mapping() {
+                                Some(m) => m,
+                                None => continue,
+                            };
+
+                            // Get participant_id (optional)
+                            let participant_id = entry_map
+                                .get(YamlValue::String("participant_id".to_string()))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
+
+                            // Get source_path directly from entry (set by frontend)
+                            let source_path_str = entry_map
+                                .get(YamlValue::String("source_path".to_string()))
+                                .and_then(|v| v.as_str());
+
+                            // Extract filename from URL for CSV
+                            let url = entry_map
+                                .get(YamlValue::String("url".to_string()))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
+
+                            let filename = url.split('/').next_back().unwrap_or("");
+
+                            if let Some(src_path) = source_path_str {
+                                if src_path.starts_with("http://")
+                                    || src_path.starts_with("https://")
+                                    || src_path.starts_with("syft://")
+                                {
+                                    // Already a URL, just use filename in CSV
+                                    csv_rows.push(format!("{},{}", participant_id, filename));
+                                    continue;
+                                }
+
+                                let source_path = PathBuf::from(src_path);
+                                if source_path.exists() {
+                                    let actual_filename = source_path
+                                        .file_name()
+                                        .and_then(|n| n.to_str())
+                                        .unwrap_or(filename);
+                                    let dest = assets_dir.join(actual_filename);
+                                    if let Err(e) = fs::copy(&source_path, &dest) {
+                                        eprintln!(
+                                            "⚠️  Failed to copy {} to {}: {}",
+                                            source_path.display(),
+                                            dest.display(),
+                                            e
+                                        );
+                                    } else {
+                                        println!("  📁 Copied {} to assets/", actual_filename);
+                                    }
+                                    csv_rows
+                                        .push(format!("{},{}", participant_id, actual_filename));
+                                } else {
+                                    eprintln!("⚠️  Mock file not found: {}", source_path.display());
+                                }
+                            } else if !filename.is_empty() {
+                                // No source_path but we have a URL, entry is already published
+                                csv_rows.push(format!("{},{}", participant_id, filename));
+                            }
+                        }
+
+                        // Write CSV file
+                        if csv_rows.len() > 1 {
+                            let csv_path = assets_dir.join(format!("{}.csv", asset_key));
+                            let csv_content = csv_rows.join("\n");
+                            storage.write_plaintext_file(
+                                &csv_path,
+                                csv_content.as_bytes(),
+                                true,
+                            )?;
+                            println!(
+                                "  📄 Generated {} with {} entries",
+                                csv_path.display(),
+                                csv_rows.len() - 1
+                            );
+                        }
+                    }
+                }
+                continue; // Skip single-file handling for twin_list
+            }
 
             if let Some(src) = mock_source {
                 if src.starts_with("http://")
@@ -461,7 +653,7 @@ pub async fn init(
     };
 
     // Private always points to the private syft URL suffix for this asset
-    let private_field = Some("{url}.private".to_string());
+    let private_field = Some(YamlValue::String("{url}.private".to_string()));
 
     // Mock: point to public asset location under this dataset if provided
     let mock_field = resolved_mock
@@ -488,10 +680,12 @@ pub async fn init(
                     None
                 },
                 db_file_id: private_id,
+                entries: None,
             }),
             mock: resolved_mock.clone().map(|p| DatasetAssetMappingEndpoint {
                 file_path: if mock_id.is_none() { Some(p) } else { None },
                 db_file_id: mock_id,
+                entries: None,
             }),
         }),
         extra: BTreeMap::new(),
