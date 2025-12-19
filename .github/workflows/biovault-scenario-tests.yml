@@ -12,6 +12,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        client_mode: [go, rust]
         scenario:
           - tests/scenarios/import-and-run.yaml
           - tests/scenarios/inbox-ping-pong.yaml
@@ -24,11 +25,6 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Update submodules
-        run: |
-          chmod +x submodules.sh
-          ./submodules.sh
-
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
         with:
@@ -37,7 +33,9 @@ jobs:
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: 'cli -> target'
+          workspaces: |
+            cli -> target
+            syftbox/rust -> target
 
       - name: Install uv
         uses: astral-sh/setup-uv@v3
@@ -62,7 +60,7 @@ jobs:
         run: cd cli && cargo build --release
 
       - name: Run scenario
-        run: ./test-scenario.sh ${{ matrix.scenario }}
+        run: ./test-scenario.sh --client-mode ${{ matrix.client_mode }} ${{ matrix.scenario }}
 
       - name: Show logs on failure
         if: failure()

@@ -30,6 +30,7 @@ pub mod sql;
 pub mod submit;
 pub mod syc;
 pub mod syftbox;
+pub mod syftboxd;
 pub mod update;
 
 /// Configure a child process command to avoid flashing a console window when the CLI library

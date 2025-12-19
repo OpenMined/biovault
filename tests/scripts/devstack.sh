@@ -23,24 +23,39 @@ used in the scenario tests.
 Options:
   --clients list   Comma-separated client emails (default: client1@sandbox.local,client2@sandbox.local)
   --sandbox DIR    Sandbox root path (default: ./sandbox)
+  --client-mode MODE  Client implementation: go|rust|mixed|embedded (default: go)
+  --rust-client-bin PATH  Path to Rust syftbox client binary (default: syftbox/rust/target/release/syftbox-rs)
+  --skip-rust-build Skip building the Rust client (assumes binary exists)
+  --skip-client-daemons Do not launch syftbox client daemons (server+minio only; still writes per-client config.json)
   --reset          Remove any existing devstack state before starting (also removes sandbox on stop)
   --skip-sync-check Skip the sbdev sync probe after boot (faster, less safe)
   --skip-keys      Skip key generation (for manual key management testing)
   --stop           Stop the devstack instead of starting it
   --status         Print the current devstack state (relay/state.json) and exit
   -h, --help       Show this message
+
+Environment (optional defaults when flags not provided):
+  BV_DEVSTACK_CLIENT_MODE      go|rust|mixed|embedded
+  BV_DEVSTACK_RUST_CLIENT_BIN  Path to Rust client binary
+  BV_DEVSTACK_SKIP_RUST_BUILD  Set to 1 to skip building Rust client
 EOF
 }
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-SYFTBOX_DIR="$ROOT_DIR/syftbox"
+SYFTBOX_DIR="$ROOT_DIR/syftbox-sdk/syftbox"
 SANDBOX_DIR="${SANDBOX_DIR:-$ROOT_DIR/sandbox}"
 GO_CACHE_DIR="$SYFTBOX_DIR/.gocache"
 ACTION="start"
 RESET_FLAG=0
 SKIP_SYNC_CHECK=0
 SKIP_KEYS=0
+SKIP_CLIENT_DAEMONS=0
+EMBEDDED_MODE=0
 RAW_CLIENTS=()
+CLIENT_MODE=""
+CLIENT_MODE_EXPLICIT=0
+RUST_CLIENT_BIN=""
+SKIP_RUST_BUILD=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -54,6 +69,36 @@ while [[ $# -gt 0 ]]; do
       SANDBOX_DIR="$2"
       shift
       ;;
+    --client-mode)
+      [[ $# -lt 2 ]] && { echo "Missing value for --client-mode" >&2; usage >&2; exit 1; }
+      CLIENT_MODE="$2"
+      CLIENT_MODE_EXPLICIT=1
+      shift
+      ;;
+    --rust-client-bin)
+      [[ $# -lt 2 ]] && { echo "Missing value for --rust-client-bin" >&2; usage >&2; exit 1; }
+      RUST_CLIENT_BIN="$2"
+      CLIENT_MODE_EXPLICIT=1
+      if [[ -z "$CLIENT_MODE" ]]; then
+        CLIENT_MODE="rust"
+      fi
+      shift
+      ;;
+    --skip-rust-build)
+      SKIP_RUST_BUILD=1
+      ;;
+    --rust)
+      CLIENT_MODE="rust"
+      CLIENT_MODE_EXPLICIT=1
+      ;;
+    --mixed)
+      CLIENT_MODE="mixed"
+      CLIENT_MODE_EXPLICIT=1
+      ;;
+    --embedded)
+      CLIENT_MODE="embedded"
+      CLIENT_MODE_EXPLICIT=1
+      ;;
     --reset)
       RESET_FLAG=1
       ;;
@@ -62,6 +107,9 @@ while [[ $# -gt 0 ]]; do
       ;;
     --skip-keys)
       SKIP_KEYS=1
+      ;;
+    --skip-client-daemons)
+      SKIP_CLIENT_DAEMONS=1
       ;;
     --stop)
       ACTION="stop"
@@ -82,6 +130,23 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
+if (( ! CLIENT_MODE_EXPLICIT )) && [[ -n "${BV_DEVSTACK_CLIENT_MODE:-}" ]]; then
+  CLIENT_MODE="${BV_DEVSTACK_CLIENT_MODE}"
+  CLIENT_MODE_EXPLICIT=1
+fi
+
+if [[ -z "$RUST_CLIENT_BIN" ]] && [[ -n "${BV_DEVSTACK_RUST_CLIENT_BIN:-}" ]]; then
+  RUST_CLIENT_BIN="${BV_DEVSTACK_RUST_CLIENT_BIN}"
+  CLIENT_MODE_EXPLICIT=1
+  if [[ -z "$CLIENT_MODE" ]]; then
+    CLIENT_MODE="rust"
+  fi
+fi
+
+if (( ! SKIP_RUST_BUILD )) && [[ "${BV_DEVSTACK_SKIP_RUST_BUILD:-0}" == "1" ]]; then
+  SKIP_RUST_BUILD=1
+fi
+
 abs_path() {
   python3 - <<'PY' "$1"
 import os, sys
@@ -97,6 +162,13 @@ require_bin() {
 
 require_file() {
   [[ -f "$1" ]] || { echo "Missing required file: $1" >&2; exit 1; }
+}
+
+is_windows() {
+  case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 declare -a CLIENTS=()
@@ -143,6 +215,17 @@ stop_stack() {
   echo "Stopping SyftBox devstack at $SANDBOX_DIR..."
   # Stop any Jupyter processes in the sandbox first
   pkill -f "jupyter.*$SANDBOX_DIR" 2>/dev/null || true
+
+  # Stop embedded syftbox hosts (best effort).
+  if [[ -x "$BV_BIN" ]]; then
+    for email in "${CLIENTS[@]}"; do
+      local client_dir="$SANDBOX_DIR/$email"
+      if [[ -d "$client_dir" ]]; then
+        HOME="$client_dir" "$BV_BIN" syftboxd stop >/dev/null 2>&1 || true
+      fi
+    done
+  fi
+
   if [[ -d "$SYFTBOX_DIR" ]]; then
     (cd "$SYFTBOX_DIR" && GOCACHE="$GO_CACHE_DIR" go run ./cmd/devstack stop --path "$SANDBOX_DIR") || true
   fi
@@ -169,14 +252,99 @@ bootstrap_biovault() {
   "$BV_BIN" init --quiet "$email" >/dev/null
 }
 
+configure_syftbox_clients() {
+  if (( ! CLIENT_MODE_EXPLICIT )); then
+    return 0
+  fi
+
+  local mode
+  mode="$(printf '%s' "${CLIENT_MODE:-go}" | tr '[:upper:]' '[:lower:]')"
+  case "$mode" in
+    ""|go)
+      unset SBDEV_CLIENT_BIN SBDEV_CLIENT_MODE SBDEV_RUST_CLIENT_BIN
+      return 0
+      ;;
+    embedded)
+      # Don't spawn syftbox client daemons; we'll start `bv syftboxd` per client instead.
+      EMBEDDED_MODE=1
+      SKIP_CLIENT_DAEMONS=1
+      unset SBDEV_CLIENT_BIN SBDEV_CLIENT_MODE SBDEV_RUST_CLIENT_BIN
+      return 0
+      ;;
+    rust|mixed)
+      ;;
+    *)
+      echo "Invalid --client-mode: $mode (expected go|rust|mixed|embedded)" >&2
+      exit 1
+      ;;
+  esac
+
+  local rust_bin
+  rust_bin="$RUST_CLIENT_BIN"
+  if [[ -z "$rust_bin" ]]; then
+    rust_bin="$SYFTBOX_DIR/rust/target/release/syftbox-rs"
+    if is_windows; then
+      rust_bin="${rust_bin}.exe"
+    fi
+  fi
+
+  rust_bin="$(abs_path "$rust_bin")"
+
+  if (( ! SKIP_RUST_BUILD )); then
+    require_bin cargo
+    echo "Building Rust SyftBox client..."
+    (cd "$SYFTBOX_DIR/rust" && cargo build --release)
+  fi
+
+  [[ -f "$rust_bin" ]] || { echo "Rust SyftBox client binary not found at $rust_bin" >&2; exit 1; }
+
+  if [[ "$mode" == "rust" ]]; then
+    export SBDEV_CLIENT_BIN="$rust_bin"
+    unset SBDEV_CLIENT_MODE SBDEV_RUST_CLIENT_BIN
+  else
+    unset SBDEV_CLIENT_BIN
+    export SBDEV_CLIENT_MODE="$mode"
+    export SBDEV_RUST_CLIENT_BIN="$rust_bin"
+  fi
+
+  echo "Using SyftBox Rust client ($mode): $rust_bin"
+}
+
+start_syftboxd() {
+  ensure_bv_binary
+
+  for email in "${CLIENTS[@]}"; do
+    local client_dir="$SANDBOX_DIR/$email"
+    local data_dir="$client_dir"
+    local config_path="$client_dir/.syftbox/config.json"
+
+    [[ -d "$client_dir" ]] || { echo "Client directory not found: $client_dir" >&2; exit 1; }
+    require_file "$config_path"
+
+    echo "Starting syftboxd (embedded) for $email"
+    HOME="$client_dir" \
+    SYFTBOX_EMAIL="$email" \
+    SYFTBOX_DATA_DIR="$data_dir" \
+    SYFTBOX_CONFIG_PATH="$config_path" \
+    BV_SYFTBOX_BACKEND=embedded \
+    "$BV_BIN" syftboxd start >/dev/null
+  done
+}
+
 start_stack() {
   require_bin go
   [[ -d "$SYFTBOX_DIR" ]] || { echo "Missing syftbox checkout at $SYFTBOX_DIR" >&2; exit 1; }
 
   mkdir -p "$SANDBOX_DIR"
+
+  # Resolve client-mode first because it may force --skip-client-daemons (embedded mode).
+  # This must happen before we build the sbdev argument list below.
+  configure_syftbox_clients
+
   local args=(--path "$SANDBOX_DIR" --random-ports)
   (( RESET_FLAG )) && args+=(--reset)
   (( SKIP_SYNC_CHECK )) && args+=(--skip-sync-check)
+  (( SKIP_CLIENT_DAEMONS )) && args+=(--skip-client-daemons)
   for email in "${CLIENTS[@]}"; do
     args+=(--client "$email")
   done
@@ -193,6 +361,27 @@ start_stack() {
   echo "Starting SyftBox devstack via syftbox/cmd/devstack..."
   (cd "$SYFTBOX_DIR" && go run ./cmd/devstack start "${args[@]}")
 
+  if (( EMBEDDED_MODE )); then
+    local state_path="$SANDBOX_DIR/relay/state.json"
+    if [[ -f "$state_path" ]]; then
+      python3 - <<'PY' "$state_path" || true
+import json, sys
+path = sys.argv[1]
+data = json.load(open(path))
+clients = data.get("clients", [])
+bad = [c for c in clients if (c.get("pid") or 0) > 0 or (c.get("bin_path") or "")]
+if bad:
+    sys.stderr.write("WARNING: sbdev started one or more syftbox client daemons even though embedded mode was requested.\n")
+    sys.stderr.write(f"  See: {path}\n")
+PY
+    fi
+
+    if [[ -f "$SANDBOX_DIR/relay/bin/syftbox" || -f "$SANDBOX_DIR/relay/bin/syftbox.exe" ]]; then
+      echo "WARNING: Found $SANDBOX_DIR/relay/bin/syftbox (client binary). Embedded mode should not require it." >&2
+      echo "  If this was a non-reset run, it may be leftover; check $SANDBOX_DIR/relay/state.json for client pid/bin_path." >&2
+    fi
+  fi
+
   if (( SKIP_KEYS )); then
     echo "Skipping key generation (--skip-keys)"
   else
@@ -200,6 +389,10 @@ start_stack() {
     for email in "${CLIENTS[@]}"; do
       bootstrap_biovault "$email"
     done
+  fi
+
+  if (( EMBEDDED_MODE )); then
+    start_syftboxd
   fi
 
   echo ""
