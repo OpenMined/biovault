@@ -42,7 +42,7 @@ EOF
 }
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-SYFTBOX_DIR="$ROOT_DIR/syftbox"
+SYFTBOX_DIR="$ROOT_DIR/syftbox-sdk/syftbox"
 SANDBOX_DIR="${SANDBOX_DIR:-$ROOT_DIR/sandbox}"
 GO_CACHE_DIR="$SYFTBOX_DIR/.gocache"
 ACTION="start"
