@@ -50,7 +50,8 @@ fn get_log_file_path(config: &Config) -> Result<PathBuf> {
 
 fn write_status(config: &Config, status: &SyftboxdStatus) -> Result<()> {
     let status_path = get_status_file_path(config)?;
-    let json = serde_json::to_string_pretty(status).context("Failed to serialize syftboxd status")?;
+    let json =
+        serde_json::to_string_pretty(status).context("Failed to serialize syftboxd status")?;
     let _ = std::fs::write(status_path, json);
     Ok(())
 }
@@ -117,9 +118,7 @@ fn check_process_running(pid: u32) -> Result<bool> {
 }
 
 fn runtime_config(config: &Config) -> Result<SyftboxRuntimeConfig> {
-    config
-        .to_syftbox_runtime_config()
-        .map_err(|e| anyhow!(e))
+    config.to_syftbox_runtime_config().map_err(|e| anyhow!(e))
 }
 
 pub async fn start(config: &Config, foreground: bool) -> Result<()> {
@@ -226,7 +225,10 @@ pub async fn start(config: &Config, foreground: bool) -> Result<()> {
     let mut child = Command::new(current_exe)
         .args(["syftboxd", "start", "--foreground"])
         .env("BV_SYFTBOXD_CONFIG", config_json)
-        .env("BV_SYFTBOXD_PID_FILE", pid_path.to_string_lossy().to_string())
+        .env(
+            "BV_SYFTBOXD_PID_FILE",
+            pid_path.to_string_lossy().to_string(),
+        )
         .env(
             "SYFTBOX_DATA_DIR",
             syftbox_data_dir.to_string_lossy().to_string(),
@@ -242,7 +244,10 @@ pub async fn start(config: &Config, foreground: bool) -> Result<()> {
 
     match child.try_wait() {
         Ok(Some(status)) => {
-            return Err(anyhow!("syftboxd exited immediately with status: {}", status));
+            return Err(anyhow!(
+                "syftboxd exited immediately with status: {}",
+                status
+            ));
         }
         Ok(None) => {
             if pid_path.exists() {
