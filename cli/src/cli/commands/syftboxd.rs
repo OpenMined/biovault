@@ -29,7 +29,7 @@ impl SyftboxdStatus {
 }
 
 fn get_biovault_dir(_config: &Config) -> Result<PathBuf> {
-    Ok(crate::config::get_biovault_home()?)
+    crate::config::get_biovault_home()
 }
 
 fn get_pid_file_path(config: &Config) -> Result<PathBuf> {
