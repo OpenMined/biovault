@@ -77,9 +77,6 @@ pub async fn execute(email: Option<&str>, quiet: bool) -> Result<()> {
         .into());
     };
 
-    // Persist the selected location for future runs when applicable
-    crate::config::set_persisted_biovault_home(&biovault_dir);
-
     if !biovault_dir.exists() {
         fs::create_dir_all(&biovault_dir)?;
         info!("Created directory: {:?}", biovault_dir);
