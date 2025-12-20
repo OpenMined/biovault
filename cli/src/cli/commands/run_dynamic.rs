@@ -1338,6 +1338,7 @@ fn detect_format(path: &Path) -> Option<&'static str> {
         .and_then(|ext| ext.to_str())
         .and_then(|ext| match ext.to_lowercase().as_str() {
             "json" => Some("json"),
+            "yaml" | "yml" => Some("yaml"),
             "csv" => Some("csv"),
             "tsv" => Some("tsv"),
             "vcf" | "vcf.gz" => Some("vcf"),

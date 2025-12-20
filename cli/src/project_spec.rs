@@ -86,6 +86,12 @@ enum ParameterType {
 }
 
 #[derive(Debug, Clone)]
+struct RecordField {
+    name: String,
+    ty: TypeExpr,
+}
+
+#[derive(Debug, Clone)]
 enum TypeExpr {
     String,
     Bool,
@@ -98,6 +104,8 @@ enum TypeExpr {
     List(Box<TypeExpr>),
     #[allow(dead_code)]
     Map(Box<TypeExpr>),
+    #[allow(dead_code)]
+    Record(Vec<RecordField>),
     Optional(Box<TypeExpr>),
 }
 
@@ -213,39 +221,117 @@ fn parse_parameter_type(spec: &ParameterSpec) -> Result<ParameterType> {
     }
 }
 
+fn split_top_level(input: &str, delimiter: char) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0usize;
+
+    for (idx, ch) in input.char_indices() {
+        match ch {
+            '[' | '{' => depth = depth.saturating_add(1),
+            ']' | '}' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+
+        if ch == delimiter && depth == 0 {
+            parts.push(input[start..idx].trim().to_string());
+            start = idx + ch.len_utf8();
+        }
+    }
+
+    parts.push(input[start..].trim().to_string());
+    parts
+}
+
+fn split_top_level_once(input: &str, delimiter: char) -> Option<(String, String)> {
+    let mut depth = 0usize;
+    for (idx, ch) in input.char_indices() {
+        match ch {
+            '[' | '{' => depth = depth.saturating_add(1),
+            ']' | '}' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+
+        if ch == delimiter && depth == 0 {
+            let left = input[..idx].trim().to_string();
+            let right = input[idx + ch.len_utf8()..].trim().to_string();
+            return Some((left, right));
+        }
+    }
+    None
+}
+
+fn strip_wrapped<'a>(raw: &'a str, prefix: &str, suffix: char) -> Option<&'a str> {
+    if raw.len() < prefix.len() + 1 {
+        return None;
+    }
+    if !raw[..prefix.len()].eq_ignore_ascii_case(prefix) {
+        return None;
+    }
+    if !raw.ends_with(suffix) {
+        return None;
+    }
+    Some(raw[prefix.len()..raw.len() - 1].trim())
+}
+
 fn parse_type_expr(raw: &str) -> Result<TypeExpr> {
     let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        bail!("Type expression cannot be empty");
+    }
+
     let (base, optional) = if let Some(stripped) = trimmed.strip_suffix('?') {
         (stripped.trim(), true)
     } else {
         (trimmed, false)
     };
 
-    let parsed = if let Some(inner) = base.strip_prefix("List[") {
-        let inner = inner
-            .strip_suffix(']')
-            .ok_or_else(|| anyhow!("Invalid List type '{}': missing closing ]", raw))?;
+    let parsed = if let Some(inner) = strip_wrapped(base, "List[", ']') {
         TypeExpr::List(Box::new(parse_type_expr(inner)?))
-    } else if let Some(inner) = base.strip_prefix("Map[String,") {
-        let inner = inner
-            .strip_suffix(']')
-            .ok_or_else(|| anyhow!("Invalid Map type '{}': missing closing ]", raw))?;
-        let inner = inner.trim_start_matches(',').trim();
-        if inner.is_empty() {
-            bail!("Map type '{}' is missing value type", raw);
+    } else if let Some(inner) = strip_wrapped(base, "Map[", ']') {
+        let parts = split_top_level(inner, ',');
+        if parts.len() != 2 {
+            bail!("Invalid Map type '{}': expected Map[String, T]", raw);
         }
-        TypeExpr::Map(Box::new(parse_type_expr(inner)?))
+        if !parts[0].eq_ignore_ascii_case("String") {
+            bail!("Invalid Map type '{}': key type must be String", raw);
+        }
+        TypeExpr::Map(Box::new(parse_type_expr(&parts[1])?))
+    } else if let Some(inner) =
+        strip_wrapped(base, "Record{", '}').or_else(|| strip_wrapped(base, "Dict{", '}'))
+    {
+        if inner.is_empty() {
+            bail!("Record type '{}' must declare at least one field", raw);
+        }
+        let mut seen = std::collections::HashSet::new();
+        let mut fields = Vec::new();
+        for field in split_top_level(inner, ',') {
+            let (name, ty_raw) = split_top_level_once(&field, ':')
+                .ok_or_else(|| anyhow!("Invalid Record field '{}': expected name: Type", field))?;
+            if name.is_empty() {
+                bail!("Invalid Record field '{}': missing field name", field);
+            }
+            if !seen.insert(name.clone()) {
+                bail!("Duplicate Record field '{}'", name);
+            }
+            fields.push(RecordField {
+                name,
+                ty: parse_type_expr(&ty_raw)?,
+            });
+        }
+        TypeExpr::Record(fields)
     } else {
-        match base {
-            "String" => TypeExpr::String,
-            "Bool" => TypeExpr::Bool,
-            "File" => TypeExpr::File,
-            "Directory" => TypeExpr::Directory,
-            "ParticipantSheet" => TypeExpr::ParticipantSheet,
-            "GenotypeRecord" => TypeExpr::GenotypeRecord,
-            "BiovaultContext" => TypeExpr::BiovaultContext,
+        let base_lower = base.to_ascii_lowercase();
+        match base_lower.as_str() {
+            "string" => TypeExpr::String,
+            "bool" => TypeExpr::Bool,
+            "file" => TypeExpr::File,
+            "directory" => TypeExpr::Directory,
+            "participantsheet" => TypeExpr::ParticipantSheet,
+            "genotyperecord" => TypeExpr::GenotypeRecord,
+            "biovaultcontext" => TypeExpr::BiovaultContext,
             other => bail!(
-                "Unsupported type '{}' (supported primitives: String, Bool, File, Directory, ParticipantSheet, GenotypeRecord, BiovaultContext, List[..], Map[String, ..])",
+                "Unsupported type '{}' (supported primitives: String, Bool, File, Directory, ParticipantSheet, GenotypeRecord, BiovaultContext, List[..], Map[String, ..], Record{{..}})",
                 other
             ),
         }
@@ -260,6 +346,55 @@ fn parse_type_expr(raw: &str) -> Result<TypeExpr> {
 
 pub fn validate_type_expr(raw: &str) -> Result<()> {
     parse_type_expr(raw).map(|_| ())
+}
+
+pub fn types_compatible(expected: &str, actual: &str) -> bool {
+    match (parse_type_expr(expected), parse_type_expr(actual)) {
+        (Ok(expected_ty), Ok(actual_ty)) => type_exprs_compatible(&expected_ty, &actual_ty),
+        _ => normalize_type_fallback(expected) == normalize_type_fallback(actual),
+    }
+}
+
+fn normalize_type_fallback(value: &str) -> String {
+    value.trim().trim_end_matches('?').to_ascii_lowercase()
+}
+
+fn type_exprs_compatible(expected: &TypeExpr, actual: &TypeExpr) -> bool {
+    match (expected, actual) {
+        (TypeExpr::Optional(inner), _) => type_exprs_compatible(inner, actual),
+        (_, TypeExpr::Optional(inner)) => type_exprs_compatible(expected, inner),
+        (TypeExpr::String, TypeExpr::String)
+        | (TypeExpr::Bool, TypeExpr::Bool)
+        | (TypeExpr::File, TypeExpr::File)
+        | (TypeExpr::Directory, TypeExpr::Directory)
+        | (TypeExpr::ParticipantSheet, TypeExpr::ParticipantSheet)
+        | (TypeExpr::GenotypeRecord, TypeExpr::GenotypeRecord)
+        | (TypeExpr::BiovaultContext, TypeExpr::BiovaultContext) => true,
+        (TypeExpr::List(expected_inner), TypeExpr::List(actual_inner)) => {
+            type_exprs_compatible(expected_inner, actual_inner)
+        }
+        (TypeExpr::Map(expected_inner), TypeExpr::Map(actual_inner)) => {
+            type_exprs_compatible(expected_inner, actual_inner)
+        }
+        (TypeExpr::Record(expected_fields), TypeExpr::Record(actual_fields)) => {
+            if expected_fields.len() != actual_fields.len() {
+                return false;
+            }
+            for expected_field in expected_fields {
+                let Some(actual_field) = actual_fields
+                    .iter()
+                    .find(|field| field.name == expected_field.name)
+                else {
+                    return false;
+                };
+                if !type_exprs_compatible(&expected_field.ty, &actual_field.ty) {
+                    return false;
+                }
+            }
+            true
+        }
+        _ => false,
+    }
 }
 
 pub fn generate_template_nf(spec: &ProjectSpec) -> Result<String> {
@@ -562,7 +697,9 @@ fn generate_preview_lines(name: &str, ty: &TypeExpr, indent: &str) -> Vec<String
             format!(r#"{indent}    println "[bv] {name}: (empty)""#),
             format!(r#"{indent}}}"#),
         ],
-        TypeExpr::Map(_) => vec![format!(r#"{indent}println "[bv] {name}: ${{{name}}}""#)],
+        TypeExpr::Map(_) | TypeExpr::Record(_) => {
+            vec![format!(r#"{indent}println "[bv] {name}: ${{{name}}}""#)]
+        }
         TypeExpr::Optional(inner) => {
             let mut lines = Vec::new();
             lines.push(format!(r#"{indent}if ({name} != null) {{"#));
@@ -589,7 +726,8 @@ fn generate_input_binding(name: &str, ty: &TypeExpr) -> String {
         TypeExpr::ParticipantSheet
         | TypeExpr::GenotypeRecord
         | TypeExpr::List(_)
-        | TypeExpr::Map(_) => format!("def {name} = params.{name}"),
+        | TypeExpr::Map(_)
+        | TypeExpr::Record(_) => format!("def {name} = params.{name}"),
         TypeExpr::Optional(inner) => generate_input_binding(name, inner),
     }
 }
@@ -611,6 +749,14 @@ fn generate_input_comment(ty: &TypeExpr) -> Option<String> {
             "// TODO: Populate Map[String, {}] value",
             describe_type(inner)
         )),
+        TypeExpr::Record(fields) => {
+            let field_list = fields
+                .iter()
+                .map(|field| format!("{}: {}", field.name, describe_type(&field.ty)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            Some(format!("// TODO: Populate Record{{{}}} value", field_list))
+        }
         TypeExpr::Optional(inner) => generate_input_comment(inner),
         _ => None,
     }
@@ -628,6 +774,14 @@ fn describe_type(ty: &TypeExpr) -> String {
         TypeExpr::BiovaultContext => "BiovaultContext".to_string(),
         TypeExpr::List(inner) => format!("List[{}]", describe_type(inner)),
         TypeExpr::Map(inner) => format!("Map[String, {}]", describe_type(inner)),
+        TypeExpr::Record(fields) => {
+            let field_list = fields
+                .iter()
+                .map(|field| format!("{}: {}", field.name, describe_type(&field.ty)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("Record{{{}}}", field_list)
+        }
         TypeExpr::Optional(inner) => format!("{}?", describe_type(inner)),
     }
 }
@@ -663,7 +817,13 @@ impl TypeExpr {
 
     /// Returns common composite types for inputs
     fn common_input_composites() -> Vec<&'static str> {
-        vec!["List[File]", "List[Directory]"]
+        vec![
+            "List[File]",
+            "List[Directory]",
+            "List[GenotypeRecord]",
+            "Map[String, File]",
+            "Record{bed: File, bim: File, fam: File}",
+        ]
     }
 }
 
@@ -687,6 +847,7 @@ pub fn get_supported_input_types() -> TypeInfo {
             "Directory".to_string(),
             "String".to_string(),
             "List[File]".to_string(),
+            "Map[String, File]".to_string(),
         ],
     }
 }
@@ -720,6 +881,8 @@ pub fn get_common_formats() -> Vec<String> {
         "tsv".to_string(),
         "txt".to_string(),
         "json".to_string(),
+        "yaml".to_string(),
+        "yml".to_string(),
         "vcf".to_string(),
         "fasta".to_string(),
         "fastq".to_string(),
