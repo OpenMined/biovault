@@ -1,6 +1,6 @@
 [package]
 name = "biovault"
-version = "0.1.128"
+version = "0.1.129"
 edition = "2021"
 authors = ["Madhava Jay <madhava@openmined.org>"]
 description = "A bioinformatics data vault CLI tool"
@@ -52,7 +52,7 @@ lazy_static = "1.4"
 notify = "6.1"
 libc = "0.2"
 csv = "1.3"
-syftbox-sdk = { version = "0.1.9", path = "../syftbox-sdk", features = ["crypto", "process", "auth"] }
+syftbox-sdk = { version = "0.1.9", path = "../syftbox-sdk", features = ["crypto", "process", "auth", "embedded"] }
 
 [dev-dependencies.syftbox-sdk]
 version = "0.1.9"

@@ -28,6 +28,13 @@ fn configure_child_process(cmd: &mut Command) {
 #[cfg(not(target_os = "windows"))]
 fn configure_child_process(_cmd: &mut Command) {}
 
+fn syftbox_backend_is_embedded() -> bool {
+    env::var("BV_SYFTBOX_BACKEND")
+        .ok()
+        .map(|v| v.eq_ignore_ascii_case("embedded"))
+        .unwrap_or(false)
+}
+
 #[cfg(target_os = "macos")]
 type HomebrewLogger = Arc<dyn Fn(&str) + Send + Sync>;
 
@@ -383,6 +390,21 @@ pub fn check_single_dependency(
         });
     }
 
+    if dep.name == "syftbox" && syftbox_backend_is_embedded() {
+        return Ok(DependencyResult {
+            name: dep.name.clone(),
+            found: true,
+            path: None,
+            version: None,
+            running: None,
+            skipped: true,
+            skip_reason: Some("Provided by BioVault (embedded)".to_string()),
+            description: Some(dep.description.clone()),
+            website: dep.website.clone(),
+            install_instructions: Some(dep.install_instructions.clone()),
+        });
+    }
+
     // On Windows, Nextflow and Java are run via Docker, so we treat them as satisfied (not required)
     // to avoid blocking onboarding/UI and to avoid prompting for installation.
     if std::env::consts::OS == "windows" && (dep.name == "java" || dep.name == "nextflow") {
@@ -687,6 +709,22 @@ pub fn check_dependencies_result() -> Result<DependencyCheckResult> {
                 running: None,
                 skipped: true,
                 skip_reason: Some(reason),
+                description: Some(dep.description.clone()),
+                website: dep.website.clone(),
+                install_instructions: Some(dep.install_instructions.clone()),
+            });
+            continue;
+        }
+
+        if dep.name == "syftbox" && syftbox_backend_is_embedded() {
+            results.push(DependencyResult {
+                name: dep.name.clone(),
+                found: true,
+                path: None,
+                version: None,
+                running: None,
+                skipped: true,
+                skip_reason: Some("Provided by BioVault (embedded)".to_string()),
                 description: Some(dep.description.clone()),
                 website: dep.website.clone(),
                 install_instructions: Some(dep.install_instructions.clone()),

@@ -482,6 +482,12 @@ enum Commands {
         command: SyftboxCommands,
     },
 
+    #[command(about = "Run an embedded SyftBox daemon host (no BioVault message processing)")]
+    Syftboxd {
+        #[command(subcommand)]
+        command: SyftboxdCommands,
+    },
+
     #[command(about = "Manage Syft Crypto keys and bundles")]
     Key {
         #[command(subcommand)]
@@ -1046,6 +1052,26 @@ enum SyftboxCommands {
         data_dir: Option<String>,
         #[arg(long, help = "SyftBox client URL to store in config")]
         client_url: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum SyftboxdCommands {
+    #[command(about = "Start the syftboxd host")]
+    Start {
+        #[arg(long, help = "Run in foreground (no background)")]
+        foreground: bool,
+    },
+    #[command(about = "Stop the running syftboxd host")]
+    Stop,
+    #[command(about = "Show syftboxd status")]
+    Status,
+    #[command(about = "View syftboxd logs")]
+    Logs {
+        #[arg(long, help = "Follow logs (tail -f)")]
+        follow: bool,
+        #[arg(long, help = "Number of lines to show (default: 50)")]
+        lines: Option<usize>,
     },
 }
 
@@ -2451,6 +2477,28 @@ async fn async_main_with(cli: Cli) -> Result<()> {
                 }
                 DaemonCommands::Reinstall => {
                     commands::daemon::reinstall_service(&config).await?;
+                }
+            }
+        }
+        Commands::Syftboxd { command } => {
+            let config = if let Ok(config_json) = std::env::var("BV_SYFTBOXD_CONFIG") {
+                serde_json::from_str(&config_json)?
+            } else {
+                biovault::config::Config::load()?
+            };
+
+            match command {
+                SyftboxdCommands::Start { foreground } => {
+                    commands::syftboxd::start(&config, foreground).await?;
+                }
+                SyftboxdCommands::Stop => {
+                    commands::syftboxd::stop(&config).await?;
+                }
+                SyftboxdCommands::Status => {
+                    commands::syftboxd::status(&config).await?;
+                }
+                SyftboxdCommands::Logs { follow, lines } => {
+                    commands::syftboxd::logs(&config, follow, lines).await?;
                 }
             }
         }
