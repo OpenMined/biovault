@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -81,6 +81,8 @@ pub struct DatasetManifest {
     pub schema: Option<String>,
     #[serde(default)]
     pub version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shape: Option<String>,
     #[serde(default)]
     pub http_relay_servers: Vec<String>,
     #[serde(default)]
@@ -775,4 +777,245 @@ fn update_local_mappings(entries: Vec<(String, String)>) -> Result<()> {
     }
 
     crate::data::datasets::update_local_mappings(&entries)
+}
+
+pub fn infer_dataset_shape(manifest: &DatasetManifest) -> Option<String> {
+    if let Some(shape) = dataset_shape_hint(manifest) {
+        return Some(shape);
+    }
+    if manifest
+        .assets
+        .values()
+        .any(|asset| asset.kind.as_deref() == Some("twin_list"))
+    {
+        return Some("List[GenotypeRecord]".to_string());
+    }
+    if let Some(shape) = infer_plink_map_shape(&manifest.assets) {
+        return Some(shape);
+    }
+    if manifest.assets.is_empty() {
+        return None;
+    }
+    if manifest.assets.len() == 1 {
+        return Some("File".to_string());
+    }
+    Some("Map[String, File]".to_string())
+}
+
+fn dataset_shape_hint(manifest: &DatasetManifest) -> Option<String> {
+    let shape = manifest
+        .shape
+        .as_deref()
+        .or_else(|| manifest.extra.get("shape").and_then(|value| value.as_str()))?;
+    if crate::project_spec::validate_type_expr(shape).is_ok() {
+        Some(shape.to_string())
+    } else {
+        None
+    }
+}
+
+fn infer_plink_map_shape(assets: &BTreeMap<String, DatasetAsset>) -> Option<String> {
+    let mut groups: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for asset in assets.values() {
+        let Some(filename) = extract_asset_filename(asset) else {
+            continue;
+        };
+        let path = Path::new(&filename);
+        let ext = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| ext.to_ascii_lowercase())
+            .unwrap_or_default();
+        if ext != "bed" && ext != "bim" && ext != "fam" {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+            continue;
+        };
+        groups.entry(stem.to_string()).or_default().insert(ext);
+    }
+
+    if groups.is_empty() {
+        return None;
+    }
+
+    let complete = groups
+        .values()
+        .all(|exts| exts.contains("bed") && exts.contains("bim") && exts.contains("fam"));
+    if complete {
+        Some("Map[String, Record{bed: File, bim: File, fam: File}]".to_string())
+    } else {
+        None
+    }
+}
+
+fn extract_asset_filename(asset: &DatasetAsset) -> Option<String> {
+    if let Some(path) = asset
+        .mappings
+        .as_ref()
+        .and_then(|mapping| mapping.private.as_ref())
+        .and_then(|endpoint| endpoint.file_path.as_ref())
+    {
+        return filename_from_hint(path);
+    }
+    if let Some(path) = asset
+        .mappings
+        .as_ref()
+        .and_then(|mapping| mapping.mock.as_ref())
+        .and_then(|endpoint| endpoint.file_path.as_ref())
+    {
+        return filename_from_hint(path);
+    }
+    if let Some(url) = asset.url.as_ref() {
+        if let Some(name) = filename_from_hint(url) {
+            return Some(name);
+        }
+    }
+    if let Some(url) = extract_url_hint(asset.mock.as_ref()) {
+        if let Some(name) = filename_from_hint(&url) {
+            return Some(name);
+        }
+    }
+    if let Some(url) = extract_url_hint(asset.private.as_ref()) {
+        if let Some(name) = filename_from_hint(&url) {
+            return Some(name);
+        }
+    }
+    None
+}
+
+fn extract_url_hint(value: Option<&YamlValue>) -> Option<String> {
+    let value = value?;
+    match value {
+        YamlValue::String(s) => Some(s.clone()),
+        YamlValue::Mapping(map) => {
+            if let Some(url) = map
+                .get(YamlValue::String("url".to_string()))
+                .and_then(|entry| entry.as_str())
+            {
+                return Some(url.to_string());
+            }
+            if let Some(entries) = map
+                .get(YamlValue::String("entries".to_string()))
+                .and_then(|entry| entry.as_sequence())
+            {
+                for entry in entries {
+                    if let Some(entry_map) = entry.as_mapping() {
+                        if let Some(url) = entry_map
+                            .get(YamlValue::String("url".to_string()))
+                            .and_then(|value| value.as_str())
+                        {
+                            return Some(url.to_string());
+                        }
+                        if let Some(path) = entry_map
+                            .get(YamlValue::String("file_path".to_string()))
+                            .and_then(|value| value.as_str())
+                        {
+                            return Some(path.to_string());
+                        }
+                    }
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+fn filename_from_hint(hint: &str) -> Option<String> {
+    let trimmed = hint.split('#').next().unwrap_or(hint).trim_end_matches('/');
+    let last = trimmed.rsplit('/').next().unwrap_or(trimmed);
+    if last.is_empty() {
+        None
+    } else {
+        Some(last.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn asset_with_path(path: &str) -> DatasetAsset {
+        DatasetAsset {
+            mappings: Some(DatasetAssetMapping {
+                private: Some(DatasetAssetMappingEndpoint {
+                    file_path: Some(path.to_string()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn infer_shape_prefers_declared_shape() {
+        let manifest = DatasetManifest {
+            name: "declared".to_string(),
+            shape: Some("Map[String, File]".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            infer_dataset_shape(&manifest),
+            Some("Map[String, File]".to_string())
+        );
+    }
+
+    #[test]
+    fn infer_shape_for_twin_list() {
+        let mut manifest = DatasetManifest {
+            name: "twin".to_string(),
+            ..Default::default()
+        };
+        manifest.assets.insert(
+            "genotypes".to_string(),
+            DatasetAsset {
+                kind: Some("twin_list".to_string()),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(
+            infer_dataset_shape(&manifest),
+            Some("List[GenotypeRecord]".to_string())
+        );
+    }
+
+    #[test]
+    fn infer_shape_for_plink_map() {
+        let mut manifest = DatasetManifest {
+            name: "gwas".to_string(),
+            ..Default::default()
+        };
+        manifest.assets.insert(
+            "chechen_bed".to_string(),
+            asset_with_path("/data/Chechen_qc.bed"),
+        );
+        manifest.assets.insert(
+            "chechen_bim".to_string(),
+            asset_with_path("/data/Chechen_qc.bim"),
+        );
+        manifest.assets.insert(
+            "chechen_fam".to_string(),
+            asset_with_path("/data/Chechen_qc.fam"),
+        );
+        manifest.assets.insert(
+            "circassian_bed".to_string(),
+            asset_with_path("/data/Circassian_qc.bed"),
+        );
+        manifest.assets.insert(
+            "circassian_bim".to_string(),
+            asset_with_path("/data/Circassian_qc.bim"),
+        );
+        manifest.assets.insert(
+            "circassian_fam".to_string(),
+            asset_with_path("/data/Circassian_qc.fam"),
+        );
+
+        assert_eq!(
+            infer_dataset_shape(&manifest),
+            Some("Map[String, Record{bed: File, bim: File, fam: File}]".to_string())
+        );
+    }
 }

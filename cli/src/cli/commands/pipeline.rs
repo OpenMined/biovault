@@ -298,6 +298,14 @@ pub async fn run_pipeline(
             step_args.push(resolved_value);
         }
 
+        for param in &project_spec.parameters {
+            let override_key = (step.id.clone(), param.name.clone());
+            if let Some(value) = step_overrides.get(&override_key) {
+                step_args.push("--set".to_string());
+                step_args.push(format!("params.{}={}", param.name, value));
+            }
+        }
+
         if !nextflow_passthrough.is_empty() {
             step_args.extend(nextflow_passthrough.clone());
         }
@@ -895,7 +903,7 @@ fn is_type_placeholder(binding: &str, expected: &str) -> bool {
     if trimmed.contains('(') || trimmed.contains(')') {
         return false;
     }
-    normalize_type(trimmed) == normalize_type(expected)
+    crate::project_spec::types_compatible(trimmed, expected)
 }
 
 fn parse_typed_literal(value: &str) -> Option<(String, String)> {
@@ -1923,11 +1931,7 @@ fn resolve_pipeline_path(file: Option<String>) -> PathBuf {
 }
 
 fn types_compatible(expected: &str, actual: &str) -> bool {
-    normalize_type(expected) == normalize_type(actual)
-}
-
-fn normalize_type(value: &str) -> String {
-    value.trim().trim_end_matches('?').to_ascii_lowercase()
+    crate::project_spec::types_compatible(expected, actual)
 }
 
 #[cfg(test)]
@@ -2194,21 +2198,6 @@ mod tests {
     }
 
     #[test]
-    fn test_normalize_type_simple() {
-        assert_eq!(normalize_type("File"), "file");
-    }
-
-    #[test]
-    fn test_normalize_type_optional() {
-        assert_eq!(normalize_type("File?"), "file");
-    }
-
-    #[test]
-    fn test_normalize_type_with_whitespace() {
-        assert_eq!(normalize_type("  File?  "), "file");
-    }
-
-    #[test]
     fn test_types_compatible_same() {
         assert!(types_compatible("File", "File"));
     }
@@ -2227,6 +2216,18 @@ mod tests {
     #[test]
     fn test_types_compatible_different() {
         assert!(!types_compatible("File", "Directory"));
+    }
+
+    #[test]
+    fn test_types_compatible_map_and_record() {
+        assert!(types_compatible(
+            "Map[String, Record{bed: File, bim: File, fam: File}]",
+            "map[string, record{fam: file, bed: file, bim: file}]"
+        ));
+        assert!(!types_compatible(
+            "Map[String, Record{bed: File, bim: File, fam: File}]",
+            "Map[String, File]"
+        ));
     }
 
     #[test]

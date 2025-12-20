@@ -178,9 +178,10 @@ def __bvBindInput(name, meta) {
 
     // Parse type structure
     def typeInfo = __bvParseType(rawType)
+    def baseDir = file(path).parent
 
     // Bind based on type
-    switch(typeInfo.base) {
+    switch(typeInfo.kind) {
         case 'String':
         case 'Bool':
             return path
@@ -192,11 +193,20 @@ def __bvBindInput(name, meta) {
 
         case 'List':
             def innerType = typeInfo.inner
-            if (innerType == 'GenotypeRecord') {
+            if (innerType?.kind == 'GenotypeRecord') {
                 return __bvLoadGenotypeRecords(path, format, mapping)
-            } else if (innerType == 'File') {
+            } else if (innerType?.kind == 'File') {
+                if (__bvIsStructuredFormat(format, path)) {
+                    def rawList = __bvLoadStructuredInput(path, format)
+                    def coerced = __bvCoerceStructuredInput(rawList, typeInfo, baseDir)
+                    return Channel.from(coerced ?: [])
+                }
                 return Channel.fromPath(path).splitCsv(header: true)
                     .map { row -> file(row.path) }
+            } else if (__bvIsStructuredFormat(format, path)) {
+                def rawList = __bvLoadStructuredInput(path, format)
+                def coerced = __bvCoerceStructuredInput(rawList, typeInfo, baseDir)
+                return Channel.from(coerced ?: [])
             } else {
                 // Generic list - just return the path
                 return Channel.fromPath(path)
@@ -209,6 +219,11 @@ def __bvBindInput(name, meta) {
             // Single record - load from CSV/JSON and take first
             return __bvLoadGenotypeRecords(path, format, mapping).first()
 
+        case 'Map':
+        case 'Record':
+            def rawStructured = __bvLoadStructuredInput(path, format)
+            return __bvCoerceStructuredInput(rawStructured, typeInfo, baseDir)
+
         default:
             println "[bv] WARNING: Unknown type '${typeName}', passing path as-is"
             return Channel.fromPath(path)
@@ -216,16 +231,218 @@ def __bvBindInput(name, meta) {
 }
 
 def __bvParseType(typeName) {
-    // Parse List[T], Map[K,V], etc.
-    if (typeName.startsWith('List[') && typeName.endsWith(']')) {
-        def inner = typeName[5..-2]
-        return [base: 'List', inner: inner]
+    def trimmed = typeName?.toString()?.trim()
+    if (!trimmed) {
+        return [kind: 'Unknown', optional: false]
     }
-    if (typeName.startsWith('Map[') && typeName.endsWith(']')) {
-        def inner = typeName[4..-2]
-        return [base: 'Map', inner: inner]
+
+    def optional = trimmed.endsWith('?')
+    if (optional) {
+        trimmed = trimmed[0..-2].trim()
     }
-    return [base: typeName, inner: null]
+
+    def lowered = trimmed.toLowerCase()
+    if (lowered.startsWith('list[') && trimmed.endsWith(']')) {
+        def inner = trimmed[5..-2]
+        return [kind: 'List', inner: __bvParseType(inner), optional: optional]
+    }
+    if (lowered.startsWith('map[') && trimmed.endsWith(']')) {
+        def inner = trimmed[4..-2]
+        def parts = __bvSplitTopLevel(inner, ',')
+        if (parts.size() != 2) {
+            throw new IllegalArgumentException("Invalid Map type '${typeName}'")
+        }
+        if (!parts[0].trim().equalsIgnoreCase('String')) {
+            throw new IllegalArgumentException("Map key type must be String in '${typeName}'")
+        }
+        return [kind: 'Map', value: __bvParseType(parts[1]), optional: optional]
+    }
+    if ((lowered.startsWith('record{') || lowered.startsWith('dict{')) && trimmed.endsWith('}')) {
+        def inner = trimmed.substring(trimmed.indexOf('{') + 1, trimmed.length() - 1)
+        if (!inner?.trim()) {
+            throw new IllegalArgumentException("Record type '${typeName}' must declare fields")
+        }
+        def fields = []
+        def seen = new HashSet<String>()
+        __bvSplitTopLevel(inner, ',').each { field ->
+            def parts = __bvSplitTopLevelOnce(field, ':')
+            if (!parts) {
+                throw new IllegalArgumentException("Invalid Record field '${field}'")
+            }
+            def fieldName = parts[0]?.trim()
+            def fieldType = parts[1]?.trim()
+            if (!fieldName) {
+                throw new IllegalArgumentException("Record field missing name in '${field}'")
+            }
+            if (seen.contains(fieldName)) {
+                throw new IllegalArgumentException("Duplicate Record field '${fieldName}'")
+            }
+            seen.add(fieldName)
+            fields << [name: fieldName, type: __bvParseType(fieldType)]
+        }
+        return [kind: 'Record', fields: fields, optional: optional]
+    }
+
+    return [kind: __bvNormalizeTypeName(trimmed), optional: optional]
+}
+
+def __bvNormalizeTypeName(typeName) {
+    switch(typeName?.toString()?.toLowerCase()) {
+        case 'string':
+            return 'String'
+        case 'bool':
+            return 'Bool'
+        case 'file':
+            return 'File'
+        case 'directory':
+            return 'Directory'
+        case 'participantsheet':
+            return 'ParticipantSheet'
+        case 'genotyperecord':
+            return 'GenotypeRecord'
+        case 'biovaultcontext':
+            return 'BiovaultContext'
+        default:
+            return typeName
+    }
+}
+
+def __bvSplitTopLevel(text, delimiter) {
+    if (text == null) {
+        return []
+    }
+    def parts = []
+    int depth = 0
+    int start = 0
+    for (int i = 0; i < text.length(); i++) {
+        def ch = text.charAt(i)
+        if (ch == '[' || ch == '{') {
+            depth++
+        } else if (ch == ']' || ch == '}') {
+            depth = Math.max(0, depth - 1)
+        }
+        if (ch == delimiter && depth == 0) {
+            parts << text.substring(start, i).trim()
+            start = i + 1
+        }
+    }
+    parts << text.substring(start).trim()
+    return parts.findAll { it != null && it != '' }
+}
+
+def __bvSplitTopLevelOnce(text, delimiter) {
+    if (text == null) {
+        return null
+    }
+    int depth = 0
+    for (int i = 0; i < text.length(); i++) {
+        def ch = text.charAt(i)
+        if (ch == '[' || ch == '{') {
+            depth++
+        } else if (ch == ']' || ch == '}') {
+            depth = Math.max(0, depth - 1)
+        }
+        if (ch == delimiter && depth == 0) {
+            def left = text.substring(0, i).trim()
+            def right = text.substring(i + 1).trim()
+            return [left, right]
+        }
+    }
+    return null
+}
+
+def __bvIsStructuredFormat(format, path) {
+    def fmt = format?.toString()?.toLowerCase()
+    if (fmt == 'json' || fmt == 'yaml' || fmt == 'yml') {
+        return true
+    }
+    def lowerPath = path?.toString()?.toLowerCase()
+    return lowerPath?.endsWith('.json') || lowerPath?.endsWith('.yaml') || lowerPath?.endsWith('.yml')
+}
+
+def __bvLoadStructuredInput(path, format) {
+    def pathFile = file(path)
+    def fmt = format?.toString()?.toLowerCase()
+    if (!fmt || fmt == 'unknown') {
+        fmt = __bvIsStructuredFormat(format, path) ? (pathFile.toString().toLowerCase().endsWith('.json') ? 'json' : 'yaml') : null
+    }
+    if (fmt == 'json') {
+        return new groovy.json.JsonSlurper().parse(pathFile)
+    }
+    if (fmt == 'yaml' || fmt == 'yml') {
+        return new YamlSlurper().parse(pathFile)
+    }
+    throw new IllegalArgumentException("Unsupported structured input format '${format}' for '${path}'")
+}
+
+def __bvResolveStructuredPath(value, baseDir) {
+    if (value == null) {
+        return null
+    }
+    def pathStr = value.toString()
+    if (!pathStr.startsWith('/') && baseDir) {
+        return new File(baseDir.toString(), pathStr).toString()
+    }
+    return pathStr
+}
+
+def __bvCoerceStructuredInput(value, typeInfo, baseDir) {
+    if (typeInfo?.optional && value == null) {
+        return null
+    }
+    switch(typeInfo.kind) {
+        case 'String':
+            return value?.toString()
+        case 'Bool':
+            if (value instanceof Boolean) {
+                return value
+            }
+            return value?.toString()?.toBoolean()
+        case 'File':
+            def resolved = __bvResolveStructuredPath(value, baseDir)
+            return resolved ? file(resolved) : null
+        case 'Directory':
+            return __bvResolveStructuredPath(value, baseDir)
+        case 'List':
+            if (!(value instanceof Collection)) {
+                throw new IllegalArgumentException("Expected list for List input, got ${value?.getClass()?.simpleName}")
+            }
+            return value.collect { item ->
+                __bvCoerceStructuredInput(item, typeInfo.inner, baseDir)
+            }
+        case 'Map':
+            if (!(value instanceof Map)) {
+                throw new IllegalArgumentException("Expected map for Map input, got ${value?.getClass()?.simpleName}")
+            }
+            return value.collectEntries { k, v ->
+                [k.toString(), __bvCoerceStructuredInput(v, typeInfo.value, baseDir)]
+            }
+        case 'Record':
+            if (!(value instanceof Map)) {
+                throw new IllegalArgumentException("Expected map for Record input, got ${value?.getClass()?.simpleName}")
+            }
+            def result = [:]
+            def rawMap = value
+            typeInfo.fields.each { field ->
+                if (!rawMap.containsKey(field.name)) {
+                    if (field.type?.optional) {
+                        result[field.name] = null
+                        return
+                    }
+                    throw new IllegalArgumentException("Record missing required field '${field.name}'")
+                }
+                result[field.name] = __bvCoerceStructuredInput(rawMap[field.name], field.type, baseDir)
+            }
+            def extraKeys = rawMap.keySet().findAll { key ->
+                !typeInfo.fields.any { field -> field.name == key.toString() }
+            }
+            if (!extraKeys.isEmpty()) {
+                println "[bv] WARNING: Record input has unexpected keys ${extraKeys}"
+            }
+            return result
+        default:
+            return value
+    }
 }
 
 def __bvLoadGenotypeRecords(path, format, mapping) {

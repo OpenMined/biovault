@@ -54,7 +54,21 @@ pub fn upsert_dataset(db: &mut BioVaultDb, manifest: &DatasetManifest) -> Result
 
     let http_relay_servers_json = serde_json::to_string(&manifest.http_relay_servers)
         .context("Failed to serialize http_relay_servers")?;
-    let extra_json = serde_json::to_value(&manifest.extra).unwrap_or(serde_json::Value::Null);
+    let mut extra_json =
+        serde_json::to_value(&manifest.extra).unwrap_or_else(|_| serde_json::json!({}));
+    if let Some(shape) = &manifest.shape {
+        match &mut extra_json {
+            serde_json::Value::Object(map) => {
+                map.insert(
+                    "shape".to_string(),
+                    serde_json::Value::String(shape.clone()),
+                );
+            }
+            _ => {
+                extra_json = serde_json::json!({ "shape": shape });
+            }
+        }
+    }
 
     let dataset_id: i64 = tx
         .query_row(
@@ -434,6 +448,11 @@ pub fn build_manifest_from_db(
         extra: serde_json::from_value(dataset.extra.clone()).unwrap_or_default(),
         ..Default::default()
     };
+
+    if let Some(shape) = manifest.extra.get("shape").and_then(|value| value.as_str()) {
+        manifest.shape = Some(shape.to_string());
+        manifest.extra.remove("shape");
+    }
 
     for a in assets {
         let asset = DatasetAsset {
