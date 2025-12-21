@@ -97,9 +97,9 @@ jobs:
       - name: Setup Go (syftbox)
         uses: actions/setup-go@v5
         with:
-          go-version-file: syftbox/go.mod
+          go-version-file: syftbox-sdk/syftbox/go.mod
           cache: true
-          cache-dependency-path: syftbox/go.sum
+          cache-dependency-path: syftbox-sdk/syftbox/go.sum
 
       - name: Install Nextflow
         run: |
