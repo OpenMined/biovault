@@ -29,7 +29,10 @@ impl Drop for MessageRpcWatcherHandle {
 
 /// Start watching the SyftBox RPC message endpoint for incoming/outgoing message activity.
 /// Calls `on_sync` with any new message IDs after each filesystem event + an initial sync.
-pub fn start_message_rpc_watcher<F>(config: Config, on_sync: F) -> crate::Result<MessageRpcWatcherHandle>
+pub fn start_message_rpc_watcher<F>(
+    config: Config,
+    on_sync: F,
+) -> crate::Result<MessageRpcWatcherHandle>
 where
     F: FnMut(&[String]) + Send + 'static,
 {
