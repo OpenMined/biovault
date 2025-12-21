@@ -9,4 +9,4 @@ pub use models::{
     Message, MessageStatus, MessageThreadSummary, MessageType, SyncStatus, ThreadFilter,
 };
 pub use sync::MessageSync;
-pub use watcher::start_message_rpc_watcher;
+pub use watcher::{start_message_rpc_watcher, MessageRpcWatcherHandle};
