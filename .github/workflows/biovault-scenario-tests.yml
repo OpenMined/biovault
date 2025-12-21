@@ -35,7 +35,7 @@ jobs:
         with:
           workspaces: |
             cli -> target
-            syftbox/rust -> target
+            syftbox-sdk/syftbox/rust -> target
 
       - name: Install uv
         uses: astral-sh/setup-uv@v3
@@ -47,7 +47,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version-file: syftbox/go.mod
+          go-version-file: syftbox-sdk/syftbox/go.mod
 
       - name: Install Nextflow
         run: |
