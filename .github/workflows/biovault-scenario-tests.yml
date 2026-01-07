@@ -22,8 +22,11 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
+
+      - name: Setup workspace dependencies
+        run: |
+          chmod +x scripts/setup-workspace.sh
+          ./scripts/setup-workspace.sh
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
@@ -35,7 +38,7 @@ jobs:
         with:
           workspaces: |
             cli -> target
-            syftbox-sdk/syftbox/rust -> target
+            syftbox/rust -> target
 
       - name: Install uv
         uses: astral-sh/setup-uv@v3
@@ -47,7 +50,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version-file: syftbox-sdk/syftbox/go.mod
+          go-version-file: syftbox/go.mod
 
       - name: Install Nextflow
         run: |

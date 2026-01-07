@@ -19,7 +19,7 @@ EOF
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SANDBOX_DIR="${SANDBOX_DIR:-$ROOT_DIR/sandbox}"
-SYFTBOX_DIR="$ROOT_DIR/syftbox-sdk/syftbox"
+SYFTBOX_DIR="$ROOT_DIR/syftbox"
 CLI_DIR="$ROOT_DIR/cli"
 SBENV_BIN="$ROOT_DIR/sbenv/sbenv"
 SERVER_URL="${SYFTBOX_SERVER_URL:-http://localhost:8080}"

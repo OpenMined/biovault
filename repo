@@ -1,0 +1,1609 @@
+#!/bin/bash
+# repo - Workspace dependency management tool
+# Version: 1.0.0
+# Keep in sync across: biovault-desktop, syftbox-sdk, biovault, biovault-beaver
+set -euo pipefail
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+NC='\033[0m'
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+MANIFEST_FILE="${MANIFEST_FILE:-manifest.xml}"
+MANIFEST_URL="${MANIFEST_URL:-}"
+MANIFEST_BRANCH="${MANIFEST_BRANCH:-}"
+REPO_BIN_DIR="${REPO_BIN_DIR:-$ROOT_DIR/.repo-bin}"
+REPO_BIN="${REPO_BIN:-$REPO_BIN_DIR/repo}"
+MANIFEST_REPO_DIR="${MANIFEST_REPO_DIR:-$ROOT_DIR/.repo-manifest}"
+MANIFEST_BRANCH_DEFAULT=""
+
+cd "$ROOT_DIR"
+
+usage() {
+  cat <<'EOF'
+Usage: ./repo [OPTIONS]
+
+Options:
+  (none)              Show repo tree with branch/dirty status
+  --init [--https]    Initialize repo workspace and sync deps
+  sync                Sync workspace to manifest (repo sync)
+  fetch [-j N]        Fetch remotes for all repos and show ahead/behind
+  pull [--rebase]     Pull updates for all repos on branches
+  ssh                 Rewrite remotes to SSH for all repos
+  pin                 Update manifest.xml to current repo SHAs
+  main                Checkout main in all repos (no reset)
+  switch [-b] <branch> <targets...>
+                      Checkout a branch across selected repos
+  track <target> <rev>
+                      Update manifest revision for a repo (branch/tag/sha)
+  <target> <rev>      Shortcut for "track <target> <rev>"
+  --status            Show repo tool status
+  --branch [name]     Checkout/create branch in all repos
+  checkout <rev> <target>
+                      Checkout a revision in a repo or all repos
+                      target: repo path, repo name, or "all"
+                      --reset: discard local changes before checkout
+  --help, -h          Show this help
+EOF
+}
+
+REPO_CMD=()
+REPO_TARGETS=()
+
+require_repo() {
+  if command -v repo >/dev/null 2>&1; then
+    REPO_CMD=(repo)
+    return
+  fi
+
+  if command -v brew >/dev/null 2>&1; then
+    local brew_prefix
+    brew_prefix="$(brew --prefix repo 2>/dev/null || true)"
+    if [[ -n "$brew_prefix" && -x "$brew_prefix/bin/repo" ]]; then
+      REPO_CMD=("$brew_prefix/bin/repo")
+      return
+    fi
+
+    if brew install repo >/dev/null 2>&1; then
+      brew_prefix="$(brew --prefix repo 2>/dev/null || true)"
+      if [[ -n "$brew_prefix" && -x "$brew_prefix/bin/repo" ]]; then
+        REPO_CMD=("$brew_prefix/bin/repo")
+        return
+      fi
+      if command -v repo >/dev/null 2>&1; then
+        REPO_CMD=(repo)
+        return
+      fi
+    fi
+  fi
+
+  if [[ -x "$REPO_BIN" ]]; then
+    REPO_CMD=("$REPO_BIN")
+    return
+  fi
+
+  mkdir -p "$REPO_BIN_DIR"
+  if command -v python >/dev/null 2>&1; then
+    python - <<'PY'
+import pathlib
+import urllib.request
+
+dest = pathlib.Path(".repo-bin/repo")
+dest.write_bytes(urllib.request.urlopen("https://storage.googleapis.com/git-repo-downloads/repo").read())
+dest.chmod(0o755)
+PY
+  elif command -v curl >/dev/null 2>&1; then
+    curl -s https://storage.googleapis.com/git-repo-downloads/repo -o "$REPO_BIN"
+    chmod +x "$REPO_BIN"
+  else
+    echo "repo tool not found. Install from https://github.com/GerritCodeReview/git-repo" >&2
+    exit 1
+  fi
+
+  if [[ -x "$REPO_BIN" ]]; then
+    REPO_CMD=("$REPO_BIN")
+    return
+  fi
+
+  echo "repo tool not found and auto-download failed. Install from https://github.com/GerritCodeReview/git-repo" >&2
+  exit 1
+}
+
+resolve_manifest_url() {
+  if [[ -n "$MANIFEST_URL" ]]; then
+    echo "$MANIFEST_URL"
+    return
+  fi
+
+  if git -C "$ROOT_DIR" cat-file -e "HEAD:$MANIFEST_FILE" 2>/dev/null; then
+    MANIFEST_BRANCH_DEFAULT="$(git -C "$ROOT_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)"
+    echo "file://$ROOT_DIR"
+    return
+  fi
+
+  if [[ ! -f "$MANIFEST_FILE" ]]; then
+    echo "Manifest not found: $MANIFEST_FILE" >&2
+    exit 1
+  fi
+
+  mkdir -p "$MANIFEST_REPO_DIR"
+  if [[ ! -d "$MANIFEST_REPO_DIR/.git" ]]; then
+    git -C "$MANIFEST_REPO_DIR" init >/dev/null 2>&1
+  fi
+  git -C "$MANIFEST_REPO_DIR" checkout -B main >/dev/null 2>&1 || true
+  git -C "$MANIFEST_REPO_DIR" config user.email "repo@local" >/dev/null 2>&1 || true
+  git -C "$MANIFEST_REPO_DIR" config user.name "repo tool" >/dev/null 2>&1 || true
+
+  mkdir -p "$MANIFEST_REPO_DIR/$(dirname "$MANIFEST_FILE")"
+  cp "$MANIFEST_FILE" "$MANIFEST_REPO_DIR/$MANIFEST_FILE"
+  git -C "$MANIFEST_REPO_DIR" add "$MANIFEST_FILE" >/dev/null 2>&1
+  if ! git -C "$MANIFEST_REPO_DIR" diff --cached --quiet -- "$MANIFEST_FILE"; then
+    git -C "$MANIFEST_REPO_DIR" commit -m "Update manifest" >/dev/null 2>&1 || true
+  fi
+
+  MANIFEST_BRANCH_DEFAULT="$(git -C "$MANIFEST_REPO_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)"
+  echo "file://$MANIFEST_REPO_DIR"
+}
+
+run_repo() {
+  PAGER=cat GIT_PAGER=cat LESS=FRX "${REPO_CMD[@]}" "$@"
+}
+
+repo_init() {
+  local init_mode="${1:-}"
+  if [[ -n "$init_mode" && "$init_mode" != "--https" ]]; then
+    echo "Unknown init option: $init_mode" >&2
+    exit 1
+  fi
+
+  if [[ "$init_mode" == "--https" ]]; then
+    repo_init_with_https
+    return
+  fi
+
+  local url
+  url="$(resolve_manifest_url)"
+  local branch="${MANIFEST_BRANCH:-$MANIFEST_BRANCH_DEFAULT}"
+
+  if [[ -n "$branch" ]]; then
+    run_repo init -u "$url" -m "$MANIFEST_FILE" -b "$branch"
+  else
+    run_repo init -u "$url" -m "$MANIFEST_FILE"
+  fi
+}
+
+repo_init_with_https() {
+  if [[ ! -f "$MANIFEST_FILE" ]]; then
+    echo "Manifest not found: $MANIFEST_FILE" >&2
+    exit 1
+  fi
+
+  local tmpdir=""
+  tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/repo-manifest.XXXXXX")"
+
+  mkdir -p "$tmpdir"
+  cp "$MANIFEST_FILE" "$tmpdir/$MANIFEST_FILE"
+
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "$tmpdir/$MANIFEST_FILE" <<'PY'
+import sys
+import xml.etree.ElementTree as ET
+from urllib.parse import urlparse
+
+path = sys.argv[1]
+tree = ET.parse(path)
+root = tree.getroot()
+
+def to_https(fetch: str) -> str:
+    fetch = fetch.strip()
+    if fetch.startswith("git@"):
+        host, _, rest = fetch[4:].partition(":")
+        rest = rest.lstrip("/")
+        return f"https://{host}/{rest}".rstrip("/") + "/"
+    if fetch.startswith("ssh://git@"):
+        rest = fetch[len("ssh://git@") :]
+        host, _, path = rest.partition("/")
+        path = path.lstrip("/")
+        return f"https://{host}/{path}".rstrip("/") + "/"
+    if fetch.startswith("https://") or fetch.startswith("http://") or fetch.startswith("git://"):
+        parsed = urlparse(fetch)
+        host = parsed.netloc
+        path = parsed.path.lstrip("/")
+        return f"https://{host}/{path}".rstrip("/") + "/"
+    return fetch
+
+for remote in root.findall("remote"):
+    fetch = remote.get("fetch")
+    if fetch:
+        remote.set("fetch", to_https(fetch))
+
+tree.write(path, encoding="UTF-8", xml_declaration=True)
+PY
+  elif command -v python >/dev/null 2>&1; then
+    python - "$tmpdir/$MANIFEST_FILE" <<'PY'
+import sys
+import xml.etree.ElementTree as ET
+from urllib.parse import urlparse
+
+path = sys.argv[1]
+tree = ET.parse(path)
+root = tree.getroot()
+
+def to_https(fetch: str) -> str:
+    fetch = fetch.strip()
+    if fetch.startswith("git@"):
+        host, _, rest = fetch[4:].partition(":")
+        rest = rest.lstrip("/")
+        return f"https://{host}/{rest}".rstrip("/") + "/"
+    if fetch.startswith("ssh://git@"):
+        rest = fetch[len("ssh://git@") :]
+        host, _, path = rest.partition("/")
+        path = path.lstrip("/")
+        return f"https://{host}/{path}".rstrip("/") + "/"
+    if fetch.startswith("https://") or fetch.startswith("http://") or fetch.startswith("git://"):
+        parsed = urlparse(fetch)
+        host = parsed.netloc
+        path = parsed.path.lstrip("/")
+        return f"https://{host}/{path}".rstrip("/") + "/"
+    return fetch
+
+for remote in root.findall("remote"):
+    fetch = remote.get("fetch")
+    if fetch:
+        remote.set("fetch", to_https(fetch))
+
+tree.write(path, encoding="UTF-8", xml_declaration=True)
+PY
+  else
+    echo "Python is required for ./repo --init --https" >&2
+    exit 1
+  fi
+
+  git -C "$tmpdir" init >/dev/null 2>&1
+  git -C "$tmpdir" checkout -B main >/dev/null 2>&1 || true
+  git -C "$tmpdir" config user.email "repo@local" >/dev/null 2>&1 || true
+  git -C "$tmpdir" config user.name "repo tool" >/dev/null 2>&1 || true
+  git -C "$tmpdir" add "$MANIFEST_FILE" >/dev/null 2>&1
+  git -C "$tmpdir" commit -m "Manifest for HTTPS" >/dev/null 2>&1 || true
+
+  run_repo init -u "file://$tmpdir" -m "$MANIFEST_FILE" -b main
+  if [[ -n "$tmpdir" ]]; then
+    rm -rf "$tmpdir"
+  fi
+}
+
+repo_sync() {
+  run_repo sync
+}
+
+repo_fetch() {
+  local jobs=0
+  if [[ "${1:-}" == "-j" ]]; then
+    jobs="${2:-0}"
+  fi
+  if [[ "$jobs" -lt 0 ]]; then
+    jobs=0
+  fi
+
+  local -a repos=()
+  while IFS= read -r repo; do
+    [[ -z "$repo" ]] && continue
+    repos+=("$repo")
+  done < <(manifest_paths)
+
+  fetch_one() {
+    local repo="$1"
+    [[ -z "$repo" ]] && return 0
+    echo -ne "  → $repo: "
+    if ! git -C "$repo" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+      echo -e "${RED}missing${NC}"
+      return 1
+    fi
+
+    local branch
+    branch=$(git -C "$repo" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "HEAD")
+    local head_sha
+    head_sha=$(git -C "$repo" rev-parse HEAD 2>/dev/null || echo "")
+
+    local remote
+    remote="$(resolve_remote_for_repo "$repo" "$repo")"
+    if [[ -z "$remote" ]]; then
+      echo -e "${YELLOW}no remote${NC}"
+      return 0
+    fi
+
+    local fetch_output=""
+    fetch_output=$(git -C "$repo" fetch "$remote" --prune 2>&1) || {
+      echo -e "${RED}fetch failed${NC}"
+      if [[ -n "$fetch_output" ]]; then
+        while IFS= read -r line; do
+          [[ -z "$line" ]] && continue
+          echo "    $line"
+          break
+        done <<< "$fetch_output"
+      fi
+      return 1
+    }
+
+    if [[ "$branch" == "HEAD" ]]; then
+      local manifest_rev
+      manifest_rev="$(manifest_revision_for "$repo")"
+      if [[ -n "$manifest_rev" && -n "$head_sha" ]]; then
+        if [[ "$manifest_rev" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
+          if [[ "${head_sha}" == "${manifest_rev}"* ]]; then
+            echo -e "${GREEN}pinned${NC}"
+            return 0
+          fi
+        else
+          local resolved
+          resolved=$(git -C "$repo" rev-parse --verify -q "${manifest_rev}^{commit}" 2>/dev/null || true)
+          if [[ -n "$resolved" && "$resolved" == "$head_sha" ]]; then
+            echo -e "${GREEN}pinned${NC}"
+            return 0
+          fi
+        fi
+      fi
+      echo -e "${YELLOW}detached${NC}"
+      return 0
+    fi
+
+    local upstream_ref
+    upstream_ref="$(resolve_upstream_ref "$repo" "$repo" "$branch")"
+    if [[ -z "$upstream_ref" ]]; then
+      echo -e "${YELLOW}no upstream${NC}"
+      return 0
+    fi
+
+    local counts
+    counts=$(git -C "$repo" rev-list --left-right --count "$branch...$upstream_ref" 2>/dev/null || echo "0 0")
+    set -- $counts
+    local ahead="${1:-0}"
+    local behind="${2:-0}"
+
+    if [[ "$ahead" == "0" && "$behind" == "0" ]]; then
+      echo -e "${GREEN}up-to-date${NC}"
+    elif [[ "$behind" != "0" && "$ahead" != "0" ]]; then
+      echo -e "${YELLOW}ahead:${ahead} behind:${behind}${NC}"
+    elif [[ "$behind" != "0" ]]; then
+      echo -e "${YELLOW}behind:${behind}${NC}"
+    else
+      echo -e "${YELLOW}ahead:${ahead}${NC}"
+    fi
+    return 0
+  }
+
+  local tmpdir=""
+  tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/repo-fetch.XXXXXX")"
+
+  local failures=0
+  local -a pids=()
+  local -a outputs=()
+
+  local idx=0
+  for repo in "${repos[@]}"; do
+    local outfile
+    outfile="$tmpdir/$(printf '%05d' "$idx")"
+    outputs+=("$outfile")
+    idx=$((idx + 1))
+
+    if [[ "$jobs" -eq 1 ]]; then
+      if fetch_one "$repo" >"$outfile" 2>&1; then
+        echo 0 >"${outfile}.status"
+      else
+        echo 1 >"${outfile}.status"
+      fi
+      continue
+    fi
+
+    if fetch_one "$repo" >"$outfile" 2>&1; then
+      echo 0 >"${outfile}.status"
+    else
+      echo 1 >"${outfile}.status"
+    fi &
+    pids+=("$!")
+
+    if [[ "$jobs" -gt 0 && "${#pids[@]}" -ge "$jobs" ]]; then
+      local pid="${pids[0]}"
+      wait "$pid" || true
+      pids=("${pids[@]:1}")
+    fi
+  done
+
+  for pid in "${pids[@]:-}"; do
+    wait "$pid" || true
+  done
+
+  for outfile in "${outputs[@]}"; do
+    if [[ -f "$outfile" ]]; then
+      cat "$outfile"
+    fi
+    if [[ -f "${outfile}.status" ]]; then
+      if [[ "$(cat "${outfile}.status")" != "0" ]]; then
+        failures=$((failures + 1))
+      fi
+    fi
+  done
+
+  if [[ -n "$tmpdir" ]]; then
+    rm -rf "$tmpdir"
+  fi
+
+  if [[ "$failures" -ne 0 ]]; then
+    exit 1
+  fi
+}
+
+repo_pull() {
+  local rebase=0
+  if [[ "${1:-}" == "--rebase" ]]; then
+    rebase=1
+  fi
+
+  local failures=0
+  while IFS= read -r repo; do
+    [[ -z "$repo" ]] && continue
+    echo -ne "  → $repo: "
+    if ! git -C "$repo" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+      echo -e "${RED}missing${NC}"
+      failures=$((failures + 1))
+      continue
+    fi
+
+    if [[ -n $(git -C "$repo" status --porcelain -uno 2>/dev/null || true) ]]; then
+      echo -e "${YELLOW}dirty (skipped)${NC}"
+      continue
+    fi
+
+    local branch
+    branch=$(git -C "$repo" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "HEAD")
+    if [[ "$branch" == "HEAD" ]]; then
+      echo -e "${YELLOW}detached (skipped)${NC}"
+      continue
+    fi
+
+    local upstream_ref
+    upstream_ref="$(resolve_upstream_ref "$repo" "$repo" "$branch")"
+    if [[ -z "$upstream_ref" ]]; then
+      echo -e "${YELLOW}no upstream (skipped)${NC}"
+      continue
+    fi
+
+    local remote="${upstream_ref%%/*}"
+    local upstream_branch="${upstream_ref#*/}"
+
+    if [[ "$rebase" -eq 1 ]]; then
+      if git -C "$repo" pull --rebase "$remote" "$upstream_branch" >/dev/null 2>&1; then
+        echo -e "${GREEN}updated${NC}"
+      else
+        echo -e "${RED}failed${NC}"
+        failures=$((failures + 1))
+      fi
+    else
+      if git -C "$repo" pull "$remote" "$upstream_branch" >/dev/null 2>&1; then
+        echo -e "${GREEN}updated${NC}"
+      else
+        echo -e "${RED}failed${NC}"
+        failures=$((failures + 1))
+      fi
+    fi
+  done < <(manifest_paths)
+
+  if [[ "$failures" -ne 0 ]]; then
+    exit 1
+  fi
+}
+
+repo_ssh() {
+  local failures=0
+  while IFS= read -r repo; do
+    [[ -z "$repo" ]] && continue
+    echo -ne "  → $repo: "
+    if ! git -C "$repo" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+      echo -e "${RED}missing${NC}"
+      failures=$((failures + 1))
+      continue
+    fi
+
+    local remote
+    remote="$(resolve_remote_for_repo "$repo" "$repo")"
+    if [[ -z "$remote" ]]; then
+      echo -e "${YELLOW}no remote${NC}"
+      continue
+    fi
+
+    local desired
+    desired="$(desired_ssh_url_for "$repo")"
+    if [[ -z "$desired" ]]; then
+      echo -e "${YELLOW}no manifest remote${NC}"
+      continue
+    fi
+
+    local current
+    current=$(git -C "$repo" remote get-url "$remote" 2>/dev/null || true)
+    if [[ "$current" == "git@"* || "$current" == "ssh://git@"* ]]; then
+      echo -e "${GREEN}ok${NC}"
+      continue
+    fi
+
+    if git -C "$repo" remote set-url "$remote" "$desired" >/dev/null 2>&1; then
+      echo -e "${GREEN}updated${NC}"
+    else
+      echo -e "${RED}failed${NC}"
+      failures=$((failures + 1))
+    fi
+  done < <(manifest_paths)
+
+  if [[ "$failures" -ne 0 ]]; then
+    exit 1
+  fi
+}
+
+repo_pin() {
+  run_repo manifest -r -o "$MANIFEST_FILE"
+  normalize_manifest "$MANIFEST_FILE"
+  echo "Updated $MANIFEST_FILE"
+}
+
+normalize_manifest() {
+  local path="$1"
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "$path" <<'PY'
+import sys
+import xml.etree.ElementTree as ET
+
+path = sys.argv[1]
+tree = ET.parse(path)
+root = tree.getroot()
+
+projects = [child for child in list(root) if child.tag == "project"]
+others = [child for child in list(root) if child.tag != "project"]
+
+for proj in projects:
+    proj.attrib.pop("upstream", None)
+    proj.attrib.pop("dest-branch", None)
+
+def sort_key(elem):
+    return (elem.get("path") or "", elem.get("name") or "")
+
+projects.sort(key=sort_key)
+root[:] = others + projects
+
+def indent(elem, level=0):
+    i = "\n" + level * "  "
+    if len(elem):
+        if not elem.text or not elem.text.strip():
+            elem.text = i + "  "
+        for child in elem:
+            indent(child, level + 1)
+        if not elem.tail or not elem.tail.strip():
+            elem.tail = i
+    else:
+        if level and (not elem.tail or not elem.tail.strip()):
+            elem.tail = i
+
+indent(root)
+tree.write(path, encoding="UTF-8", xml_declaration=True)
+PY
+  elif command -v python >/dev/null 2>&1; then
+    python - "$path" <<'PY'
+import sys
+import xml.etree.ElementTree as ET
+
+path = sys.argv[1]
+tree = ET.parse(path)
+root = tree.getroot()
+
+projects = [child for child in list(root) if child.tag == "project"]
+others = [child for child in list(root) if child.tag != "project"]
+
+for proj in projects:
+    proj.attrib.pop("upstream", None)
+    proj.attrib.pop("dest-branch", None)
+
+def sort_key(elem):
+    return (elem.get("path") or "", elem.get("name") or "")
+
+projects.sort(key=sort_key)
+root[:] = others + projects
+
+def indent(elem, level=0):
+    i = "\n" + level * "  "
+    if len(elem):
+        if not elem.text or not elem.text.strip():
+            elem.text = i + "  "
+        for child in elem:
+            indent(child, level + 1)
+        if not elem.tail or not elem.tail.strip():
+            elem.tail = i
+    else:
+        if level and (not elem.tail or not elem.tail.strip()):
+            elem.tail = i
+
+indent(root)
+tree.write(path, encoding="UTF-8", xml_declaration=True)
+PY
+  fi
+}
+
+manifest_set_revision() {
+  local target="$1"
+  local revision="$2"
+
+  if [[ -z "$target" || -z "$revision" ]]; then
+    echo "Usage: ./repo track <target> <rev>" >&2
+    exit 1
+  fi
+
+  if [[ "$target" == "all" ]]; then
+    echo "track does not support target 'all'" >&2
+    exit 1
+  fi
+
+  local repo_path
+  repo_path="$(resolve_checkout_targets "$target")"
+
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "$MANIFEST_FILE" "$repo_path" "$revision" <<'PY'
+import sys
+import xml.etree.ElementTree as ET
+
+path, repo_path, revision = sys.argv[1:4]
+tree = ET.parse(path)
+root = tree.getroot()
+
+matches = []
+for proj in root.findall("project"):
+    proj_path = proj.get("path") or proj.get("name")
+    if proj_path == repo_path:
+        matches.append(proj)
+
+if not matches:
+    raise SystemExit(f"Project not found in manifest: {repo_path}")
+if len(matches) > 1:
+    raise SystemExit(f"Project path is not unique in manifest: {repo_path}")
+
+proj = matches[0]
+proj.set("revision", revision)
+proj.attrib.pop("upstream", None)
+proj.attrib.pop("dest-branch", None)
+
+tree.write(path, encoding="UTF-8", xml_declaration=True)
+PY
+  elif command -v python >/dev/null 2>&1; then
+    python - "$MANIFEST_FILE" "$repo_path" "$revision" <<'PY'
+import sys
+import xml.etree.ElementTree as ET
+
+path, repo_path, revision = sys.argv[1:4]
+tree = ET.parse(path)
+root = tree.getroot()
+
+matches = []
+for proj in root.findall("project"):
+    proj_path = proj.get("path") or proj.get("name")
+    if proj_path == repo_path:
+        matches.append(proj)
+
+if not matches:
+    raise SystemExit(f"Project not found in manifest: {repo_path}")
+if len(matches) > 1:
+    raise SystemExit(f"Project path is not unique in manifest: {repo_path}")
+
+proj = matches[0]
+proj.set("revision", revision)
+proj.attrib.pop("upstream", None)
+proj.attrib.pop("dest-branch", None)
+
+tree.write(path, encoding="UTF-8", xml_declaration=True)
+PY
+  else
+    echo "Python is required to update $MANIFEST_FILE" >&2
+    exit 1
+  fi
+
+  normalize_manifest "$MANIFEST_FILE"
+  echo "Updated $MANIFEST_FILE"
+}
+
+require_repo_workspace() {
+  if [[ ! -d "$ROOT_DIR/.repo" ]]; then
+    echo "repo workspace not initialized. Run: ./repo --init" >&2
+    exit 1
+  fi
+}
+
+manifest_revision_for() {
+  local target="$1"
+  if [[ -z "$target" || ! -f "$MANIFEST_FILE" ]]; then
+    return 0
+  fi
+
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "$MANIFEST_FILE" "$target" <<'PY'
+import sys
+import xml.etree.ElementTree as ET
+
+manifest, target = sys.argv[1:3]
+tree = ET.parse(manifest)
+for proj in tree.findall("project"):
+    path = proj.get("path") or proj.get("name")
+    if path == target:
+        revision = proj.get("revision") or ""
+        if revision:
+            print(revision)
+        break
+PY
+    return
+  fi
+
+  if command -v python >/dev/null 2>&1; then
+    python - "$MANIFEST_FILE" "$target" <<'PY'
+import sys
+import xml.etree.ElementTree as ET
+
+manifest, target = sys.argv[1:3]
+tree = ET.parse(manifest)
+for proj in tree.findall("project"):
+    path = proj.get("path") or proj.get("name")
+    if path == target:
+        revision = proj.get("revision") or ""
+        if revision:
+            print(revision)
+        break
+PY
+    return
+  fi
+
+  awk -v target="$target" '
+    /<project / {
+      path=""
+      rev=""
+      if (match($0, /path="[^"]+"/)) {
+        path=substr($0, RSTART+6, RLENGTH-7)
+      } else if (match($0, /name="[^"]+"/)) {
+        path=substr($0, RSTART+6, RLENGTH-7)
+      }
+      if (match($0, /revision="[^"]+"/)) {
+        rev=substr($0, RSTART+10, RLENGTH-11)
+      }
+      if (path == target && rev != "") {
+        print rev
+        exit 0
+      }
+    }
+  ' "$MANIFEST_FILE"
+}
+
+manifest_remote_for() {
+  local target="$1"
+  if [[ -z "$target" || ! -f "$MANIFEST_FILE" ]]; then
+    return 0
+  fi
+
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "$MANIFEST_FILE" "$target" <<'PY'
+import sys
+import xml.etree.ElementTree as ET
+
+manifest, target = sys.argv[1:3]
+tree = ET.parse(manifest)
+root = tree.getroot()
+default = root.find("default")
+default_remote = ""
+if default is not None:
+    default_remote = default.get("remote") or ""
+
+for proj in root.findall("project"):
+    path = proj.get("path") or proj.get("name")
+    if path == target:
+        remote = proj.get("remote") or default_remote
+        if remote:
+            print(remote)
+        break
+PY
+    return
+  fi
+
+  if command -v python >/dev/null 2>&1; then
+    python - "$MANIFEST_FILE" "$target" <<'PY'
+import sys
+import xml.etree.ElementTree as ET
+
+manifest, target = sys.argv[1:3]
+tree = ET.parse(manifest)
+root = tree.getroot()
+default = root.find("default")
+default_remote = ""
+if default is not None:
+    default_remote = default.get("remote") or ""
+
+for proj in root.findall("project"):
+    path = proj.get("path") or proj.get("name")
+    if path == target:
+        remote = proj.get("remote") or default_remote
+        if remote:
+            print(remote)
+        break
+PY
+    return
+  fi
+
+  local default_remote=""
+  default_remote=$(awk -F'"' '/<default / { for (i = 1; i <= NF; i++) { if ($i == "remote") { print $(i + 1); exit } } }' "$MANIFEST_FILE")
+  awk -v target="$target" -v def="$default_remote" '
+    /<project / {
+      path=""
+      remote=""
+      if (match($0, /path="[^"]+"/)) {
+        path=substr($0, RSTART+6, RLENGTH-7)
+      } else if (match($0, /name="[^"]+"/)) {
+        path=substr($0, RSTART+6, RLENGTH-7)
+      }
+      if (path != target) {
+        next
+      }
+      if (match($0, /remote="[^"]+"/)) {
+        remote=substr($0, RSTART+8, RLENGTH-9)
+      } else {
+        remote=def
+      }
+      if (remote != "") {
+        print remote
+      }
+      exit 0
+    }
+  ' "$MANIFEST_FILE"
+}
+
+manifest_project_name_for() {
+  local target="$1"
+  if [[ -z "$target" || ! -f "$MANIFEST_FILE" ]]; then
+    return 0
+  fi
+
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "$MANIFEST_FILE" "$target" <<'PY'
+import sys
+import xml.etree.ElementTree as ET
+
+manifest, target = sys.argv[1:3]
+tree = ET.parse(manifest)
+for proj in tree.findall("project"):
+    path = proj.get("path") or proj.get("name")
+    if path == target:
+        name = proj.get("name") or ""
+        if name:
+            print(name)
+        break
+PY
+    return
+  fi
+
+  if command -v python >/dev/null 2>&1; then
+    python - "$MANIFEST_FILE" "$target" <<'PY'
+import sys
+import xml.etree.ElementTree as ET
+
+manifest, target = sys.argv[1:3]
+tree = ET.parse(manifest)
+for proj in tree.findall("project"):
+    path = proj.get("path") or proj.get("name")
+    if path == target:
+        name = proj.get("name") or ""
+        if name:
+            print(name)
+        break
+PY
+    return
+  fi
+
+  awk -v target="$target" '
+    /<project / {
+      path=""
+      name=""
+      if (match($0, /path="[^"]+"/)) {
+        path=substr($0, RSTART+6, RLENGTH-7)
+      } else if (match($0, /name="[^"]+"/)) {
+        path=substr($0, RSTART+6, RLENGTH-7)
+      }
+      if (path != target) {
+        next
+      }
+      if (match($0, /name="[^"]+"/)) {
+        name=substr($0, RSTART+6, RLENGTH-7)
+      }
+      if (name != "") {
+        print name
+      }
+      exit 0
+    }
+  ' "$MANIFEST_FILE"
+}
+
+manifest_fetch_for() {
+  local remote_name="$1"
+  if [[ -z "$remote_name" || ! -f "$MANIFEST_FILE" ]]; then
+    return 0
+  fi
+
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "$MANIFEST_FILE" "$remote_name" <<'PY'
+import sys
+import xml.etree.ElementTree as ET
+
+manifest, remote_name = sys.argv[1:3]
+tree = ET.parse(manifest)
+root = tree.getroot()
+for remote in root.findall("remote"):
+    if (remote.get("name") or "") == remote_name:
+        fetch = remote.get("fetch") or ""
+        if fetch:
+            print(fetch)
+        break
+PY
+    return
+  fi
+
+  if command -v python >/dev/null 2>&1; then
+    python - "$MANIFEST_FILE" "$remote_name" <<'PY'
+import sys
+import xml.etree.ElementTree as ET
+
+manifest, remote_name = sys.argv[1:3]
+tree = ET.parse(manifest)
+root = tree.getroot()
+for remote in root.findall("remote"):
+    if (remote.get("name") or "") == remote_name:
+        fetch = remote.get("fetch") or ""
+        if fetch:
+            print(fetch)
+        break
+PY
+    return
+  fi
+
+  awk -v target="$remote_name" -F'"' '
+    /<remote / {
+      name=""
+      fetch=""
+      for (i = 1; i <= NF; i++) {
+        if ($i == "name") {
+          name=$(i + 1)
+        } else if ($i == "fetch") {
+          fetch=$(i + 1)
+        }
+      }
+      if (name == target && fetch != "") {
+        print fetch
+        exit 0
+      }
+    }
+  ' "$MANIFEST_FILE"
+}
+
+desired_ssh_url_for() {
+  local path="$1"
+  local remote_name
+  remote_name="$(manifest_remote_for "$path")"
+  local fetch
+  fetch="$(manifest_fetch_for "$remote_name")"
+  local project
+  project="$(manifest_project_name_for "$path")"
+
+  if [[ -z "$fetch" || -z "$project" ]]; then
+    return 0
+  fi
+
+  local host=""
+  case "$fetch" in
+    ssh://git@*/*)
+      host="${fetch#ssh://git@}"
+      host="${host%%/*}"
+      ;;
+    http://*/*|https://*/*)
+      host="${fetch#*://}"
+      host="${host%%/*}"
+      ;;
+    git@*:*)
+      host="${fetch#git@}"
+      host="${host%%:*}"
+      ;;
+  esac
+
+  if [[ -z "$host" ]]; then
+    return 0
+  fi
+
+  echo "git@${host}:${project}.git"
+}
+
+resolve_remote_for_repo() {
+  local repo="$1"
+  local path="$2"
+  local upstream
+
+  upstream=$(git -C "$repo" rev-parse --abbrev-ref --symbolic-full-name @{u} 2>/dev/null || true)
+  if [[ -n "$upstream" && "$upstream" != "@{u}" ]]; then
+    echo "${upstream%%/*}"
+    return
+  fi
+
+  local remotes
+  remotes=$(git -C "$repo" remote 2>/dev/null || true)
+  if [[ -z "$remotes" ]]; then
+    return
+  fi
+
+  local remote_count
+  remote_count=$(printf '%s\n' "$remotes" | awk 'END { print NR }')
+  if [[ "$remote_count" -eq 1 ]]; then
+    echo "$remotes"
+    return
+  fi
+
+  local manifest_remote
+  manifest_remote="$(manifest_remote_for "$path")"
+  if [[ -n "$manifest_remote" ]]; then
+    if printf '%s\n' "$remotes" | awk -v target="$manifest_remote" '$0 == target { found=1 } END { exit !found }'; then
+      echo "$manifest_remote"
+      return
+    fi
+  fi
+
+  printf '%s\n' "$remotes" | head -n1
+}
+
+resolve_upstream_ref() {
+  local repo="$1"
+  local path="$2"
+  local branch="$3"
+  local upstream
+
+  upstream=$(git -C "$repo" rev-parse --abbrev-ref --symbolic-full-name @{u} 2>/dev/null || true)
+  if [[ -n "$upstream" && "$upstream" != "@{u}" ]]; then
+    echo "$upstream"
+    return
+  fi
+
+  local remote
+  remote="$(resolve_remote_for_repo "$repo" "$path")"
+  if [[ -n "$remote" && -n "$branch" ]]; then
+    if git -C "$repo" show-ref --verify --quiet "refs/remotes/$remote/$branch"; then
+      echo "$remote/$branch"
+      return
+    fi
+  fi
+}
+
+manifest_paths() {
+  if [[ ! -f "$MANIFEST_FILE" ]]; then
+    echo "Manifest not found: $MANIFEST_FILE" >&2
+    exit 1
+  fi
+
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "$MANIFEST_FILE" <<'PY'
+import sys
+import xml.etree.ElementTree as ET
+
+manifest = sys.argv[1]
+tree = ET.parse(manifest)
+for proj in tree.findall("project"):
+    path = proj.get("path") or proj.get("name")
+    if path:
+        print(path)
+PY
+    return
+  elif command -v python >/dev/null 2>&1; then
+    python - "$MANIFEST_FILE" <<'PY'
+import sys
+import xml.etree.ElementTree as ET
+
+manifest = sys.argv[1]
+tree = ET.parse(manifest)
+for proj in tree.findall("project"):
+    path = proj.get("path") or proj.get("name")
+    if path:
+        print(path)
+PY
+    return
+  fi
+
+  awk -F'path="' '/<project / { if (NF > 1) { split($2, parts, "\""); if (parts[1] != "") print parts[1]; } }' "$MANIFEST_FILE" \
+    | awk 'NF'
+}
+
+add_target() {
+  local target="$1"
+  local existing
+  for existing in "${REPO_TARGETS[@]:-}"; do
+    if [[ "$existing" == "$target" ]]; then
+      return
+    fi
+  done
+  REPO_TARGETS+=("$target")
+}
+
+resolve_targets() {
+  REPO_TARGETS=()
+  if [[ "$#" -eq 0 ]]; then
+    echo "Missing targets. Use 'all' or list repo names/paths." >&2
+    exit 1
+  fi
+
+  local arg
+  while [[ "$#" -gt 0 ]]; do
+    arg="$1"
+    shift
+    case "$arg" in
+      self)
+        add_target "$ROOT_DIR"
+        ;;
+      all)
+        while IFS= read -r path; do
+          [[ -z "$path" ]] && continue
+          add_target "$path"
+        done < <(manifest_paths)
+        ;;
+      *)
+        while IFS= read -r path; do
+          [[ -z "$path" ]] && continue
+          add_target "$path"
+        done < <(resolve_checkout_targets "$arg")
+        ;;
+    esac
+  done
+
+  if [[ "${#REPO_TARGETS[@]}" -eq 0 ]]; then
+    echo "No matching targets found." >&2
+    exit 1
+  fi
+
+  printf '%s\n' "${REPO_TARGETS[@]}"
+}
+
+print_repo() {
+  local path="$1"
+  local indent="$2"
+  local prefix="$3"
+
+  if [[ ! -d "$path/.git" && ! -f "$path/.git" ]]; then
+    echo -e "${indent}${prefix}${CYAN}${path##*/}/${NC} ${RED}[missing]${NC}"
+    return
+  fi
+
+  if ! git -C "$path" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    echo -e "${indent}${prefix}${CYAN}${path##*/}/${NC} ${RED}[broken]${NC}"
+    return
+  fi
+
+  local branch
+  branch=$(git -C "$path" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "HEAD")
+  local head_sha
+  head_sha=$(git -C "$path" rev-parse HEAD 2>/dev/null || echo "")
+  local dirty=""
+  local dirty_color=""
+
+  if [[ -n $(git -C "$path" status --porcelain -uno 2>/dev/null || true) ]]; then
+    dirty=" [dirty]"
+    dirty_color="${RED}"
+  else
+    dirty_color="${GREEN}"
+  fi
+
+  local manifest_note=""
+  local manifest_rev
+  manifest_rev="$(manifest_revision_for "$path")"
+  local manifest_match=""
+  if [[ -n "$manifest_rev" && -n "$head_sha" ]]; then
+    manifest_match=0
+    if [[ "$manifest_rev" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
+      if [[ "${head_sha}" == "${manifest_rev}"* ]]; then
+        manifest_match=1
+      fi
+    else
+      if [[ "$branch" != "HEAD" && "$branch" == "$manifest_rev" ]]; then
+        manifest_match=1
+      else
+        local resolved
+        resolved=$(git -C "$path" rev-parse --verify -q "${manifest_rev}^{commit}" 2>/dev/null || true)
+        if [[ -n "$resolved" && "$resolved" == "$head_sha" ]]; then
+          manifest_match=1
+        fi
+      fi
+    fi
+
+    if [[ "$manifest_match" -eq 0 ]]; then
+      local manifest_display="$manifest_rev"
+      if [[ "$manifest_rev" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
+        manifest_display="${manifest_rev:0:7}"
+      fi
+      manifest_note=" ${BLUE}[manifest:${manifest_display}]${NC}"
+    fi
+  fi
+
+  local branch_display=""
+  if [[ "$branch" == "HEAD" ]]; then
+    local tag
+    local detached_color="${YELLOW}"
+    if [[ "$manifest_match" == "1" ]]; then
+      detached_color="${GREEN}"
+    fi
+    tag=$(git -C "$path" describe --tags --exact-match 2>/dev/null || true)
+    if [[ -n "$tag" ]]; then
+      branch_display="${detached_color}($tag)${NC}"
+    else
+      local short_sha
+      short_sha=$(git -C "$path" rev-parse --short HEAD 2>/dev/null || echo "unknown")
+      branch_display="${detached_color}(detached: $short_sha)${NC}"
+    fi
+  else
+    branch_display="${BLUE}[$branch]${NC}"
+  fi
+
+  echo -e "${indent}${prefix}${CYAN}${path##*/}/${NC} ${branch_display}${dirty_color}${dirty}${NC}${manifest_note}"
+}
+
+show_tree() {
+  local root_branch
+  root_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
+  local root_dirty=""
+  if [[ -n $(git status --porcelain -uno 2>/dev/null || true) ]]; then
+    root_dirty=" ${RED}[dirty]${NC}"
+  fi
+  echo -e "${CYAN}$(basename "$(pwd)")/${NC} ${BLUE}[$root_branch]${NC}${root_dirty}"
+
+  local python_cmd=""
+  if command -v python3 >/dev/null 2>&1; then
+    python_cmd="python3"
+  elif command -v python >/dev/null 2>&1; then
+    python_cmd="python"
+  fi
+
+  local print_flat=false
+  if [[ -z "$python_cmd" ]]; then
+    print_flat=true
+  fi
+
+  local tree_lines
+  if [[ "$print_flat" == false ]]; then
+    if ! tree_lines="$("$python_cmd" - "$MANIFEST_FILE" <<'PY'
+import sys
+import xml.etree.ElementTree as ET
+
+manifest = sys.argv[1]
+tree = ET.parse(manifest)
+paths = []
+for proj in tree.findall("project"):
+    path = proj.get("path") or proj.get("name")
+    if path:
+        paths.append(path)
+
+path_set = set(paths)
+sep = "\x1f"
+
+def parent_of(path: str):
+    parts = path.split("/")
+    for i in range(len(parts) - 1, 0, -1):
+        candidate = "/".join(parts[:i])
+        if candidate in path_set:
+            return candidate
+    return None
+
+children = {}
+for path in paths:
+    parent = parent_of(path)
+    children.setdefault(parent, []).append(path)
+
+def walk(parent, indent=""):
+    kids = sorted(children.get(parent, []))
+    for idx, child in enumerate(kids):
+        last = idx == len(kids) - 1
+        prefix = "└── " if last else "├── "
+        print(f"{indent}{sep}{prefix}{sep}{child}")
+        walk(child, indent + ("    " if last else "│   "))
+
+walk(None)
+PY
+    )"; then
+      print_flat=true
+    fi
+  fi
+
+  if [[ "$print_flat" == true ]]; then
+    manifest_paths | sort | while IFS= read -r path; do
+      print_repo "$path" "" "- "
+    done
+  else
+    while IFS=$'\x1f' read -r indent prefix path; do
+      [[ -z "$path" ]] && continue
+      print_repo "$path" "$indent" "$prefix"
+    done <<< "$tree_lines"
+  fi
+
+  echo ""
+  echo -e "${GREEN}Legend:${NC}"
+  echo -e "  ${BLUE}[branch]${NC}     - on branch"
+  echo -e "  ${YELLOW}(tag)${NC}        - detached at tag"
+  echo -e "  ${YELLOW}(detached)${NC}   - detached HEAD"
+  echo -e "  ${RED}[dirty]${NC}      - uncommitted changes"
+  echo -e "  ${BLUE}[manifest:x]${NC} - differs from manifest revision"
+  echo -e "  ${RED}[missing]${NC}    - repo not checked out"
+}
+
+resolve_checkout_targets() {
+  local target="$1"
+  local -a matches
+  matches=()
+
+  if [[ "$target" == "all" ]]; then
+    manifest_paths
+    return
+  fi
+
+  while IFS= read -r path; do
+    [[ -z "$path" ]] && continue
+    if [[ "$path" == "$target" ]]; then
+      matches+=("$path")
+    fi
+  done < <(manifest_paths)
+
+  if [[ "${#matches[@]}" -eq 0 ]]; then
+    while IFS= read -r path; do
+      [[ -z "$path" ]] && continue
+      if [[ "$(basename "$path")" == "$target" ]]; then
+        matches+=("$path")
+      fi
+    done < <(manifest_paths)
+  fi
+
+  if [[ "${#matches[@]}" -eq 0 ]]; then
+    echo "Unknown repo target: $target" >&2
+    exit 1
+  fi
+  if [[ "${#matches[@]}" -gt 1 ]]; then
+    echo "Ambiguous repo name '$target'. Use full path:" >&2
+    for repo in "${matches[@]}"; do
+      printf '  - %s\n' "$repo" >&2
+    done
+    exit 1
+  fi
+
+  for repo in "${matches[@]}"; do
+    printf '%s\n' "$repo"
+  done
+}
+
+do_checkout() {
+  local reset=0
+  while [[ "${1:-}" == "--reset" ]]; do
+    reset=1
+    shift
+  done
+
+  local rev="${1:-}"
+  local target="${2:-}"
+
+  if [[ -z "$rev" || -z "$target" ]]; then
+    echo "Usage: ./repo checkout [--reset] <rev> <target>" >&2
+    exit 1
+  fi
+
+  if [[ "$reset" -eq 1 && "${MODS_ASSUME_YES:-0}" != "1" ]]; then
+    echo -e "${RED}WARNING:${NC} This will discard local changes and remove untracked files."
+    echo -ne "${YELLOW}Continue? [y/N]: ${NC}"
+    read -r confirm
+    if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
+      echo -e "${BLUE}Aborted.${NC}"
+      exit 0
+    fi
+  fi
+
+  local repo
+  local failures=0
+  while IFS= read -r repo; do
+    [[ -z "$repo" ]] && continue
+    echo -ne "  → $repo: "
+    if ! git -C "$repo" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+      echo -e "${RED}missing${NC}"
+      failures=$((failures + 1))
+      continue
+    fi
+
+    if [[ "$reset" -eq 1 ]]; then
+      git -C "$repo" reset --hard >/dev/null 2>&1 || true
+      git -C "$repo" clean -fd >/dev/null 2>&1 || true
+    fi
+
+    if [[ "${MODS_FETCH:-1}" != "0" ]]; then
+      local fetch_remote
+      fetch_remote="$(resolve_remote_for_repo "$repo" "$repo")"
+      if [[ -n "$fetch_remote" ]]; then
+        git -C "$repo" fetch "$fetch_remote" --tags >/dev/null 2>&1 || true
+      else
+        git -C "$repo" fetch --tags >/dev/null 2>&1 || true
+      fi
+    fi
+
+    if git -C "$repo" show-ref --verify --quiet "refs/heads/$rev"; then
+      if git -C "$repo" checkout "$rev" >/dev/null 2>&1; then
+        echo -e "${GREEN}checked out${NC}"
+      else
+        echo -e "${RED}failed${NC}"
+        failures=$((failures + 1))
+      fi
+      continue
+    fi
+
+    local remote
+    remote="$(resolve_remote_for_repo "$repo" "$repo")"
+    if [[ -n "$remote" ]] && git -C "$repo" show-ref --verify --quiet "refs/remotes/$remote/$rev"; then
+      if git -C "$repo" checkout -B "$rev" "$remote/$rev" >/dev/null 2>&1; then
+        echo -e "${GREEN}checked out${NC}"
+      else
+        echo -e "${RED}failed${NC}"
+        failures=$((failures + 1))
+      fi
+      continue
+    fi
+
+    if git -C "$repo" checkout "$rev" >/dev/null 2>&1; then
+      echo -e "${GREEN}checked out${NC}"
+    else
+      echo -e "${RED}failed${NC}"
+      failures=$((failures + 1))
+    fi
+  done < <(resolve_checkout_targets "$target")
+
+  if [[ "$failures" -ne 0 ]]; then
+    exit 1
+  fi
+}
+
+do_switch() {
+  local create=0
+  if [[ "${1:-}" == "-b" ]]; then
+    create=1
+    shift
+  fi
+
+  local branch="${1:-}"
+  shift || true
+
+  if [[ -z "$branch" ]]; then
+    echo "Usage: ./repo switch [-b] <branch> <targets...>" >&2
+    exit 1
+  fi
+
+  local repo
+  local failures=0
+  while IFS= read -r repo; do
+    [[ -z "$repo" ]] && continue
+    local label="$repo"
+    if [[ "$repo" == "$ROOT_DIR" ]]; then
+      label="self"
+    fi
+    echo -ne "  → $label: "
+    if ! git -C "$repo" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+      echo -e "${RED}missing${NC}"
+      failures=$((failures + 1))
+      continue
+    fi
+
+    if [[ -n $(git -C "$repo" status --porcelain -uno 2>/dev/null || true) ]]; then
+      echo -e "${YELLOW}dirty (skipped)${NC}"
+      continue
+    fi
+
+    if git -C "$repo" show-ref --verify --quiet "refs/heads/$branch"; then
+      if git -C "$repo" checkout "$branch" >/dev/null 2>&1; then
+        echo -e "${GREEN}switched${NC}"
+      else
+        echo -e "${RED}failed${NC}"
+        failures=$((failures + 1))
+      fi
+      continue
+    fi
+
+    local remote
+    remote="$(resolve_remote_for_repo "$repo" "$repo")"
+    if [[ -n "$remote" ]] && git -C "$repo" show-ref --verify --quiet "refs/remotes/$remote/$branch"; then
+      if git -C "$repo" checkout -b "$branch" "$remote/$branch" >/dev/null 2>&1; then
+        echo -e "${GREEN}switched${NC}"
+      else
+        echo -e "${RED}failed${NC}"
+        failures=$((failures + 1))
+      fi
+      continue
+    fi
+
+    if [[ "$create" -eq 1 ]]; then
+      if git -C "$repo" checkout -b "$branch" >/dev/null 2>&1; then
+        echo -e "${GREEN}created${NC}"
+      else
+        echo -e "${RED}failed${NC}"
+        failures=$((failures + 1))
+      fi
+      continue
+    fi
+
+    echo -e "${RED}missing branch${NC}"
+    failures=$((failures + 1))
+  done < <(resolve_targets "$@")
+
+  if [[ "$failures" -ne 0 ]]; then
+    exit 1
+  fi
+}
+
+case "${1:-}" in
+  --init)
+    require_repo
+    repo_init "${2:-}"
+    repo_sync
+    ;;
+  sync)
+    require_repo
+    require_repo_workspace
+    repo_sync
+    ;;
+  fetch)
+    repo_fetch "${@:2}"
+    ;;
+  pull)
+    repo_pull "${2:-}"
+    ;;
+  ssh)
+    repo_ssh
+    ;;
+  pin)
+    require_repo
+    require_repo_workspace
+    repo_pin
+    ;;
+  main)
+    do_checkout main all
+    ;;
+  --status)
+    require_repo
+    require_repo_workspace
+    run_repo status
+    ;;
+  --branch)
+    require_repo
+    require_repo_workspace
+    branch="${2:-}"
+    if [[ -z "$branch" ]]; then
+      echo "Missing branch name" >&2
+      exit 1
+    fi
+    run_repo forall -c "git checkout -B \"$branch\""
+    ;;
+  --help|-h)
+    usage
+    ;;
+  checkout)
+    do_checkout "${@:2}"
+    ;;
+  switch)
+    do_switch "${@:2}"
+    ;;
+  track)
+    manifest_set_revision "${2:-}" "${3:-}"
+    ;;
+  "")
+    show_tree
+    ;;
+  *)
+    if [[ "$#" -eq 2 ]]; then
+      manifest_set_revision "$1" "$2"
+      exit 0
+    fi
+    echo "Unknown option: $1" >&2
+    usage >&2
+    exit 1
+    ;;
+esac

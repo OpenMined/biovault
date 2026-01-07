@@ -232,3 +232,9 @@ cli/test_project/*
 sandbox/*
 tests/scripts/sbdev
 sbdev
+# Workspace symlinks (created by repo tool)
+/syftbox-sdk
+/biovault-beaver
+/bioscript
+/sbenv
+/syftbox

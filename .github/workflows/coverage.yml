@@ -15,8 +15,11 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-        with:
-          submodules: recursive
+
+      - name: Setup workspace dependencies
+        run: |
+          chmod +x scripts/setup-workspace.sh
+          ./scripts/setup-workspace.sh
 
       - name: Install protoc
         uses: arduino/setup-protoc@v2
