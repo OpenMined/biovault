@@ -233,16 +233,63 @@ jobs:
         with:
           ref: main
 
-      - name: Setup workspace dependencies
+      - name: Setup workspace dependencies (Unix)
+        if: runner.os != 'Windows'
         run: |
           chmod +x scripts/setup-workspace.sh
           ./scripts/setup-workspace.sh
+
+      - name: Setup workspace dependencies (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $repoRoot = (Resolve-Path ".").Path
+          $parentDir = Split-Path $repoRoot -Parent
+
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+
+          function Clone-IfMissing($name, $url, $branch = $null) {
+            $dest = Join-Path $parentDir $name
+            if (Test-Path $dest) {
+              Write-Host "$name already exists at $dest"
+            } else {
+              Write-Host "Cloning $name to $dest..."
+              if ($branch) {
+                git clone -b $branch $url $dest
+              } else {
+                git clone $url $dest
+              }
+            }
+          }
+
+          Clone-IfMissing "syftbox-sdk" "https://github.com/OpenMined/syftbox-sdk.git"
+          Clone-IfMissing "syft-crypto-core" "https://github.com/AtheMathmo/syft-crypto-core.git"
+          Clone-IfMissing "syftbox" "https://github.com/OpenMined/syftbox.git" "madhava/biovault"
+          Clone-IfMissing "biovault-beaver" "https://github.com/OpenMined/biovault-beaver.git"
+          Clone-IfMissing "sbenv" "https://github.com/OpenMined/sbenv.git"
+          Clone-IfMissing "bioscript" "https://github.com/OpenMined/bioscript.git"
+
+          function Create-Junction($name) {
+            $link = Join-Path $repoRoot $name
+            $target = Join-Path $parentDir $name
+            if (-not (Test-Path $link)) {
+              cmd /c mklink /J $link $target
+              Write-Host "Created junction: $name -> $target"
+            }
+          }
+
+          Create-Junction "syftbox-sdk"
+          Create-Junction "syft-crypto-core"
+          Create-Junction "syftbox"
+          Create-Junction "biovault-beaver"
+          Create-Junction "sbenv"
+          Create-Junction "bioscript"
 
       - name: Install protoc
         uses: arduino/setup-protoc@v2
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
-      
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
         with:
