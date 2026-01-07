@@ -1,11 +1,14 @@
 use std::env;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 fn main() {
     println!("cargo:rerun-if-changed=examples/");
     println!("cargo:rerun-if-changed=examples/examples.yaml");
     println!("cargo:rerun-if-changed=../biovault-beaver/python/src/beaver/__init__.py");
+    println!("cargo:rerun-if-changed=../../biovault-beaver/python/src/beaver/__init__.py");
+    println!("cargo:rerun-if-env-changed=BIOVAULT_BEAVER_DIR");
+    println!("cargo:rerun-if-env-changed=WORKSPACE_ROOT");
 
     // Expose the biovault-beaver version (from submodule) to the biovault CLI crate at compile time.
     // This is used to pin the PyPI dependency when creating a Jupyter venv.
@@ -20,10 +23,30 @@ fn main() {
 
 fn beaver_version_from_submodule() -> String {
     let fallback = "0.1.30".to_string();
-    let beaver_init_path = Path::new("../biovault-beaver/python/src/beaver/__init__.py");
-    let content = match fs::read_to_string(beaver_init_path) {
-        Ok(c) => c,
-        Err(_) => return fallback,
+    let mut candidates = Vec::new();
+
+    if let Ok(path) = env::var("BIOVAULT_BEAVER_DIR") {
+        candidates.push(PathBuf::from(path).join("python/src/beaver/__init__.py"));
+    }
+
+    if let Ok(root) = env::var("WORKSPACE_ROOT") {
+        candidates.push(
+            PathBuf::from(root).join("biovault-beaver/python/src/beaver/__init__.py"),
+        );
+    }
+
+    if let Ok(manifest_dir) = env::var("CARGO_MANIFEST_DIR") {
+        let manifest = PathBuf::from(manifest_dir);
+        candidates.push(manifest.join("../biovault-beaver/python/src/beaver/__init__.py"));
+        if let Some(root) = manifest.parent().and_then(|p| p.parent()) {
+            candidates.push(root.join("biovault-beaver/python/src/beaver/__init__.py"));
+        }
+    }
+
+    let beaver_init_path = candidates.into_iter().find(|path| path.exists());
+    let content = match beaver_init_path.and_then(|path| fs::read_to_string(path).ok()) {
+        Some(c) => c,
+        None => return fallback,
     };
 
     for line in content.lines() {
