@@ -263,7 +263,7 @@ jobs:
           }
 
           Clone-IfMissing "syftbox-sdk" "https://github.com/OpenMined/syftbox-sdk.git"
-          Clone-IfMissing "syft-crypto-core" "https://github.com/AtheMathmo/syft-crypto-core.git"
+          Clone-IfMissing "syft-crypto-core" "https://github.com/OpenMined/syft-crypto-core.git"
           Clone-IfMissing "syftbox" "https://github.com/OpenMined/syftbox.git" "madhava/biovault"
           Clone-IfMissing "biovault-beaver" "https://github.com/OpenMined/biovault-beaver.git"
           Clone-IfMissing "sbenv" "https://github.com/OpenMined/sbenv.git"
