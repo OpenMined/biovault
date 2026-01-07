@@ -51,8 +51,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
+
+      - name: Setup workspace dependencies
+        run: |
+          chmod +x scripts/setup-workspace.sh
+          ./scripts/setup-workspace.sh
 
       - name: Install protoc
         uses: arduino/setup-protoc@v2
@@ -79,9 +82,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          submodules: recursive
           fetch-depth: 0
-      
+
+      - name: Setup workspace dependencies
+        run: |
+          chmod +x scripts/setup-workspace.sh
+          ./scripts/setup-workspace.sh
+
       - name: Check version
         id: check
         shell: bash
@@ -158,9 +165,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          submodules: recursive
           token: ${{ secrets.PAT_TOKEN || secrets.GITHUB_TOKEN }}
           fetch-depth: 0
+
+      - name: Setup workspace dependencies
+        run: |
+          chmod +x scripts/setup-workspace.sh
+          ./scripts/setup-workspace.sh
       
       - name: Update version in Cargo.toml
         shell: bash
@@ -220,8 +231,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          submodules: recursive
           ref: main
+
+      - name: Setup workspace dependencies
+        run: |
+          chmod +x scripts/setup-workspace.sh
+          ./scripts/setup-workspace.sh
 
       - name: Install protoc
         uses: arduino/setup-protoc@v2
@@ -297,8 +312,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          submodules: recursive
           ref: main
+
+      - name: Setup workspace dependencies
+        run: |
+          chmod +x scripts/setup-workspace.sh
+          ./scripts/setup-workspace.sh
 
       - name: Install protoc
         uses: arduino/setup-protoc@v2
@@ -326,9 +345,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          submodules: recursive
           ref: main
-      
+
+      - name: Setup workspace dependencies
+        run: |
+          chmod +x scripts/setup-workspace.sh
+          ./scripts/setup-workspace.sh
+
       - name: Get final version
         id: version
         shell: bash

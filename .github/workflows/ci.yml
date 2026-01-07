@@ -23,8 +23,12 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-        with:
-          submodules: recursive
+
+      - name: Setup workspace dependencies
+        shell: bash
+        run: |
+          chmod +x scripts/setup-workspace.sh
+          ./scripts/setup-workspace.sh
 
       - name: Install protoc
         uses: arduino/setup-protoc@v2
@@ -76,8 +80,12 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-        with:
-          submodules: recursive
+
+      - name: Setup workspace dependencies
+        shell: bash
+        run: |
+          chmod +x scripts/setup-workspace.sh
+          ./scripts/setup-workspace.sh
 
       - name: Install protoc
         uses: arduino/setup-protoc@v2
@@ -97,9 +105,9 @@ jobs:
       - name: Setup Go (syftbox)
         uses: actions/setup-go@v5
         with:
-          go-version-file: syftbox-sdk/syftbox/go.mod
+          go-version-file: syftbox/go.mod
           cache: true
-          cache-dependency-path: syftbox-sdk/syftbox/go.sum
+          cache-dependency-path: syftbox/go.sum
 
       - name: Install Nextflow
         run: |

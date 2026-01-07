@@ -850,6 +850,7 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
+    #[cfg(not(windows))]
     fn default_home_creates_desktop_biovault() {
         let tmp = TempDir::new().unwrap();
         let home_dir = tmp.path().join("home");

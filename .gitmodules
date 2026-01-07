@@ -1,12 +1,3 @@
-[submodule "sbenv"]
-	path = sbenv
-	url = https://github.com/openmined/sbenv
-[submodule "bioscript"]
-	path = bioscript
-	url = https://github.com/OpenMined/bioscript
-[submodule "syftbox-sdk"]
-	path = syftbox-sdk
-	url = https://github.com/OpenMined/syftbox-sdk.git
-[submodule "biovault-beaver"]
-	path = biovault-beaver
-	url = git@github.com:OpenMined/biovault-beaver.git
+# Submodules removed - dependencies are now sibling directories
+# Use ./scripts/setup-workspace.sh to clone dependencies
+# Or use repo tool in parent workspace
