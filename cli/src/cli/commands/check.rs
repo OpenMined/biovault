@@ -295,13 +295,13 @@ pub struct EnvironmentConfig {
     pub skip_reason: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DependencyCheckResult {
     pub dependencies: Vec<DependencyResult>,
     pub all_satisfied: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DependencyResult {
     pub name: String,
     pub found: bool,
