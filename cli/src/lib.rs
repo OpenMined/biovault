@@ -6,6 +6,7 @@ pub mod error;
 pub mod messages;
 pub mod pipeline_spec;
 pub mod project_spec;
+pub mod telemetry;
 pub mod types;
 
 pub mod syftbox {

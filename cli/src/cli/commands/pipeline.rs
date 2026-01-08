@@ -38,6 +38,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::env;
 use std::path::{Path, PathBuf};
 use tokio::fs;
+use tracing::instrument;
 
 use super::run_dynamic;
 
@@ -64,6 +65,7 @@ impl<T> DialoguerResultExt<T> for std::result::Result<T, dialoguer::Error> {
     }
 }
 
+#[instrument(skip_all, fields(component = "pipeline", pipeline_name = ?name), err)]
 pub async fn create(
     file: Option<String>,
     name: Option<String>,
@@ -182,6 +184,7 @@ pub async fn add_step(file: Option<String>) -> Result<()> {
     Ok(())
 }
 
+#[instrument(skip(extra_args), fields(component = "pipeline", pipeline = %pipeline_path, dry_run = %dry_run, resume = %resume), err)]
 pub async fn run_pipeline(
     pipeline_path: &str,
     extra_args: Vec<String>,
@@ -396,6 +399,7 @@ pub async fn run_pipeline(
     Ok(())
 }
 
+#[instrument(skip_all, fields(component = "pipeline", pipeline = %file), err)]
 pub fn validate(file: &str, diagram: bool) -> Result<()> {
     let pipeline_path = Path::new(file);
     if !pipeline_path.exists() {

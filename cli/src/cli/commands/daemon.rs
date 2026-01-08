@@ -9,7 +9,7 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::signal;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, instrument, warn};
 
 use crate::config::Config;
 use crate::messages::sync::MessageSync;
@@ -125,6 +125,7 @@ impl Daemon {
     }
 
     // NOT unit testable - requires MessageSync and actual message processing
+    #[instrument(skip(self), fields(component = "daemon"), err)]
     async fn sync_messages(&self) -> Result<()> {
         self.log("INFO", "Starting message sync");
 
@@ -149,6 +150,7 @@ impl Daemon {
     }
 
     // NOT unit testable - spawns actual SyftBox processes (sbenv or syftbox command)
+    #[instrument(skip(self), fields(component = "daemon"), err)]
     async fn start_syftbox(&self) -> Result<()> {
         let runtime_config = self.runtime_config()?;
         let mode = detect_mode(&runtime_config)?;
@@ -169,6 +171,7 @@ impl Daemon {
         Ok(())
     }
 
+    #[instrument(skip(self), fields(component = "daemon"), err)]
     async fn ensure_syftbox_running(&self) -> Result<()> {
         let runtime_config = self.runtime_config()?;
         if is_syftbox_running(&runtime_config)? {
@@ -181,6 +184,7 @@ impl Daemon {
     }
 
     // NOT unit testable - main daemon loop with file watching, signal handling, and async runtime
+    #[instrument(skip(self), fields(component = "daemon"), err)]
     pub async fn run(&self) -> Result<()> {
         self.log("INFO", "BioVault daemon starting");
 
