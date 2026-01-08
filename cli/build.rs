@@ -30,9 +30,7 @@ fn beaver_version_from_submodule() -> String {
     }
 
     if let Ok(root) = env::var("WORKSPACE_ROOT") {
-        candidates.push(
-            PathBuf::from(root).join("biovault-beaver/python/src/beaver/__init__.py"),
-        );
+        candidates.push(PathBuf::from(root).join("biovault-beaver/python/src/beaver/__init__.py"));
     }
 
     if let Ok(manifest_dir) = env::var("CARGO_MANIFEST_DIR") {
