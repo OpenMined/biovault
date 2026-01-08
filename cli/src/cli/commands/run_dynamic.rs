@@ -525,10 +525,7 @@ fn resolve_docker_config_path() -> Option<String> {
 
 fn apply_docker_config_arg(cmd: &mut Command) {
     if let Some(config) = resolve_docker_config_path() {
-        append_desktop_log(&format!(
-            "[Pipeline] Using Docker config: {}",
-            config
-        ));
+        append_desktop_log(&format!("[Pipeline] Using Docker config: {}", config));
         cmd.arg("--config").arg(config);
     }
 }
@@ -785,8 +782,7 @@ pub async fn execute_dynamic(
         project_path.join(results_path)
     };
     if !dry_run {
-        fs::create_dir_all(&results_path_buf)
-            .context("Failed to create results directory")?;
+        fs::create_dir_all(&results_path_buf).context("Failed to create results directory")?;
     }
     let results_path_str = results_path_buf.to_string_lossy().to_string();
 
