@@ -4,12 +4,14 @@ use reqwest::blocking::Client as BlockingClient;
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+use tracing::instrument;
 
 use crate::config::Config;
 use crate::syftbox::app::SyftBoxApp;
 use crate::syftbox::endpoint::Endpoint;
 use crate::syftbox::storage::WritePolicy;
 use crate::syftbox::types::{RpcRequest, RpcResponse};
+use syftbox_sdk::trace_context;
 use syftbox_sdk::{has_syc_magic, parse_envelope};
 
 use super::db::MessageDb;
@@ -122,6 +124,7 @@ impl MessageSync {
     }
 
     /// Send a message via RPC
+    #[instrument(skip(self), fields(component = "messaging", message_id = %message_id), err)]
     pub fn send_message(&self, message_id: &str) -> Result<()> {
         let mut msg = self
             .db
@@ -169,12 +172,15 @@ impl MessageSync {
             mode = "send-handler";
             self.send_via_send_handler(&msg.from, &msg.to, &payload_bytes)
         } else {
-            let rpc_request = RpcRequest::new(
+            let mut rpc_request = RpcRequest::new(
                 msg.from.clone(),
                 format!("syft://{}/app_data/biovault/rpc/message", msg.to),
                 "POST".to_string(),
                 payload_bytes.clone(),
             );
+
+            // Inject trace context for distributed tracing
+            trace_context::inject_trace_context(&mut rpc_request);
 
             let recipient_rpc_dir = self
                 .app
@@ -224,6 +230,7 @@ impl MessageSync {
     }
 
     /// Check for incoming messages
+    #[instrument(skip(self), fields(component = "messaging"), err)]
     pub fn check_incoming(&self, no_cleanup: bool) -> Result<Vec<String>> {
         let (new_message_ids, _new_failed) = self.check_incoming_with_failures(no_cleanup)?;
         Ok(new_message_ids)
@@ -240,6 +247,19 @@ impl MessageSync {
 
         // Process successful decryptions
         for (request_path, rpc_request) in requests {
+            // Log trace context from incoming request for distributed tracing
+            if let Some(traceparent) = rpc_request.traceparent() {
+                if let Some((trace_id, parent_span_id, _flags)) =
+                    trace_context::parse_traceparent(traceparent)
+                {
+                    tracing::info!(
+                        trace_id = %trace_id,
+                        parent_span_id = %parent_span_id,
+                        "Processing request with trace context"
+                    );
+                }
+            }
+
             let body_bytes = match rpc_request.decode_body() {
                 Ok(b) => b,
                 Err(e) => {
@@ -424,6 +444,7 @@ impl MessageSync {
     }
 
     /// Check for ACK responses to sent messages
+    #[instrument(skip(self), fields(component = "messaging"), err)]
     pub fn check_acks(&self, no_cleanup: bool) -> Result<()> {
         let endpoint = Endpoint::new(&self.app, "/message")?;
         let responses = endpoint.check_responses()?;
@@ -461,6 +482,7 @@ impl MessageSync {
     }
 
     /// Full sync cycle: check incoming, send pending, check acks (verbose)
+    #[instrument(skip(self), fields(component = "messaging"), err)]
     pub fn sync(&self, no_cleanup: bool) -> Result<()> {
         let (new_message_ids, new_failed_count) = self.check_incoming_with_failures(no_cleanup)?;
         if !new_message_ids.is_empty() {
