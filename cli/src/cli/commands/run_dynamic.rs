@@ -133,7 +133,8 @@ fn should_use_docker_for_nextflow() -> bool {
 /// e.g., C:\Users\foo -> /c/Users/foo
 #[cfg(target_os = "windows")]
 fn windows_path_to_docker(path: &Path) -> String {
-    let path_str = path.to_string_lossy();
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let path_str = canonical.to_string_lossy();
     // Convert backslashes to forward slashes
     let unix_path = path_str.replace('\\', "/");
     // Convert drive letter: C:/... -> /c/...
@@ -506,6 +507,32 @@ fn build_docker_path(_docker_bin: &str) -> Option<String> {
     None
 }
 
+fn resolve_docker_config_path() -> Option<String> {
+    if let Ok(config) = std::env::var("BIOVAULT_DOCKER_CONFIG") {
+        let trimmed = config.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+    if let Ok(config) = std::env::var("DOCKER_CONFIG") {
+        let trimmed = config.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+    None
+}
+
+fn apply_docker_config_arg(cmd: &mut Command) {
+    if let Some(config) = resolve_docker_config_path() {
+        append_desktop_log(&format!(
+            "[Pipeline] Using Docker config: {}",
+            config
+        ));
+        cmd.arg("--config").arg(config);
+    }
+}
+
 /// Pull a Docker image if not already present (needed on Windows for credential helper PATH issues)
 #[cfg(target_os = "windows")]
 fn pull_docker_image_if_needed(docker_bin: &str, image: &str) -> Result<()> {
@@ -517,6 +544,7 @@ fn pull_docker_image_if_needed(docker_bin: &str, image: &str) -> Result<()> {
     // Check if image exists locally
     let mut check_cmd = Command::new(docker_bin);
     super::configure_child_process(&mut check_cmd);
+    apply_docker_config_arg(&mut check_cmd);
     check_cmd
         .arg("image")
         .arg("inspect")
@@ -543,6 +571,7 @@ fn pull_docker_image_if_needed(docker_bin: &str, image: &str) -> Result<()> {
 
     let mut pull_cmd = Command::new(docker_bin);
     super::configure_child_process(&mut pull_cmd);
+    apply_docker_config_arg(&mut pull_cmd);
     pull_cmd.arg("pull").arg(image);
 
     // Add Docker PATH for credential helpers on Windows
@@ -574,6 +603,7 @@ fn ensure_nextflow_runner_image(docker_bin: &str) -> Result<&'static str> {
     // Check if runner image exists locally
     let mut check_cmd = Command::new(docker_bin);
     super::configure_child_process(&mut check_cmd);
+    apply_docker_config_arg(&mut check_cmd);
     check_cmd
         .arg("image")
         .arg("inspect")
@@ -616,6 +646,7 @@ fn ensure_nextflow_runner_image(_docker_bin: &str) -> Result<&'static str> {
 #[cfg(target_os = "linux")]
 fn check_docker_running(docker_bin: &str) -> Result<()> {
     let mut cmd = Command::new(docker_bin);
+    apply_docker_config_arg(&mut cmd);
     cmd.arg("info")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -667,6 +698,7 @@ If you recently added your user to the docker group, log out and back in, then r
 fn check_docker_running(docker_bin: &str) -> Result<()> {
     let mut cmd = Command::new(docker_bin);
     super::configure_child_process(&mut cmd);
+    apply_docker_config_arg(&mut cmd);
     cmd.arg("info").stdout(Stdio::null()).stderr(Stdio::null());
 
     // Add Docker PATH for credential helpers on Windows
@@ -702,6 +734,9 @@ pub async fn execute_dynamic(
     if !project_path.exists() {
         return Err(anyhow::anyhow!("Project folder does not exist: {}", project_folder).into());
     }
+    let project_abs = project_path
+        .canonicalize()
+        .context("Failed to resolve project path")?;
 
     let nextflow_log_path = project_path.join(".nextflow.log");
     fs::remove_file(&nextflow_log_path).ok();
@@ -744,6 +779,16 @@ pub async fn execute_dynamic(
         .or_insert_with(|| json!(assets_dir_abs.to_string_lossy().to_string()));
 
     let results_path = results_dir.as_deref().unwrap_or("results");
+    let results_path_buf = if Path::new(results_path).is_absolute() {
+        PathBuf::from(results_path)
+    } else {
+        project_path.join(results_path)
+    };
+    if !dry_run {
+        fs::create_dir_all(&results_path_buf)
+            .context("Failed to create results directory")?;
+    }
+    let results_path_str = results_path_buf.to_string_lossy().to_string();
 
     // Check user workflow exists
     let workflow_path = project_path.join(&spec.workflow);
@@ -758,12 +803,15 @@ pub async fn execute_dynamic(
 
     // Load template from .biovault/env/{template_name}/ (security boundary)
     let biovault_home = crate::config::get_biovault_home()?;
+    let biovault_home_abs = biovault_home
+        .canonicalize()
+        .unwrap_or_else(|_| biovault_home.clone());
     let template_name = spec.template.as_deref().unwrap_or("dynamic-nextflow");
-    let env_dir = biovault_home.join("env").join(template_name);
+    let env_dir = biovault_home_abs.join("env").join(template_name);
     let template_path = env_dir.join("template.nf");
 
     if template_name == "dynamic-nextflow" {
-        install_dynamic_template(&biovault_home)?;
+        install_dynamic_template(&biovault_home_abs)?;
     }
 
     if !template_path.exists() {
@@ -822,13 +870,16 @@ pub async fn execute_dynamic(
         };
 
         // Convert all paths to Docker-compatible format
-        let docker_biovault_home = windows_path_to_docker(&biovault_home);
-        let docker_project_path = windows_path_to_docker(project_path);
+        let docker_biovault_home = windows_path_to_docker(&biovault_home_abs);
+        let docker_project_path = windows_path_to_docker(&project_abs);
         let docker_template = windows_path_to_docker(&template_abs);
         let docker_workflow = windows_path_to_docker(&workflow_abs);
         let docker_project_spec = windows_path_to_docker(&project_spec_abs);
         let docker_log_path = windows_path_to_docker(&nextflow_log_path);
-        let docker_results = windows_path_to_docker(Path::new(results_path));
+        let results_abs = results_path_buf
+            .canonicalize()
+            .unwrap_or_else(|_| results_path_buf.clone());
+        let docker_results = windows_path_to_docker(&results_abs);
 
         // Extract paths from inputs that need to be mounted (must do before rewriting CSVs)
         // This is Windows-specific: extract paths from CSV files and rewrite them for Docker
@@ -863,12 +914,12 @@ pub async fn execute_dynamic(
         append_desktop_log("[Pipeline] Docker path mappings:");
         append_desktop_log(&format!(
             "  biovault_home: {} -> {}",
-            biovault_home.display(),
+            biovault_home_abs.display(),
             docker_biovault_home
         ));
         append_desktop_log(&format!(
             "  project_path: {} -> {}",
-            project_path.display(),
+            project_abs.display(),
             docker_project_path
         ));
         append_desktop_log(&format!(
@@ -883,6 +934,7 @@ pub async fn execute_dynamic(
 
         let mut docker_cmd = Command::new(&docker_bin);
         super::configure_child_process(&mut docker_cmd);
+        apply_docker_config_arg(&mut docker_cmd);
 
         // Add Docker PATH for credential helpers on Windows
         if let Some(docker_path) = build_docker_path(&docker_bin) {
@@ -1034,7 +1086,7 @@ pub async fn execute_dynamic(
             .arg("--params_json")
             .arg(params_json_str)
             .arg("--results_dir")
-            .arg(results_path);
+            .arg(&results_path_str);
 
         native_cmd
     };
