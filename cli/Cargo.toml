@@ -56,7 +56,7 @@ lazy_static = "1.4"
 notify = "6.1"
 libc = "0.2"
 csv = "1.3"
-syftbox-sdk = { version = "0.1.9", path = "../../syftbox-sdk", features = ["crypto", "process", "auth", "telemetry"] }
+syftbox-sdk = { version = "0.1.9", path = "../../syftbox-sdk", features = ["crypto", "process", "auth", "telemetry", "embedded"] }
 
 [dev-dependencies.syftbox-sdk]
 version = "0.1.9"
