@@ -221,7 +221,10 @@ stop_stack() {
     for email in "${CLIENTS[@]}"; do
       local client_dir="$SANDBOX_DIR/$email"
       if [[ -d "$client_dir" ]]; then
-        HOME="$client_dir" "$BV_BIN" syftboxd stop >/dev/null 2>&1 || true
+        BIOVAULT_HOME="$client_dir" \
+        BIOVAULT_DISABLE_PROFILES=1 \
+        HOME="$client_dir" \
+        "$BV_BIN" syftboxd stop >/dev/null 2>&1 || true
       fi
     done
   fi
@@ -245,6 +248,8 @@ bootstrap_biovault() {
   require_file "$config_path"
 
   echo "Configuring BioVault for $email"
+  BIOVAULT_HOME="$client_dir" \
+  BIOVAULT_DISABLE_PROFILES=1 \
   HOME="$client_dir" \
   SYFTBOX_EMAIL="$email" \
   SYFTBOX_DATA_DIR="$data_dir" \
@@ -322,6 +327,8 @@ start_syftboxd() {
     require_file "$config_path"
 
     echo "Starting syftboxd (embedded) for $email"
+    BIOVAULT_HOME="$client_dir" \
+    BIOVAULT_DISABLE_PROFILES=1 \
     HOME="$client_dir" \
     SYFTBOX_EMAIL="$email" \
     SYFTBOX_DATA_DIR="$data_dir" \
