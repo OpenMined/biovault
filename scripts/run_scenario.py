@@ -5,6 +5,7 @@ import argparse
 import json
 import os
 import subprocess
+import shutil
 import sys
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -65,6 +66,27 @@ def is_supported_java(java_home: str) -> bool:
 
 
 JAVA_HOME_OVERRIDE = detect_java_home()
+
+def resolve_bash() -> list[str]:
+    override = os.environ.get("SCENARIO_BASH") or os.environ.get("GIT_BASH")
+    if override:
+        return [override]
+    if os.name == "nt":
+        candidates = [
+            r"C:\Program Files\Git\bin\bash.exe",
+            r"C:\Program Files\Git\usr\bin\bash.exe",
+            r"C:\Program Files (x86)\Git\bin\bash.exe",
+            r"C:\Program Files (x86)\Git\usr\bin\bash.exe",
+        ]
+        for candidate in candidates:
+            if Path(candidate).exists():
+                return [candidate]
+    found = shutil.which("bash") or "bash"
+    if os.name == "nt" and isinstance(found, str) and "System32" in found:
+        git_bash = Path(r"C:\Program Files\Git\bin\bash.exe")
+        if git_bash.exists():
+            return [str(git_bash)]
+    return [found]
 
 
 def load_scenario(path: Path) -> Dict[str, Any]:
@@ -339,6 +361,39 @@ def replace_vars(command: str, variables: Dict[str, str]) -> str:
             result = result.replace(token, value)
     return result
 
+def to_msys_path(value: str) -> str:
+    if os.name != "nt":
+        return value
+    if len(value) >= 2 and value[1] == ":":
+        drive = value[0].lower()
+        rest = value[2:].replace("\\", "/")
+        if not rest.startswith("/"):
+            rest = "/" + rest.lstrip("/")
+        return f"/{drive}{rest}"
+    return value
+
+def write_stream(stream, text: Optional[str]) -> None:
+    if not text:
+        return
+    try:
+        stream.write(text)
+    except UnicodeEncodeError:
+        stream.buffer.write(text.encode("utf-8", errors="replace"))
+        stream.flush()
+
+def ensure_shims(env: Dict[str, str]) -> Dict[str, str]:
+    if os.name != "nt":
+        return env
+    if all(shutil.which(tool) for tool in ("jq", "sqlite3")):
+        return env
+    shim_dir = ROOT / "scripts"
+    if not (shim_dir / "jq").exists() or not (shim_dir / "sqlite3").exists():
+        return env
+    env = env.copy()
+    shim_path = to_msys_path(str(shim_dir))
+    env["PATH"] = f"{shim_path}:{env.get('PATH', '')}"
+    return env
+
 
 def run_shell(
     command: str,
@@ -346,7 +401,12 @@ def run_shell(
     variables: Dict[str, str],
     capture: bool = False,
 ) -> subprocess.CompletedProcess:
-    expanded = replace_vars(command, variables)
+    shell_vars = variables
+    if datasite and os.name == "nt":
+        shell_vars = dict(variables)
+        shell_vars["workspace"] = to_msys_path(variables.get("workspace", ""))
+        shell_vars["sandbox"] = to_msys_path(variables.get("sandbox", ""))
+    expanded = replace_vars(command, shell_vars)
     env = os.environ.copy()
     env["WORKSPACE_ROOT"] = str(ROOT)
     env["SCENARIO_DATASITE"] = datasite or ""
@@ -381,11 +441,15 @@ def run_shell(
         if user_path:
             env["PATH"] = user_path
 
+        bash_cmd = resolve_bash()
+        env = ensure_shims(env)
         result = subprocess.run(
-            ["bash", "-c", expanded],
+            bash_cmd + ["-lc", expanded],
             cwd=client_dir,
             env=env,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             capture_output=True,
         )
     else:
@@ -400,12 +464,14 @@ def run_shell(
             cwd=ROOT,
             env=env,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             shell=True,
             capture_output=True,
         )
 
-    sys.stdout.write(result.stdout)
-    sys.stderr.write(result.stderr)
+    write_stream(sys.stdout, result.stdout)
+    write_stream(sys.stderr, result.stderr)
     if result.returncode != 0:
         raise SystemExit(f"Command failed (exit {result.returncode}): {expanded}")
     return result
@@ -455,10 +521,10 @@ def run_step(step: Dict[str, Any], variables: Dict[str, str]):
                 matches = set(glob.glob(str(wait_path)))
                 candidates = sorted(matches - initial_matches) if wait_for_new else sorted(matches)
                 if candidates:
-                    print(f"✓ Found: {candidates[0]}")
+                    print(f"OK: Found: {candidates[0]}")
                     return
             elif wait_path.exists():
-                print(f"✓ Found: {wait_path}")
+                print(f"OK: Found: {wait_path}")
                 return
             time.sleep(1)
 
@@ -501,7 +567,7 @@ def run_step(step: Dict[str, Any], variables: Dict[str, str]):
                 print(f"  - {f}")
             raise SystemExit(f"Encrypted files found in: {check_path}")
 
-        print(f"✓ No encrypted files in: {expanded}")
+        print(f"OK: No encrypted files in: {expanded}")
         return
 
     # Handle assert_encrypted: check that files have SYC1 headers
@@ -544,7 +610,7 @@ def run_step(step: Dict[str, Any], variables: Dict[str, str]):
                 print(f"  - {f}")
             raise SystemExit(f"Unencrypted files found in: {check_path}")
 
-        print(f"✓ All files encrypted in: {expanded}")
+        print(f"OK: All files encrypted in: {expanded}")
         return
 
     if not command:
