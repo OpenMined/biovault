@@ -73,6 +73,8 @@ pub struct ProjectYaml {
     pub outputs: Option<Vec<OutputSpec>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub b3_hashes: Option<HashMap<String, String>>,
+    #[serde(flatten, default)]
+    pub extra: HashMap<String, serde_yaml::Value>,
 }
 
 impl ProjectYaml {
@@ -142,6 +144,7 @@ mod tests {
             inputs: None,
             outputs: None,
             b3_hashes: None,
+            extra: HashMap::new(),
         };
         proj.save(&p).unwrap();
         let loaded = ProjectYaml::from_file(&p).unwrap();

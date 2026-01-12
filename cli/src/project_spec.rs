@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
@@ -21,9 +21,15 @@ pub struct ProjectSpec {
     pub author: String,
     pub workflow: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub template: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub datasites: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
     #[serde(default)]
     pub assets: Vec<String>,
     #[serde(default)]
@@ -32,6 +38,8 @@ pub struct ProjectSpec {
     pub inputs: Vec<InputSpec>,
     #[serde(default)]
     pub outputs: Vec<OutputSpec>,
+    #[serde(default)]
+    pub steps: Vec<ProjectStepSpec>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -75,6 +83,21 @@ pub struct OutputSpec {
     pub format: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectStepSpec {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub foreach: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
+    #[serde(default)]
+    pub inputs: Vec<InputSpec>,
+    #[serde(default)]
+    pub outputs: Vec<OutputSpec>,
 }
 
 #[derive(Debug, Clone)]

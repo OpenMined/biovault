@@ -68,6 +68,7 @@ pub fn save_project_metadata(project_root: &Path, metadata: &ProjectMetadata) ->
         name: metadata.name.clone(),
         author: metadata.author.clone(),
         workflow: metadata.workflow.clone(),
+        description: None,
         template: metadata.template.clone(),
         version: Some(
             metadata
@@ -75,10 +76,13 @@ pub fn save_project_metadata(project_root: &Path, metadata: &ProjectMetadata) ->
                 .clone()
                 .unwrap_or_else(|| "1.0.0".to_string()),
         ),
+        datasites: None,
+        env: Default::default(),
         assets,
         parameters: metadata.parameters.clone(),
         inputs: metadata.inputs.clone(),
         outputs: metadata.outputs.clone(),
+        steps: Vec::new(),
     };
 
     let yaml_str = serde_yaml::to_string(&spec)

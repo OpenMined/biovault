@@ -90,11 +90,12 @@ pub async fn submit(
         project.participants = Some(vec![url.clone()]);
     }
 
-    // Hash workflow.nf
-    let workflow_path = project_dir.join("workflow.nf");
+    // Hash workflow file
+    let workflow_path = project_dir.join(&project.workflow);
     if !workflow_path.exists() {
         return Err(Error::from(anyhow::anyhow!(
-            "workflow.nf not found in project directory"
+            "Workflow file '{}' not found in project directory",
+            project.workflow
         )));
     }
     let workflow_hash = hash_file(&workflow_path)?;
@@ -105,7 +106,7 @@ pub async fn submit(
     let mut b3_hashes = HashMap::new();
 
     // Add workflow hash
-    b3_hashes.insert("workflow.nf".to_string(), workflow_hash.clone());
+    b3_hashes.insert(project.workflow.clone(), workflow_hash.clone());
 
     if assets_dir.exists() && assets_dir.is_dir() {
         for entry in WalkDir::new(&assets_dir)
@@ -142,7 +143,7 @@ pub async fn submit(
     };
     project.b3_hashes = Some(b3_hashes);
 
-    // Calculate project hash from workflow.nf and assets only (deterministic)
+    // Calculate project hash from workflow and assets only (deterministic)
     let mut hash_content = String::new();
     hash_content.push_str(&project.name);
     hash_content.push_str(&workflow_hash);
@@ -180,8 +181,16 @@ pub async fn submit(
             existing_hash_content.push_str(&existing_project.name);
 
             // Get workflow hash from existing submission
-            if let Some(ref existing_hashes) = existing_project.b3_hashes {
-                if let Some(existing_workflow_hash) = existing_hashes.get("workflow.nf") {
+                if let Some(ref existing_hashes) = existing_project.b3_hashes {
+                    let workflow_key = if existing_project.workflow.trim().is_empty() {
+                        "workflow.nf"
+                    } else {
+                        existing_project.workflow.as_str()
+                    };
+                    if let Some(existing_workflow_hash) = existing_hashes
+                        .get(workflow_key)
+                        .or_else(|| existing_hashes.get("workflow.nf"))
+                    {
                     existing_hash_content.push_str(existing_workflow_hash);
 
                     let mut sorted_hashes: Vec<_> = existing_hashes.iter().collect();
@@ -401,16 +410,17 @@ fn copy_project_files(
     dest: &Path,
     storage: &SyftBoxStorage,
     recipient: &str,
+    workflow_name: &str,
 ) -> Result<()> {
     storage.ensure_dir(dest)?;
-    // Copy workflow.nf
-    let src_workflow = src.join("workflow.nf");
-    let dest_workflow = dest.join("workflow.nf");
+    // Copy workflow file
+    let src_workflow = src.join(workflow_name);
+    let dest_workflow = dest.join(workflow_name);
     let workflow_bytes = fs::read(&src_workflow)
-        .with_context(|| "Failed to read workflow.nf from project".to_string())?;
+        .with_context(|| format!("Failed to read {} from project", workflow_name))?;
     let workflow_policy = WritePolicy::Envelope {
         recipients: vec![recipient.to_string()],
-        hint: Some("workflow.nf".into()),
+        hint: Some(workflow_name.to_string()),
     };
     storage.write_with_shadow(&dest_workflow, &workflow_bytes, workflow_policy, true)?;
 
@@ -470,7 +480,13 @@ fn create_and_submit_project(
     storage.ensure_dir(submission_path)?;
 
     // Copy project files
-    copy_project_files(project_dir, submission_path, storage, datasite_email)?;
+    copy_project_files(
+        project_dir,
+        submission_path,
+        storage,
+        datasite_email,
+        &project.workflow,
+    )?;
 
     // Save updated project.yaml
     let mut final_project = project.clone();
@@ -674,6 +690,7 @@ mod tests {
             inputs: None,
             outputs: None,
             b3_hashes: None,
+            extra: HashMap::new(),
         };
         project.save(&path.to_path_buf()).unwrap();
     }
@@ -737,7 +754,7 @@ mod tests {
         fs::write(src.join("assets/nested/file.bin"), b"x").unwrap();
         let storage = SyftBoxStorage::new(tmp.path());
 
-        copy_project_files(&src, &dest, &storage, "peer@example.com").unwrap();
+        copy_project_files(&src, &dest, &storage, "peer@example.com", "workflow.nf").unwrap();
 
         assert!(dest.join("workflow.nf").exists());
         assert!(dest.join("assets/nested/file.bin").exists());
@@ -748,7 +765,7 @@ mod tests {
         fs::write(src2.join("workflow.nf"), b"wf").unwrap();
         let dest2 = tmp.path().join("datasites/dest2");
         fs::create_dir_all(&dest2).unwrap();
-        copy_project_files(&src2, &dest2, &storage, "peer@example.com").unwrap();
+        copy_project_files(&src2, &dest2, &storage, "peer@example.com", "workflow.nf").unwrap();
     }
 
     #[test]
@@ -793,7 +810,7 @@ mod tests {
         // No workflow.nf file
 
         let storage = SyftBoxStorage::new(tmp.path());
-        let result = copy_project_files(&src, &dest, &storage, "peer@example.com");
+        let result = copy_project_files(&src, &dest, &storage, "peer@example.com", "workflow.nf");
         assert!(result.is_err());
     }
 
@@ -821,7 +838,7 @@ mod tests {
         }
 
         let storage = SyftBoxStorage::new(tmp.path());
-        let result = copy_project_files(&src, &dest, &storage, "peer@example.com");
+        let result = copy_project_files(&src, &dest, &storage, "peer@example.com", "workflow.nf");
         assert!(result.is_ok());
         assert!(dest.join("workflow.nf").exists());
     }
@@ -838,7 +855,7 @@ mod tests {
         fs::write(src.join("assets/a/b/c/d/deep.txt"), b"deep").unwrap();
 
         let storage = SyftBoxStorage::new(tmp.path());
-        copy_project_files(&src, &dest, &storage, "peer@example.com").unwrap();
+        copy_project_files(&src, &dest, &storage, "peer@example.com", "workflow.nf").unwrap();
 
         assert!(dest.join("workflow.nf").exists());
         assert!(dest.join("assets/a/b/c/d/deep.txt").exists());
@@ -863,7 +880,7 @@ mod tests {
         fs::write(src.join("assets/data.csv"), asset_content).unwrap();
 
         let storage = SyftBoxStorage::new(tmp.path());
-        copy_project_files(&src, &dest, &storage, "peer@example.com").unwrap();
+        copy_project_files(&src, &dest, &storage, "peer@example.com", "workflow.nf").unwrap();
 
         let copied_workflow = fs::read(dest.join("workflow.nf")).unwrap();
         let copied_asset = fs::read(dest.join("assets/data.csv")).unwrap();
@@ -978,6 +995,7 @@ mod tests {
             inputs: None,
             outputs: None,
             b3_hashes: Some(hashes),
+            extra: HashMap::new(),
         };
 
         write_yaml_to_storage(

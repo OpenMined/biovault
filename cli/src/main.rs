@@ -1846,7 +1846,7 @@ async fn async_main_with(cli: Cli) -> Result<()> {
                         let template = project.template.as_deref().unwrap_or("default");
 
                         // Use dynamic run system for dynamic-nextflow template
-                        if template == "dynamic-nextflow" {
+                        if template == "dynamic-nextflow" || template == "shell" {
                             commands::run_dynamic::execute_dynamic(
                                 &project_folder,
                                 args,

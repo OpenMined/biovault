@@ -1,0 +1,205 @@
+# Syqure file-transport demo (3 parties via Docker)
+# Run with: ./test-scenario.sh tests/scenarios/syqure.yaml
+
+setup:
+  server:
+    - "./tests/scripts/devstack.sh --reset --clients client1@sandbox.local,client2@sandbox.local,aggregator@sandbox.local"
+
+steps:
+  - name: Generate run id
+    run: |
+      date +%Y%m%d%H%M%S
+    capture: run_id
+
+  - name: Wait for client2 public key to sync
+    datasite: client1@sandbox.local
+    wait_for: datasites/client2@sandbox.local/public/crypto/did.json
+    timeout: 30
+
+  - name: Wait for aggregator public key to sync
+    datasite: client1@sandbox.local
+    wait_for: datasites/aggregator@sandbox.local/public/crypto/did.json
+    timeout: 30
+
+  - name: Prepare Syqure shared folders + permissions
+    run: |
+      set -euo pipefail
+      RUN_ID="{{run_id}}"
+      BASE_AGG="{{sandbox}}/aggregator@sandbox.local/datasites/aggregator@sandbox.local/shared/syqure/${RUN_ID}"
+      BASE_C1="{{sandbox}}/client1@sandbox.local/datasites/client1@sandbox.local/shared/syqure/${RUN_ID}"
+      BASE_C2="{{sandbox}}/client2@sandbox.local/datasites/client2@sandbox.local/shared/syqure/${RUN_ID}"
+
+      mkdir -p "$BASE_AGG" "$BASE_C1" "$BASE_C2"
+
+      write_acl() {
+        local dir="$1"
+        local peer_a="$2"
+        local peer_b="$3"
+        mkdir -p "$dir"
+        printf '%s\n' \
+          'rules:' \
+          '  - pattern: "**"' \
+          '    access:' \
+          '      admin: []' \
+          '      read:' \
+          "        - ${peer_a}" \
+          "        - ${peer_b}" \
+          '      write:' \
+          "        - ${peer_a}" \
+          "        - ${peer_b}" \
+          > "$dir/syft.pub.yaml"
+      }
+
+      write_acl "$BASE_AGG/0_to_1" client1@sandbox.local aggregator@sandbox.local
+      write_acl "$BASE_AGG/0_to_2" client2@sandbox.local aggregator@sandbox.local
+      write_acl "$BASE_C1/1_to_0" client1@sandbox.local aggregator@sandbox.local
+      write_acl "$BASE_C1/1_to_2" client1@sandbox.local client2@sandbox.local
+      write_acl "$BASE_C2/2_to_0" client2@sandbox.local aggregator@sandbox.local
+      write_acl "$BASE_C2/2_to_1" client2@sandbox.local client1@sandbox.local
+
+  - name: Wait for aggregator 0_to_1 ACL to sync to client1
+    datasite: client1@sandbox.local
+    wait_for: datasites/aggregator@sandbox.local/shared/syqure/{{run_id}}/0_to_1/syft.pub.yaml
+    timeout: 60
+
+  - name: Wait for aggregator 0_to_2 ACL to sync to client2
+    datasite: client2@sandbox.local
+    wait_for: datasites/aggregator@sandbox.local/shared/syqure/{{run_id}}/0_to_2/syft.pub.yaml
+    timeout: 60
+
+  - name: Wait for client1 1_to_0 ACL to sync to aggregator
+    datasite: aggregator@sandbox.local
+    wait_for: datasites/client1@sandbox.local/shared/syqure/{{run_id}}/1_to_0/syft.pub.yaml
+    timeout: 60
+
+  - name: Wait for client2 2_to_0 ACL to sync to aggregator
+    datasite: aggregator@sandbox.local
+    wait_for: datasites/client2@sandbox.local/shared/syqure/{{run_id}}/2_to_0/syft.pub.yaml
+    timeout: 60
+
+  - name: Wait for client1 1_to_2 ACL to sync to client2
+    datasite: client2@sandbox.local
+    wait_for: datasites/client1@sandbox.local/shared/syqure/{{run_id}}/1_to_2/syft.pub.yaml
+    timeout: 60
+
+  - name: Wait for client2 2_to_1 ACL to sync to client1
+    datasite: client1@sandbox.local
+    wait_for: datasites/client2@sandbox.local/shared/syqure/{{run_id}}/2_to_1/syft.pub.yaml
+    timeout: 60
+
+  - name: Write syqure test files for each pair
+    run: |
+      set -euo pipefail
+      RUN_ID="{{run_id}}"
+      BASE_AGG="{{sandbox}}/aggregator@sandbox.local/datasites/aggregator@sandbox.local/shared/syqure/${RUN_ID}"
+      BASE_C1="{{sandbox}}/client1@sandbox.local/datasites/client1@sandbox.local/shared/syqure/${RUN_ID}"
+      BASE_C2="{{sandbox}}/client2@sandbox.local/datasites/client2@sandbox.local/shared/syqure/${RUN_ID}"
+
+      printf 'agg->c1\n' > "$BASE_AGG/0_to_1/ping.txt"
+      printf 'agg->c2\n' > "$BASE_AGG/0_to_2/ping.txt"
+      printf 'c1->agg\n' > "$BASE_C1/1_to_0/ping.txt"
+      printf 'c1->c2\n' > "$BASE_C1/1_to_2/ping.txt"
+      printf 'c2->agg\n' > "$BASE_C2/2_to_0/ping.txt"
+      printf 'c2->c1\n' > "$BASE_C2/2_to_1/ping.txt"
+
+  - name: Wait for 0_to_1 test file to sync to client1
+    datasite: client1@sandbox.local
+    wait_for: datasites/aggregator@sandbox.local/shared/syqure/{{run_id}}/0_to_1/ping.txt
+    timeout: 60
+
+  - name: Wait for 0_to_2 test file to sync to client2
+    datasite: client2@sandbox.local
+    wait_for: datasites/aggregator@sandbox.local/shared/syqure/{{run_id}}/0_to_2/ping.txt
+    timeout: 60
+
+  - name: Wait for 1_to_0 test file to sync to aggregator
+    datasite: aggregator@sandbox.local
+    wait_for: datasites/client1@sandbox.local/shared/syqure/{{run_id}}/1_to_0/ping.txt
+    timeout: 60
+
+  - name: Wait for 1_to_2 test file to sync to client2
+    datasite: client2@sandbox.local
+    wait_for: datasites/client1@sandbox.local/shared/syqure/{{run_id}}/1_to_2/ping.txt
+    timeout: 60
+
+  - name: Wait for 2_to_0 test file to sync to aggregator
+    datasite: aggregator@sandbox.local
+    wait_for: datasites/client2@sandbox.local/shared/syqure/{{run_id}}/2_to_0/ping.txt
+    timeout: 60
+
+  - name: Wait for 2_to_1 test file to sync to client1
+    datasite: client1@sandbox.local
+    wait_for: datasites/client2@sandbox.local/shared/syqure/{{run_id}}/2_to_1/ping.txt
+    timeout: 60
+
+  - name: Start aggregator (CP0) container
+    run: |
+      docker rm -f syqure-aggregator syqure-client1 syqure-client2 >/dev/null 2>&1 || true
+      SEQURE_FILE_KEEP=1 SEQURE_FILE_DEBUG=1 {{workspace}}/tests/scripts/run_syqure_party.sh \
+        --pid 0 \
+        --email aggregator@sandbox.local \
+        --run-id {{run_id}} \
+        --party-emails aggregator@sandbox.local,client1@sandbox.local,client2@sandbox.local \
+        --datasites-root "{{sandbox}}/aggregator@sandbox.local/datasites" \
+        --image syqure-cli-files \
+        --platform linux/amd64 \
+        --name syqure-aggregator-{{run_id}}
+
+  - name: Capture Syqure start time (ms)
+    run: |
+      python3 - <<'PY'
+      import time
+      print(int(time.time() * 1000))
+      PY
+    capture: run_start_ms
+
+  - name: Start client1 (CP1) container
+    run: |
+      SEQURE_FILE_KEEP=1 SEQURE_FILE_DEBUG=1 {{workspace}}/tests/scripts/run_syqure_party.sh \
+        --pid 1 \
+        --email client1@sandbox.local \
+        --run-id {{run_id}} \
+        --party-emails aggregator@sandbox.local,client1@sandbox.local,client2@sandbox.local \
+        --datasites-root "{{sandbox}}/client1@sandbox.local/datasites" \
+        --image syqure-cli-files \
+        --platform linux/amd64 \
+        --name syqure-client1-{{run_id}}
+
+  - name: Start client2 (CP2) container
+    run: |
+      SEQURE_FILE_KEEP=1 SEQURE_FILE_DEBUG=1 {{workspace}}/tests/scripts/run_syqure_party.sh \
+        --pid 2 \
+        --email client2@sandbox.local \
+        --run-id {{run_id}} \
+        --party-emails aggregator@sandbox.local,client1@sandbox.local,client2@sandbox.local \
+        --datasites-root "{{sandbox}}/client2@sandbox.local/datasites" \
+        --image syqure-cli-files \
+        --platform linux/amd64 \
+        --name syqure-client2-{{run_id}}
+
+  - name: Wait for Syqure containers to finish
+    run: |
+      docker wait syqure-aggregator-{{run_id}} syqure-client1-{{run_id}} syqure-client2-{{run_id}}
+
+  - name: Report Syqure duration
+    run: |
+      python3 - <<'PY'
+      import time
+      start = int("{{run_start_ms}}")
+      end = int(time.time() * 1000)
+      print(f"Syqure runtime ms: {end - start}")
+      PY
+
+  - name: Check CP1 output
+    run: |
+      docker logs syqure-client1-{{run_id}}
+    expect: "sum = 14"
+
+  - name: Check CP2 output
+    run: |
+      docker logs syqure-client2-{{run_id}}
+    expect: "sum = 14"
+
+  - name: Cleanup Syqure containers
+    run: |
+      docker rm -f syqure-aggregator-{{run_id}} syqure-client1-{{run_id}} syqure-client2-{{run_id}} >/dev/null 2>&1 || true

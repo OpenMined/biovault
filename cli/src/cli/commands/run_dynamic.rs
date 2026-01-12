@@ -1,11 +1,12 @@
 use super::run::execute_with_logging;
 use crate::error::Result;
-use crate::project_spec::ProjectSpec;
+use crate::project_spec::{ProjectSpec, ProjectStepSpec};
 use anyhow::Context;
 use chrono::Local;
 use colored::Colorize;
 use serde_json::{json, Value as JsonValue};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::env;
 use std::ffi::OsStr;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -716,13 +717,29 @@ pub async fn execute_dynamic(
     }
 
     let spec = ProjectSpec::load(&spec_path)?;
+    let template = spec.template.as_deref().unwrap_or("dynamic-nextflow");
 
-    if spec.template.as_deref() != Some("dynamic-nextflow") {
-        return Err(anyhow::anyhow!(
-            "This project uses template '{}'. Only 'dynamic-nextflow' is supported by the new run system.",
-            spec.template.as_deref().unwrap_or("(none)")
-        ).into());
+    if template == "shell" {
+        return execute_shell(
+            &spec,
+            project_path,
+            args,
+            dry_run,
+            results_dir,
+            run_settings,
+        )
+        .await;
     }
+
+    if template != "dynamic-nextflow" {
+        return Err(anyhow::anyhow!(
+            "This project uses template '{}'. Only 'dynamic-nextflow' or 'shell' are supported by the new run system.",
+            template
+        )
+        .into());
+    }
+
+    let current_datasite = resolve_current_datasite();
 
     println!("🚀 Running project: {}", spec.name.bold());
 
@@ -743,7 +760,28 @@ pub async fn execute_dynamic(
         .entry("assets_dir".to_string())
         .or_insert_with(|| json!(assets_dir_abs.to_string_lossy().to_string()));
 
-    let results_path = results_dir.as_deref().unwrap_or("results");
+    let results_path_str = results_dir.as_deref().unwrap_or("results");
+    let results_path_buf = PathBuf::from(results_path_str);
+    let template_datasites = if spec.datasites.as_ref().map_or(false, |d| !d.is_empty()) {
+        spec.datasites.clone().unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let datasite_index =
+        resolve_datasite_index(&template_datasites, current_datasite.as_deref());
+    let context = DatasiteContext {
+        datasites: template_datasites,
+        current: current_datasite.clone(),
+        index: datasite_index,
+    };
+    let env_map = build_shell_env(
+        &spec.env,
+        &BTreeMap::new(),
+        &context,
+        project_path,
+        &results_path_buf,
+        "workflow",
+    );
 
     // Check user workflow exists
     let workflow_path = project_path.join(&spec.workflow);
@@ -828,7 +866,7 @@ pub async fn execute_dynamic(
         let docker_workflow = windows_path_to_docker(&workflow_abs);
         let docker_project_spec = windows_path_to_docker(&project_spec_abs);
         let docker_log_path = windows_path_to_docker(&nextflow_log_path);
-        let docker_results = windows_path_to_docker(Path::new(results_path));
+        let docker_results = windows_path_to_docker(Path::new(results_path_str));
 
         // Extract paths from inputs that need to be mounted (must do before rewriting CSVs)
         // This is Windows-specific: extract paths from CSV files and rewrite them for Docker
@@ -1034,10 +1072,14 @@ pub async fn execute_dynamic(
             .arg("--params_json")
             .arg(params_json_str)
             .arg("--results_dir")
-            .arg(results_path);
+            .arg(results_path_str);
 
         native_cmd
     };
+
+    for (key, value) in &env_map {
+        cmd.env(key, value);
+    }
 
     let display_cmd = format_command(&cmd);
 
@@ -1077,6 +1119,252 @@ pub async fn execute_dynamic(
 
     println!("\n✅ Workflow completed successfully!");
     append_desktop_log("[Pipeline] Workflow completed successfully!");
+    Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct DatasiteContext {
+    datasites: Vec<String>,
+    current: Option<String>,
+    index: Option<usize>,
+}
+
+fn resolve_current_datasite() -> Option<String> {
+    if let Ok(cfg) = crate::config::Config::load() {
+        if !cfg.email.trim().is_empty() {
+            return Some(cfg.email);
+        }
+    }
+    if let Ok(env_email) = env::var("SYFTBOX_EMAIL") {
+        if !env_email.trim().is_empty() {
+            return Some(env_email.trim().to_string());
+        }
+    }
+    if let Ok(env_email) = env::var("BIOVAULT_DATASITE") {
+        if !env_email.trim().is_empty() {
+            return Some(env_email.trim().to_string());
+        }
+    }
+    None
+}
+
+fn resolve_datasite_index(datasites: &[String], current: Option<&str>) -> Option<usize> {
+    let current = current?;
+    datasites.iter().position(|site| site == current)
+}
+
+fn render_template(value: &str, ctx: &DatasiteContext) -> String {
+    let mut rendered = value.to_string();
+    if let Some(current) = &ctx.current {
+        rendered = rendered.replace("{current_datasite}", current);
+    }
+    if let Some(index) = ctx.index {
+        rendered = rendered.replace("{datasites.index}", &index.to_string());
+        rendered = rendered.replace("{datasite.index}", &index.to_string());
+    }
+    rendered.replace("{datasites}", &ctx.datasites.join(","))
+}
+
+fn env_key_suffix(name: &str) -> String {
+    name.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn build_shell_env(
+    spec_env: &BTreeMap<String, String>,
+    step_env: &BTreeMap<String, String>,
+    ctx: &DatasiteContext,
+    project_path: &Path,
+    results_path: &Path,
+    step_id: &str,
+) -> BTreeMap<String, String> {
+    let mut env_map = spec_env.clone();
+    for (key, value) in step_env {
+        env_map.insert(key.clone(), value.clone());
+    }
+
+    let mut rendered = BTreeMap::new();
+    for (key, value) in env_map {
+        rendered.insert(key, render_template(&value, ctx));
+    }
+
+    rendered.insert(
+        "BV_PROJECT_DIR".to_string(),
+        project_path.to_string_lossy().to_string(),
+    );
+    rendered.insert(
+        "BV_RESULTS_DIR".to_string(),
+        results_path.to_string_lossy().to_string(),
+    );
+    rendered.insert(
+        "BV_ASSETS_DIR".to_string(),
+        project_path.join("assets").to_string_lossy().to_string(),
+    );
+    rendered.insert("BV_STEP_ID".to_string(), step_id.to_string());
+    rendered.insert("BV_DATASITES".to_string(), ctx.datasites.join(","));
+
+    if let Some(current) = &ctx.current {
+        rendered.insert("BV_CURRENT_DATASITE".to_string(), current.clone());
+    }
+    if let Some(index) = ctx.index {
+        rendered.insert("BV_DATASITE_INDEX".to_string(), index.to_string());
+    }
+
+    rendered
+}
+
+fn shell_passthrough_args(args: &[String]) -> Vec<String> {
+    args.iter()
+        .position(|arg| arg == "--")
+        .map(|idx| args[idx + 1..].to_vec())
+        .unwrap_or_default()
+}
+
+fn default_shell_step(spec: &ProjectSpec) -> ProjectStepSpec {
+    ProjectStepSpec {
+        id: "run".to_string(),
+        foreach: spec.datasites.clone(),
+        order: None,
+        env: BTreeMap::new(),
+        inputs: Vec::new(),
+        outputs: Vec::new(),
+    }
+}
+
+async fn execute_shell(
+    spec: &ProjectSpec,
+    project_path: &Path,
+    args: Vec<String>,
+    dry_run: bool,
+    results_dir: Option<String>,
+    _run_settings: RunSettings,
+) -> Result<()> {
+    let workflow_path = project_path.join(&spec.workflow);
+    if !workflow_path.exists() {
+        return Err(anyhow::anyhow!(
+            "Workflow file not found: {}",
+            workflow_path.display()
+        )
+        .into());
+    }
+
+    let results_path = PathBuf::from(results_dir.unwrap_or_else(|| "results".to_string()));
+    if !dry_run {
+        fs::create_dir_all(&results_path)?;
+    }
+
+    let current_datasite = resolve_current_datasite();
+    if spec.datasites.is_some() && current_datasite.is_none() {
+        return Err(anyhow::anyhow!(
+            "datasites specified in project.yaml but current datasite could not be determined"
+        )
+        .into());
+    }
+
+    let steps = if spec.steps.is_empty() {
+        vec![default_shell_step(spec)]
+    } else {
+        spec.steps.clone()
+    };
+
+    for step in steps {
+        let passthrough_args = shell_passthrough_args(&args);
+        let step_targets = step
+            .foreach
+            .clone()
+            .or_else(|| spec.datasites.clone())
+            .unwrap_or_default();
+
+        let should_run = if step_targets.is_empty() {
+            true
+        } else if let Some(current) = current_datasite.as_ref() {
+            step_targets.iter().any(|site| site == current)
+        } else {
+            false
+        };
+
+        if !should_run {
+            println!(
+                "⏭️  Skipping step '{}' (current datasite not in foreach list)",
+                step.id
+            );
+            continue;
+        }
+
+        let template_datasites = if let Some(spec_datasites) = &spec.datasites {
+            if spec_datasites.is_empty() {
+                step_targets.clone()
+            } else {
+                spec_datasites.clone()
+            }
+        } else {
+            step_targets.clone()
+        };
+        let index = resolve_datasite_index(&template_datasites, current_datasite.as_deref());
+
+        let ctx = DatasiteContext {
+            datasites: template_datasites,
+            current: current_datasite.clone(),
+            index,
+        };
+
+        let mut env_map = build_shell_env(
+            &spec.env,
+            &step.env,
+            &ctx,
+            project_path,
+            &results_path,
+            &step.id,
+        );
+        for output in &step.outputs {
+            let raw_path = output.path.as_deref().unwrap_or(&output.name);
+            let rendered_path = render_template(raw_path, &ctx);
+            let output_path = if Path::new(&rendered_path).is_absolute() {
+                PathBuf::from(rendered_path)
+            } else {
+                results_path.join(rendered_path)
+            };
+            let env_key = format!("BV_OUTPUT_{}", env_key_suffix(&output.name));
+            env_map.insert(env_key, output_path.to_string_lossy().to_string());
+        }
+
+        let mut cmd = Command::new("bash");
+        cmd.arg(&workflow_path);
+        if !passthrough_args.is_empty() {
+            cmd.args(&passthrough_args);
+        }
+        cmd.current_dir(project_path);
+        for (key, value) in &env_map {
+            cmd.env(key, value);
+        }
+
+        let display_cmd = format_command(&cmd);
+        if dry_run {
+            println!("\n🔍 Dry run - would execute:");
+            println!("  {}", display_cmd.dimmed());
+            continue;
+        }
+
+        println!("\n▶️  Executing shell workflow for step '{}'...", step.id);
+        println!("  {}", display_cmd.dimmed());
+        let status = cmd.status().context("Failed to execute shell workflow")?;
+        if !status.success() {
+            return Err(anyhow::anyhow!(
+                "Shell workflow exited with code: {:?}",
+                status.code()
+            )
+            .into());
+        }
+    }
+
+    println!("\n✅ Shell workflow completed successfully!");
     Ok(())
 }
 
@@ -1381,8 +1669,11 @@ mod tests {
             name: "test".to_string(),
             author: "author".to_string(),
             workflow: "workflow.nf".to_string(),
+            description: None,
             template: Some("dynamic-nextflow".to_string()),
             version: None,
+            datasites: None,
+            env: Default::default(),
             assets: vec![],
             parameters: vec![],
             inputs: vec![
@@ -1404,6 +1695,7 @@ mod tests {
                 },
             ],
             outputs: vec![],
+            steps: Vec::new(),
         }
     }
 
