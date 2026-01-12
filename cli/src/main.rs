@@ -1860,8 +1860,8 @@ async fn async_main_with(cli: Cli) -> Result<()> {
                 if let Ok(project) = biovault::project_spec::ProjectSpec::load(&project_yaml_path) {
                     let template = project.template.as_deref().unwrap_or("default");
 
-                    // Use dynamic run system for dynamic-nextflow template
-                    if template == "dynamic-nextflow" {
+                    // Use dynamic run system for dynamic-nextflow or shell template
+                    if template == "dynamic-nextflow" || template == "shell" {
                         commands::run_dynamic::execute_dynamic(
                             &project_folder,
                             args,
@@ -1913,11 +1913,11 @@ async fn async_main_with(cli: Cli) -> Result<()> {
                             i += 1;
                         }
 
-                        commands::run::execute(commands::run::RunParams {
-                            project_folder: project_folder.clone(),
-                            participant_source,
-                            test,
-                            download,
+                            commands::run::execute(commands::run::RunParams {
+                                project_folder: project_folder.clone(),
+                                participant_source,
+                                test,
+                                download,
                             dry_run,
                             with_docker,
                             work_dir,
