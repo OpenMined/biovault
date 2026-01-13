@@ -153,6 +153,11 @@ mod tests {
             version: None,
             binary_paths: None,
             syftbox_credentials: None,
+            agent_bridge_enabled: None,
+            agent_bridge_port: None,
+            agent_bridge_http_port: None,
+            agent_bridge_token: None,
+            agent_bridge_blocklist: None,
         };
         initial_config.save(config_dir.join("config.yaml"))?;
 
@@ -195,6 +200,11 @@ mod tests {
             version: None,
             binary_paths: None,
             syftbox_credentials: None,
+            agent_bridge_enabled: None,
+            agent_bridge_port: None,
+            agent_bridge_http_port: None,
+            agent_bridge_token: None,
+            agent_bridge_blocklist: None,
         };
         cfg.save(tmp.path().join(".bv/config.yaml"))?;
 
@@ -237,6 +247,11 @@ mod tests {
             version: Some("1.0.0".to_string()),
             binary_paths: None,
             syftbox_credentials: None,
+            agent_bridge_enabled: None,
+            agent_bridge_port: None,
+            agent_bridge_http_port: None,
+            agent_bridge_token: None,
+            agent_bridge_blocklist: None,
         };
         config.save(config_dir.join("config.yaml"))?;
 
@@ -264,6 +279,11 @@ mod tests {
             version: None,
             binary_paths: None,
             syftbox_credentials: None,
+            agent_bridge_enabled: None,
+            agent_bridge_port: None,
+            agent_bridge_http_port: None,
+            agent_bridge_token: None,
+            agent_bridge_blocklist: None,
         };
         initial_config.save(config_dir.join("config.yaml"))?;
 

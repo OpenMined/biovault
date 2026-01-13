@@ -689,6 +689,11 @@ mod tests {
             version: None,
             binary_paths: None,
             syftbox_credentials: None,
+            agent_bridge_enabled: None,
+            agent_bridge_port: None,
+            agent_bridge_http_port: None,
+            agent_bridge_token: None,
+            agent_bridge_blocklist: None,
         };
         config.save(bv_home.join("config.yaml")).unwrap();
 
@@ -952,6 +957,11 @@ mod tests {
             version: None,
             binary_paths: None,
             syftbox_credentials: None,
+            agent_bridge_enabled: None,
+            agent_bridge_port: None,
+            agent_bridge_http_port: None,
+            agent_bridge_token: None,
+            agent_bridge_blocklist: None,
         };
 
         let app = SyftBoxApp::new(&syft_dir, &config.email, "biovault").unwrap();
@@ -1092,6 +1102,11 @@ mod tests {
             version: None,
             binary_paths: None,
             syftbox_credentials: None,
+            agent_bridge_enabled: None,
+            agent_bridge_port: None,
+            agent_bridge_http_port: None,
+            agent_bridge_token: None,
+            agent_bridge_blocklist: None,
         })
         .unwrap();
         let db = MessageDb::new(&db_path).unwrap();
