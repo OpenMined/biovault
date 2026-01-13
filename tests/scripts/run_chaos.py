@@ -142,6 +142,12 @@ def bv(
         "SYFTBOX_DATA_DIR": str(client.dir),
         "SYFTBOX_CONFIG_PATH": str(client.syftbox_config_path),
     }
+    # Use the initialized config.yaml if present (devstack writes to client dir).
+    config_path = client.dir / "config.yaml"
+    if config_path.exists():
+        env["BIOVAULT_HOME"] = str(client.dir)
+    else:
+        env["BIOVAULT_HOME"] = str(client.dir / ".biovault")
     # Preserve scenario runner conventions, if present
     if os.environ.get("SCENARIO_JAVA_HOME"):
         env["JAVA_HOME"] = os.environ["SCENARIO_JAVA_HOME"]
