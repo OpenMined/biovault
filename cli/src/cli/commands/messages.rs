@@ -107,6 +107,11 @@ mod tests_fast_helpers {
             version: None,
             binary_paths: None,
             syftbox_credentials: None,
+            agent_bridge_enabled: None,
+            agent_bridge_port: None,
+            agent_bridge_http_port: None,
+            agent_bridge_token: None,
+            agent_bridge_blocklist: None,
         };
         let path = get_message_db_path(&cfg).unwrap();
         // Parent dir should exist now
@@ -142,6 +147,11 @@ mod tests_fast_helpers {
             version: None,
             binary_paths: None,
             syftbox_credentials: None,
+            agent_bridge_enabled: None,
+            agent_bridge_port: None,
+            agent_bridge_http_port: None,
+            agent_bridge_token: None,
+            agent_bridge_blocklist: None,
         };
         // Create db first
         let _ = get_message_db_path(&cfg).unwrap();
@@ -1972,6 +1982,11 @@ mod tests {
             version: None,
             binary_paths: None,
             syftbox_credentials: None,
+            agent_bridge_enabled: None,
+            agent_bridge_port: None,
+            agent_bridge_http_port: None,
+            agent_bridge_token: None,
+            agent_bridge_blocklist: None,
         }
     }
 
@@ -2073,6 +2088,11 @@ mod tests {
             version: None,
             binary_paths: None,
             syftbox_credentials: None,
+            agent_bridge_enabled: None,
+            agent_bridge_port: None,
+            agent_bridge_http_port: None,
+            agent_bridge_token: None,
+            agent_bridge_blocklist: None,
         };
 
         let app = SyftBoxApp::new(tmp.path(), &cfg.email, "biovault").unwrap();
@@ -2123,6 +2143,11 @@ mod tests {
             version: None,
             binary_paths: None,
             syftbox_credentials: None,
+            agent_bridge_enabled: None,
+            agent_bridge_port: None,
+            agent_bridge_http_port: None,
+            agent_bridge_token: None,
+            agent_bridge_blocklist: None,
         };
 
         // Make sender tree and one file
@@ -2155,6 +2180,11 @@ mod tests {
             version: None,
             binary_paths: None,
             syftbox_credentials: None,
+            agent_bridge_enabled: None,
+            agent_bridge_port: None,
+            agent_bridge_http_port: None,
+            agent_bridge_token: None,
+            agent_bridge_blocklist: None,
         };
 
         // Build project root with two files and compute blake3
@@ -2205,6 +2235,11 @@ mod tests {
             version: None,
             binary_paths: None,
             syftbox_credentials: None,
+            agent_bridge_enabled: None,
+            agent_bridge_port: None,
+            agent_bridge_http_port: None,
+            agent_bridge_token: None,
+            agent_bridge_blocklist: None,
         };
         // Init DB only
         let db_path = get_message_db_path(&cfg)?;
@@ -2232,6 +2267,11 @@ mod tests {
             version: None,
             binary_paths: None,
             syftbox_credentials: None,
+            agent_bridge_enabled: None,
+            agent_bridge_port: None,
+            agent_bridge_http_port: None,
+            agent_bridge_token: None,
+            agent_bridge_blocklist: None,
         };
         let db_path = get_message_db_path(&cfg)?;
         let db = MessageDb::new(&db_path)?;

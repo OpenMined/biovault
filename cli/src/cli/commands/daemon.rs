@@ -1366,6 +1366,11 @@ mod tests {
             version: None,
             binary_paths: None,
             syftbox_credentials: None,
+            agent_bridge_enabled: None,
+            agent_bridge_port: None,
+            agent_bridge_http_port: None,
+            agent_bridge_token: None,
+            agent_bridge_blocklist: None,
         };
         let name = get_service_name(&config);
         assert!(name.starts_with("biovault-daemon-"));
@@ -1383,6 +1388,11 @@ mod tests {
             version: None,
             binary_paths: None,
             syftbox_credentials: None,
+            agent_bridge_enabled: None,
+            agent_bridge_port: None,
+            agent_bridge_http_port: None,
+            agent_bridge_token: None,
+            agent_bridge_blocklist: None,
         };
         let dir = get_biovault_dir(&config);
         assert!(dir.is_ok());
@@ -1399,6 +1409,11 @@ mod tests {
             version: None,
             binary_paths: None,
             syftbox_credentials: None,
+            agent_bridge_enabled: None,
+            agent_bridge_port: None,
+            agent_bridge_http_port: None,
+            agent_bridge_token: None,
+            agent_bridge_blocklist: None,
         };
         let path = get_pid_file_path(&config);
         assert!(path.is_ok());
@@ -1416,6 +1431,11 @@ mod tests {
             version: None,
             binary_paths: None,
             syftbox_credentials: None,
+            agent_bridge_enabled: None,
+            agent_bridge_port: None,
+            agent_bridge_http_port: None,
+            agent_bridge_token: None,
+            agent_bridge_blocklist: None,
         };
         let path = get_status_file_path(&config);
         assert!(path.is_ok());
@@ -1433,6 +1453,11 @@ mod tests {
             version: None,
             binary_paths: None,
             syftbox_credentials: None,
+            agent_bridge_enabled: None,
+            agent_bridge_port: None,
+            agent_bridge_http_port: None,
+            agent_bridge_token: None,
+            agent_bridge_blocklist: None,
         };
         let path = get_log_file_path(&config);
         assert!(path.is_ok());
@@ -1506,6 +1531,11 @@ mod tests {
             version: None,
             binary_paths: None,
             syftbox_credentials: None,
+            agent_bridge_enabled: None,
+            agent_bridge_port: None,
+            agent_bridge_http_port: None,
+            agent_bridge_token: None,
+            agent_bridge_blocklist: None,
         };
 
         let result = is_daemon_running(&config);
@@ -1524,6 +1554,11 @@ mod tests {
             version: None,
             binary_paths: None,
             syftbox_credentials: None,
+            agent_bridge_enabled: None,
+            agent_bridge_port: None,
+            agent_bridge_http_port: None,
+            agent_bridge_token: None,
+            agent_bridge_blocklist: None,
         };
 
         let result = cleanup_stale_pid_files(&config);
@@ -1541,6 +1576,11 @@ mod tests {
             version: None,
             binary_paths: None,
             syftbox_credentials: None,
+            agent_bridge_enabled: None,
+            agent_bridge_port: None,
+            agent_bridge_http_port: None,
+            agent_bridge_token: None,
+            agent_bridge_blocklist: None,
         };
 
         let result = get_daemon_status(&config);
@@ -1562,6 +1602,11 @@ mod tests {
             version: None,
             binary_paths: None,
             syftbox_credentials: None,
+            agent_bridge_enabled: None,
+            agent_bridge_port: None,
+            agent_bridge_http_port: None,
+            agent_bridge_token: None,
+            agent_bridge_blocklist: None,
         };
 
         let result = generate_systemd_service_content(&config);
@@ -1580,6 +1625,11 @@ mod tests {
             version: None,
             binary_paths: None,
             syftbox_credentials: None,
+            agent_bridge_enabled: None,
+            agent_bridge_port: None,
+            agent_bridge_http_port: None,
+            agent_bridge_token: None,
+            agent_bridge_blocklist: None,
         };
 
         // Create invalid PID file
@@ -1605,6 +1655,11 @@ mod tests {
             version: None,
             binary_paths: None,
             syftbox_credentials: None,
+            agent_bridge_enabled: None,
+            agent_bridge_port: None,
+            agent_bridge_http_port: None,
+            agent_bridge_token: None,
+            agent_bridge_blocklist: None,
         };
 
         // Create invalid PID file
@@ -1632,6 +1687,11 @@ mod tests {
             version: None,
             binary_paths: None,
             syftbox_credentials: None,
+            agent_bridge_enabled: None,
+            agent_bridge_port: None,
+            agent_bridge_http_port: None,
+            agent_bridge_token: None,
+            agent_bridge_blocklist: None,
         };
 
         // Create valid status file
@@ -1668,6 +1728,11 @@ mod tests {
             version: None,
             binary_paths: None,
             syftbox_credentials: None,
+            agent_bridge_enabled: None,
+            agent_bridge_port: None,
+            agent_bridge_http_port: None,
+            agent_bridge_token: None,
+            agent_bridge_blocklist: None,
         };
         let name = get_service_name(&config);
         assert!(name.contains("user-at-example-com"));
@@ -1701,6 +1766,11 @@ mod tests {
             version: None,
             binary_paths: None,
             syftbox_credentials: None,
+            agent_bridge_enabled: None,
+            agent_bridge_port: None,
+            agent_bridge_http_port: None,
+            agent_bridge_token: None,
+            agent_bridge_blocklist: None,
         };
 
         let biovault_dir = get_biovault_dir(&config).unwrap();
@@ -1745,6 +1815,11 @@ mod tests {
             version: None,
             binary_paths: None,
             syftbox_credentials: None,
+            agent_bridge_enabled: None,
+            agent_bridge_port: None,
+            agent_bridge_http_port: None,
+            agent_bridge_token: None,
+            agent_bridge_blocklist: None,
         };
 
         let result = stop(&config).await;
@@ -1763,6 +1838,11 @@ mod tests {
             version: None,
             binary_paths: None,
             syftbox_credentials: None,
+            agent_bridge_enabled: None,
+            agent_bridge_port: None,
+            agent_bridge_http_port: None,
+            agent_bridge_token: None,
+            agent_bridge_blocklist: None,
         };
 
         let result = logs(&config, false, Some(10)).await;
@@ -1781,6 +1861,11 @@ mod tests {
             version: None,
             binary_paths: None,
             syftbox_credentials: None,
+            agent_bridge_enabled: None,
+            agent_bridge_port: None,
+            agent_bridge_http_port: None,
+            agent_bridge_token: None,
+            agent_bridge_blocklist: None,
         };
 
         // Should work even when daemon not running
@@ -1797,6 +1882,11 @@ mod tests {
             version: None,
             binary_paths: None,
             syftbox_credentials: None,
+            agent_bridge_enabled: None,
+            agent_bridge_port: None,
+            agent_bridge_http_port: None,
+            agent_bridge_token: None,
+            agent_bridge_blocklist: None,
         };
 
         let result = install_service(&config).await;
@@ -1812,6 +1902,11 @@ mod tests {
             version: None,
             binary_paths: None,
             syftbox_credentials: None,
+            agent_bridge_enabled: None,
+            agent_bridge_port: None,
+            agent_bridge_http_port: None,
+            agent_bridge_token: None,
+            agent_bridge_blocklist: None,
         };
 
         let result = uninstall_service(&config).await;
@@ -1827,6 +1922,11 @@ mod tests {
             version: None,
             binary_paths: None,
             syftbox_credentials: None,
+            agent_bridge_enabled: None,
+            agent_bridge_port: None,
+            agent_bridge_http_port: None,
+            agent_bridge_token: None,
+            agent_bridge_blocklist: None,
         };
 
         let result = service_status(&config).await;
@@ -1842,6 +1942,11 @@ mod tests {
             version: None,
             binary_paths: None,
             syftbox_credentials: None,
+            agent_bridge_enabled: None,
+            agent_bridge_port: None,
+            agent_bridge_http_port: None,
+            agent_bridge_token: None,
+            agent_bridge_blocklist: None,
         };
 
         let result = show_service(&config).await;
@@ -1857,6 +1962,11 @@ mod tests {
             version: None,
             binary_paths: None,
             syftbox_credentials: None,
+            agent_bridge_enabled: None,
+            agent_bridge_port: None,
+            agent_bridge_http_port: None,
+            agent_bridge_token: None,
+            agent_bridge_blocklist: None,
         };
 
         let result = reinstall_service(&config).await;
@@ -1875,6 +1985,11 @@ mod tests {
             version: None,
             binary_paths: None,
             syftbox_credentials: None,
+            agent_bridge_enabled: None,
+            agent_bridge_port: None,
+            agent_bridge_http_port: None,
+            agent_bridge_token: None,
+            agent_bridge_blocklist: None,
         };
 
         if let Ok(content) = generate_systemd_service_content(&config) {
@@ -1921,6 +2036,11 @@ mod tests {
             version: None,
             binary_paths: None,
             syftbox_credentials: None,
+            agent_bridge_enabled: None,
+            agent_bridge_port: None,
+            agent_bridge_http_port: None,
+            agent_bridge_token: None,
+            agent_bridge_blocklist: None,
         };
 
         // Create invalid JSON status file
@@ -1944,6 +2064,11 @@ mod tests {
             version: None,
             binary_paths: None,
             syftbox_credentials: None,
+            agent_bridge_enabled: None,
+            agent_bridge_port: None,
+            agent_bridge_http_port: None,
+            agent_bridge_token: None,
+            agent_bridge_blocklist: None,
         };
 
         // Create PID file with non-existent PID
@@ -1967,6 +2092,11 @@ mod tests {
             version: None,
             binary_paths: None,
             syftbox_credentials: None,
+            agent_bridge_enabled: None,
+            agent_bridge_port: None,
+            agent_bridge_http_port: None,
+            agent_bridge_token: None,
+            agent_bridge_blocklist: None,
         };
 
         // Create PID file with non-existent PID
@@ -2006,6 +2136,11 @@ mod tests {
                 version: None,
                 binary_paths: None,
                 syftbox_credentials: None,
+                agent_bridge_enabled: None,
+                agent_bridge_port: None,
+                agent_bridge_http_port: None,
+                agent_bridge_token: None,
+                agent_bridge_blocklist: None,
             };
             let name = get_service_name(&config);
             assert!(
@@ -2030,6 +2165,11 @@ mod tests {
             version: None,
             binary_paths: None,
             syftbox_credentials: None,
+            agent_bridge_enabled: None,
+            agent_bridge_port: None,
+            agent_bridge_http_port: None,
+            agent_bridge_token: None,
+            agent_bridge_blocklist: None,
         };
 
         let config2 = Config {
@@ -2038,6 +2178,11 @@ mod tests {
             version: None,
             binary_paths: None,
             syftbox_credentials: None,
+            agent_bridge_enabled: None,
+            agent_bridge_port: None,
+            agent_bridge_http_port: None,
+            agent_bridge_token: None,
+            agent_bridge_blocklist: None,
         };
 
         let dir1 = get_biovault_dir(&config1).unwrap();
@@ -2063,6 +2208,11 @@ mod tests {
             version: None,
             binary_paths: None,
             syftbox_credentials: None,
+            agent_bridge_enabled: None,
+            agent_bridge_port: None,
+            agent_bridge_http_port: None,
+            agent_bridge_token: None,
+            agent_bridge_blocklist: None,
         };
 
         // Create PID file with current process ID (which is running)
@@ -2102,6 +2252,11 @@ mod tests {
             version: None,
             binary_paths: None,
             syftbox_credentials: None,
+            agent_bridge_enabled: None,
+            agent_bridge_port: None,
+            agent_bridge_http_port: None,
+            agent_bridge_token: None,
+            agent_bridge_blocklist: None,
         };
 
         let pid_path = get_pid_file_path(&config).unwrap();
@@ -2121,6 +2276,11 @@ mod tests {
             version: None,
             binary_paths: None,
             syftbox_credentials: None,
+            agent_bridge_enabled: None,
+            agent_bridge_port: None,
+            agent_bridge_http_port: None,
+            agent_bridge_token: None,
+            agent_bridge_blocklist: None,
         };
 
         let log_path = get_log_file_path(&config).unwrap();
@@ -2140,6 +2300,11 @@ mod tests {
             version: None,
             binary_paths: None,
             syftbox_credentials: None,
+            agent_bridge_enabled: None,
+            agent_bridge_port: None,
+            agent_bridge_http_port: None,
+            agent_bridge_token: None,
+            agent_bridge_blocklist: None,
         };
 
         // Test with different line counts
@@ -2171,6 +2336,11 @@ mod tests {
             version: None,
             binary_paths: None,
             syftbox_credentials: None,
+            agent_bridge_enabled: None,
+            agent_bridge_port: None,
+            agent_bridge_http_port: None,
+            agent_bridge_token: None,
+            agent_bridge_blocklist: None,
         };
 
         let status_path = get_status_file_path(&config).unwrap();
@@ -2200,6 +2370,11 @@ mod tests {
             version: None,
             binary_paths: None,
             syftbox_credentials: None,
+            agent_bridge_enabled: None,
+            agent_bridge_port: None,
+            agent_bridge_http_port: None,
+            agent_bridge_token: None,
+            agent_bridge_blocklist: None,
         };
 
         let name = get_service_name(&config);

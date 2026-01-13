@@ -390,7 +390,11 @@ steps:
   - name: Client1 asserts a failed message was recorded for client2
     datasite: client1@sandbox.local
     run: |
-      COUNT=$(sqlite3 .biovault/data/messages.db "SELECT COUNT(*) FROM failed_messages WHERE dismissed = 0 AND sender_identity = 'client2@sandbox.local';")
+      DB="data/messages.db"
+      if [ ! -f "$DB" ]; then
+        DB=".biovault/data/messages.db"
+      fi
+      COUNT=$(sqlite3 "$DB" "SELECT COUNT(*) FROM failed_messages WHERE dismissed = 0 AND sender_identity = 'client2@sandbox.local';")
       echo "failed_count=${COUNT}"
       test "${COUNT}" -ge 1
 
@@ -419,6 +423,10 @@ steps:
   - name: Client1 asserts failed_messages record for rotated message was cleared
     datasite: client1@sandbox.local
     run: |
-      COUNT=$(sqlite3 .biovault/data/messages.db "SELECT COUNT(*) FROM failed_messages WHERE dismissed = 0 AND sender_identity = 'client2@sandbox.local';")
+      DB="data/messages.db"
+      if [ ! -f "$DB" ]; then
+        DB=".biovault/data/messages.db"
+      fi
+      COUNT=$(sqlite3 "$DB" "SELECT COUNT(*) FROM failed_messages WHERE dismissed = 0 AND sender_identity = 'client2@sandbox.local';")
       echo "failed_count=${COUNT}"
       test "${COUNT}" -eq 0

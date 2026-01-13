@@ -16,7 +16,7 @@ steps:
     datasite: client1@sandbox.local
     run: |
       echo "=== Checking for existing keys ==="
-      VAULT=".biovault/.syc"
+      VAULT="${BIOVAULT_HOME:-.biovault}/.syc"
       if [ -d "$VAULT/keys" ] && [ "$(ls -A "$VAULT/keys" 2>/dev/null)" ]; then
         echo "✗ Keys directory exists and has files"
         ls -la "$VAULT/keys/"
@@ -27,7 +27,7 @@ steps:
   - name: Verify client2 has NO keys initially
     datasite: client2@sandbox.local
     run: |
-      VAULT=".biovault/.syc"
+      VAULT="${BIOVAULT_HOME:-.biovault}/.syc"
       if [ -d "$VAULT/keys" ] && [ "$(ls -A "$VAULT/keys" 2>/dev/null)" ]; then
         echo "✗ Keys directory exists and has files"
         exit 1
@@ -58,7 +58,7 @@ steps:
   - name: Verify client1 key exists in vault
     datasite: client1@sandbox.local
     run: |
-      VAULT=".biovault/.syc"
+      VAULT="${BIOVAULT_HOME:-.biovault}/.syc"
       test -f "$VAULT/keys/client1@sandbox.local.key" && echo "✓ Private key exists"
       test -f "$VAULT/bundles/client1@sandbox.local.json" && echo "✓ Bundle exists"
 
@@ -82,7 +82,7 @@ steps:
   - name: Verify client2 key exists in vault
     datasite: client2@sandbox.local
     run: |
-      VAULT=".biovault/.syc"
+      VAULT="${BIOVAULT_HOME:-.biovault}/.syc"
       test -f "$VAULT/keys/client2@sandbox.local.key" && echo "✓ Private key exists"
       test -f "$VAULT/bundles/client2@sandbox.local.json" && echo "✓ Bundle exists"
 
@@ -168,13 +168,13 @@ steps:
   - name: Verify client1 has client2's bundle cached
     datasite: client1@sandbox.local
     run: |
-      VAULT=".biovault/.syc"
+      VAULT="${BIOVAULT_HOME:-.biovault}/.syc"
       test -f "$VAULT/bundles/client2@sandbox.local.json" && echo "✓ Client2 bundle cached"
 
   - name: Verify client2 has client1's bundle cached
     datasite: client2@sandbox.local
     run: |
-      VAULT=".biovault/.syc"
+      VAULT="${BIOVAULT_HOME:-.biovault}/.syc"
       test -f "$VAULT/bundles/client1@sandbox.local.json" && echo "✓ Client1 bundle cached"
 
   - name: Client1 sends message to Client2
@@ -234,7 +234,7 @@ steps:
   - name: Client1 deletes their private key (simulating key loss)
     datasite: client1@sandbox.local
     run: |
-      VAULT=".biovault/.syc"
+      VAULT="${BIOVAULT_HOME:-.biovault}/.syc"
       echo "Deleting private key..."
       rm -f "$VAULT/keys/client1@sandbox.local.key"
       test ! -f "$VAULT/keys/client1@sandbox.local.key" && echo "✓ Private key deleted"
@@ -270,7 +270,7 @@ steps:
   - name: Verify published DID matches restored key
     datasite: client1@sandbox.local
     run: |
-      VAULT=".biovault/.syc"
+      VAULT="${BIOVAULT_HOME:-.biovault}/.syc"
       VAULT_FP=$(grep -o '"identity_fingerprint"[[:space:]]*:[[:space:]]*"[^"]*"' "$VAULT/bundles/client1@sandbox.local.json" | cut -d'"' -f4 | head -c 16)
       DID_FP=$(grep -o '"identity_fingerprint"[[:space:]]*:[[:space:]]*"[^"]*"' datasites/client1@sandbox.local/public/crypto/did.json | cut -d'"' -f4 | head -c 16)
       echo "Vault fingerprint: $VAULT_FP"
@@ -399,7 +399,7 @@ steps:
   - name: Client1 re-imports Client2's NEW public key
     datasite: client1@sandbox.local
     run: |
-      VAULT=".biovault/.syc"
+      VAULT="${BIOVAULT_HOME:-.biovault}/.syc"
       # Remove old bundle first, then re-import to get new key (simulating "trust new key")
       rm -f "$VAULT/bundles/client2@sandbox.local.json"
       {{workspace}}/cli/target/release/bv key import \
@@ -449,14 +449,14 @@ steps:
   - name: Client2 removes Client1's imported key
     datasite: client2@sandbox.local
     run: |
-      VAULT=".biovault/.syc"
+      VAULT="${BIOVAULT_HOME:-.biovault}/.syc"
       rm -f "$VAULT/bundles/client1@sandbox.local.json"
       echo "✓ Removed client1 bundle from cache"
 
   - name: Verify client1 bundle removed
     datasite: client2@sandbox.local
     run: |
-      VAULT=".biovault/.syc"
+      VAULT="${BIOVAULT_HOME:-.biovault}/.syc"
       test ! -f "$VAULT/bundles/client1@sandbox.local.json" && echo "✓ Bundle removed"
 
   - name: Client1 sends another message
@@ -485,14 +485,14 @@ steps:
   - name: "Phase 10: Artificially create multiple identity files"
     datasite: client1@sandbox.local
     run: |
-      VAULT=".biovault/.syc"
+      VAULT="${BIOVAULT_HOME:-.biovault}/.syc"
       cp "$VAULT/keys/client1@sandbox.local.key" "$VAULT/keys/fake_identity.key"
       echo "✓ Created duplicate key file"
 
   - name: Verify multiple key files exist
     datasite: client1@sandbox.local
     run: |
-      VAULT=".biovault/.syc"
+      VAULT="${BIOVAULT_HOME:-.biovault}/.syc"
       KEY_COUNT=$(ls "$VAULT"/keys/*.key 2>/dev/null | wc -l)
       echo "Key files found: $KEY_COUNT"
       test "$KEY_COUNT" -gt 1 && echo "✓ Multiple keys present"
@@ -511,7 +511,7 @@ steps:
   - name: Clean up extra key files
     datasite: client1@sandbox.local
     run: |
-      VAULT=".biovault/.syc"
+      VAULT="${BIOVAULT_HOME:-.biovault}/.syc"
       # Keep only the first key file (alphabetically)
       FIRST_KEY=$(ls "$VAULT"/keys/*.key 2>/dev/null | head -1)
       for f in "$VAULT"/keys/*.key; do
