@@ -14,7 +14,7 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::json;
 use serde_yaml;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
@@ -83,7 +83,13 @@ pub async fn submit(
 
     // Override security-sensitive fields
     project.author = config.email.clone();
-    project.datasites = Some(vec![datasite_email.clone()]);
+    let mut datasites = project.datasites.clone().unwrap_or_default();
+    if datasites.is_empty() {
+        datasites.push(datasite_email.clone());
+    } else if !datasites.contains(&datasite_email) {
+        datasites.push(datasite_email.clone());
+    }
+    project.datasites = Some(datasites);
 
     // Handle participants from destination URL
     if let Some(ref url) = participant_url {
@@ -181,16 +187,16 @@ pub async fn submit(
             existing_hash_content.push_str(&existing_project.name);
 
             // Get workflow hash from existing submission
-                if let Some(ref existing_hashes) = existing_project.b3_hashes {
-                    let workflow_key = if existing_project.workflow.trim().is_empty() {
-                        "workflow.nf"
-                    } else {
-                        existing_project.workflow.as_str()
-                    };
-                    if let Some(existing_workflow_hash) = existing_hashes
-                        .get(workflow_key)
-                        .or_else(|| existing_hashes.get("workflow.nf"))
-                    {
+            if let Some(ref existing_hashes) = existing_project.b3_hashes {
+                let workflow_key = if existing_project.workflow.trim().is_empty() {
+                    "workflow.nf"
+                } else {
+                    existing_project.workflow.as_str()
+                };
+                if let Some(existing_workflow_hash) = existing_hashes
+                    .get(workflow_key)
+                    .or_else(|| existing_hashes.get("workflow.nf"))
+                {
                     existing_hash_content.push_str(existing_workflow_hash);
 
                     let mut sorted_hashes: Vec<_> = existing_hashes.iter().collect();
@@ -215,23 +221,50 @@ pub async fn submit(
                         datasite_email
                     );
 
-                    // Update permissions to include new recipient
-                    update_permissions_for_new_recipient(
-                        &storage,
-                        &existing_permissions_path,
-                        &datasite_email,
-                    )?;
-
-                    // Update project.yaml with new datasites
                     let mut existing_project =
                         read_yaml_from_storage::<ProjectYaml>(&storage, &existing_project_yaml)?;
-                    if let Some(ref mut datasites) = existing_project.datasites {
-                        if !datasites.contains(&datasite_email) {
-                            datasites.push(datasite_email.clone());
-                        }
-                    } else {
-                        existing_project.datasites = Some(vec![datasite_email.clone()]);
+                    let mut share_datasites =
+                        existing_project.datasites.clone().unwrap_or_default();
+                    if share_datasites.is_empty() {
+                        share_datasites = project
+                            .datasites
+                            .clone()
+                            .unwrap_or_else(|| vec![datasite_email.clone()]);
                     }
+                    if !share_datasites.contains(&datasite_email) {
+                        share_datasites.push(datasite_email.clone());
+                    }
+                    share_datasites = dedupe_recipients(share_datasites);
+
+                    let mut permissions = SyftPermissions::new_for_datasites(&share_datasites);
+                    permissions.add_rule(
+                        "results/**/*",
+                        share_datasites.clone(),
+                        share_datasites.clone(),
+                    );
+                    write_yaml_to_storage(
+                        &storage,
+                        &existing_permissions_path,
+                        &permissions,
+                        None,
+                        true,
+                    )?;
+
+                    let recipients = recipients_from_permissions(
+                        &storage,
+                        &existing_permissions_path,
+                        &config.email,
+                    )?;
+
+                    copy_project_files(
+                        &project_dir,
+                        &submission_path,
+                        &storage,
+                        &recipients,
+                        &project.workflow,
+                    )?;
+
+                    existing_project.datasites = Some(share_datasites);
 
                     // Handle participants from destination URL
                     if let Some(ref new_participant) = participant_url {
@@ -248,14 +281,25 @@ pub async fn submit(
                         &storage,
                         &existing_project_yaml,
                         &existing_project,
-                        Some(datasite_email.as_str()),
+                        Some(recipients),
                         true,
                     )?;
 
                     println!("✓ Permissions updated for existing submission");
                     println!("  Location: {}", submission_path.display());
 
-                    // Continue to send the message to the new recipient
+                    // Send the message to the new recipient
+                    return send_project_message(
+                        &config,
+                        &project,
+                        &datasite_email,
+                        &submission_path,
+                        &submission_folder_name,
+                        &project_hash,
+                        &date_str,
+                        non_interactive,
+                        is_self_submission,
+                    );
                 } else if !force {
                     println!("⚠️  This exact project version has already been submitted.");
                     println!("   Location: {}", submission_path.display());
@@ -279,28 +323,55 @@ pub async fn submit(
 
                         // Update project.yaml with new datasite
                         let mut updated_project = existing_project.clone();
-                        updated_project.datasites = Some(vec![datasite_email.clone()]);
+                        let mut updated_datasites =
+                            updated_project.datasites.clone().unwrap_or_default();
+                        if updated_datasites.is_empty() {
+                            updated_datasites = project.datasites.clone().unwrap_or_default();
+                        }
+                        if updated_datasites.is_empty() {
+                            updated_datasites.push(datasite_email.clone());
+                        } else if !updated_datasites.contains(&datasite_email) {
+                            updated_datasites.push(datasite_email.clone());
+                        }
+                        updated_datasites = dedupe_recipients(updated_datasites);
+                        updated_project.datasites = Some(updated_datasites.clone());
                         if let Some(ref url) = participant_url {
                             updated_project.participants = Some(vec![url.clone()]);
                         }
+                        let mut recipients = updated_datasites.clone();
+                        recipients.push(config.email.clone());
+                        let recipients = dedupe_recipients(recipients);
                         write_yaml_to_storage(
                             &storage,
                             &existing_project_yaml,
                             &updated_project,
-                            Some(datasite_email.as_str()),
+                            Some(recipients.clone()),
                             true,
                         )?;
 
                         // Update syft.pub.yaml
                         let existing_permissions_path = submission_path.join("syft.pub.yaml");
-                        let updated_permissions =
-                            SyftPermissions::new_for_datasite(&datasite_email);
+                        let mut updated_permissions =
+                            SyftPermissions::new_for_datasites(&updated_datasites);
+                        updated_permissions.add_rule(
+                            "results/**/*",
+                            updated_datasites.clone(),
+                            updated_datasites.clone(),
+                        );
                         write_yaml_to_storage(
                             &storage,
                             &existing_permissions_path,
                             &updated_permissions,
                             None,
                             true,
+                        )?;
+
+                        copy_project_files(
+                            &project_dir,
+                            &submission_path,
+                            &storage,
+                            &recipients,
+                            &project.workflow,
                         )?;
                     }
 
@@ -387,13 +458,13 @@ fn write_yaml_to_storage<T: Serialize>(
     storage: &SyftBoxStorage,
     path: &Path,
     value: &T,
-    recipient: Option<&str>,
+    recipients: Option<Vec<String>>,
     overwrite: bool,
 ) -> Result<()> {
     let yaml = serde_yaml::to_string(value)?;
-    let policy = if let Some(identity) = recipient {
+    let policy = if let Some(recipients) = recipients {
         WritePolicy::Envelope {
-            recipients: vec![identity.to_string()],
+            recipients,
             hint: path
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned()),
@@ -405,11 +476,36 @@ fn write_yaml_to_storage<T: Serialize>(
     Ok(())
 }
 
+fn dedupe_recipients(mut recipients: Vec<String>) -> Vec<String> {
+    let mut set = BTreeSet::new();
+    for recipient in recipients.drain(..) {
+        let trimmed = recipient.trim();
+        if !trimmed.is_empty() {
+            set.insert(trimmed.to_string());
+        }
+    }
+    set.into_iter().collect()
+}
+
+fn recipients_from_permissions(
+    storage: &SyftBoxStorage,
+    permissions_path: &Path,
+    sender: &str,
+) -> Result<Vec<String>> {
+    let permissions: SyftPermissions = read_yaml_from_storage(storage, permissions_path)?;
+    let mut recipients = vec![sender.to_string()];
+    for rule in permissions.rules {
+        recipients.extend(rule.access.read);
+        recipients.extend(rule.access.write);
+    }
+    Ok(dedupe_recipients(recipients))
+}
+
 fn copy_project_files(
     src: &Path,
     dest: &Path,
     storage: &SyftBoxStorage,
-    recipient: &str,
+    recipients: &[String],
     workflow_name: &str,
 ) -> Result<()> {
     storage.ensure_dir(dest)?;
@@ -419,7 +515,7 @@ fn copy_project_files(
     let workflow_bytes = fs::read(&src_workflow)
         .with_context(|| format!("Failed to read {} from project", workflow_name))?;
     let workflow_policy = WritePolicy::Envelope {
-        recipients: vec![recipient.to_string()],
+        recipients: recipients.to_vec(),
         hint: Some(workflow_name.to_string()),
     };
     storage.write_with_shadow(&dest_workflow, &workflow_bytes, workflow_policy, true)?;
@@ -451,7 +547,7 @@ fn copy_project_files(
                     .and_then(|p| p.to_str())
                     .map(|s| format!("assets/{s}"));
                 let asset_policy = WritePolicy::Envelope {
-                    recipients: vec![recipient.to_string()],
+                    recipients: recipients.to_vec(),
                     hint,
                 };
                 storage.write_with_shadow(&dest_path, &bytes, asset_policy, true)?;
@@ -479,12 +575,22 @@ fn create_and_submit_project(
     // Create submission directory
     storage.ensure_dir(submission_path)?;
 
+    let share_datasites = dedupe_recipients(
+        project
+            .datasites
+            .clone()
+            .unwrap_or_else(|| vec![datasite_email.to_string()]),
+    );
+    let mut recipients = share_datasites.clone();
+    recipients.push(config.email.clone());
+    let recipients = dedupe_recipients(recipients);
+
     // Copy project files
     copy_project_files(
         project_dir,
         submission_path,
         storage,
-        datasite_email,
+        &recipients,
         &project.workflow,
     )?;
 
@@ -496,12 +602,17 @@ fn create_and_submit_project(
         storage,
         &project_yaml_path,
         &final_project,
-        Some(datasite_email),
+        Some(recipients),
         true,
     )?;
 
     // Create permissions file
-    let permissions = SyftPermissions::new_for_datasite(datasite_email);
+    let mut permissions = SyftPermissions::new_for_datasites(&share_datasites);
+    permissions.add_rule(
+        "results/**/*",
+        share_datasites.clone(),
+        share_datasites.clone(),
+    );
     let permissions_path = submission_path.join("syft.pub.yaml");
     write_yaml_to_storage(storage, &permissions_path, &permissions, None, true)?;
 
@@ -639,6 +750,7 @@ fn send_project_message(
     Ok(())
 }
 
+#[allow(dead_code)]
 fn update_permissions_for_new_recipient(
     storage: &SyftBoxStorage,
     permissions_path: &Path,
@@ -753,8 +865,9 @@ mod tests {
         fs::write(src.join("workflow.nf"), b"wf").unwrap();
         fs::write(src.join("assets/nested/file.bin"), b"x").unwrap();
         let storage = SyftBoxStorage::new(tmp.path());
+        let recipients = vec!["peer@example.com".to_string()];
 
-        copy_project_files(&src, &dest, &storage, "peer@example.com", "workflow.nf").unwrap();
+        copy_project_files(&src, &dest, &storage, &recipients, "workflow.nf").unwrap();
 
         assert!(dest.join("workflow.nf").exists());
         assert!(dest.join("assets/nested/file.bin").exists());
@@ -765,7 +878,7 @@ mod tests {
         fs::write(src2.join("workflow.nf"), b"wf").unwrap();
         let dest2 = tmp.path().join("datasites/dest2");
         fs::create_dir_all(&dest2).unwrap();
-        copy_project_files(&src2, &dest2, &storage, "peer@example.com", "workflow.nf").unwrap();
+        copy_project_files(&src2, &dest2, &storage, &recipients, "workflow.nf").unwrap();
     }
 
     #[test]
@@ -810,7 +923,8 @@ mod tests {
         // No workflow.nf file
 
         let storage = SyftBoxStorage::new(tmp.path());
-        let result = copy_project_files(&src, &dest, &storage, "peer@example.com", "workflow.nf");
+        let recipients = vec!["peer@example.com".to_string()];
+        let result = copy_project_files(&src, &dest, &storage, &recipients, "workflow.nf");
         assert!(result.is_err());
     }
 
@@ -838,7 +952,8 @@ mod tests {
         }
 
         let storage = SyftBoxStorage::new(tmp.path());
-        let result = copy_project_files(&src, &dest, &storage, "peer@example.com", "workflow.nf");
+        let recipients = vec!["peer@example.com".to_string()];
+        let result = copy_project_files(&src, &dest, &storage, &recipients, "workflow.nf");
         assert!(result.is_ok());
         assert!(dest.join("workflow.nf").exists());
     }
@@ -855,7 +970,8 @@ mod tests {
         fs::write(src.join("assets/a/b/c/d/deep.txt"), b"deep").unwrap();
 
         let storage = SyftBoxStorage::new(tmp.path());
-        copy_project_files(&src, &dest, &storage, "peer@example.com", "workflow.nf").unwrap();
+        let recipients = vec!["peer@example.com".to_string()];
+        copy_project_files(&src, &dest, &storage, &recipients, "workflow.nf").unwrap();
 
         assert!(dest.join("workflow.nf").exists());
         assert!(dest.join("assets/a/b/c/d/deep.txt").exists());
@@ -880,7 +996,8 @@ mod tests {
         fs::write(src.join("assets/data.csv"), asset_content).unwrap();
 
         let storage = SyftBoxStorage::new(tmp.path());
-        copy_project_files(&src, &dest, &storage, "peer@example.com", "workflow.nf").unwrap();
+        let recipients = vec!["peer@example.com".to_string()];
+        copy_project_files(&src, &dest, &storage, &recipients, "workflow.nf").unwrap();
 
         let copied_workflow = fs::read(dest.join("workflow.nf")).unwrap();
         let copied_asset = fs::read(dest.join("assets/data.csv")).unwrap();
@@ -901,7 +1018,12 @@ mod tests {
         let datasites_dir = tmp.path().join("datasites");
         fs::create_dir_all(&datasites_dir).unwrap();
         let path = datasites_dir.join("syft.pub.yaml");
-        let original = SyftPermissions::new_for_datasite("original@example.com");
+        let mut original = SyftPermissions::new_for_datasite("original@example.com");
+        original.add_rule(
+            "results/**/*",
+            vec!["original@example.com".to_string()],
+            vec!["original@example.com".to_string()],
+        );
         original.save(&path.to_path_buf()).unwrap();
 
         let storage = SyftBoxStorage::new(tmp.path());
@@ -1002,7 +1124,7 @@ mod tests {
             &app.storage,
             &submission_path.join("project.yaml"),
             &project,
-            Some(config.email.as_str()),
+            Some(vec![config.email.clone()]),
             true,
         )
         .unwrap();
@@ -1102,7 +1224,9 @@ mod tests {
 
         let project = ProjectYaml::from_file(&submission_path.join("project.yaml")).unwrap();
         let datasites = project.datasites.unwrap();
-        assert_eq!(datasites, vec!["colleague@example.com".to_string()]);
+        assert_eq!(datasites.len(), 2);
+        assert!(datasites.contains(&"friend@example.com".to_string()));
+        assert!(datasites.contains(&"colleague@example.com".to_string()));
 
         let db_path = get_message_db_path(&Config {
             email: config_email.into(),
