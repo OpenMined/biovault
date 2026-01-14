@@ -188,14 +188,7 @@ fn build_message_system(config: &Config) -> Result<(MessageDb, MessageSync)> {
     let db = MessageDb::new(&db_path)?;
 
     let data_dir = config.get_syftbox_data_dir()?;
-    // Use the same vault path resolution as `bv key` commands to ensure consistent bundle locations
-    let vault_path = crate::cli::commands::key::resolve_vault_for_config(config)?;
-    let app = crate::syftbox::SyftBoxApp::with_vault_path(
-        &data_dir,
-        &config.email,
-        "biovault",
-        Some(&vault_path),
-    )?;
+    let app = crate::syftbox::SyftBoxApp::new(&data_dir, &config.email, "biovault")?;
     app.register_endpoint(MESSAGE_ENDPOINT)?;
 
     let sync = MessageSync::new(&db_path, app)?;

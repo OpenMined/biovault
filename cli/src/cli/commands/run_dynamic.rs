@@ -247,7 +247,7 @@ fn extract_paths_from_json(value: &JsonValue, paths: &mut Vec<PathBuf>) {
                                 "[JSON Extract] Reading CSV for embedded paths: {}",
                                 s
                             ));
-                            if let Ok(content) = fs::read_to_string(&path) {
+                            if let Ok(content) = fs::read_to_string(path) {
                                 extract_paths_from_csv(&content, paths);
                             } else {
                                 append_desktop_log(&format!(
@@ -819,17 +819,30 @@ pub async fn execute_dynamic(
     }
 
     // Canonicalize paths for Nextflow
-    let template_abs = template_path
-        .canonicalize()
-        .context("Failed to resolve template path")?;
+    let use_docker = should_use_docker_for_nextflow();
+    let template_abs = if use_docker {
+        template_path.clone()
+    } else {
+        template_path
+            .canonicalize()
+            .context("Failed to resolve template path")?
+    };
 
-    let workflow_abs = workflow_path
-        .canonicalize()
-        .context("Failed to resolve workflow path")?;
+    let workflow_abs = if use_docker {
+        workflow_path.clone()
+    } else {
+        workflow_path
+            .canonicalize()
+            .context("Failed to resolve workflow path")?
+    };
 
-    let project_spec_abs = spec_path
-        .canonicalize()
-        .context("Failed to resolve project spec path")?;
+    let project_spec_abs = if use_docker {
+        spec_path.clone()
+    } else {
+        spec_path
+            .canonicalize()
+            .context("Failed to resolve project spec path")?
+    };
 
     let inputs_json_str =
         serde_json::to_string(&inputs_json).context("Failed to encode inputs metadata to JSON")?;
@@ -844,7 +857,7 @@ pub async fn execute_dynamic(
 
     // Check Docker availability (required for both Windows Docker execution and workflow containers)
     // Skip Docker checks in dry-run mode
-    if !dry_run && (run_settings.require_docker || should_use_docker_for_nextflow()) {
+    if !dry_run && (run_settings.require_docker || use_docker) {
         append_desktop_log("[Pipeline] Checking Docker availability...");
         if let Err(err) = check_docker_running(&docker_bin) {
             append_desktop_log(&format!("[Pipeline] Docker check failed: {}", err));
@@ -854,7 +867,7 @@ pub async fn execute_dynamic(
     }
 
     // Build command - use Docker on Windows, native Nextflow elsewhere
-    let mut cmd = if should_use_docker_for_nextflow() {
+    let mut cmd = if use_docker {
         append_desktop_log("[Pipeline] Using Docker to run Nextflow (Windows mode)");
 
         // Build/get Nextflow runner image with modern Docker CLI
