@@ -353,6 +353,7 @@ steps:
     run: |
       rm -f datasites/client2@sandbox.local/app_data/biovault/rpc/message/*.request
       rm -f datasites/client2@sandbox.local/app_data/biovault/rpc/message/*.response
+      rm -f datasites/client1@sandbox.local/app_data/biovault/rpc/message/*.response
       echo "✓ Cleaned old messages"
 
   # Client1 still has OLD client2 key cached
@@ -386,6 +387,7 @@ steps:
     run: |
       rm -f datasites/client2@sandbox.local/app_data/biovault/rpc/message/*.request
       rm -f datasites/client2@sandbox.local/app_data/biovault/rpc/message/*.response
+      rm -f datasites/client1@sandbox.local/app_data/biovault/rpc/message/*.response
       echo "✓ Cleaned old messages"
 
   - name: Wait for client1 to receive updated client2 public key
@@ -431,6 +433,17 @@ steps:
     datasite: client2@sandbox.local
     wait_for: datasites/client2@sandbox.local/app_data/biovault/rpc/message/*.request
     timeout: 30
+    wait_for_new: true
+
+  - name: Client2 refreshes Client1 key before decrypting
+    datasite: client2@sandbox.local
+    run: |
+      VAULT="${BIOVAULT_HOME:-.biovault}/.syc"
+      rm -f "$VAULT/bundles/client1@sandbox.local.json"
+      {{workspace}}/cli/target/release/bv key import \
+        datasites/client1@sandbox.local/public/crypto/did.json \
+        --email client1@sandbox.local
+      echo "✓ Refreshed Client1 key"
 
   - name: Client2 syncs the new message
     datasite: client2@sandbox.local
@@ -440,8 +453,18 @@ steps:
   - name: Client2 lists inbox - should see new message
     datasite: client2@sandbox.local
     run: |
-      {{workspace}}/cli/target/release/bv inbox --plain
-    expect: "NEW key"
+      for i in $(seq 1 5); do
+        OUTPUT=$({{workspace}}/cli/target/release/bv inbox --plain)
+        echo "$OUTPUT"
+        if echo "$OUTPUT" | grep -q "NEW key"; then
+          echo "✓ Found NEW key message"
+          exit 0
+        fi
+        {{workspace}}/cli/target/release/bv message sync --no-cleanup || true
+        sleep 1
+      done
+      echo "Expected substring 'NEW key' not found in output."
+      exit 1
 
   # ============================================================
   # PHASE 9: Recipient Removes Sender's Key
@@ -479,12 +502,13 @@ steps:
     wait_for: datasites/client2@sandbox.local/app_data/biovault/rpc/message/*.request
     timeout: 30
 
-  - name: Client2 syncs - should fail (no sender bundle)
+  - name: Client2 syncs - should auto-refresh sender bundle
     datasite: client2@sandbox.local
     run: |
-      OUTPUT=$({{workspace}}/cli/target/release/bv message sync --no-cleanup 2>&1) || true
+      OUTPUT=$({{workspace}}/cli/target/release/bv message sync --no-cleanup 2>&1)
       echo "$OUTPUT"
-      echo "$OUTPUT" | grep -qi "sender bundle not cached\|import" && echo "✓ Got expected sender bundle error"
+      echo "$OUTPUT" | grep -qi "new message" && echo "✓ Message synced"
+      {{workspace}}/cli/target/release/bv inbox --plain | grep -q "after removing my key" && echo "✓ Message decrypted after auto-refresh"
 
   # ============================================================
   # PHASE 10: Multiple Identities Prevention
