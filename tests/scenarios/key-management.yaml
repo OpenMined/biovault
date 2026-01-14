@@ -328,6 +328,14 @@ steps:
       {{workspace}}/cli/target/release/bv key generate
       echo "✓ Key regenerated"
 
+  - name: Client2 re-imports Client1's public key after regeneration
+    datasite: client2@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv key import \
+        datasites/client1@sandbox.local/public/crypto/did.json \
+        --email client1@sandbox.local
+      echo "✓ Client2 re-imported Client1's key"
+
   - name: Get client2 NEW fingerprint
     datasite: client2@sandbox.local
     run: |
