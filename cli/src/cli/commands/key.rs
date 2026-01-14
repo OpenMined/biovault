@@ -518,6 +518,12 @@ fn resolve_vault_default(vault_override: Option<&Path>) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(".syc"))
 }
 
+/// Resolve the vault path using the same logic as key commands.
+/// This ensures consistent vault location between `bv key` commands and message sync.
+pub fn resolve_vault_for_config(_config: &Config) -> Result<PathBuf> {
+    Ok(resolve_vault_default(None))
+}
+
 fn resolve_export_path(data_root: &Path, identity: &str) -> PathBuf {
     let base = if data_root
         .file_name()

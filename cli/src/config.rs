@@ -120,6 +120,16 @@ pub struct Config {
     pub binary_paths: Option<BinaryPaths>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub syftbox_credentials: Option<SyftboxCredentials>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub agent_bridge_enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub agent_bridge_port: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub agent_bridge_http_port: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub agent_bridge_token: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub agent_bridge_blocklist: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -195,6 +205,11 @@ impl Config {
             version: None,
             binary_paths: None,
             syftbox_credentials: None,
+            agent_bridge_enabled: None,
+            agent_bridge_port: None,
+            agent_bridge_http_port: None,
+            agent_bridge_token: None,
+            agent_bridge_blocklist: None,
         }
     }
 
@@ -736,6 +751,11 @@ mod tests {
             version: Some("1.0.0".into()),
             binary_paths: None,
             syftbox_credentials: None,
+            agent_bridge_enabled: None,
+            agent_bridge_port: None,
+            agent_bridge_http_port: None,
+            agent_bridge_token: None,
+            agent_bridge_blocklist: None,
         };
         cfg.save(&path).unwrap();
         let loaded = Config::from_file(&path).unwrap();
@@ -761,6 +781,11 @@ mod tests {
             version: None,
             binary_paths: None,
             syftbox_credentials: None,
+            agent_bridge_enabled: None,
+            agent_bridge_port: None,
+            agent_bridge_http_port: None,
+            agent_bridge_token: None,
+            agent_bridge_blocklist: None,
         };
 
         let dir = cfg.get_syftbox_data_dir().unwrap();

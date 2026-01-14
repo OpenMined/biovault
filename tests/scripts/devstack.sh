@@ -202,8 +202,16 @@ fi
 BV_BIN="${BV_BIN:-$ROOT_DIR/cli/target/release/bv}"
 
 ensure_bv_binary() {
+  local cargo_toml="$ROOT_DIR/cli/Cargo.toml"
+  local cargo_lock="$ROOT_DIR/cli/Cargo.lock"
   if [[ -x "$BV_BIN" ]]; then
-    return
+    if [[ -f "$cargo_toml" && "$cargo_toml" -nt "$BV_BIN" ]]; then
+      :
+    elif [[ -f "$cargo_lock" && "$cargo_lock" -nt "$BV_BIN" ]]; then
+      :
+    else
+      return 0
+    fi
   fi
   require_bin cargo
   echo "Building BioVault CLI (release)..."
@@ -221,7 +229,7 @@ stop_stack() {
     for email in "${CLIENTS[@]}"; do
       local client_dir="$SANDBOX_DIR/$email"
       if [[ -d "$client_dir" ]]; then
-        HOME="$client_dir" "$BV_BIN" syftboxd stop >/dev/null 2>&1 || true
+        HOME="$client_dir" BIOVAULT_HOME="$client_dir/.biovault" "$BV_BIN" syftboxd stop >/dev/null 2>&1 || true
       fi
     done
   fi
@@ -246,6 +254,7 @@ bootstrap_biovault() {
 
   echo "Configuring BioVault for $email"
   HOME="$client_dir" \
+  BIOVAULT_HOME="$client_dir/.biovault" \
   SYFTBOX_EMAIL="$email" \
   SYFTBOX_DATA_DIR="$data_dir" \
   SYFTBOX_CONFIG_PATH="$config_path" \
@@ -323,6 +332,7 @@ start_syftboxd() {
 
     echo "Starting syftboxd (embedded) for $email"
     HOME="$client_dir" \
+    BIOVAULT_HOME="$client_dir/.biovault" \
     SYFTBOX_EMAIL="$email" \
     SYFTBOX_DATA_DIR="$data_dir" \
     SYFTBOX_CONFIG_PATH="$config_path" \

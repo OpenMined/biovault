@@ -5,6 +5,7 @@ import argparse
 import json
 import os
 import subprocess
+import shutil
 import sys
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -65,6 +66,27 @@ def is_supported_java(java_home: str) -> bool:
 
 
 JAVA_HOME_OVERRIDE = detect_java_home()
+
+def resolve_bash() -> list[str]:
+    override = os.environ.get("SCENARIO_BASH") or os.environ.get("GIT_BASH")
+    if override:
+        return [override]
+    if os.name == "nt":
+        candidates = [
+            r"C:\Program Files\Git\bin\bash.exe",
+            r"C:\Program Files\Git\usr\bin\bash.exe",
+            r"C:\Program Files (x86)\Git\bin\bash.exe",
+            r"C:\Program Files (x86)\Git\usr\bin\bash.exe",
+        ]
+        for candidate in candidates:
+            if Path(candidate).exists():
+                return [candidate]
+    found = shutil.which("bash") or "bash"
+    if os.name == "nt" and isinstance(found, str) and "System32" in found:
+        git_bash = Path(r"C:\Program Files\Git\bin\bash.exe")
+        if git_bash.exists():
+            return [str(git_bash)]
+    return [found]
 
 
 def load_scenario(path: Path) -> Dict[str, Any]:
@@ -339,14 +361,52 @@ def replace_vars(command: str, variables: Dict[str, str]) -> str:
             result = result.replace(token, value)
     return result
 
+def to_msys_path(value: str) -> str:
+    if os.name != "nt":
+        return value
+    if len(value) >= 2 and value[1] == ":":
+        drive = value[0].lower()
+        rest = value[2:].replace("\\", "/")
+        if not rest.startswith("/"):
+            rest = "/" + rest.lstrip("/")
+        return f"/{drive}{rest}"
+    return value
+
+def write_stream(stream, text: Optional[str]) -> None:
+    if not text:
+        return
+    try:
+        stream.write(text)
+    except UnicodeEncodeError:
+        stream.buffer.write(text.encode("utf-8", errors="replace"))
+        stream.flush()
+
+def ensure_shims(env: Dict[str, str]) -> Dict[str, str]:
+    if os.name != "nt":
+        return env
+    if all(shutil.which(tool) for tool in ("jq", "sqlite3")):
+        return env
+    shim_dir = ROOT / "scripts"
+    if not (shim_dir / "jq").exists() or not (shim_dir / "sqlite3").exists():
+        return env
+    env = env.copy()
+    shim_path = to_msys_path(str(shim_dir))
+    env["PATH"] = f"{shim_path}:{env.get('PATH', '')}"
+    return env
+
 
 def run_shell(
     command: str,
     datasite: Optional[str],
     variables: Dict[str, str],
-    capture_output: bool = False,
+    capture: bool = False,
 ) -> subprocess.CompletedProcess:
-    expanded = replace_vars(command, variables)
+    shell_vars = variables
+    if datasite and os.name == "nt":
+        shell_vars = dict(variables)
+        shell_vars["workspace"] = to_msys_path(variables.get("workspace", ""))
+        shell_vars["sandbox"] = to_msys_path(variables.get("sandbox", ""))
+    expanded = replace_vars(command, shell_vars)
     env = os.environ.copy()
     env["WORKSPACE_ROOT"] = str(ROOT)
     env["SCENARIO_DATASITE"] = datasite or ""
@@ -371,6 +431,11 @@ def run_shell(
                 "SYFTBOX_CONFIG_PATH": str(config_path),
             }
         )
+        config_yaml = client_dir / "config.yaml"
+        if config_yaml.exists():
+            env["BIOVAULT_HOME"] = str(client_dir)
+        else:
+            env["BIOVAULT_HOME"] = str(client_dir / ".biovault")
         if java_home:
             env["JAVA_HOME"] = java_home
             env["JAVA_CMD"] = str(Path(java_home) / "bin" / "java")
@@ -381,12 +446,16 @@ def run_shell(
         if user_path:
             env["PATH"] = user_path
 
+        bash_cmd = resolve_bash()
+        env = ensure_shims(env)
         result = subprocess.run(
-            ["bash", "-c", expanded],
+            bash_cmd + ["-lc", expanded],
             cwd=client_dir,
             env=env,
             text=True,
-            capture_output=capture_output,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
         )
     else:
         if java_home:
@@ -396,16 +465,18 @@ def run_shell(
         env.setdefault("NXF_IGNORE_JAVA_VERSION", "true")
         env.setdefault("NXF_OPTS", "-Dnxf.java.check=false")
         result = subprocess.run(
-            ["bash", "-c", expanded],
+            expanded,
             cwd=ROOT,
             env=env,
             text=True,
-            capture_output=capture_output,
+            encoding="utf-8",
+            errors="replace",
+            shell=True,
+            capture_output=True,
         )
 
-    if capture_output:
-        sys.stdout.write(result.stdout)
-        sys.stderr.write(result.stderr)
+    write_stream(sys.stdout, result.stdout)
+    write_stream(sys.stderr, result.stderr)
     if result.returncode != 0:
         raise SystemExit(f"Command failed (exit {result.returncode}): {expanded}")
     return result
@@ -419,13 +490,9 @@ def execute_commands(commands: Any, variables: Dict[str, str]):
 
 
 def run_step(step: Dict[str, Any], variables: Dict[str, str]):
-    import time
-    start_ts = time.perf_counter()
     name = step.get("name")
     if name:
         print(f"\n=== {name} ===")
-    else:
-        name = "<unnamed>"
     datasite = step.get("datasite")
     command = step.get("run")
     capture = step.get("capture")
@@ -435,138 +502,134 @@ def run_step(step: Dict[str, Any], variables: Dict[str, str]):
     assert_no_encrypted = step.get("assert_no_encrypted")
     assert_encrypted = step.get("assert_encrypted")
 
-    try:
-        # Handle wait_for syntax
-        if wait_for:
-            import glob
-            expanded = replace_vars(wait_for, variables)
-            wait_for_new = bool(step.get("wait_for_new", False))
+    # Handle wait_for syntax
+    if wait_for:
+        import time
+        import glob
+        expanded = replace_vars(wait_for, variables)
+        wait_for_new = bool(step.get("wait_for_new", False))
 
-            if datasite:
-                # Wait for file in datasite directory
-                client_dir = SANDBOX_ROOT / datasite
-                wait_path = client_dir / expanded
-            else:
-                wait_path = ROOT / expanded
+        if datasite:
+            # Wait for file in datasite directory
+            client_dir = SANDBOX_ROOT / datasite
+            wait_path = client_dir / expanded
+        else:
+            wait_path = ROOT / expanded
 
-            initial_matches: set[str] = set()
-            if wait_for_new and "*" in str(wait_path):
-                initial_matches = set(glob.glob(str(wait_path)))
+        initial_matches: set[str] = set()
+        if wait_for_new and "*" in str(wait_path):
+            initial_matches = set(glob.glob(str(wait_path)))
 
-            for i in range(timeout):
-                # Support glob patterns
-                if '*' in str(wait_path):
-                    matches = set(glob.glob(str(wait_path)))
-                    candidates = sorted(matches - initial_matches) if wait_for_new else sorted(matches)
-                    if candidates:
-                        print(f"✓ Found: {candidates[0]}")
-                        return
-                elif wait_path.exists():
-                    print(f"✓ Found: {wait_path}")
+        for i in range(timeout):
+            # Support glob patterns
+            if '*' in str(wait_path):
+                matches = set(glob.glob(str(wait_path)))
+                candidates = sorted(matches - initial_matches) if wait_for_new else sorted(matches)
+                if candidates:
+                    print(f"OK: Found: {candidates[0]}")
                     return
-                time.sleep(1)
+            elif wait_path.exists():
+                print(f"OK: Found: {wait_path}")
+                return
+            time.sleep(1)
 
-            raise SystemExit(f"Timeout waiting for: {wait_path}")
+        raise SystemExit(f"Timeout waiting for: {wait_path}")
 
-        # Handle assert_no_encrypted: check that files/directory have no SYC1 headers
-        if assert_no_encrypted:
-            import glob
-            expanded = replace_vars(assert_no_encrypted, variables)
+    # Handle assert_no_encrypted: check that files/directory have no SYC1 headers
+    if assert_no_encrypted:
+        import glob
+        expanded = replace_vars(assert_no_encrypted, variables)
 
-            if datasite:
-                client_dir = SANDBOX_ROOT / datasite
-                check_path = client_dir / expanded
-            else:
-                check_path = ROOT / expanded
+        if datasite:
+            client_dir = SANDBOX_ROOT / datasite
+            check_path = client_dir / expanded
+        else:
+            check_path = ROOT / expanded
 
-            # Collect files to check
-            if check_path.is_dir():
-                files_to_check = list(check_path.rglob("*"))
-                files_to_check = [f for f in files_to_check if f.is_file()]
-            elif '*' in str(check_path):
-                files_to_check = [Path(p) for p in glob.glob(str(check_path))]
-            else:
-                files_to_check = [check_path] if check_path.exists() else []
+        # Collect files to check
+        if check_path.is_dir():
+            files_to_check = list(check_path.rglob("*"))
+            files_to_check = [f for f in files_to_check if f.is_file()]
+        elif '*' in str(check_path):
+            files_to_check = [Path(p) for p in glob.glob(str(check_path))]
+        else:
+            files_to_check = [check_path] if check_path.exists() else []
 
-            # Check each file for SYC1 header
-            encrypted_files = []
-            for file_path in files_to_check:
-                try:
-                    with open(file_path, 'rb') as f:
-                        header = f.read(4)
-                        if header == b'SYC1':
-                            encrypted_files.append(file_path)
-                except Exception:
-                    pass  # Skip files we can't read
+        # Check each file for SYC1 header
+        encrypted_files = []
+        for file_path in files_to_check:
+            try:
+                with open(file_path, 'rb') as f:
+                    header = f.read(4)
+                    if header == b'SYC1':
+                        encrypted_files.append(file_path)
+            except Exception:
+                pass  # Skip files we can't read
 
-            if encrypted_files:
-                print(f"ERROR: Found {len(encrypted_files)} encrypted file(s):")
-                for f in encrypted_files:
-                    print(f"  - {f}")
-                raise SystemExit(f"Encrypted files found in: {check_path}")
+        if encrypted_files:
+            print(f"ERROR: Found {len(encrypted_files)} encrypted file(s):")
+            for f in encrypted_files:
+                print(f"  - {f}")
+            raise SystemExit(f"Encrypted files found in: {check_path}")
 
-            print(f"✓ No encrypted files in: {expanded}")
-            return
+        print(f"OK: No encrypted files in: {expanded}")
+        return
 
-        # Handle assert_encrypted: check that files have SYC1 headers
-        if assert_encrypted:
-            import glob
-            expanded = replace_vars(assert_encrypted, variables)
+    # Handle assert_encrypted: check that files have SYC1 headers
+    if assert_encrypted:
+        import glob
+        expanded = replace_vars(assert_encrypted, variables)
 
-            if datasite:
-                client_dir = SANDBOX_ROOT / datasite
-                check_path = client_dir / expanded
-            else:
-                check_path = ROOT / expanded
+        if datasite:
+            client_dir = SANDBOX_ROOT / datasite
+            check_path = client_dir / expanded
+        else:
+            check_path = ROOT / expanded
 
-            # Collect files to check
-            if check_path.is_dir():
-                files_to_check = list(check_path.rglob("*"))
-                files_to_check = [f for f in files_to_check if f.is_file()]
-            elif '*' in str(check_path):
-                files_to_check = [Path(p) for p in glob.glob(str(check_path))]
-            else:
-                files_to_check = [check_path] if check_path.exists() else []
+        # Collect files to check
+        if check_path.is_dir():
+            files_to_check = list(check_path.rglob("*"))
+            files_to_check = [f for f in files_to_check if f.is_file()]
+        elif '*' in str(check_path):
+            files_to_check = [Path(p) for p in glob.glob(str(check_path))]
+        else:
+            files_to_check = [check_path] if check_path.exists() else []
 
-            if not files_to_check:
-                raise SystemExit(f"No files found to check: {check_path}")
+        if not files_to_check:
+            raise SystemExit(f"No files found to check: {check_path}")
 
-            # Check each file for SYC1 header
-            unencrypted_files = []
-            for file_path in files_to_check:
-                try:
-                    with open(file_path, 'rb') as f:
-                        header = f.read(4)
-                        if header != b'SYC1':
-                            unencrypted_files.append(file_path)
-                except Exception:
-                    unencrypted_files.append(file_path)  # Assume unencrypted if can't read
+        # Check each file for SYC1 header
+        unencrypted_files = []
+        for file_path in files_to_check:
+            try:
+                with open(file_path, 'rb') as f:
+                    header = f.read(4)
+                    if header != b'SYC1':
+                        unencrypted_files.append(file_path)
+            except Exception:
+                unencrypted_files.append(file_path)  # Assume unencrypted if can't read
 
-            if unencrypted_files:
-                print(f"ERROR: Found {len(unencrypted_files)} unencrypted file(s):")
-                for f in unencrypted_files:
-                    print(f"  - {f}")
-                raise SystemExit(f"Unencrypted files found in: {check_path}")
+        if unencrypted_files:
+            print(f"ERROR: Found {len(unencrypted_files)} unencrypted file(s):")
+            for f in unencrypted_files:
+                print(f"  - {f}")
+            raise SystemExit(f"Unencrypted files found in: {check_path}")
 
-            print(f"✓ All files encrypted in: {expanded}")
-            return
+        print(f"OK: All files encrypted in: {expanded}")
+        return
 
-        if not command:
-            raise SystemExit("Each step must define a 'run', 'wait_for', 'assert_no_encrypted', or 'assert_encrypted' command.")
+    if not command:
+        raise SystemExit("Each step must define a 'run', 'wait_for', 'assert_no_encrypted', or 'assert_encrypted' command.")
 
-        capture_output = bool(capture or expect)
-        result = run_shell(command, datasite, variables, capture_output=capture_output)
+    result = run_shell(command, datasite, variables, capture=bool(capture))
 
-        if expect:
-            if expect not in result.stdout:
-                raise SystemExit(f"Expected substring '{expect}' not found in output.")
+    if expect:
+        if expect not in result.stdout:
+            raise SystemExit(f"Expected substring '{expect}' not found in output.")
 
-        if capture:
-            variables[capture] = result.stdout.strip()
-            print(f"[captured {capture}]")
-    finally:
-        elapsed = time.perf_counter() - start_ts
-        print(f"[step '{name}' completed in {elapsed:.2f}s]")
+    if capture:
+        variables[capture] = result.stdout.strip()
+        print(f"[captured {capture}]")
 
 
 def main():

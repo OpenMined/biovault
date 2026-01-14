@@ -139,8 +139,10 @@ run_bv() {
   email="$(basename "$client_dir")"
   local data_dir="$client_dir"
   local config_path="$client_dir/.syftbox/config.json"
+  local config_yaml="$client_dir/config.yaml"
   [[ -f "$config_path" ]] || { echo "Missing SyftBox config for $email at $config_path" >&2; exit 1; }
   HOME="$client_dir" \
+  BIOVAULT_HOME="$([[ -f "$config_yaml" ]] && printf '%s' "$client_dir" || printf '%s' "$client_dir/.biovault")" \
   SYFTBOX_EMAIL="$email" \
   SYFTBOX_DATA_DIR="$data_dir" \
   SYFTBOX_CONFIG_PATH="$config_path" \

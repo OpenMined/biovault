@@ -1,0 +1,25 @@
+name: allele-freq
+author: madhava@openmined.org
+workflow: workflow.nf
+template: dynamic-nextflow
+version: 0.1.0
+description: Convert genotype files to VCF and calculate allele frequencies across samples with batched parallel processing.
+inputs:
+- name: participants
+  type: List[GenotypeRecord]
+  description: CSV/TSV with participant_id and genotype_file columns. genotype_file can be .txt (genotype) or .vcf/.vcf.gz
+  format: csv
+  mapping:
+    participant_id: participant_id
+    genotype_file: genotype_file
+outputs:
+- name: allele_freq
+  type: File
+  description: Allele frequency table with AC, AN, AF per locus
+  format: tsv
+  path: allele_freq.tsv
+- name: vcf_results
+  type: File
+  description: VCF conversion stats per participant
+  format: tsv
+  path: vcf_conversion_results.tsv

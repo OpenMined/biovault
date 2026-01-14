@@ -157,6 +157,11 @@ pub async fn execute(email: Option<&str>, quiet: bool) -> Result<()> {
             version: Some("0.1.27".to_string()),
             binary_paths: None,
             syftbox_credentials: None,
+            agent_bridge_enabled: None,
+            agent_bridge_port: None,
+            agent_bridge_http_port: None,
+            agent_bridge_token: None,
+            agent_bridge_blocklist: None,
         };
 
         config.save(&config_file)?;
@@ -478,6 +483,11 @@ mod tests {
             version: None,
             binary_paths: None,
             syftbox_credentials: None,
+            agent_bridge_enabled: None,
+            agent_bridge_port: None,
+            agent_bridge_http_port: None,
+            agent_bridge_token: None,
+            agent_bridge_blocklist: None,
         };
         let config_path = temp_dir.path().join(".biovault").join("config.yaml");
         fs::create_dir_all(config_path.parent().unwrap()).unwrap();

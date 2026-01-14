@@ -12,7 +12,12 @@ steps:
 
   - name: Verify only valid files were imported (3 out of 5)
     datasite: client1@sandbox.local
-    run: sqlite3 .biovault/biovault.db "select count(*) from files"
+    run: |
+      DB="biovault.db"
+      if [ ! -f "$DB" ]; then
+        DB=".biovault/biovault.db"
+      fi
+      sqlite3 "$DB" "select count(*) from files"
     expect: "3"
 
   - name: Run count-lines pipeline with edge-case IDs

@@ -44,11 +44,14 @@ mkdir -p "$DATASITES_ROOT"
 if [[ "$MODE" == "native" ]]; then
   if [[ -z "$NATIVE_BIN" ]]; then
     # Try common locations relative to project
+    # SYFTBOX_DATA_DIR is typically sandbox/{client}, so we need ../../syqure (workspace2/syqure)
     for candidate in \
       "${PROJECT_DIR}/../../../syqure/target/release/syqure" \
       "${PROJECT_DIR}/../../../syqure/target/debug/syqure" \
-      "$(dirname "${SYFTBOX_DATA_DIR:-/tmp}")/../syqure/target/release/syqure" \
-      "$(dirname "${SYFTBOX_DATA_DIR:-/tmp}")/../syqure/target/debug/syqure"; do
+      "$(dirname "$(dirname "${SYFTBOX_DATA_DIR:-/tmp}")")/syqure/target/release/syqure" \
+      "$(dirname "$(dirname "${SYFTBOX_DATA_DIR:-/tmp}")")/syqure/target/debug/syqure" \
+      "$(dirname "$(dirname "$(dirname "${SYFTBOX_DATA_DIR:-/tmp}")")")/syqure/target/release/syqure" \
+      "$(dirname "$(dirname "$(dirname "${SYFTBOX_DATA_DIR:-/tmp}")")")/syqure/target/debug/syqure"; do
       if [[ -x "$candidate" ]]; then
         NATIVE_BIN="$candidate"
         break
