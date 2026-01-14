@@ -417,6 +417,11 @@ fn load_or_create_config(email: &str) -> Result<(Config, PathBuf)> {
                 version: None,
                 binary_paths: None,
                 syftbox_credentials: None,
+                agent_bridge_enabled: None,
+                agent_bridge_port: None,
+                agent_bridge_http_port: None,
+                agent_bridge_token: None,
+                agent_bridge_blocklist: None,
             };
             config.save(&config_path)?;
             Ok((config, config_path))

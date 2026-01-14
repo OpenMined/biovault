@@ -107,6 +107,11 @@ mod tests_fast_helpers {
             version: None,
             binary_paths: None,
             syftbox_credentials: None,
+            agent_bridge_enabled: None,
+            agent_bridge_port: None,
+            agent_bridge_http_port: None,
+            agent_bridge_token: None,
+            agent_bridge_blocklist: None,
         };
         let path = get_message_db_path(&cfg).unwrap();
         // Parent dir should exist now
@@ -142,6 +147,11 @@ mod tests_fast_helpers {
             version: None,
             binary_paths: None,
             syftbox_credentials: None,
+            agent_bridge_enabled: None,
+            agent_bridge_port: None,
+            agent_bridge_http_port: None,
+            agent_bridge_token: None,
+            agent_bridge_blocklist: None,
         };
         // Create db first
         let _ = get_message_db_path(&cfg).unwrap();
@@ -178,7 +188,14 @@ fn build_message_system(config: &Config) -> Result<(MessageDb, MessageSync)> {
     let db = MessageDb::new(&db_path)?;
 
     let data_dir = config.get_syftbox_data_dir()?;
-    let app = crate::syftbox::SyftBoxApp::new(&data_dir, &config.email, "biovault")?;
+    // Use the same vault path resolution as `bv key` commands to ensure consistent bundle locations
+    let vault_path = crate::cli::commands::key::resolve_vault_for_config(config)?;
+    let app = crate::syftbox::SyftBoxApp::with_vault_path(
+        &data_dir,
+        &config.email,
+        "biovault",
+        Some(&vault_path),
+    )?;
     app.register_endpoint(MESSAGE_ENDPOINT)?;
 
     let sync = MessageSync::new(&db_path, app)?;
@@ -1972,6 +1989,11 @@ mod tests {
             version: None,
             binary_paths: None,
             syftbox_credentials: None,
+            agent_bridge_enabled: None,
+            agent_bridge_port: None,
+            agent_bridge_http_port: None,
+            agent_bridge_token: None,
+            agent_bridge_blocklist: None,
         }
     }
 
@@ -2073,6 +2095,11 @@ mod tests {
             version: None,
             binary_paths: None,
             syftbox_credentials: None,
+            agent_bridge_enabled: None,
+            agent_bridge_port: None,
+            agent_bridge_http_port: None,
+            agent_bridge_token: None,
+            agent_bridge_blocklist: None,
         };
 
         let app = SyftBoxApp::new(tmp.path(), &cfg.email, "biovault").unwrap();
@@ -2123,6 +2150,11 @@ mod tests {
             version: None,
             binary_paths: None,
             syftbox_credentials: None,
+            agent_bridge_enabled: None,
+            agent_bridge_port: None,
+            agent_bridge_http_port: None,
+            agent_bridge_token: None,
+            agent_bridge_blocklist: None,
         };
 
         // Make sender tree and one file
@@ -2155,6 +2187,11 @@ mod tests {
             version: None,
             binary_paths: None,
             syftbox_credentials: None,
+            agent_bridge_enabled: None,
+            agent_bridge_port: None,
+            agent_bridge_http_port: None,
+            agent_bridge_token: None,
+            agent_bridge_blocklist: None,
         };
 
         // Build project root with two files and compute blake3
@@ -2205,6 +2242,11 @@ mod tests {
             version: None,
             binary_paths: None,
             syftbox_credentials: None,
+            agent_bridge_enabled: None,
+            agent_bridge_port: None,
+            agent_bridge_http_port: None,
+            agent_bridge_token: None,
+            agent_bridge_blocklist: None,
         };
         // Init DB only
         let db_path = get_message_db_path(&cfg)?;
@@ -2232,6 +2274,11 @@ mod tests {
             version: None,
             binary_paths: None,
             syftbox_credentials: None,
+            agent_bridge_enabled: None,
+            agent_bridge_port: None,
+            agent_bridge_http_port: None,
+            agent_bridge_token: None,
+            agent_bridge_blocklist: None,
         };
         let db_path = get_message_db_path(&cfg)?;
         let db = MessageDb::new(&db_path)?;

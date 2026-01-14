@@ -371,6 +371,11 @@ def run_shell(
                 "SYFTBOX_CONFIG_PATH": str(config_path),
             }
         )
+        config_yaml = client_dir / "config.yaml"
+        if config_yaml.exists():
+            env["BIOVAULT_HOME"] = str(client_dir)
+        else:
+            env["BIOVAULT_HOME"] = str(client_dir / ".biovault")
         if java_home:
             env["JAVA_HOME"] = java_home
             env["JAVA_CMD"] = str(Path(java_home) / "bin" / "java")
