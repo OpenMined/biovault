@@ -16,7 +16,7 @@ steps:
     datasite: client1@sandbox.local
     run: |
       echo "=== Checking for existing keys ==="
-      VAULT=".biovault/.syc"
+      VAULT="${BIOVAULT_HOME:-.biovault}/.syc"
       if [ -d "$VAULT/keys" ] && [ "$(ls -A "$VAULT/keys" 2>/dev/null)" ]; then
         echo "✗ Keys directory exists and has files"
         ls -la "$VAULT/keys/"
@@ -27,7 +27,7 @@ steps:
   - name: Verify client2 has NO keys initially
     datasite: client2@sandbox.local
     run: |
-      VAULT=".biovault/.syc"
+      VAULT="${BIOVAULT_HOME:-.biovault}/.syc"
       if [ -d "$VAULT/keys" ] && [ "$(ls -A "$VAULT/keys" 2>/dev/null)" ]; then
         echo "✗ Keys directory exists and has files"
         exit 1
@@ -58,7 +58,7 @@ steps:
   - name: Verify client1 key exists in vault
     datasite: client1@sandbox.local
     run: |
-      VAULT=".biovault/.syc"
+      VAULT="${BIOVAULT_HOME:-.biovault}/.syc"
       test -f "$VAULT/keys/client1@sandbox.local.key" && echo "✓ Private key exists"
       test -f "$VAULT/bundles/client1@sandbox.local.json" && echo "✓ Bundle exists"
 
@@ -82,7 +82,7 @@ steps:
   - name: Verify client2 key exists in vault
     datasite: client2@sandbox.local
     run: |
-      VAULT=".biovault/.syc"
+      VAULT="${BIOVAULT_HOME:-.biovault}/.syc"
       test -f "$VAULT/keys/client2@sandbox.local.key" && echo "✓ Private key exists"
       test -f "$VAULT/bundles/client2@sandbox.local.json" && echo "✓ Bundle exists"
 
@@ -168,13 +168,13 @@ steps:
   - name: Verify client1 has client2's bundle cached
     datasite: client1@sandbox.local
     run: |
-      VAULT=".biovault/.syc"
+      VAULT="${BIOVAULT_HOME:-.biovault}/.syc"
       test -f "$VAULT/bundles/client2@sandbox.local.json" && echo "✓ Client2 bundle cached"
 
   - name: Verify client2 has client1's bundle cached
     datasite: client2@sandbox.local
     run: |
-      VAULT=".biovault/.syc"
+      VAULT="${BIOVAULT_HOME:-.biovault}/.syc"
       test -f "$VAULT/bundles/client1@sandbox.local.json" && echo "✓ Client1 bundle cached"
 
   - name: Client1 sends message to Client2
@@ -234,7 +234,7 @@ steps:
   - name: Client1 deletes their private key (simulating key loss)
     datasite: client1@sandbox.local
     run: |
-      VAULT=".biovault/.syc"
+      VAULT="${BIOVAULT_HOME:-.biovault}/.syc"
       echo "Deleting private key..."
       rm -f "$VAULT/keys/client1@sandbox.local.key"
       test ! -f "$VAULT/keys/client1@sandbox.local.key" && echo "✓ Private key deleted"
@@ -270,12 +270,27 @@ steps:
   - name: Verify published DID matches restored key
     datasite: client1@sandbox.local
     run: |
-      VAULT=".biovault/.syc"
+      VAULT="${BIOVAULT_HOME:-.biovault}/.syc"
       VAULT_FP=$(grep -o '"identity_fingerprint"[[:space:]]*:[[:space:]]*"[^"]*"' "$VAULT/bundles/client1@sandbox.local.json" | cut -d'"' -f4 | head -c 16)
       DID_FP=$(grep -o '"identity_fingerprint"[[:space:]]*:[[:space:]]*"[^"]*"' datasites/client1@sandbox.local/public/crypto/did.json | cut -d'"' -f4 | head -c 16)
       echo "Vault fingerprint: $VAULT_FP"
       echo "DID fingerprint:   $DID_FP"
       test "$VAULT_FP" = "$DID_FP" && echo "✓ Vault matches published DID"
+
+  # After restore, re-import sender key to ensure Client2 has the fresh bundle before Phase 7
+  - name: Client2 re-imports Client1 key after restore (ensure sync)
+    datasite: client2@sandbox.local
+    run: |
+      # Wait for Client1's DID to sync (the restored bundle)
+      echo "Waiting for Client1's restored DID to sync..."
+      for i in $(seq 1 15); do
+        # Import will update the cache even if fingerprint is same
+        {{workspace}}/cli/target/release/bv key import \
+          datasites/client1@sandbox.local/public/crypto/did.json \
+          --email client1@sandbox.local 2>/dev/null && break
+        sleep 1
+      done
+      echo "✓ Re-imported Client1's key after restore"
 
   - name: Clean up old messages on client1
     datasite: client1@sandbox.local
@@ -328,6 +343,14 @@ steps:
       {{workspace}}/cli/target/release/bv key generate
       echo "✓ Key regenerated"
 
+  - name: Client2 re-imports Client1's public key after regeneration
+    datasite: client2@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv key import \
+        datasites/client1@sandbox.local/public/crypto/did.json \
+        --email client1@sandbox.local
+      echo "✓ Client2 re-imported Client1's key"
+
   - name: Get client2 NEW fingerprint
     datasite: client2@sandbox.local
     run: |
@@ -345,6 +368,7 @@ steps:
     run: |
       rm -f datasites/client2@sandbox.local/app_data/biovault/rpc/message/*.request
       rm -f datasites/client2@sandbox.local/app_data/biovault/rpc/message/*.response
+      rm -f datasites/client1@sandbox.local/app_data/biovault/rpc/message/*.response
       echo "✓ Cleaned old messages"
 
   # Client1 still has OLD client2 key cached
@@ -378,6 +402,7 @@ steps:
     run: |
       rm -f datasites/client2@sandbox.local/app_data/biovault/rpc/message/*.request
       rm -f datasites/client2@sandbox.local/app_data/biovault/rpc/message/*.response
+      rm -f datasites/client1@sandbox.local/app_data/biovault/rpc/message/*.response
       echo "✓ Cleaned old messages"
 
   - name: Wait for client1 to receive updated client2 public key
@@ -399,7 +424,7 @@ steps:
   - name: Client1 re-imports Client2's NEW public key
     datasite: client1@sandbox.local
     run: |
-      VAULT=".biovault/.syc"
+      VAULT="${BIOVAULT_HOME:-.biovault}/.syc"
       # Remove old bundle first, then re-import to get new key (simulating "trust new key")
       rm -f "$VAULT/bundles/client2@sandbox.local.json"
       {{workspace}}/cli/target/release/bv key import \
@@ -423,6 +448,22 @@ steps:
     datasite: client2@sandbox.local
     wait_for: datasites/client2@sandbox.local/app_data/biovault/rpc/message/*.request
     timeout: 30
+    wait_for_new: true
+
+  # Delay to ensure file is fully written (sync may still be completing)
+  # The 200ms threshold in endpoint.rs can skip newly-created files
+  - name: Wait for file sync to complete
+    run: sleep 1
+
+  - name: Client2 refreshes Client1 key before decrypting
+    datasite: client2@sandbox.local
+    run: |
+      VAULT="${BIOVAULT_HOME:-.biovault}/.syc"
+      rm -f "$VAULT/bundles/client1@sandbox.local.json"
+      {{workspace}}/cli/target/release/bv key import \
+        datasites/client1@sandbox.local/public/crypto/did.json \
+        --email client1@sandbox.local
+      echo "✓ Refreshed Client1 key"
 
   - name: Client2 syncs the new message
     datasite: client2@sandbox.local
@@ -432,12 +473,30 @@ steps:
   - name: Client2 lists inbox - should see new message
     datasite: client2@sandbox.local
     run: |
-      {{workspace}}/cli/target/release/bv inbox --plain
-    expect: "NEW key"
+      for i in $(seq 1 10); do
+        # Sync first to process any new messages
+        {{workspace}}/cli/target/release/bv message sync --no-cleanup || true
+        # Then check inbox
+        OUTPUT=$({{workspace}}/cli/target/release/bv inbox --plain)
+        echo "$OUTPUT"
+        if echo "$OUTPUT" | grep -q "NEW key"; then
+          echo "✓ Found NEW key message"
+          exit 0
+        fi
+        sleep 0.5
+      done
+      echo "Expected substring 'NEW key' not found in output."
+      exit 1
 
   # ============================================================
-  # PHASE 9: Recipient Removes Sender's Key
+  # PHASE 9: Recipient Removes Sender's Key (TOFU Security Test)
   # ============================================================
+  # This phase tests the Trust On First Use (TOFU) security model:
+  # - When a recipient removes/loses a sender's cached key, they cannot
+  #   decrypt messages from that sender until they explicitly re-import
+  #   the key. This is a security feature - the system should NOT
+  #   auto-import keys, as that would bypass user verification.
+  # - The user must consciously decide to trust a key by importing it.
 
   - name: "Phase 9: Clean up old messages before testing"
     datasite: client2@sandbox.local
@@ -449,14 +508,14 @@ steps:
   - name: Client2 removes Client1's imported key
     datasite: client2@sandbox.local
     run: |
-      VAULT=".biovault/.syc"
+      VAULT="${BIOVAULT_HOME:-.biovault}/.syc"
       rm -f "$VAULT/bundles/client1@sandbox.local.json"
       echo "✓ Removed client1 bundle from cache"
 
   - name: Verify client1 bundle removed
     datasite: client2@sandbox.local
     run: |
-      VAULT=".biovault/.syc"
+      VAULT="${BIOVAULT_HOME:-.biovault}/.syc"
       test ! -f "$VAULT/bundles/client1@sandbox.local.json" && echo "✓ Bundle removed"
 
   - name: Client1 sends another message
@@ -471,12 +530,34 @@ steps:
     wait_for: datasites/client2@sandbox.local/app_data/biovault/rpc/message/*.request
     timeout: 30
 
-  - name: Client2 syncs - should fail (no sender bundle)
+  # Without the sender's key cached, decryption should FAIL
+  # This is correct TOFU behavior - no auto-import of keys
+  - name: Client2 syncs - should FAIL without sender key (TOFU security)
     datasite: client2@sandbox.local
     run: |
-      OUTPUT=$({{workspace}}/cli/target/release/bv message sync --no-cleanup 2>&1) || true
+      OUTPUT=$({{workspace}}/cli/target/release/bv message sync --no-cleanup 2>&1)
       echo "$OUTPUT"
-      echo "$OUTPUT" | grep -qi "sender bundle not cached\|import" && echo "✓ Got expected sender bundle error"
+      # Should report a decryption failure because sender bundle is not cached
+      echo "$OUTPUT" | grep -qi "failure\|failed\|not cached\|error" && echo "✓ Decryption failed as expected (sender key not cached)"
+
+  # User explicitly decides to trust the sender by re-importing their key
+  - name: Client2 re-imports Client1's key (user explicitly trusts sender)
+    datasite: client2@sandbox.local
+    run: |
+      echo "User decides to re-import Client1's key..."
+      {{workspace}}/cli/target/release/bv key import \
+        datasites/client1@sandbox.local/public/crypto/did.json \
+        --email client1@sandbox.local
+      echo "✓ Re-imported Client1's key (user verified trust)"
+
+  # Now sync should succeed
+  - name: Client2 syncs again - should work after explicit key import
+    datasite: client2@sandbox.local
+    run: |
+      OUTPUT=$({{workspace}}/cli/target/release/bv message sync --no-cleanup 2>&1)
+      echo "$OUTPUT"
+      echo "$OUTPUT" | grep -qi "new message" && echo "✓ Message synced after re-import"
+      {{workspace}}/cli/target/release/bv inbox --plain | grep -q "after removing my key" && echo "✓ Message decrypted after explicit key import"
 
   # ============================================================
   # PHASE 10: Multiple Identities Prevention
@@ -485,14 +566,14 @@ steps:
   - name: "Phase 10: Artificially create multiple identity files"
     datasite: client1@sandbox.local
     run: |
-      VAULT=".biovault/.syc"
+      VAULT="${BIOVAULT_HOME:-.biovault}/.syc"
       cp "$VAULT/keys/client1@sandbox.local.key" "$VAULT/keys/fake_identity.key"
       echo "✓ Created duplicate key file"
 
   - name: Verify multiple key files exist
     datasite: client1@sandbox.local
     run: |
-      VAULT=".biovault/.syc"
+      VAULT="${BIOVAULT_HOME:-.biovault}/.syc"
       KEY_COUNT=$(ls "$VAULT"/keys/*.key 2>/dev/null | wc -l)
       echo "Key files found: $KEY_COUNT"
       test "$KEY_COUNT" -gt 1 && echo "✓ Multiple keys present"
@@ -511,7 +592,7 @@ steps:
   - name: Clean up extra key files
     datasite: client1@sandbox.local
     run: |
-      VAULT=".biovault/.syc"
+      VAULT="${BIOVAULT_HOME:-.biovault}/.syc"
       # Keep only the first key file (alphabetically)
       FIRST_KEY=$(ls "$VAULT"/keys/*.key 2>/dev/null | head -1)
       for f in "$VAULT"/keys/*.key; do

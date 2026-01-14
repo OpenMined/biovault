@@ -262,6 +262,11 @@ mod tests {
             version: Some("0.1.0".into()),
             binary_paths: None,
             syftbox_credentials: None,
+            agent_bridge_enabled: None,
+            agent_bridge_port: None,
+            agent_bridge_http_port: None,
+            agent_bridge_token: None,
+            agent_bridge_blocklist: None,
         };
         cfg.save(&cfg_path).unwrap();
 
