@@ -77,6 +77,9 @@ echo "Running scenario: $SCENARIO"
 # Preserve user JAVA_HOME/PATH for downstream shells (after sbenv activation)
 export SCENARIO_JAVA_HOME="${JAVA_HOME:-}"
 export SCENARIO_USER_PATH="$PATH"
+if command -v nextflow >/dev/null 2>&1; then
+  export BIOVAULT_BUNDLED_NEXTFLOW="$(command -v nextflow)"
+fi
 
 if [[ -n "$SANDBOX_DIR" ]]; then
   export SANDBOX_DIR="$SANDBOX_DIR"
