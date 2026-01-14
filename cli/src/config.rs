@@ -120,15 +120,15 @@ pub struct Config {
     pub binary_paths: Option<BinaryPaths>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub syftbox_credentials: Option<SyftboxCredentials>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub agent_bridge_enabled: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub agent_bridge_port: Option<u16>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub agent_bridge_http_port: Option<u16>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub agent_bridge_token: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub agent_bridge_blocklist: Option<Vec<String>>,
 }
 
