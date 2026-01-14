@@ -98,7 +98,7 @@ impl DatabaseLock {
 
                         // Check if process is still alive first (more important than age)
                         let mut should_remove = false;
-                        let process_exists = true;
+                        let mut process_exists = true;
 
                         #[cfg(unix)]
                         {
