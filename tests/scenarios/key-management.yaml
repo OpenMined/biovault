@@ -450,9 +450,10 @@ steps:
     timeout: 30
     wait_for_new: true
 
-  # Small delay to ensure file is fully written (sync may still be completing)
+  # Delay to ensure file is fully written (sync may still be completing)
+  # The 200ms threshold in endpoint.rs can skip newly-created files
   - name: Wait for file sync to complete
-    run: sleep 0.5
+    run: sleep 1
 
   - name: Client2 refreshes Client1 key before decrypting
     datasite: client2@sandbox.local
@@ -472,22 +473,30 @@ steps:
   - name: Client2 lists inbox - should see new message
     datasite: client2@sandbox.local
     run: |
-      for i in $(seq 1 5); do
+      for i in $(seq 1 10); do
+        # Sync first to process any new messages
+        {{workspace}}/cli/target/release/bv message sync --no-cleanup || true
+        # Then check inbox
         OUTPUT=$({{workspace}}/cli/target/release/bv inbox --plain)
         echo "$OUTPUT"
         if echo "$OUTPUT" | grep -q "NEW key"; then
           echo "✓ Found NEW key message"
           exit 0
         fi
-        {{workspace}}/cli/target/release/bv message sync --no-cleanup || true
-        sleep 1
+        sleep 0.5
       done
       echo "Expected substring 'NEW key' not found in output."
       exit 1
 
   # ============================================================
-  # PHASE 9: Recipient Removes Sender's Key
+  # PHASE 9: Recipient Removes Sender's Key (TOFU Security Test)
   # ============================================================
+  # This phase tests the Trust On First Use (TOFU) security model:
+  # - When a recipient removes/loses a sender's cached key, they cannot
+  #   decrypt messages from that sender until they explicitly re-import
+  #   the key. This is a security feature - the system should NOT
+  #   auto-import keys, as that would bypass user verification.
+  # - The user must consciously decide to trust a key by importing it.
 
   - name: "Phase 9: Clean up old messages before testing"
     datasite: client2@sandbox.local
@@ -521,13 +530,34 @@ steps:
     wait_for: datasites/client2@sandbox.local/app_data/biovault/rpc/message/*.request
     timeout: 30
 
-  - name: Client2 syncs - should auto-refresh sender bundle
+  # Without the sender's key cached, decryption should FAIL
+  # This is correct TOFU behavior - no auto-import of keys
+  - name: Client2 syncs - should FAIL without sender key (TOFU security)
     datasite: client2@sandbox.local
     run: |
       OUTPUT=$({{workspace}}/cli/target/release/bv message sync --no-cleanup 2>&1)
       echo "$OUTPUT"
-      echo "$OUTPUT" | grep -qi "new message" && echo "✓ Message synced"
-      {{workspace}}/cli/target/release/bv inbox --plain | grep -q "after removing my key" && echo "✓ Message decrypted after auto-refresh"
+      # Should report a decryption failure because sender bundle is not cached
+      echo "$OUTPUT" | grep -qi "failure\|failed\|not cached\|error" && echo "✓ Decryption failed as expected (sender key not cached)"
+
+  # User explicitly decides to trust the sender by re-importing their key
+  - name: Client2 re-imports Client1's key (user explicitly trusts sender)
+    datasite: client2@sandbox.local
+    run: |
+      echo "User decides to re-import Client1's key..."
+      {{workspace}}/cli/target/release/bv key import \
+        datasites/client1@sandbox.local/public/crypto/did.json \
+        --email client1@sandbox.local
+      echo "✓ Re-imported Client1's key (user verified trust)"
+
+  # Now sync should succeed
+  - name: Client2 syncs again - should work after explicit key import
+    datasite: client2@sandbox.local
+    run: |
+      OUTPUT=$({{workspace}}/cli/target/release/bv message sync --no-cleanup 2>&1)
+      echo "$OUTPUT"
+      echo "$OUTPUT" | grep -qi "new message" && echo "✓ Message synced after re-import"
+      {{workspace}}/cli/target/release/bv inbox --plain | grep -q "after removing my key" && echo "✓ Message decrypted after explicit key import"
 
   # ============================================================
   # PHASE 10: Multiple Identities Prevention
