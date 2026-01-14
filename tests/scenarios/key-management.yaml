@@ -277,6 +277,21 @@ steps:
       echo "DID fingerprint:   $DID_FP"
       test "$VAULT_FP" = "$DID_FP" && echo "✓ Vault matches published DID"
 
+  # After restore, re-import sender key to ensure Client2 has the fresh bundle before Phase 7
+  - name: Client2 re-imports Client1 key after restore (ensure sync)
+    datasite: client2@sandbox.local
+    run: |
+      # Wait for Client1's DID to sync (the restored bundle)
+      echo "Waiting for Client1's restored DID to sync..."
+      for i in $(seq 1 15); do
+        # Import will update the cache even if fingerprint is same
+        {{workspace}}/cli/target/release/bv key import \
+          datasites/client1@sandbox.local/public/crypto/did.json \
+          --email client1@sandbox.local 2>/dev/null && break
+        sleep 1
+      done
+      echo "✓ Re-imported Client1's key after restore"
+
   - name: Clean up old messages on client1
     datasite: client1@sandbox.local
     run: |
@@ -434,6 +449,10 @@ steps:
     wait_for: datasites/client2@sandbox.local/app_data/biovault/rpc/message/*.request
     timeout: 30
     wait_for_new: true
+
+  # Small delay to ensure file is fully written (sync may still be completing)
+  - name: Wait for file sync to complete
+    run: sleep 0.5
 
   - name: Client2 refreshes Client1 key before decrypting
     datasite: client2@sandbox.local
