@@ -803,7 +803,10 @@ pub async fn execute_dynamic(
         fs::create_dir_all(&results_path_buf).context("Failed to create results directory")?;
     }
     let results_path_str = results_path_buf.to_string_lossy().to_string();
-    let template_datasites = if spec.datasites.as_ref().is_some_and(|d| !d.is_empty()) {
+    let datasites_override = resolve_datasites_override();
+    let template_datasites = if let Some(override_list) = datasites_override {
+        override_list
+    } else if spec.datasites.as_ref().is_some_and(|d| !d.is_empty()) {
         spec.datasites.clone().unwrap_or_default()
     } else {
         Vec::new()
@@ -1190,6 +1193,11 @@ struct DatasiteContext {
 }
 
 fn resolve_current_datasite() -> Option<String> {
+    if let Ok(env_override) = env::var("BIOVAULT_DATASITE_OVERRIDE") {
+        if !env_override.trim().is_empty() {
+            return Some(env_override.trim().to_string());
+        }
+    }
     if let Ok(cfg) = crate::config::Config::load() {
         if !cfg.email.trim().is_empty() {
             return Some(cfg.email);
@@ -1206,6 +1214,21 @@ fn resolve_current_datasite() -> Option<String> {
         }
     }
     None
+}
+
+fn resolve_datasites_override() -> Option<Vec<String>> {
+    let raw = env::var("BIOVAULT_DATASITES_OVERRIDE").ok()?;
+    let list: Vec<String> = raw
+        .split(',')
+        .map(|entry| entry.trim())
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| entry.to_string())
+        .collect();
+    if list.is_empty() {
+        None
+    } else {
+        Some(list)
+    }
 }
 
 fn resolve_datasite_index(datasites: &[String], current: Option<&str>) -> Option<usize> {
@@ -1253,6 +1276,12 @@ fn build_shell_env(
     let mut rendered = BTreeMap::new();
     for (key, value) in env_map {
         rendered.insert(key, render_template(&value, ctx));
+    }
+
+    if let Ok(bv_bin) = env::var("BV_BIN") {
+        if !bv_bin.trim().is_empty() {
+            rendered.insert("BV_BIN".to_string(), bv_bin);
+        }
     }
 
     rendered.insert(
@@ -1311,7 +1340,16 @@ async fn execute_shell(
         return Err(anyhow::anyhow!("Workflow file not found: {}", workflow_path.display()).into());
     }
 
-    let results_path = PathBuf::from(results_dir.unwrap_or_else(|| "results".to_string()));
+    let results_path = if let Some(dir) = results_dir {
+        let path = PathBuf::from(&dir);
+        if path.is_absolute() {
+            path
+        } else {
+            project_path.join(dir)
+        }
+    } else {
+        project_path.join("results")
+    };
     if !dry_run {
         fs::create_dir_all(&results_path)?;
     }
@@ -1324,6 +1362,7 @@ async fn execute_shell(
         .into());
     }
 
+    let parsed_args = parse_cli_args(&args)?;
     let steps = if spec.steps.is_empty() {
         vec![default_shell_step(spec)]
     } else {
@@ -1354,7 +1393,9 @@ async fn execute_shell(
             continue;
         }
 
-        let template_datasites = if let Some(spec_datasites) = &spec.datasites {
+        let template_datasites = if let Some(override_list) = resolve_datasites_override() {
+            override_list
+        } else if let Some(spec_datasites) = &spec.datasites {
             if spec_datasites.is_empty() {
                 step_targets.clone()
             } else {
@@ -1401,6 +1442,17 @@ async fn execute_shell(
             &step.inputs
         };
         for input in input_specs {
+            let env_key = format!("BV_INPUT_{}", env_key_suffix(&input.name));
+            if let Some(arg) = parsed_args.inputs.get(&input.name) {
+                let rendered_value = render_template(&arg.value, &ctx);
+                let input_path = if Path::new(&rendered_value).is_absolute() {
+                    PathBuf::from(rendered_value)
+                } else {
+                    project_path.join(rendered_value)
+                };
+                env_map.insert(env_key, input_path.to_string_lossy().to_string());
+                continue;
+            }
             if let Some(path_template) = input.path.as_deref() {
                 let rendered_path = render_template(path_template, &ctx);
                 let input_path = if Path::new(&rendered_path).is_absolute() {
@@ -1408,13 +1460,17 @@ async fn execute_shell(
                 } else {
                     project_path.join(rendered_path)
                 };
-                let env_key = format!("BV_INPUT_{}", env_key_suffix(&input.name));
                 env_map
                     .entry(env_key)
                     .or_insert_with(|| input_path.to_string_lossy().to_string());
             }
         }
-        for output in &step.outputs {
+        let output_specs = if step.outputs.is_empty() {
+            &spec.outputs
+        } else {
+            &step.outputs
+        };
+        for output in output_specs {
             let raw_path = output.path.as_deref().unwrap_or(&output.name);
             let rendered_path = render_template(raw_path, &ctx);
             let output_path = if Path::new(&rendered_path).is_absolute() {

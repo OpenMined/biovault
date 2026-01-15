@@ -938,9 +938,14 @@ fn build_run_project_copy(config: &Config, msg: &Message) -> anyhow::Result<Path
     let dest_root = receiver_private_submissions_path(config)?;
     let dest_path = dest_root.join(&folder_name);
 
-    // Always copy if project.yaml is missing (handles incomplete/failed copies)
+    // Always copy if key files are missing (handles incomplete/failed copies)
     let project_yaml = dest_path.join("project.yaml");
-    if !project_yaml.exists() {
+    let assets_dir = dest_path.join("assets");
+    let assets_missing = !assets_dir.exists()
+        || fs::read_dir(&assets_dir)
+            .map(|mut entries| entries.next().is_none())
+            .unwrap_or(true);
+    if !project_yaml.exists() || assets_missing {
         copy_dir_recursive(config, &sender_root, &dest_path)?;
     }
 
