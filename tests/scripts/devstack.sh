@@ -17,7 +17,7 @@ usage() {
 Usage: ./devstack.sh [--clients email1,email2] [--sandbox DIR] [--reset] [--stop] [--status]
 
 Starts or stops the SyftBox devstack (server + clients) without Docker using the
-sbdev tool from the syftbox submodule. Defaults to the sandbox clients already
+sbdev tool from the syftbox checkout. Defaults to the sandbox clients already
 used in the scenario tests.
 
 Options:
@@ -42,9 +42,7 @@ EOF
 }
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-SYFTBOX_DIR="$ROOT_DIR/syftbox"
 SANDBOX_DIR="${SANDBOX_DIR:-$ROOT_DIR/sandbox}"
-GO_CACHE_DIR="$SYFTBOX_DIR/.gocache"
 ACTION="start"
 RESET_FLAG=0
 SKIP_SYNC_CHECK=0
@@ -155,6 +153,37 @@ PY
 }
 
 SANDBOX_DIR="$(abs_path "$SANDBOX_DIR")"
+
+resolve_syftbox_dir() {
+  local candidate
+
+  if [[ -n "${SYFTBOX_DIR:-}" ]]; then
+    echo "$(abs_path "$SYFTBOX_DIR")"
+    return 0
+  fi
+
+  candidate="$ROOT_DIR/syftbox"
+  if [[ -d "$candidate" ]]; then
+    echo "$(abs_path "$candidate")"
+    return 0
+  fi
+
+  local current="$ROOT_DIR"
+  while [[ "$current" != "/" ]]; do
+    if [[ -d "$current/.repo" || ( -d "$current/syftbox" && -d "$current/biovault" ) ]]; then
+      if [[ -d "$current/syftbox" ]]; then
+        echo "$(abs_path "$current/syftbox")"
+        return 0
+      fi
+    fi
+    current="$(dirname "$current")"
+  done
+
+  echo "$(abs_path "$candidate")"
+}
+
+SYFTBOX_DIR="$(resolve_syftbox_dir)"
+GO_CACHE_DIR="$SYFTBOX_DIR/.gocache"
 
 require_bin() {
   command -v "$1" >/dev/null 2>&1 || { echo "Missing required tool: $1" >&2; exit 1; }
