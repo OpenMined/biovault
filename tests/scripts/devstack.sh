@@ -23,7 +23,7 @@ used in the scenario tests.
 Options:
   --clients list   Comma-separated client emails (default: client1@sandbox.local,client2@sandbox.local)
   --sandbox DIR    Sandbox root path (default: ./sandbox)
-  --client-mode MODE  Client implementation: go|rust|mixed|embedded (default: go)
+  --client-mode MODE  Client implementation: go|rust|mixed|embedded (default: embedded; go disabled)
   --rust-client-bin PATH  Path to Rust syftbox client binary (default: syftbox/rust/target/release/syftbox-rs)
   --skip-rust-build Skip building the Rust client (assumes binary exists)
   --skip-client-daemons Do not launch syftbox client daemons (server+minio only; still writes per-client config.json)
@@ -35,7 +35,7 @@ Options:
   -h, --help       Show this message
 
 Environment (optional defaults when flags not provided):
-  BV_DEVSTACK_CLIENT_MODE      go|rust|mixed|embedded
+  BV_DEVSTACK_CLIENT_MODE      go|rust|mixed|embedded (go disabled)
   BV_DEVSTACK_RUST_CLIENT_BIN  Path to Rust client binary
   BV_DEVSTACK_SKIP_RUST_BUILD  Set to 1 to skip building Rust client
 EOF
@@ -143,6 +143,20 @@ fi
 
 if (( ! SKIP_RUST_BUILD )) && [[ "${BV_DEVSTACK_SKIP_RUST_BUILD:-0}" == "1" ]]; then
   SKIP_RUST_BUILD=1
+fi
+
+if [[ -n "$CLIENT_MODE" ]]; then
+  mode="$(printf '%s' "$CLIENT_MODE" | tr '[:upper:]' '[:lower:]')"
+  if [[ "$mode" != "embedded" ]]; then
+    echo "Go/mixed/rust client modes are disabled; forcing embedded." >&2
+    CLIENT_MODE="embedded"
+    CLIENT_MODE_EXPLICIT=1
+  fi
+fi
+
+if (( ! CLIENT_MODE_EXPLICIT )); then
+  CLIENT_MODE="embedded"
+  CLIENT_MODE_EXPLICIT=1
 fi
 
 abs_path() {

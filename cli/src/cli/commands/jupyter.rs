@@ -233,13 +233,74 @@ fn is_macos_intel() -> bool {
     cfg!(target_os = "macos") && cfg!(target_arch = "x86_64")
 }
 
+fn resolve_repo_root(env_key: &str, repo_name: &str, biovault_root: &Path) -> PathBuf {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Ok(path) = env::var(env_key) {
+        if !path.trim().is_empty() {
+            candidates.push(PathBuf::from(path));
+        }
+    }
+    if let Ok(root) = env::var("WORKSPACE_ROOT") {
+        if !root.trim().is_empty() {
+            candidates.push(PathBuf::from(root).join(repo_name));
+        }
+    }
+    if let Some(parent) = biovault_root.parent() {
+        candidates.push(parent.join(repo_name));
+    }
+    candidates.push(biovault_root.join(repo_name));
+
+    candidates
+        .into_iter()
+        .find(|candidate| candidate.exists())
+        .unwrap_or_else(|| biovault_root.join(repo_name))
+}
+
+fn read_version_from_init(init_path: &Path) -> Option<String> {
+    let content = fs::read_to_string(init_path).ok()?;
+    for line in content.lines() {
+        let line = line.trim();
+        if !line.starts_with("__version__") {
+            continue;
+        }
+        let quote = line.chars().find(|c| *c == '"' || *c == '\'')?;
+        let start = line.find(quote)? + 1;
+        let rest = &line[start..];
+        let end = rest.find(quote)?;
+        let version = rest[..end].trim();
+        if !version.is_empty() {
+            return Some(version.to_string());
+        }
+    }
+    None
+}
+
 fn ensure_virtualenv(project_dir: &Path, python_version: &str, uv_bin: &str) -> Result<()> {
     let venv_path = project_dir.join(".venv");
     let capture_output = std::env::var_os("BIOVAULT_DESKTOP_LOG_FILE").is_some();
 
+    // Path structure: project_dir is BIOVAULT_HOME/sessions/<session_id>
+    // BIOVAULT_HOME is like: workspace3/biovault/sandbox/client1@sandbox.local
+    // biovault submodule root is at BIOVAULT_HOME/../.. (e.g., workspace3/biovault)
+    // So from project_dir (BIOVAULT_HOME/sessions/<id>): 4 levels up
+    let biovault_root = project_dir.join("..").join("..").join("..").join("..");
+    let biovault_root = biovault_root
+        .canonicalize()
+        .unwrap_or_else(|_| biovault_root.clone());
+    let syftbox_repo = resolve_repo_root("SYFTBOX_SDK_DIR", "syftbox-sdk", &biovault_root);
+    let beaver_repo = resolve_repo_root("BIOVAULT_BEAVER_DIR", "biovault-beaver", &biovault_root);
+    let syftbox_path = syftbox_repo.join("python");
+    let beaver_path = beaver_repo.join("python");
+
     // Version of biovault-beaver from PyPI - auto-detected from submodule at compile time
     // Falls back to hardcoded version if env var not set (e.g., when building biovault CLI standalone)
-    let beaver_version = option_env!("BEAVER_VERSION").unwrap_or("0.1.30");
+    let mut beaver_version = option_env!("BEAVER_VERSION")
+        .unwrap_or("0.1.30")
+        .to_string();
+    let beaver_init = beaver_path.join("src").join("beaver").join("__init__.py");
+    if let Some(version) = read_version_from_init(&beaver_init) {
+        beaver_version = version;
+    }
 
     // Marker file to track if dependencies are already installed
     // Includes version to trigger reinstall on beaver version changes
@@ -382,18 +443,9 @@ fn ensure_virtualenv(project_dir: &Path, python_version: &str, uv_bin: &str) -> 
         }
     }
 
-    // Path structure: project_dir is BIOVAULT_HOME/sessions/<session_id>
-    // BIOVAULT_HOME is like: workspace3/biovault/sandbox/client1@sandbox.local
-    // biovault submodule root is at BIOVAULT_HOME/../.. (e.g., workspace3/biovault)
-    // So from project_dir (BIOVAULT_HOME/sessions/<id>): 4 levels up
-    let biovault_root = project_dir.join("..").join("..").join("..").join("..");
-
     // DEV MODE: If local source exists, install editable versions on top of PyPI packages
     // This allows developers to test local changes while maintaining compatibility
     // Note: biovault_root IS the biovault submodule, so paths are directly under it
-    let syftbox_path = biovault_root.join("syftbox-sdk").join("python");
-    let beaver_path = biovault_root.join("biovault-beaver").join("python");
-
     if needs_base_install && (syftbox_path.exists() || beaver_path.exists()) {
         println!("🔧 DEV MODE: Local source detected, installing editable packages...");
 

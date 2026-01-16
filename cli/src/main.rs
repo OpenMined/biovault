@@ -2487,7 +2487,15 @@ async fn async_main_with(cli: Cli) -> Result<()> {
             let config = if let Ok(config_json) = std::env::var("BV_SYFTBOXD_CONFIG") {
                 serde_json::from_str(&config_json)?
             } else {
-                biovault::config::Config::load()?
+                match biovault::config::Config::load() {
+                    Ok(config) => config,
+                    Err(biovault::error::Error::NotInitialized) => {
+                        let email = std::env::var("SYFTBOX_EMAIL")
+                            .map_err(|_| biovault::error::Error::NotInitialized)?;
+                        biovault::config::Config::new(email)
+                    }
+                    Err(err) => return Err(err.into()),
+                }
             };
 
             match command {
