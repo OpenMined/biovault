@@ -1,0 +1,32 @@
+#!/usr/bin/env python
+"""
+Minimal sqlite3 shim for Windows test scenarios.
+
+Supports: sqlite3 <db_path> "<sql>"
+Outputs rows joined by | (similar to sqlite3 default).
+"""
+from __future__ import annotations
+
+import sqlite3
+import sys
+
+
+def main() -> int:
+    if len(sys.argv) < 3:
+        print("usage: sqlite3 <db_path> <sql>", file=sys.stderr)
+        return 1
+    db_path = sys.argv[1]
+    sql = sys.argv[2]
+    conn = sqlite3.connect(db_path)
+    try:
+        cur = conn.execute(sql)
+        rows = cur.fetchall()
+        for row in rows:
+            print("|".join("" if v is None else str(v) for v in row))
+    finally:
+        conn.close()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
