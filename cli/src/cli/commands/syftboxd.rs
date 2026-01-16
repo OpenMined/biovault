@@ -1,10 +1,11 @@
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::env;
 use std::io::{BufRead, BufReader, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::signal;
 
 use crate::config::Config;
@@ -54,6 +55,22 @@ fn write_status(config: &Config, status: &SyftboxdStatus) -> Result<()> {
         serde_json::to_string_pretty(status).context("Failed to serialize syftboxd status")?;
     let _ = std::fs::write(status_path, json);
     Ok(())
+}
+
+fn tail_log(path: &Path, max_lines: usize) -> Result<Option<String>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("Failed to read syftboxd log file: {:?}", path))?;
+    let lines: Vec<&str> = content.lines().collect();
+    let start = lines.len().saturating_sub(max_lines);
+    Ok(Some(lines[start..].join("\n")))
+}
+
+fn syftboxd_debug_enabled() -> bool {
+    env::var_os("SYFTBOX_DEBUG_CRYPTO").is_some() || env::var_os("BV_SYFTBOXD_DEBUG").is_some()
 }
 
 pub fn is_syftboxd_running(config: &Config) -> Result<bool> {
@@ -240,28 +257,53 @@ pub async fn start(config: &Config, foreground: bool) -> Result<()> {
         .context("Failed to spawn syftboxd process")?;
 
     let pid = child.id();
-    tokio::time::sleep(Duration::from_millis(750)).await;
+    let wait_timeout = Duration::from_secs(5);
+    let poll_interval = Duration::from_millis(100);
+    let start_time = Instant::now();
 
-    match child.try_wait() {
-        Ok(Some(status)) => {
-            return Err(anyhow!(
-                "syftboxd exited immediately with status: {}",
-                status
-            ));
-        }
-        Ok(None) => {
-            if pid_path.exists() {
-                println!("✅ syftboxd started successfully (PID: {})", pid);
-            } else {
-                return Err(anyhow!("syftboxd started but PID file was not created"));
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                return Err(anyhow!(
+                    "syftboxd exited immediately with status: {}",
+                    status
+                ));
+            }
+            Ok(None) => {}
+            Err(e) => {
+                return Err(anyhow!("Failed to check syftboxd status: {}", e));
             }
         }
-        Err(e) => {
-            return Err(anyhow!("Failed to check syftboxd status: {}", e));
+
+        if pid_path.exists() {
+            println!("✅ syftboxd started successfully (PID: {})", pid);
+            return Ok(());
         }
+
+        if start_time.elapsed() >= wait_timeout {
+            break;
+        }
+
+        tokio::time::sleep(poll_interval).await;
     }
 
-    Ok(())
+    let mut details = format!(
+        "syftboxd started but PID file was not created within {:?} (pid_path={:?}, log_path={:?}, child_pid={})",
+        wait_timeout, pid_path, log_path, pid
+    );
+
+    if syftboxd_debug_enabled() {
+        if let Ok(Some(tail)) = tail_log(&log_path, 40) {
+            details.push_str("\n---- syftboxd log tail ----\n");
+            details.push_str(&tail);
+        }
+    } else {
+        details.push_str(
+            "\n(set BV_SYFTBOXD_DEBUG=1 or SYFTBOX_DEBUG_CRYPTO=1 for syftboxd log tail)",
+        );
+    }
+
+    Err(anyhow!(details))
 }
 
 pub async fn stop(config: &Config) -> Result<()> {

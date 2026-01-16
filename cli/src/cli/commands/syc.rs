@@ -33,8 +33,8 @@ pub async fn handle(command: SycCommands, config: &Config) -> Result<()> {
         } => {
             let data_root = config.get_syftbox_data_dir()?;
             let encrypted_root = syc_utils::resolve_encrypted_root(&data_root);
-            // Use the BioVault-managed vault location (colocated .biovault/.syc when present)
-            let vault_path = crate::config::resolve_default_syc_vault_path()?;
+            // Use the explicit Syft Crypto vault location.
+            let vault_path = crate::config::resolve_syc_vault_path()?;
             let parsed = syc_utils::import_public_bundle(
                 &bundle,
                 expected_identity.as_deref(),

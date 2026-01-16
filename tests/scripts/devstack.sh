@@ -231,14 +231,27 @@ fi
 BV_BIN="${BV_BIN:-$ROOT_DIR/cli/target/release/bv}"
 
 ensure_bv_binary() {
+  if [[ "${BV_FORCE_REBUILD:-1}" == "1" ]]; then
+    require_bin cargo
+    echo "Building BioVault CLI (release)..."
+    (cd "$ROOT_DIR/cli" && cargo build --release)
+    [[ -x "$BV_BIN" ]] || { echo "Failed to build BioVault CLI at $BV_BIN" >&2; exit 1; }
+    return 0
+  fi
   local cargo_toml="$ROOT_DIR/cli/Cargo.toml"
   local cargo_lock="$ROOT_DIR/cli/Cargo.lock"
   if [[ -x "$BV_BIN" ]]; then
+    local src_changed=0
     if [[ -f "$cargo_toml" && "$cargo_toml" -nt "$BV_BIN" ]]; then
-      :
+      src_changed=1
     elif [[ -f "$cargo_lock" && "$cargo_lock" -nt "$BV_BIN" ]]; then
-      :
-    else
+      src_changed=1
+    elif [[ -f "$ROOT_DIR/cli/build.rs" && "$ROOT_DIR/cli/build.rs" -nt "$BV_BIN" ]]; then
+      src_changed=1
+    elif find "$ROOT_DIR/cli/src" -type f -newer "$BV_BIN" -print -quit 2>/dev/null | grep -q .; then
+      src_changed=1
+    fi
+    if [[ "$src_changed" -eq 0 ]]; then
       return 0
     fi
   fi
@@ -365,6 +378,7 @@ start_syftboxd() {
     SYFTBOX_EMAIL="$email" \
     SYFTBOX_DATA_DIR="$data_dir" \
     SYFTBOX_CONFIG_PATH="$config_path" \
+    SYC_VAULT="$data_dir/.syc" \
     BV_SYFTBOX_BACKEND=embedded \
     "$BV_BIN" syftboxd start >/dev/null
   done
