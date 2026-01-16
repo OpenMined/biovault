@@ -8,6 +8,12 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use tracing::warn;
 
+fn command<S: AsRef<std::ffi::OsStr>>(program: S) -> Command {
+    let mut cmd = Command::new(program);
+    super::configure_child_process(&mut cmd);
+    cmd
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Participant {
     pub id: String,
@@ -68,7 +74,7 @@ fn get_participants_file_path() -> Result<PathBuf> {
 }
 
 fn check_samtools_installed() -> bool {
-    Command::new("which")
+    command("which")
         .arg("samtools")
         .output()
         .map(|output| output.status.success())
@@ -80,7 +86,7 @@ fn detect_reference_version(aligned_file: &str) -> Option<String> {
         return None;
     }
 
-    let check_ebv = Command::new("sh")
+    let check_ebv = command("sh")
         .arg("-c")
         .arg(format!(
             "samtools view -H {} | grep -c 'SN:chrEBV'",
@@ -88,7 +94,7 @@ fn detect_reference_version(aligned_file: &str) -> Option<String> {
         ))
         .output();
 
-    let check_ki270 = Command::new("sh")
+    let check_ki270 = command("sh")
         .arg("-c")
         .arg(format!(
             "samtools view -H {} | grep -c 'SN:KI270'",
@@ -473,9 +479,9 @@ pub async fn add(
         for (file, is_aligned) in index_jobs {
             println!("Indexing: {}", file);
             let result = if is_aligned {
-                Command::new("samtools").args(["index", &file]).output()
+                command("samtools").args(["index", &file]).output()
             } else {
-                Command::new("samtools").args(["faidx", &file]).output()
+                command("samtools").args(["faidx", &file]).output()
             };
 
             match result {
@@ -572,7 +578,7 @@ pub async fn validate(id: Option<String>) -> Result<()> {
         ));
     }
 
-    let check_seqkit = Command::new("which")
+    let check_seqkit = command("which")
         .arg("seqkit")
         .output()
         .map(|output| output.status.success())
@@ -624,7 +630,7 @@ pub async fn validate(id: Option<String>) -> Result<()> {
 
         // Validate CRAM/BAM participant
         if let Some(aligned) = &participant.aligned {
-            let aligned_result = Command::new("samtools")
+            let aligned_result = command("samtools")
                 .args(["quickcheck", "-v", aligned])
                 .output();
 
@@ -651,7 +657,7 @@ pub async fn validate(id: Option<String>) -> Result<()> {
         }
 
         if let Some(r#ref) = &participant.r#ref {
-            let ref_result = Command::new("seqkit").args(["stats", r#ref]).output();
+            let ref_result = command("seqkit").args(["stats", r#ref]).output();
 
             match ref_result {
                 Ok(output) if output.status.success() => {

@@ -19,6 +19,12 @@ use crate::syftbox::{
 };
 use syftbox_sdk::syftbox::config::SyftboxRuntimeConfig;
 
+fn command<S: AsRef<std::ffi::OsStr>>(program: S) -> Command {
+    let mut cmd = Command::new(program);
+    super::configure_child_process(&mut cmd);
+    cmd
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DaemonStatus {
     pid: u32,
@@ -466,7 +472,7 @@ fn check_process_running(pid: u32) -> Result<bool> {
         }
 
         // Verify it's actually a bv daemon process
-        let output = Command::new("ps")
+        let output = command("ps")
             .args(["-p", &pid.to_string(), "-o", "command="])
             .output()?;
 
@@ -480,7 +486,7 @@ fn check_process_running(pid: u32) -> Result<bool> {
 
     #[cfg(windows)]
     {
-        let output = Command::new("tasklist")
+        let output = command("tasklist")
             .args(["/FI", &format!("PID eq {}", pid), "/NH", "/FO", "CSV"])
             .output()?;
 
@@ -600,7 +606,7 @@ pub async fn start(config: &Config, foreground: bool) -> Result<()> {
         // Pass the PID file path as an environment variable so the child can write it
         let pid_path = get_pid_file_path(config)?;
 
-        let mut child = Command::new(current_exe)
+        let mut child = command(current_exe)
             .args(["daemon", "start", "--foreground"])
             .env("BV_DAEMON_CONFIG", config_json)
             .env("BV_DAEMON_PID_FILE", pid_path.to_string_lossy().to_string())
@@ -688,7 +694,7 @@ pub async fn logs(config: &Config, follow: bool, lines: Option<usize>) -> Result
         println!("📖 Following daemon logs (Ctrl+C to stop):");
         println!("════════════════════════════════════════");
 
-        let mut child = Command::new("tail")
+        let mut child = command("tail")
             .args(["-f", &log_path.to_string_lossy()])
             .stdout(Stdio::piped())
             .spawn()
@@ -711,7 +717,7 @@ pub async fn logs(config: &Config, follow: bool, lines: Option<usize>) -> Result
         println!("📖 Last {} lines of daemon logs:", tail_lines);
         println!("═══════════════════════════════════");
 
-        let output = Command::new("tail")
+        let output = command("tail")
             .args(["-n", &tail_lines.to_string(), &log_path.to_string_lossy()])
             .output()
             .context("Failed to read log file")?;
@@ -761,7 +767,7 @@ pub async fn stop(config: &Config) -> Result<()> {
 
     #[cfg(windows)]
     {
-        let output = Command::new("taskkill")
+        let output = command("taskkill")
             .args(["/F", "/PID", &pid.to_string()])
             .output()?;
         if !output.status.success() {
@@ -793,7 +799,7 @@ fn check_systemd_available() -> Result<()> {
     }
 
     // Check if systemd is available
-    let output = Command::new("systemctl")
+    let output = command("systemctl")
         .arg("--version")
         .output()
         .context("systemctl not found. This system doesn't appear to use systemd")?;
@@ -835,7 +841,7 @@ fn generate_systemd_service_content(config: &Config) -> Result<String> {
     // Generate the ExecStart command
     let exec_start = if is_sbenv {
         // Find the full path to sbenv
-        let sbenv_path = Command::new("which")
+        let sbenv_path = command("which")
             .arg("sbenv")
             .output()
             .ok()
@@ -923,7 +929,7 @@ pub async fn install_service(config: &Config) -> Result<()> {
 
     // Check if service is already installed
     let service_name = get_service_name(config);
-    let check_output = Command::new("systemctl")
+    let check_output = command("systemctl")
         .args(["status", &service_name])
         .output()?;
 
@@ -946,7 +952,7 @@ pub async fn install_service(config: &Config) -> Result<()> {
 
     // Move service file to systemd directory (requires sudo)
     println!("🔐 Installing service (requires sudo)...");
-    let install_output = Command::new("sudo")
+    let install_output = command("sudo")
         .args([
             "mv",
             &temp_service_path,
@@ -964,7 +970,7 @@ pub async fn install_service(config: &Config) -> Result<()> {
 
     // Reload systemd daemon
     println!("🔄 Reloading systemd daemon...");
-    let reload_output = Command::new("sudo")
+    let reload_output = command("sudo")
         .args(["systemctl", "daemon-reload"])
         .output()
         .context("Failed to reload systemd daemon")?;
@@ -978,7 +984,7 @@ pub async fn install_service(config: &Config) -> Result<()> {
 
     // Enable service to start on boot
     println!("🚀 Enabling service to start on boot...");
-    let enable_output = Command::new("sudo")
+    let enable_output = command("sudo")
         .args(["systemctl", "enable", &service_name])
         .output()
         .context("Failed to enable service")?;
@@ -992,7 +998,7 @@ pub async fn install_service(config: &Config) -> Result<()> {
 
     // Start the service
     println!("▶️  Starting service...");
-    let start_output = Command::new("sudo")
+    let start_output = command("sudo")
         .args(["systemctl", "start", &service_name])
         .output()
         .context("Failed to start service")?;
@@ -1027,7 +1033,7 @@ pub async fn uninstall_service(config: &Config) -> Result<()> {
 
     // Stop the service if running
     println!("⏹️  Stopping service...");
-    let stop_output = Command::new("sudo")
+    let stop_output = command("sudo")
         .args(["systemctl", "stop", &service_name])
         .output()?;
 
@@ -1038,7 +1044,7 @@ pub async fn uninstall_service(config: &Config) -> Result<()> {
 
     // Disable the service
     println!("🚫 Disabling service...");
-    let disable_output = Command::new("sudo")
+    let disable_output = command("sudo")
         .args(["systemctl", "disable", &service_name])
         .output()?;
 
@@ -1048,7 +1054,7 @@ pub async fn uninstall_service(config: &Config) -> Result<()> {
 
     // Remove service file
     println!("🗑️  Removing service file...");
-    let remove_output = Command::new("sudo")
+    let remove_output = command("sudo")
         .args(["rm", "-f", &format!("/etc/systemd/system/{}", service_name)])
         .output()?;
 
@@ -1061,7 +1067,7 @@ pub async fn uninstall_service(config: &Config) -> Result<()> {
 
     // Reload systemd daemon
     println!("🔄 Reloading systemd daemon...");
-    let reload_output = Command::new("sudo")
+    let reload_output = command("sudo")
         .args(["systemctl", "daemon-reload"])
         .output()?;
 
@@ -1084,7 +1090,7 @@ pub async fn list_services() -> Result<()> {
     }
 
     // Check if systemctl is available
-    let check = Command::new("systemctl").arg("--version").output();
+    let check = command("systemctl").arg("--version").output();
 
     if check.is_err() || !check.as_ref().unwrap().status.success() {
         println!("⚠️  systemd is not available on this system");
@@ -1094,7 +1100,7 @@ pub async fn list_services() -> Result<()> {
     println!("🔍 Searching for BioVault daemon services...\n");
 
     // List all biovault-daemon services
-    let output = Command::new("systemctl")
+    let output = command("systemctl")
         .args([
             "list-units",
             "--all",
@@ -1198,7 +1204,7 @@ pub async fn service_status(config: &Config) -> Result<()> {
     // Check systemd service status (runtime check)
     if cfg!(target_os = "linux") {
         let service_name = get_service_name(config);
-        let output = Command::new("systemctl")
+        let output = command("systemctl")
             .args(["status", &service_name, "--no-pager"])
             .output()?;
 
@@ -1275,7 +1281,7 @@ pub async fn reinstall_service(config: &Config) -> Result<()> {
 
     // Check if service exists
     let service_name = get_service_name(config);
-    let check_output = Command::new("systemctl")
+    let check_output = command("systemctl")
         .args(["status", &service_name])
         .output()?;
 

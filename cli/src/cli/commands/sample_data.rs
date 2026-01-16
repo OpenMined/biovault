@@ -7,9 +7,16 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
+use std::process::Command;
 use uuid::Uuid;
 
 const SAMPLE_DATA_YAML: &str = include_str!("../../sample_data.yaml");
+
+fn command<S: AsRef<std::ffi::OsStr>>(program: S) -> Command {
+    let mut cmd = Command::new(program);
+    super::configure_child_process(&mut cmd);
+    cmd
+}
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(untagged)]
@@ -244,7 +251,7 @@ pub async fn fetch(
                         .context("Failed to create temp extraction dir")?;
 
                     // Extract the zip file
-                    let output = std::process::Command::new("unzip")
+                    let output = command("unzip")
                         .args(["-q", "-o", temp_path.to_str().unwrap()])
                         .current_dir(&temp_extract_dir)
                         .output()
@@ -579,7 +586,7 @@ pub async fn fetch(
             if !quiet {
                 println!("  Extracting archive...");
             }
-            let output = std::process::Command::new("tar")
+            let output = command("tar")
                 .args(["xzf", base_name])
                 .current_dir(&temp_extract_dir)
                 .output()

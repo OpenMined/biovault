@@ -225,7 +225,9 @@ async fn update_via_cargo(_new_version: &Version) -> Result<()> {
 
     println!("Updating via cargo install...");
 
-    let output = Command::new("cargo")
+    let mut cmd = Command::new("cargo");
+    super::configure_child_process(&mut cmd);
+    let output = cmd
         .args(["install", "biovault", "--force"])
         .output()
         .context("Failed to run cargo install")?;

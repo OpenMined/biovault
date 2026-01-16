@@ -10,6 +10,12 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
 
+fn command<S: AsRef<std::ffi::OsStr>>(program: S) -> Command {
+    let mut cmd = Command::new(program);
+    super::configure_child_process(&mut cmd);
+    cmd
+}
+
 #[derive(Debug, Clone)]
 struct FastqFile {
     path: PathBuf,
@@ -569,7 +575,7 @@ fn group_files_by_base(files: &[FastqFile]) -> BTreeMap<String, Vec<FastqFile>> 
 }
 
 fn check_seqkit_available() -> bool {
-    Command::new("seqkit")
+    command("seqkit")
         .arg("version")
         .output()
         .map(|output| output.status.success())
@@ -577,7 +583,7 @@ fn check_seqkit_available() -> bool {
 }
 
 fn validate_fastq_file(path: &Path) -> Result<FastqStats> {
-    let output = Command::new("seqkit")
+    let output = command("seqkit")
         .arg("stats")
         .arg("-T") // Tab-separated output
         .arg("-a") // All statistics

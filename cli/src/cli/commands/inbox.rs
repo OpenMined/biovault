@@ -3,6 +3,7 @@ use crate::messages::{MessageDb, MessageType};
 use anyhow::Result;
 use dialoguer::{theme::ColorfulTheme, Select};
 use std::io::Read;
+use std::process::Command;
 use std::time::{Duration, Instant};
 
 /// Expand environment variables in text (specifically $SYFTBOX_DATA_DIR)
@@ -26,9 +27,15 @@ enum Key {
     Char(char),
 }
 
+fn command<S: AsRef<std::ffi::OsStr>>(program: S) -> Command {
+    let mut cmd = Command::new(program);
+    super::configure_child_process(&mut cmd);
+    cmd
+}
+
 fn enable_raw_mode_cmd() -> Result<()> {
     // Use `stty` to disable canonical mode and echo
-    std::process::Command::new("stty")
+    command("stty")
         .arg("-icanon")
         .arg("-echo")
         .arg("min")
@@ -40,7 +47,7 @@ fn enable_raw_mode_cmd() -> Result<()> {
 }
 
 fn disable_raw_mode_cmd() -> Result<()> {
-    std::process::Command::new("stty").arg("sane").status()?;
+    command("stty").arg("sane").status()?;
     Ok(())
 }
 
