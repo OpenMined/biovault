@@ -738,10 +738,10 @@ pub async fn execute_dynamic(
     let nextflow_log_path = project_path.join(".nextflow.log");
     fs::remove_file(&nextflow_log_path).ok();
 
-    let spec_path = project_path.join("project.yaml");
+    let spec_path = crate::project_spec::resolve_project_spec_path(project_path);
     if !spec_path.exists() {
         return Err(anyhow::anyhow!(
-            "project.yaml not found in {}. Use 'bv project create' first.",
+            "module.yaml not found in {}. Use 'bv module create' first.",
             project_folder
         )
         .into());

@@ -1,7 +1,0 @@
----
-name: eye-color
-author: madhava@openmined.org
-workflow: workflow.nf
-template: default
-assets:
-  - eye_color.py

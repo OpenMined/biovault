@@ -4,7 +4,10 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
 
-use crate::project_spec::{InputSpec, OutputSpec, ParameterSpec, ProjectSpec};
+use crate::module_spec::ModuleFile;
+use crate::project_spec::{
+    resolve_project_spec_path, InputSpec, OutputSpec, ParameterSpec, ProjectSpec, MODULE_YAML_FILE,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectMetadata {
@@ -33,7 +36,7 @@ pub struct ProjectFileNode {
 }
 
 pub fn load_project_metadata(project_root: &Path) -> Result<Option<ProjectMetadata>> {
-    let yaml_path = project_root.join("project.yaml");
+    let yaml_path = resolve_project_spec_path(project_root);
     if !yaml_path.exists() {
         return Ok(None);
     }
@@ -55,7 +58,7 @@ pub fn load_project_metadata(project_root: &Path) -> Result<Option<ProjectMetada
 }
 
 pub fn save_project_metadata(project_root: &Path, metadata: &ProjectMetadata) -> Result<()> {
-    let yaml_path = project_root.join("project.yaml");
+    let yaml_path = project_root.join(MODULE_YAML_FILE);
     let mut assets: Vec<String> = metadata
         .assets
         .iter()
@@ -81,7 +84,8 @@ pub fn save_project_metadata(project_root: &Path, metadata: &ProjectMetadata) ->
         outputs: metadata.outputs.clone(),
     };
 
-    let yaml_str = serde_yaml::to_string(&spec)
+    let module = ModuleFile::from_project_spec(&spec);
+    let yaml_str = serde_yaml::to_string(&module)
         .with_context(|| format!("Failed to serialize {}", yaml_path.display()))?;
     fs::write(&yaml_path, yaml_str)
         .with_context(|| format!("Failed to write {}", yaml_path.display()))?;
@@ -90,7 +94,7 @@ pub fn save_project_metadata(project_root: &Path, metadata: &ProjectMetadata) ->
 }
 
 pub fn project_yaml_hash(project_root: &Path) -> Result<Option<String>> {
-    let yaml_path = project_root.join("project.yaml");
+    let yaml_path = resolve_project_spec_path(project_root);
     if !yaml_path.exists() {
         return Ok(None);
     }
@@ -135,7 +139,7 @@ pub fn build_project_file_tree(project_root: &Path) -> Result<Vec<ProjectFileNod
                     is_dir: true,
                     children,
                 });
-            } else if name != "project.yaml" {
+            } else if name != MODULE_YAML_FILE {
                 entries.push(ProjectFileNode {
                     name,
                     path: relative,
@@ -219,7 +223,7 @@ mod tests {
         assert_eq!(digest.len(), 64);
 
         // Modify file to ensure hash changes
-        let yaml_path = root.join("project.yaml");
+        let yaml_path = root.join(MODULE_YAML_FILE);
         let mut yaml = std::fs::read_to_string(&yaml_path).unwrap();
         yaml.push_str("# comment\n");
         std::fs::write(&yaml_path, yaml).unwrap();
@@ -230,10 +234,10 @@ mod tests {
     }
 
     #[test]
-    fn build_tree_skips_project_yaml() {
+    fn build_tree_skips_module_yaml() {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
-        fs::write(root.join("project.yaml"), "name: test").unwrap();
+        fs::write(root.join(MODULE_YAML_FILE), "name: test").unwrap();
         fs::write(root.join("workflow.nf"), "// workflow").unwrap();
         fs::create_dir_all(root.join("bioscript")).unwrap();
         fs::write(root.join("bioscript/lib.rs"), "").unwrap();

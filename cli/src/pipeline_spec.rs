@@ -5,6 +5,20 @@ use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::Path;
 
+use crate::flow_spec::FlowFile;
+use crate::spec_format::{detect_spec_format, SpecFormat};
+
+pub const FLOW_YAML_FILE: &str = "flow.yaml";
+pub const PIPELINE_YAML_FILE: &str = "pipeline.yaml";
+
+pub fn resolve_pipeline_spec_path(pipeline_root: &Path) -> std::path::PathBuf {
+    let flow_path = pipeline_root.join(FLOW_YAML_FILE);
+    if flow_path.exists() {
+        return flow_path;
+    }
+    pipeline_root.join(PIPELINE_YAML_FILE)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PipelineContextSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -45,6 +59,34 @@ impl PipelineSpec {
     pub fn load(path: &Path) -> Result<Self> {
         let raw = fs::read_to_string(path)
             .with_context(|| format!("Failed to read pipeline spec at {}", path.display()))?;
+        match detect_spec_format(path, &raw) {
+            SpecFormat::Flow => {
+                let flow = FlowFile::from_str(&raw)
+                    .with_context(|| format!("Failed to parse flow spec at {}", path.display()))?;
+                return flow
+                    .to_pipeline_spec()
+                    .with_context(|| format!("Failed to convert flow spec at {}", path.display()));
+            }
+            SpecFormat::Module => {
+                return Err(anyhow!(
+                    "Detected Module spec at {}. Expected flow.yaml.",
+                    path.display()
+                ));
+            }
+            SpecFormat::FlowOverlay => {
+                return Err(anyhow!(
+                    "Detected FlowOverlay spec at {}. Expected flow.yaml.",
+                    path.display()
+                ));
+            }
+            SpecFormat::LegacyProject => {
+                return Err(anyhow!(
+                    "Detected legacy project spec at {}. Expected flow.yaml.",
+                    path.display()
+                ));
+            }
+            SpecFormat::LegacyPipeline | SpecFormat::Unknown => {}
+        }
         let spec: PipelineSpec = serde_yaml::from_str(&raw)
             .with_context(|| format!("Failed to parse pipeline spec at {}", path.display()))?;
         Ok(spec)

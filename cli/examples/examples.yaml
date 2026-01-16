@@ -4,7 +4,7 @@ examples:
     description: "Analyze Y chromosome haplogroups"
     template: default
     files:
-      - project.yaml
+      - module.yaml
       - workflow.nf
       - assets/interpret_y_haplogroup.py
       - assets/y_haplogroup_panel.GRCh37.tsv
@@ -15,7 +15,7 @@ examples:
     description: "Predict eye color from genetic markers"
     template: default
     files:
-      - project.yaml
+      - module.yaml
       - workflow.nf
       - assets/eye_color.py
 
@@ -24,7 +24,7 @@ examples:
     description: "Predict red hair trait from MC1R gene variants"
     template: default
     files:
-      - project.yaml
+      - module.yaml
       - workflow.nf
       - assets/red_hair.py
 
@@ -33,7 +33,7 @@ examples:
     description: "Count the number of SNPs in genomic data"
     template: snp
     files:
-      - project.yaml
+      - module.yaml
       - workflow.nf
       - assets/count_number_of_snps.py
 
@@ -42,7 +42,7 @@ examples:
     description: "Add derived columns to participant data"
     template: sheet
     files:
-      - project.yaml
+      - module.yaml
       - workflow.nf
       - assets/schema.yaml
       - participants.csv
@@ -52,7 +52,7 @@ examples:
     description: "Analyze APOL1 genotypes and add derived columns to participant data"
     template: sheet
     files:
-      - project.yaml
+      - module.yaml
       - workflow.nf
       - assets/schema.yaml
       - assets/apol1_classifier.py
@@ -69,7 +69,7 @@ examples:
     description: "Analyze APOL1 genotypes and add derived columns to participant data using BioScript"
     template: sheet
     files:
-      - project.yaml
+      - module.yaml
       - workflow.nf
       - assets/schema.yaml
       - assets/bs_classifier.py

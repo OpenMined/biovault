@@ -751,7 +751,7 @@ enum ProjectCommands {
 
     #[command(about = "Import a project from URL or register a local project")]
     Import {
-        #[arg(help = "URL to project.yaml or local directory path")]
+        #[arg(help = "URL to module.yaml or local directory path")]
         source: String,
 
         #[arg(long, help = "Override project name")]
@@ -796,7 +796,7 @@ enum ProjectCommands {
 enum PipelineCommands {
     #[command(about = "Create a new pipeline interactively")]
     Create {
-        #[arg(long, help = "Pipeline YAML file path (defaults to pipeline.yaml)")]
+        #[arg(long, help = "Flow YAML file path (defaults to flow.yaml)")]
         file: Option<String>,
 
         #[arg(long, help = "Pipeline name (non-interactive mode)")]
@@ -804,7 +804,7 @@ enum PipelineCommands {
 
         #[arg(
             long = "use-project",
-            help = "Project path or project.yaml to add as the first step (non-interactive)"
+            help = "Project path or module.yaml to add as the first step (non-interactive)"
         )]
         uses: Option<String>,
 
@@ -814,13 +814,13 @@ enum PipelineCommands {
 
     #[command(about = "Add a step to an existing pipeline")]
     AddStep {
-        #[arg(long, help = "Pipeline YAML file path (defaults to pipeline.yaml)")]
+        #[arg(long, help = "Flow YAML file path (defaults to flow.yaml)")]
         file: Option<String>,
     },
 
     #[command(about = "Validate a pipeline spec")]
     Validate {
-        #[arg(help = "Pipeline YAML file path")]
+        #[arg(help = "Flow YAML file path")]
         file: String,
 
         #[arg(long, help = "Render step diagram after validation")]
@@ -1849,93 +1849,19 @@ async fn async_main_with(cli: Cli) -> Result<()> {
                 .await?;
                 return Ok(());
             }
+
             // Check project template to determine which run system to use
             use std::path::Path;
             let project_path = Path::new(&project_folder);
-            let project_yaml_path = project_path.join("project.yaml");
+            let project_yaml_path = biovault::project_spec::resolve_project_spec_path(project_path);
 
             if project_yaml_path.exists() {
-                // Read project.yaml to check template
-                if let Ok(content) = std::fs::read_to_string(&project_yaml_path) {
-                    #[derive(serde::Deserialize)]
-                    struct ProjectYaml {
-                        #[serde(default)]
-                        template: Option<String>,
-                    }
+                // Read module/project spec to check template
+                if let Ok(project) = biovault::project_spec::ProjectSpec::load(&project_yaml_path) {
+                    let template = project.template.as_deref().unwrap_or("default");
 
-                    if let Ok(project) = serde_yaml::from_str::<ProjectYaml>(&content) {
-                        let template = project.template.as_deref().unwrap_or("default");
-
-                        // Use dynamic run system for dynamic-nextflow template
-                        if template == "dynamic-nextflow" {
-                            commands::run_dynamic::execute_dynamic(
-                                &project_folder,
-                                args,
-                                dry_run,
-                                resume,
-                                results_dir,
-                                commands::run_dynamic::RunSettings::default(),
-                            )
-                            .await?;
-                        } else {
-                            // Use old run system for legacy templates (snp, sheet, default)
-                            // Parse args in old format: [participant_source, flags...]
-                            let mut participant_source = String::new();
-                            let mut test = false;
-                            let mut download = false;
-                            let mut with_docker = true; // default to true for backward compatibility
-                            let mut work_dir = None;
-                            let mut nextflow_args = Vec::new();
-                            let template_override = None;
-
-                            // Parse args: first arg is participant_source, rest are flags
-                            let mut i = 0;
-                            while i < args.len() {
-                                let arg = &args[i];
-                                if arg.starts_with("--") {
-                                    match arg.as_str() {
-                                        "--test" => test = true,
-                                        "--download" => download = true,
-                                        "--with-docker" => with_docker = true,
-                                        "--no-docker" => with_docker = false,
-                                        "--work-dir" => {
-                                            if i + 1 < args.len() {
-                                                work_dir = Some(args[i + 1].clone());
-                                                i += 1;
-                                            }
-                                        }
-                                        _ => {
-                                            // Nextflow args
-                                            nextflow_args.push(arg.clone());
-                                            if !arg.starts_with("--") && i + 1 < args.len() {
-                                                nextflow_args.push(args[i + 1].clone());
-                                                i += 1;
-                                            }
-                                        }
-                                    }
-                                } else if participant_source.is_empty() {
-                                    participant_source = arg.clone();
-                                }
-                                i += 1;
-                            }
-
-                            commands::run::execute(commands::run::RunParams {
-                                project_folder: project_folder.clone(),
-                                participant_source,
-                                test,
-                                download,
-                                dry_run,
-                                with_docker,
-                                work_dir,
-                                resume,
-                                template: template_override,
-                                results_dir,
-                                nextflow_args,
-                            })
-                            .await?;
-                        }
-                    } else {
-                        // Couldn't parse project.yaml, default to dynamic
+                    // Use dynamic run system for dynamic-nextflow template
+                    if template == "dynamic-nextflow" {
                         commands::run_dynamic::execute_dynamic(
                             &project_folder,
                             args,
@@ -1945,9 +1871,65 @@ async fn async_main_with(cli: Cli) -> Result<()> {
                             commands::run_dynamic::RunSettings::default(),
                         )
                         .await?;
+                    } else {
+                        // Use old run system for legacy templates (snp, sheet, default)
+                        // Parse args in old format: [participant_source, flags...]
+                        let mut participant_source = String::new();
+                        let mut test = false;
+                        let mut download = false;
+                        let mut with_docker = true; // default to true for backward compatibility
+                        let mut work_dir = None;
+                        let mut nextflow_args = Vec::new();
+                        let template_override = None;
+
+                        // Parse args: first arg is participant_source, rest are flags
+                        let mut i = 0;
+                        while i < args.len() {
+                            let arg = &args[i];
+                            if arg.starts_with("--") {
+                                match arg.as_str() {
+                                    "--test" => test = true,
+                                    "--download" => download = true,
+                                    "--with-docker" => with_docker = true,
+                                    "--no-docker" => with_docker = false,
+                                    "--work-dir" => {
+                                        if i + 1 < args.len() {
+                                            work_dir = Some(args[i + 1].clone());
+                                            i += 1;
+                                        }
+                                    }
+                                    _ => {
+                                        // Nextflow args
+                                        nextflow_args.push(arg.clone());
+                                        if !arg.starts_with("--") && i + 1 < args.len() {
+                                            nextflow_args.push(args[i + 1].clone());
+                                            i += 1;
+                                        }
+                                    }
+                                }
+                            } else if participant_source.is_empty() {
+                                participant_source = arg.clone();
+                            }
+                            i += 1;
+                        }
+
+                        commands::run::execute(commands::run::RunParams {
+                            project_folder: project_folder.clone(),
+                            participant_source,
+                            test,
+                            download,
+                            dry_run,
+                            with_docker,
+                            work_dir,
+                            resume,
+                            template: template_override,
+                            results_dir,
+                            nextflow_args,
+                        })
+                        .await?;
                     }
                 } else {
-                    // Couldn't read project.yaml, default to dynamic
+                    // Couldn't parse module spec, default to dynamic
                     commands::run_dynamic::execute_dynamic(
                         &project_folder,
                         args,
@@ -1959,7 +1941,7 @@ async fn async_main_with(cli: Cli) -> Result<()> {
                     .await?;
                 }
             } else {
-                // No project.yaml, use dynamic
+                // No module.yaml, use dynamic
                 commands::run_dynamic::execute_dynamic(
                     &project_folder,
                     args,

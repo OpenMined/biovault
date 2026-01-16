@@ -1434,7 +1434,7 @@ pub async fn execute(params: RunParams) -> anyhow::Result<()> {
         return Err(Error::ProjectFolderMissing(params.project_folder.clone()).into());
     }
 
-    let project_yaml = project_path.join("project.yaml");
+    let project_yaml = crate::project_spec::resolve_project_spec_path(&project_path);
     if !project_yaml.exists() {
         return Err(Error::ProjectConfigMissing(params.project_folder.clone()).into());
     }
@@ -1449,10 +1449,22 @@ pub async fn execute(params: RunParams) -> anyhow::Result<()> {
     }
 
     // Read project config
-    let config_content =
-        fs::read_to_string(&project_yaml).context("Failed to read project.yaml")?;
+    let config_content = fs::read_to_string(&project_yaml).context("Failed to read module spec")?;
     let config: ProjectConfig =
-        serde_yaml::from_str(&config_content).context("Failed to parse project.yaml")?;
+        match crate::spec_format::detect_spec_format(&project_yaml, &config_content) {
+            crate::spec_format::SpecFormat::Module => {
+                let spec = crate::project_spec::ProjectSpec::load(&project_yaml)?;
+                ProjectConfig {
+                    name: spec.name,
+                    author: spec.author,
+                    workflow: spec.workflow,
+                    template: spec.template,
+                    assets: spec.assets,
+                    participants: Vec::new(),
+                }
+            }
+            _ => serde_yaml::from_str(&config_content).context("Failed to parse project.yaml")?,
+        };
 
     // Check if this is a sheet template project
     let is_sheet_template = config
@@ -1480,7 +1492,7 @@ pub async fn execute(params: RunParams) -> anyhow::Result<()> {
         ensure_files_exist(&participant, params.download, &source, mock_key.as_deref()).await?;
 
     // Determine which template to use
-    // Priority: CLI flag > project.yaml > default
+    // Priority: CLI flag > module spec > default
     let template_name = params
         .template
         .or(config.template.clone())

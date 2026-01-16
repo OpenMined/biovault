@@ -26,7 +26,10 @@ use crate::pipeline_spec::{
     value_to_string, PipelineInputSpec, PipelineSpec, PipelineSqlStoreSpec, PipelineStepSpec,
     PipelineStoreSpec,
 };
-use crate::project_spec::{InputSpec, OutputSpec, ProjectSpec};
+use crate::project_spec::{
+    resolve_project_spec_path, InputSpec, OutputSpec, ProjectSpec, MODULE_YAML_FILE,
+    PROJECT_YAML_FILE,
+};
 use anyhow::{anyhow, Context};
 use chrono::Utc;
 use colored::Colorize;
@@ -575,7 +578,7 @@ impl<'a> PipelineWizard<'a> {
         match &options[index] {
             ProjectChoice::EnterPath => {
                 let input: String = Input::with_theme(&self.theme)
-                    .with_prompt("Project directory path or project.yaml")
+                    .with_prompt("Project directory path or module.yaml")
                     .interact_text()
                     .cli_result()?;
                 let (reference, root) = normalize_project_reference(&input, self.pipeline_dir())?;
@@ -761,7 +764,7 @@ impl LoadedProject {
 fn load_project_spec(choice: &ProjectChoice) -> Result<LoadedProject> {
     match choice {
         ProjectChoice::Registered { name: _, path } => {
-            let spec_path = Path::new(path).join("project.yaml");
+            let spec_path = resolve_project_spec_path(Path::new(path));
             let spec = ProjectSpec::load(&spec_path)?;
             Ok(LoadedProject {
                 spec,
@@ -769,9 +772,9 @@ fn load_project_spec(choice: &ProjectChoice) -> Result<LoadedProject> {
             })
         }
         ProjectChoice::Path { reference: _, root } => {
-            let spec_path = Path::new(root).join("project.yaml");
+            let spec_path = resolve_project_spec_path(Path::new(root));
             if !spec_path.exists() {
-                return Err(anyhow!("No project.yaml found at {}", spec_path.display()).into());
+                return Err(anyhow!("No module.yaml found at {}", spec_path.display()).into());
             }
             let spec = ProjectSpec::load(&spec_path)?;
             Ok(LoadedProject {
@@ -1407,7 +1410,7 @@ fn normalize_project_reference(raw: &str, base_dir: &Path) -> Result<(String, Pa
     let mut reference_path = PathBuf::from(trimmed);
     if reference_path
         .file_name()
-        .map(|name| name == "project.yaml")
+        .map(|name| name == MODULE_YAML_FILE || name == PROJECT_YAML_FILE)
         .unwrap_or(false)
     {
         reference_path.pop();
@@ -1431,10 +1434,10 @@ fn normalize_project_reference(raw: &str, base_dir: &Path) -> Result<(String, Pa
             .join(&reference_path)
     };
 
-    if !absolute.join("project.yaml").exists() {
+    if !resolve_project_spec_path(&absolute).exists() {
         return Err(anyhow!(
-            "No project.yaml found at {}",
-            absolute.join("project.yaml").display()
+            "No module.yaml found at {}",
+            resolve_project_spec_path(&absolute).display()
         )
         .into());
     }
@@ -1930,8 +1933,16 @@ fn print_steps(result: &PipelineValidationResult) {
 }
 
 fn resolve_pipeline_path(file: Option<String>) -> PathBuf {
-    file.map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("pipeline.yaml"))
+    if let Some(path) = file {
+        return PathBuf::from(path);
+    }
+
+    let flow_path = PathBuf::from(crate::pipeline_spec::FLOW_YAML_FILE);
+    if flow_path.exists() {
+        return flow_path;
+    }
+
+    PathBuf::from(crate::pipeline_spec::PIPELINE_YAML_FILE)
 }
 
 fn types_compatible(expected: &str, actual: &str) -> bool {

@@ -1,11 +1,10 @@
 use anyhow::Result;
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
-use std::fs;
 use std::path::PathBuf;
 
 use super::BioVaultDb;
-use crate::pipeline_spec::PipelineSpec;
+use crate::pipeline_spec::{resolve_pipeline_spec_path, PipelineSpec};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Pipeline {
@@ -67,28 +66,21 @@ impl BioVaultDb {
             })?
             .collect::<Result<Vec<_>, _>>()?;
 
-        // Load spec from pipeline.yaml for each pipeline
+        // Load spec from flow.yaml/pipeline.yaml for each pipeline
         for pipeline in &mut pipelines {
-            let yaml_path = PathBuf::from(&pipeline.pipeline_path).join("pipeline.yaml");
+            let yaml_path =
+                resolve_pipeline_spec_path(PathBuf::from(&pipeline.pipeline_path).as_path());
             if yaml_path.exists() {
-                match fs::read_to_string(&yaml_path) {
-                    Ok(content) => match serde_yaml::from_str::<PipelineSpec>(&content) {
-                        Ok(spec) => {
-                            pipeline.spec = Some(spec);
-                        }
-                        Err(e) => {
-                            eprintln!(
-                                "Warning: Failed to parse pipeline.yaml for '{}': {}",
-                                pipeline.name, e
-                            );
-                            eprintln!("  Path: {}", yaml_path.display());
-                        }
-                    },
+                match PipelineSpec::load(&yaml_path) {
+                    Ok(spec) => {
+                        pipeline.spec = Some(spec);
+                    }
                     Err(e) => {
                         eprintln!(
-                            "Warning: Failed to read pipeline.yaml for '{}': {}",
+                            "Warning: Failed to parse flow spec for '{}': {}",
                             pipeline.name, e
                         );
+                        eprintln!("  Path: {}", yaml_path.display());
                     }
                 }
             }
@@ -120,20 +112,15 @@ impl BioVaultDb {
 
         // Load spec if found
         if let Some(mut p) = pipeline {
-            let yaml_path = PathBuf::from(&p.pipeline_path).join("pipeline.yaml");
+            let yaml_path = resolve_pipeline_spec_path(PathBuf::from(&p.pipeline_path).as_path());
             if yaml_path.exists() {
-                match fs::read_to_string(&yaml_path) {
-                    Ok(content) => match serde_yaml::from_str::<PipelineSpec>(&content) {
-                        Ok(spec) => {
-                            p.spec = Some(spec);
-                        }
-                        Err(e) => {
-                            eprintln!("Warning: Failed to parse pipeline.yaml: {}", e);
-                            eprintln!("  Path: {}", yaml_path.display());
-                        }
-                    },
+                match PipelineSpec::load(&yaml_path) {
+                    Ok(spec) => {
+                        p.spec = Some(spec);
+                    }
                     Err(e) => {
-                        eprintln!("Warning: Failed to read pipeline.yaml: {}", e);
+                        eprintln!("Warning: Failed to parse flow spec: {}", e);
+                        eprintln!("  Path: {}", yaml_path.display());
                     }
                 }
             }

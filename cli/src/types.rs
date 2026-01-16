@@ -1,6 +1,4 @@
-use crate::project_spec::{InputSpec, OutputSpec};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -55,41 +53,6 @@ impl SyftPermissions {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProjectYaml {
-    pub name: String,
-    pub author: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub datasites: Option<Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub participants: Option<Vec<String>>,
-    pub workflow: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub template: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub assets: Option<Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub inputs: Option<Vec<InputSpec>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub outputs: Option<Vec<OutputSpec>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub b3_hashes: Option<HashMap<String, String>>,
-}
-
-impl ProjectYaml {
-    pub fn from_file(path: &PathBuf) -> anyhow::Result<Self> {
-        let content = std::fs::read_to_string(path)?;
-        let project: ProjectYaml = serde_yaml::from_str(&content)?;
-        Ok(project)
-    }
-
-    pub fn save(&self, path: &PathBuf) -> anyhow::Result<()> {
-        let yaml = serde_yaml::to_string(self)?;
-        std::fs::write(path, yaml)?;
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InboxSubmission {
     pub name: String,
     pub author: String,
@@ -125,32 +88,6 @@ mod tests {
         let read_back: SyftPermissions =
             serde_yaml::from_str(&fs::read_to_string(&p).unwrap()).unwrap();
         assert_eq!(read_back.rules.len(), 2);
-    }
-
-    #[test]
-    fn project_yaml_round_trip_and_error() {
-        let tmp = TempDir::new().unwrap();
-        let p = tmp.path().join("project.yaml");
-        let proj = ProjectYaml {
-            name: "N".into(),
-            author: "A".into(),
-            datasites: Some(vec!["x@y".into()]),
-            participants: Some(vec!["P1".into()]),
-            workflow: "wf".into(),
-            template: None,
-            assets: Some(vec!["a".into()]),
-            inputs: None,
-            outputs: None,
-            b3_hashes: None,
-        };
-        proj.save(&p).unwrap();
-        let loaded = ProjectYaml::from_file(&p).unwrap();
-        assert_eq!(loaded.name, "N");
-        assert_eq!(loaded.workflow, "wf");
-
-        let bad = tmp.path().join("bad.yaml");
-        fs::write(&bad, "not: [valid").unwrap();
-        assert!(ProjectYaml::from_file(&bad).is_err());
     }
 
     #[test]

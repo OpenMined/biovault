@@ -1,6 +1,9 @@
 use crate::cli::examples;
 use crate::error::Result;
-use crate::project_spec::{self, InputSpec, OutputSpec, ParameterSpec, ProjectSpec};
+use crate::project_spec::{
+    self, resolve_project_spec_path, InputSpec, OutputSpec, ParameterSpec, ProjectSpec,
+    MODULE_YAML_FILE,
+};
 use crate::types::InboxSubmission;
 use colored::Colorize;
 use dialoguer::{theme::ColorfulTheme, Confirm, Input, MultiSelect, Select};
@@ -55,10 +58,10 @@ pub fn view(path: Option<String>) -> Result<()> {
         )));
     }
 
-    let spec_path = project_path.join("project.yaml");
+    let spec_path = resolve_project_spec_path(project_path);
     if !spec_path.exists() {
         return Err(crate::error::Error::Anyhow(anyhow::anyhow!(
-            "project.yaml not found in {}",
+            "module.yaml not found in {}",
             project_dir
         )));
     }
@@ -141,7 +144,7 @@ pub async fn create(
             .map_err(crate::error::Error::Anyhow)?;
 
         // Load the generated spec to display summary
-        let spec_path = project_path.join("project.yaml");
+        let spec_path = resolve_project_spec_path(project_path);
         let spec = ProjectSpec::load(&spec_path)?;
         println!("   (from example '{}')", example_name);
         print_project_summary(&spec, &project_folder);
@@ -167,10 +170,10 @@ pub async fn create(
         // Load prepopulated inputs/outputs for pipeline composition
         // --output_from: new project's inputs FROM other project's outputs
         let prepopulated_inputs = if let Some(ref output_from_path) = output_from {
-            let output_from_spec_path = Path::new(output_from_path).join("project.yaml");
+            let output_from_spec_path = resolve_project_spec_path(Path::new(output_from_path));
             if !output_from_spec_path.exists() {
                 return Err(crate::error::Error::Anyhow(anyhow::anyhow!(
-                    "Cannot load --output_from: project.yaml not found in {}",
+                    "Cannot load --output_from: module.yaml not found in {}",
                     output_from_path
                 )));
             }
@@ -182,10 +185,10 @@ pub async fn create(
 
         // --input_to: new project's outputs TO other project's inputs
         let prepopulated_outputs = if let Some(ref input_to_path) = input_to {
-            let input_to_spec_path = Path::new(input_to_path).join("project.yaml");
+            let input_to_spec_path = resolve_project_spec_path(Path::new(input_to_path));
             if !input_to_spec_path.exists() {
                 return Err(crate::error::Error::Anyhow(anyhow::anyhow!(
-                    "Cannot load --input_to: project.yaml not found in {}",
+                    "Cannot load --input_to: module.yaml not found in {}",
                     input_to_path
                 )));
             }
@@ -331,7 +334,7 @@ fn print_project_summary(spec: &ProjectSpec, folder: &str) {
 
     // File TOC
     println!("📁 Files:");
-    println!("   ├─ project.yaml");
+    println!("   ├─ {}", MODULE_YAML_FILE);
     println!("   ├─ workflow.nf");
     if spec.assets.is_empty() {
         println!("   └─ assets/ (empty)");
@@ -420,7 +423,7 @@ fn print_project_view(spec: &ProjectSpec, folder: &str) {
 
     // File TOC
     println!("📁 Files:");
-    println!("   ├─ project.yaml");
+    println!("   ├─ {}", MODULE_YAML_FILE);
     println!("   ├─ workflow.nf");
     if spec.assets.is_empty() {
         println!("   └─ assets/ (empty)");
@@ -1865,7 +1868,7 @@ status: {}
         std::fs::write(sub_dir.join("workflow.nf"), b"wf").unwrap();
         std::fs::write(sub_dir.join("assets/nested/file.txt"), b"x").unwrap();
         // The path stored in tuple points to a yaml file inside the submission dir
-        let path = sub_dir.join("project.yaml");
+        let path = sub_dir.join(MODULE_YAML_FILE);
         std::fs::write(&path, b"name: P\nauthor: A\nstatus: pending\nsyft_url: x\n").unwrap();
         let sub = InboxSubmission {
             name: "P".into(),
@@ -1951,7 +1954,7 @@ status: {}
         .await
         .unwrap();
 
-        assert!(proj_dir.join("project.yaml").exists());
+        assert!(proj_dir.join(MODULE_YAML_FILE).exists());
         assert!(proj_dir.join("workflow.nf").exists());
         assert!(proj_dir.join("assets").is_dir());
 

@@ -1,0 +1,57 @@
+apiVersion: syftbox.openmined.org/v1alpha1
+kind: Flow
+metadata:
+  name: demo-sql
+  version: 0.1.0
+spec:
+  inputs:
+    samplesheet:
+      type: File
+    data_dir:
+      type: Directory
+  modules:
+    filter-samples:
+      source:
+        kind: local
+        path: ./filter-samples
+      allow_dirty: true
+    count-lines:
+      source:
+        kind: local
+        path: ./count-lines
+      allow_dirty: true
+    sum-total:
+      source:
+        kind: local
+        path: ./sum-total
+      allow_dirty: true
+  steps:
+    - id: filter
+      uses: filter-samples
+      with:
+        samplesheet: inputs.samplesheet
+        data_dir: inputs.data_dir
+      publish:
+        filtered_sheet: File(filtered_samplesheet.csv)
+
+    - id: count
+      uses: count-lines
+      with:
+        samplesheet: steps.filter.outputs.filtered_sheet
+        data_dir: inputs.data_dir
+      publish:
+        counted_sheet: File(line_counts.csv)
+      store:
+        counts_sql:
+          kind: sql
+          source: counted_sheet
+          table: pipeline_counts_{run_id}
+          key_column: participant_id
+
+    - id: sum
+      uses: sum-total
+      with:
+        samplesheet: steps.count.outputs.counted_sheet
+        data_dir: inputs.data_dir
+      publish:
+        result_summary: File(results.txt)
