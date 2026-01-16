@@ -5,6 +5,7 @@ use std::fs;
 use std::path::Path;
 
 use crate::project_spec::{InputSpec, OutputSpec, ParameterSpec, ProjectSpec};
+use crate::types::ProjectYaml;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectMetadata {
@@ -68,6 +69,7 @@ pub fn save_project_metadata(project_root: &Path, metadata: &ProjectMetadata) ->
         name: metadata.name.clone(),
         author: metadata.author.clone(),
         workflow: metadata.workflow.clone(),
+        description: None,
         template: metadata.template.clone(),
         version: Some(
             metadata
@@ -75,10 +77,13 @@ pub fn save_project_metadata(project_root: &Path, metadata: &ProjectMetadata) ->
                 .clone()
                 .unwrap_or_else(|| "1.0.0".to_string()),
         ),
+        datasites: None,
+        env: Default::default(),
         assets,
         parameters: metadata.parameters.clone(),
         inputs: metadata.inputs.clone(),
         outputs: metadata.outputs.clone(),
+        steps: Vec::new(),
     };
 
     let yaml_str = serde_yaml::to_string(&spec)
@@ -97,6 +102,36 @@ pub fn project_yaml_hash(project_root: &Path) -> Result<Option<String>> {
 
     let bytes =
         fs::read(&yaml_path).with_context(|| format!("Failed to read {}", yaml_path.display()))?;
+    if let Ok(project) = serde_yaml::from_slice::<ProjectYaml>(&bytes) {
+        if let Some(hashes) = &project.b3_hashes {
+            let mut hash_content = String::new();
+            hash_content.push_str(&project.name);
+
+            let workflow_key = if project.workflow.trim().is_empty() {
+                "workflow.nf"
+            } else {
+                project.workflow.as_str()
+            };
+            if let Some(workflow_hash) = hashes
+                .get(workflow_key)
+                .or_else(|| hashes.get("workflow.nf"))
+            {
+                hash_content.push_str(workflow_hash);
+            }
+
+            let mut sorted_hashes: Vec<_> = hashes.iter().collect();
+            sorted_hashes.sort_by_key(|entry| entry.0);
+            for (file, hash) in sorted_hashes {
+                hash_content.push_str(file);
+                hash_content.push_str(hash);
+            }
+
+            return Ok(Some(
+                blake3::hash(hash_content.as_bytes()).to_hex().to_string(),
+            ));
+        }
+    }
+
     let mut hasher = Hasher::new();
     hasher.update(&bytes);
     Ok(Some(hasher.finalize().to_hex().to_string()))

@@ -186,12 +186,16 @@ pub fn create_project_record(
                 name: project_name_owned.clone(),
                 author: author_placeholder,
                 workflow: "workflow.nf".to_string(),
+                description: None,
                 template: Some("dynamic-nextflow".to_string()),
                 version: Some("1.0.0".to_string()),
+                datasites: None,
+                env: Default::default(),
                 assets: vec![],
                 parameters: vec![],
                 inputs: vec![],
                 outputs: vec![],
+                steps: Vec::new(),
             };
 
             project_spec::scaffold_from_spec(minimal_spec, &project_dir)

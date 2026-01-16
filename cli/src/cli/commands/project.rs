@@ -245,12 +245,16 @@ pub async fn create(
                 name: project_name.clone(),
                 author: author_default.clone(),
                 workflow: "workflow.nf".to_string(),
+                description: None,
                 template: Some("dynamic-nextflow".to_string()),
                 version: Some("0.1.0".to_string()),
+                datasites: None,
+                env: Default::default(),
                 assets: Vec::new(),
                 parameters: Vec::new(),
                 inputs: fallback_inputs,
                 outputs: fallback_outputs,
+                steps: Vec::new(),
             };
             project_spec::scaffold_from_spec(fallback, project_path)?
         };
@@ -875,12 +879,16 @@ fn run_project_spec_wizard(
         name,
         author,
         workflow,
+        description: None,
         template: Some("dynamic-nextflow".to_string()),
         version,
+        datasites: None,
+        env: Default::default(),
         assets,
         parameters,
         inputs,
         outputs,
+        steps: Vec::new(),
     })
 }
 
