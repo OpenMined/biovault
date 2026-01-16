@@ -64,14 +64,9 @@ mod tests {
             let data_dir = temp.path().join("syftbox");
             std::fs::create_dir_all(&data_dir).unwrap();
             biovault::config::set_test_syftbox_data_dir(&data_dir);
-            let data_guard = EnvVarGuard::set(
-                "SYFTBOX_DATA_DIR",
-                &data_dir.to_string_lossy(),
-            );
-            let vault_guard = EnvVarGuard::set(
-                "SYC_VAULT",
-                &data_dir.join(".syc").to_string_lossy(),
-            );
+            let data_guard = EnvVarGuard::set("SYFTBOX_DATA_DIR", &data_dir.to_string_lossy());
+            let vault_guard =
+                EnvVarGuard::set("SYC_VAULT", &data_dir.join(".syc").to_string_lossy());
             Self {
                 _temp: temp,
                 _data_guard: data_guard,
