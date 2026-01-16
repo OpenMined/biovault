@@ -11,7 +11,6 @@ use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::collections::HashMap;
 use syftbox_sdk::syftbox::config::SyftboxRuntimeConfig;
-use syftbox_sdk::syftbox::syc;
 
 thread_local! {
     static TEST_CONFIG: RefCell<Option<Config>> = const { RefCell::new(None) };
@@ -592,35 +591,56 @@ pub fn is_syftbox_env() -> bool {
     env::var("SYFTBOX_DATA_DIR").is_ok() || env::var("SYFTBOX_EMAIL").is_ok()
 }
 
-/// Resolve the default Syft Crypto vault path, preferring the BioVault home location
-/// but falling back to the legacy global ~/.syc when present.
-pub fn resolve_default_syc_vault_path() -> anyhow::Result<PathBuf> {
-    let home = get_biovault_home()?;
-    let colocated = syc::vault_path_for_home(&home);
-    if colocated.exists() {
-        return Ok(colocated);
+fn syc_paths_match(left: &Path, right: &Path) -> bool {
+    match (left.canonicalize(), right.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => left == right,
     }
-
-    let legacy = dirs::home_dir()
-        .map(|h| h.join(".syc"))
-        .unwrap_or_else(|| PathBuf::from(".syc"));
-    if legacy.exists() {
-        return Ok(legacy);
-    }
-
-    Ok(colocated)
 }
 
-/// Ensure SYC_VAULT is set so SyftBox uses the same vault as BioVault.
-pub fn ensure_syc_vault_env() -> anyhow::Result<PathBuf> {
-    if let Ok(current) = env::var("SYC_VAULT") {
-        let path = PathBuf::from(current);
-        if !path.as_os_str().is_empty() {
-            return Ok(path);
+/// Resolve the Syft Crypto vault path.
+///
+/// Strict rules:
+/// - If SYFTBOX_DATA_DIR is set, the vault must be <SYFTBOX_DATA_DIR>/.syc
+/// - If SYC_VAULT is set, it must match the derived path when SYFTBOX_DATA_DIR is present
+/// - If neither is set, error (no implicit fallback to BIOVAULT_HOME or ~/.syc)
+pub fn resolve_syc_vault_path() -> anyhow::Result<PathBuf> {
+    let env_vault = get_env_var("SYC_VAULT")
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from);
+    let data_dir = get_env_var("SYFTBOX_DATA_DIR")
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from);
+
+    if let Some(data_dir) = data_dir {
+        let derived = data_dir.join(".syc");
+        if let Some(vault_path) = env_vault {
+            if !syc_paths_match(&vault_path, &derived) {
+                return Err(anyhow::anyhow!(
+                    "SYC_VAULT must match SYFTBOX_DATA_DIR/.syc (SYC_VAULT={}, expected={})",
+                    vault_path.display(),
+                    derived.display()
+                ));
+            }
+            return Ok(vault_path);
         }
+        return Ok(derived);
     }
 
-    let vault_path = resolve_default_syc_vault_path()?;
+    if let Some(vault_path) = env_vault {
+        return Ok(vault_path);
+    }
+
+    Err(anyhow::anyhow!(
+        "SYC_VAULT is required (set SYC_VAULT or SYFTBOX_DATA_DIR)"
+    ))
+}
+
+/// Ensure SYC_VAULT is set to the single, explicit vault path.
+pub fn require_syc_vault_env() -> anyhow::Result<PathBuf> {
+    let vault_path = resolve_syc_vault_path()?;
     env::set_var("SYC_VAULT", &vault_path);
     Ok(vault_path)
 }

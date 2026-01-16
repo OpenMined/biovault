@@ -51,6 +51,8 @@ mod tests {
 
     struct TestHomeGuard {
         _temp: TempDir,
+        _data_guard: EnvVarGuard,
+        _vault_guard: EnvVarGuard,
     }
 
     impl TestHomeGuard {
@@ -59,13 +61,29 @@ mod tests {
             let home = temp.path().join(".biovault");
             std::fs::create_dir_all(&home).unwrap();
             biovault::config::set_test_biovault_home(&home);
-            Self { _temp: temp }
+            let data_dir = temp.path().join("syftbox");
+            std::fs::create_dir_all(&data_dir).unwrap();
+            biovault::config::set_test_syftbox_data_dir(&data_dir);
+            let data_guard = EnvVarGuard::set(
+                "SYFTBOX_DATA_DIR",
+                &data_dir.to_string_lossy(),
+            );
+            let vault_guard = EnvVarGuard::set(
+                "SYC_VAULT",
+                &data_dir.join(".syc").to_string_lossy(),
+            );
+            Self {
+                _temp: temp,
+                _data_guard: data_guard,
+                _vault_guard: vault_guard,
+            }
         }
     }
 
     impl Drop for TestHomeGuard {
         fn drop(&mut self) {
             biovault::config::clear_test_biovault_home();
+            biovault::config::clear_test_syftbox_data_dir();
         }
     }
 
@@ -1703,8 +1721,8 @@ async fn async_main_with(cli: Cli) -> Result<()> {
         .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(filter_level)))
         .try_init();
 
-    // Ensure Syft Crypto uses the BioVault-managed vault path by default
-    biovault::config::ensure_syc_vault_env()?;
+    // Require a single explicit Syft Crypto vault path.
+    biovault::config::require_syc_vault_env()?;
 
     // Random version check on startup (10% chance)
     let _ = commands::update::check_and_notify_random().await;

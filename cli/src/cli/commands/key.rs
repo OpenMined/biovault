@@ -467,7 +467,7 @@ fn resolve_paths(
         config.get_syftbox_data_dir()?
     };
     let encrypted_root = syftbox_sdk::syftbox::syc::resolve_encrypted_root(&data_root);
-    let vault_path = resolve_vault_default(vault_override);
+    let vault_path = resolve_vault_default(vault_override)?;
     Ok((encrypted_root, vault_path))
 }
 
@@ -477,7 +477,7 @@ fn resolve_vault_only(
 ) -> Result<(PathBuf, PathBuf)> {
     let data_root = config.get_syftbox_data_dir()?;
     let encrypted_root = syftbox_sdk::syftbox::syc::resolve_encrypted_root(&data_root);
-    let vault_path = resolve_vault_default(vault_override);
+    let vault_path = resolve_vault_default(vault_override)?;
     Ok((vault_path, encrypted_root))
 }
 
@@ -491,37 +491,20 @@ fn load_existing_bundle(vault_path: &Path, identity: &str) -> Result<Option<Publ
     Ok(Some(info))
 }
 
-fn resolve_vault_default(vault_override: Option<&Path>) -> PathBuf {
+fn resolve_vault_default(vault_override: Option<&Path>) -> Result<PathBuf> {
     if let Some(v) = vault_override {
-        return v.to_path_buf();
+        return Ok(v.to_path_buf());
     }
     if let Some(env_vault) = std::env::var_os("SYC_VAULT") {
-        return PathBuf::from(env_vault);
+        return Ok(PathBuf::from(env_vault));
     }
-    // Keep vault colocated with BioVault home so desktop/CLI share the same keys by default.
-    if let Ok(home) = crate::config::get_biovault_home() {
-        let colocated = syftbox_sdk::syftbox::syc::vault_path_for_home(&home);
-        if colocated.exists() {
-            return colocated;
-        }
-        let legacy = dirs::home_dir()
-            .map(|h| h.join(".syc"))
-            .unwrap_or_else(|| PathBuf::from(".syc"));
-        if legacy.exists() {
-            return legacy;
-        }
-        return colocated;
-    }
-    // Fallback to legacy global location.
-    dirs::home_dir()
-        .map(|h| h.join(".syc"))
-        .unwrap_or_else(|| PathBuf::from(".syc"))
+    Ok(crate::config::resolve_syc_vault_path()?)
 }
 
 /// Resolve the vault path using the same logic as key commands.
 /// This ensures consistent vault location between `bv key` commands and message sync.
 pub fn resolve_vault_for_config(_config: &Config) -> Result<PathBuf> {
-    Ok(resolve_vault_default(None))
+    resolve_vault_default(None)
 }
 
 fn resolve_export_path(data_root: &Path, identity: &str) -> PathBuf {
