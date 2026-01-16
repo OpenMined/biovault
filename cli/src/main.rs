@@ -24,6 +24,7 @@ fn validate_example_name(s: &str) -> Result<String, String> {
 mod tests {
     use super::*;
     use clap::Parser;
+    use std::sync::{Mutex, MutexGuard};
     use tempfile::TempDir;
 
     struct EnvVarGuard {
@@ -49,14 +50,20 @@ mod tests {
         }
     }
 
+    static TEST_ENV_MUTEX: Mutex<()> = Mutex::new(());
+
     struct TestHomeGuard {
         _temp: TempDir,
+        _env_guard: MutexGuard<'static, ()>,
         _data_guard: EnvVarGuard,
         _vault_guard: EnvVarGuard,
     }
 
     impl TestHomeGuard {
         fn new() -> Self {
+            let env_guard = TEST_ENV_MUTEX
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             let temp = TempDir::new().unwrap();
             let home = temp.path().join(".biovault");
             std::fs::create_dir_all(&home).unwrap();
@@ -69,6 +76,7 @@ mod tests {
                 EnvVarGuard::set("SYC_VAULT", &data_dir.join(".syc").to_string_lossy());
             Self {
                 _temp: temp,
+                _env_guard: env_guard,
                 _data_guard: data_guard,
                 _vault_guard: vault_guard,
             }
