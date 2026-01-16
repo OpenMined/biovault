@@ -125,13 +125,7 @@ fn ensure_jupyter_kernelspec(venv_path: &Path, uv_bin: &str, python_arg: &str) {
     let project_dir = venv_path.parent().unwrap_or(venv_path);
     if kernel_spec_needs_install(venv_path) {
         let mut install_cmd = Command::new(uv_bin);
-        install_cmd.args([
-            "pip",
-            "install",
-            "--python",
-            python_arg,
-            "ipykernel",
-        ]);
+        install_cmd.args(["pip", "install", "--python", python_arg, "ipykernel"]);
         install_cmd.current_dir(project_dir);
         hide_console_window(&mut install_cmd);
         let _ = install_cmd.status();
@@ -1609,4 +1603,3 @@ mod tests {
         assert!(result.is_ok());
     }
 }
-
