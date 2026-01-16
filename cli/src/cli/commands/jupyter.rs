@@ -26,6 +26,140 @@ fn hide_console_window(_cmd: &mut Command) {
     }
 }
 
+fn uv_python_arg(_venv_path: &Path) -> String {
+    ".venv".to_string()
+}
+
+#[cfg(target_os = "windows")]
+fn patch_windows_kernelspec(venv_path: &Path) {
+    let kernels_dirs = [
+        venv_path.join("share").join("jupyter").join("kernels"),
+        venv_path
+            .join("Library")
+            .join("share")
+            .join("jupyter")
+            .join("kernels"),
+    ];
+
+    for kernels_dir in kernels_dirs.iter().filter(|p| p.exists()) {
+        let entries = match fs::read_dir(kernels_dir) {
+            Ok(entries) => entries,
+            Err(_) => continue,
+        };
+
+        for entry in entries.flatten() {
+            let kernel_json = entry.path().join("kernel.json");
+            if !kernel_json.exists() {
+                continue;
+            }
+
+            let content = match fs::read_to_string(&kernel_json) {
+                Ok(content) => content,
+                Err(_) => continue,
+            };
+            let mut value: Value = match serde_json::from_str(&content) {
+                Ok(value) => value,
+                Err(_) => continue,
+            };
+
+            if let Some(argv) = value.get_mut("argv").and_then(|v| v.as_array_mut()) {
+                if let Some(first) = argv.first().and_then(|v| v.as_str()) {
+                    if first.to_ascii_lowercase().ends_with("python.exe") {
+                        let first_path = PathBuf::from(first);
+                        if let Some(dir) = first_path.parent() {
+                            let pythonw = dir.join("pythonw.exe");
+                            if pythonw.exists() {
+                                argv[0] = Value::String(pythonw.to_string_lossy().to_string());
+                                if let Ok(updated) = serde_json::to_string_pretty(&value) {
+                                    let _ = fs::write(&kernel_json, updated);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn patch_windows_kernelspec(_venv_path: &Path) {}
+
+fn kernel_spec_needs_install(venv_path: &Path) -> bool {
+    let kernels_dirs = [
+        venv_path.join("share").join("jupyter").join("kernels"),
+        venv_path
+            .join("Library")
+            .join("share")
+            .join("jupyter")
+            .join("kernels"),
+    ];
+
+    for kernels_dir in kernels_dirs.iter() {
+        let kernel_json = kernels_dir.join("python3").join("kernel.json");
+        if !kernel_json.exists() {
+            continue;
+        }
+
+        let content = match fs::read_to_string(&kernel_json) {
+            Ok(content) => content,
+            Err(_) => continue,
+        };
+        let value: Value = match serde_json::from_str(&content) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        if let Some(argv) = value.get("argv").and_then(|v| v.as_array()) {
+            if let Some(first) = argv.first().and_then(|v| v.as_str()) {
+                if PathBuf::from(first).exists() {
+                    return false;
+                }
+            }
+        }
+    }
+
+    true
+}
+
+fn ensure_jupyter_kernelspec(venv_path: &Path, uv_bin: &str, python_arg: &str) {
+    let project_dir = venv_path.parent().unwrap_or(venv_path);
+    if kernel_spec_needs_install(venv_path) {
+        let mut install_cmd = Command::new(uv_bin);
+        install_cmd.args([
+            "pip",
+            "install",
+            "--python",
+            python_arg,
+            "ipykernel",
+        ]);
+        install_cmd.current_dir(project_dir);
+        hide_console_window(&mut install_cmd);
+        let _ = install_cmd.status();
+
+        let mut cmd = Command::new(uv_bin);
+        cmd.args([
+            "run",
+            "--python",
+            python_arg,
+            "python",
+            "-m",
+            "ipykernel",
+            "install",
+            "--prefix",
+            venv_path.to_string_lossy().as_ref(),
+            "--name",
+            "python3",
+            "--display-name",
+            "Python (BioVault)",
+        ]);
+        cmd.current_dir(project_dir);
+        hide_console_window(&mut cmd);
+        let _ = cmd.status();
+    }
+
+    patch_windows_kernelspec(venv_path);
+}
+
 fn is_pid_alive(pid: i32) -> bool {
     if pid <= 0 {
         return false;
@@ -314,6 +448,8 @@ fn ensure_virtualenv(project_dir: &Path, python_version: &str, uv_bin: &str) -> 
         println!("✅ Using existing virtualenv with dependencies");
         // Ensure uv is available inside the virtualenv PATH
         link_uv_into_venv(&venv_path, uv_bin);
+        let python_arg = uv_python_arg(&venv_path);
+        ensure_jupyter_kernelspec(&venv_path, uv_bin, &python_arg);
         return Ok(());
     }
 
@@ -354,6 +490,7 @@ fn ensure_virtualenv(project_dir: &Path, python_version: &str, uv_bin: &str) -> 
 
     // Ensure uv is available inside the virtualenv PATH (symlink/copy bundled uv)
     link_uv_into_venv(&venv_path, uv_bin);
+    let python_arg = uv_python_arg(&venv_path);
 
     if needs_base_install {
         println!(
@@ -370,8 +507,9 @@ fn ensure_virtualenv(project_dir: &Path, python_version: &str, uv_bin: &str) -> 
                 "pip",
                 "install",
                 "--python",
-                ".venv",
+                python_arg.as_str(),
                 "jupyterlab",
+                "ipykernel",
                 "cleon",
                 &beaver_pkg,
             ]);
@@ -391,8 +529,9 @@ fn ensure_virtualenv(project_dir: &Path, python_version: &str, uv_bin: &str) -> 
                         "pip",
                         "install",
                         "--python",
-                        ".venv",
+                        python_arg.as_str(),
                         "jupyterlab",
+                        "ipykernel",
                         "cleon",
                         &beaver_pkg,
                     ]);
@@ -425,8 +564,9 @@ fn ensure_virtualenv(project_dir: &Path, python_version: &str, uv_bin: &str) -> 
                 "pip",
                 "install",
                 "--python",
-                ".venv",
+                python_arg.as_str(),
                 "jupyterlab",
+                "ipykernel",
                 "cleon",
                 &beaver_pkg,
             ]);
@@ -477,7 +617,7 @@ fn ensure_virtualenv(project_dir: &Path, python_version: &str, uv_bin: &str) -> 
                     "pip",
                     "install",
                     "--python",
-                    ".venv",
+                    python_arg.as_str(),
                     "--find-links",
                     wheels_canonical.to_str().unwrap_or("."),
                     "--reinstall-package",
@@ -505,7 +645,7 @@ fn ensure_virtualenv(project_dir: &Path, python_version: &str, uv_bin: &str) -> 
                         "pip",
                         "install",
                         "--python",
-                        ".venv",
+                        python_arg.as_str(),
                         "-e",
                         syftbox_canonical.to_str().unwrap_or("."),
                     ]);
@@ -522,7 +662,7 @@ fn ensure_virtualenv(project_dir: &Path, python_version: &str, uv_bin: &str) -> 
                     "pip",
                     "install",
                     "--python",
-                    ".venv",
+                    python_arg.as_str(),
                     "-e",
                     syftbox_canonical.to_str().unwrap_or("."),
                 ]);
@@ -552,7 +692,7 @@ fn ensure_virtualenv(project_dir: &Path, python_version: &str, uv_bin: &str) -> 
                 "pip",
                 "install",
                 "--python",
-                ".venv",
+                python_arg.as_str(),
                 "-e",
                 &beaver_with_extras,
             ]);
@@ -583,7 +723,7 @@ fn ensure_virtualenv(project_dir: &Path, python_version: &str, uv_bin: &str) -> 
                 "pip",
                 "install",
                 "--python",
-                ".venv",
+                python_arg.as_str(),
                 "--force-reinstall",
                 PYFORY_MACOS_INTEL_WHEEL,
             ]);
@@ -603,7 +743,7 @@ fn ensure_virtualenv(project_dir: &Path, python_version: &str, uv_bin: &str) -> 
                 "pip",
                 "install",
                 "--python",
-                ".venv",
+                python_arg.as_str(),
                 "--force-reinstall",
                 PYFORY_MACOS_INTEL_WHEEL,
             ]);
@@ -629,6 +769,8 @@ fn ensure_virtualenv(project_dir: &Path, python_version: &str, uv_bin: &str) -> 
             warn!("Failed to create deps marker file: {}", e);
         }
     }
+
+    ensure_jupyter_kernelspec(&venv_path, uv_bin, &python_arg);
 
     Ok(())
 }
@@ -972,7 +1114,11 @@ pub async fn start(project_path: &str, python_version: &str) -> Result<()> {
     // Also point XDG_RUNTIME_DIR to keep jpserver files local (macOS/Linux)
     std::env::set_var("XDG_RUNTIME_DIR", &runtime_dir);
 
-    println!("🚀 Launching Jupyter Lab with: uv run --python .venv jupyter lab");
+    let python_arg = uv_python_arg(&venv_path);
+    println!(
+        "dYs? Launching Jupyter Lab with: uv run --python {} jupyter lab",
+        python_arg
+    );
     if let Some(port) = chosen_port {
         println!("🎯 Requested port: {} (random to reduce conflicts)", port);
     }
@@ -995,20 +1141,17 @@ pub async fn start(project_path: &str, python_version: &str) -> Result<()> {
     use std::process::Stdio;
 
     let mut args: Vec<String> = vec![
-        "run",
-        "--python",
-        ".venv",
-        "jupyter",
-        "lab",
-        "--no-browser",
-        "--ServerApp.token=",
-        "--ServerApp.password=",
-        "--ServerApp.disable_check_xsrf=true",
-        "--ServerApp.allow_origin=*",
-    ]
-    .into_iter()
-    .map(String::from)
-    .collect();
+        "run".into(),
+        "--python".into(),
+        python_arg.clone(),
+        "jupyter".into(),
+        "lab".into(),
+        "--no-browser".into(),
+        "--ServerApp.token=".into(),
+        "--ServerApp.password=".into(),
+        "--ServerApp.disable_check_xsrf=true".into(),
+        "--ServerApp.allow_origin=*".into(),
+    ];
 
     if let Some(port) = chosen_port {
         args.push("--port".into());
@@ -1466,3 +1609,4 @@ mod tests {
         assert!(result.is_ok());
     }
 }
+

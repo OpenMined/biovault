@@ -2,10 +2,16 @@ use crate::error::Result;
 use anyhow::anyhow;
 use std::process::Command;
 
+fn command<S: AsRef<std::ffi::OsStr>>(program: S) -> Command {
+    let mut cmd = Command::new(program);
+    super::configure_child_process(&mut cmd);
+    cmd
+}
+
 pub async fn install(version: &str) -> Result<()> {
     println!("📦 Installing Python {} via UV...", version);
 
-    let output = Command::new("uv")
+    let output = command("uv")
         .args(["python", "install", version])
         .output()?;
 
@@ -29,7 +35,7 @@ pub async fn list(installed_only: bool) -> Result<()> {
         args.push("--only-installed");
     }
 
-    let output = Command::new("uv").args(&args).output()?;
+    let output = command("uv").args(&args).output()?;
 
     if output.status.success() {
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -43,7 +49,7 @@ pub async fn list(installed_only: bool) -> Result<()> {
 }
 
 pub async fn show() -> Result<()> {
-    let output = Command::new("uv").args(["python", "find"]).output()?;
+    let output = command("uv").args(["python", "find"]).output()?;
 
     if output.status.success() {
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -60,7 +66,7 @@ pub async fn show() -> Result<()> {
 pub async fn uninstall(version: &str) -> Result<()> {
     println!("🗑️  Uninstalling Python {}...", version);
 
-    let output = Command::new("uv")
+    let output = command("uv")
         .args(["python", "uninstall", version])
         .output()?;
 

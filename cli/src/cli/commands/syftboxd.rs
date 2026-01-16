@@ -12,6 +12,12 @@ use crate::config::Config;
 use syftbox_sdk::syftbox::config::SyftboxRuntimeConfig;
 use syftbox_sdk::syftbox::control::{is_syftbox_running, start_syftbox, stop_syftbox};
 
+fn command<S: AsRef<std::ffi::OsStr>>(program: S) -> Command {
+    let mut cmd = Command::new(program);
+    super::configure_child_process(&mut cmd);
+    cmd
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SyftboxdStatus {
     pid: u32,
@@ -105,7 +111,7 @@ fn check_process_running(pid: u32) -> Result<bool> {
             return Ok(false);
         }
 
-        let output = Command::new("ps")
+        let output = command("ps")
             .args(["-p", &pid.to_string(), "-o", "command="])
             .output()
             .context("Failed to run ps")?;
@@ -118,7 +124,7 @@ fn check_process_running(pid: u32) -> Result<bool> {
 
     #[cfg(windows)]
     {
-        let output = Command::new("tasklist")
+        let output = command("tasklist")
             .args(["/FI", &format!("PID eq {}", pid), "/NH", "/FO", "CSV"])
             .output()?;
         if !output.status.success() {
@@ -239,7 +245,7 @@ pub async fn start(config: &Config, foreground: bool) -> Result<()> {
 
     let pid_path = get_pid_file_path(config)?;
 
-    let mut child = Command::new(current_exe)
+    let mut child = command(current_exe)
         .args(["syftboxd", "start", "--foreground"])
         .env("BV_SYFTBOXD_CONFIG", config_json)
         .env(
@@ -326,7 +332,7 @@ pub async fn stop(config: &Config) -> Result<()> {
 
     #[cfg(windows)]
     {
-        let output = Command::new("taskkill")
+        let output = command("taskkill")
             .args(["/F", "/PID", &pid.to_string()])
             .output()?;
         if !output.status.success() {
@@ -358,7 +364,7 @@ pub async fn logs(config: &Config, follow: bool, lines: Option<usize>) -> Result
     }
 
     if follow {
-        let mut child = Command::new("tail")
+        let mut child = command("tail")
             .args(["-f", &log_path.to_string_lossy()])
             .stdout(Stdio::piped())
             .spawn()
@@ -377,7 +383,7 @@ pub async fn logs(config: &Config, follow: bool, lines: Option<usize>) -> Result
         let _ = child.wait();
     } else {
         let tail_lines = lines.unwrap_or(50);
-        let output = Command::new("tail")
+        let output = command("tail")
             .args(["-n", &tail_lines.to_string(), &log_path.to_string_lossy()])
             .output()
             .context("Failed to read log file")?;

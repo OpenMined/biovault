@@ -10,6 +10,12 @@ use std::fs;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+fn command<S: AsRef<std::ffi::OsStr>>(program: S) -> Command {
+    let mut cmd = Command::new(program);
+    super::configure_child_process(&mut cmd);
+    cmd
+}
 use walkdir::WalkDir;
 
 trait DialoguerResultExt<T> {
@@ -1672,7 +1678,7 @@ async fn test_submission(
 
             if download {
                 println!("📥 Downloading sample data for {}...", participant);
-                Command::new("bv")
+                command("bv")
                     .args(["sample-data", "fetch", participant])
                     .status()
                     .map_err(|e| anyhow::anyhow!("Failed to download sample data: {}", e))?;
@@ -1688,7 +1694,7 @@ async fn test_submission(
         println!("   Input: {}", mock_data_path.display());
         println!("   Output: {}", output_dir.display());
 
-        let status = Command::new("nextflow")
+        let status = command("nextflow")
             .arg("run")
             .arg(&workflow_file)
             .arg("--input")
