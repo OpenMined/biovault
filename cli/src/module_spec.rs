@@ -94,7 +94,7 @@ pub struct ModuleAsset {
 }
 
 impl ModuleFile {
-    pub fn from_str(raw: &str) -> Result<Self> {
+    pub fn parse_yaml(raw: &str) -> Result<Self> {
         let module: ModuleFile =
             serde_yaml::from_str(raw).context("Failed to parse module spec")?;
         Ok(module)

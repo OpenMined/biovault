@@ -202,7 +202,7 @@ pub fn create_project_record(
         let yaml_path = project_dir.join(PROJECT_YAML_FILE);
         let yaml_str = fs::read_to_string(&yaml_path).context("Failed to read module.yaml")?;
 
-        let mut module = ModuleFile::from_str(&yaml_str).context("Invalid module.yaml format")?;
+        let mut module = ModuleFile::parse_yaml(&yaml_str).context("Invalid module.yaml format")?;
         module.metadata.name = project_name_owned.clone();
 
         if !email_trimmed.is_empty() {
@@ -547,7 +547,7 @@ struct ModuleInfo {
 }
 
 fn module_info_from_str(raw: &str) -> Result<ModuleInfo> {
-    let module = ModuleFile::from_str(raw)?;
+    let module = ModuleFile::parse_yaml(raw)?;
     let spec = module.to_project_spec()?;
     Ok(ModuleInfo {
         name: spec.name,
@@ -1303,7 +1303,7 @@ pub async fn import_pipeline_with_deps(
     let yaml_content = download_file(&raw_url).await?;
     let yaml_str = String::from_utf8(yaml_content).context("Invalid UTF-8 in flow.yaml")?;
 
-    let mut flow = FlowFile::from_str(&yaml_str).context("Failed to parse flow.yaml")?;
+    let mut flow = FlowFile::parse_yaml(&yaml_str).context("Failed to parse flow.yaml")?;
     if flow.kind != "Flow" {
         return Err(anyhow::anyhow!("Expected Flow kind but found '{}'", flow.kind).into());
     }

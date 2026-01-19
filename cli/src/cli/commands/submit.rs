@@ -311,7 +311,7 @@ fn load_module_file(path: &Path) -> Result<ModuleFile> {
     let content = fs::read_to_string(path)
         .with_context(|| format!("Failed to read module spec from {}", path.display()))?;
     match detect_spec_format(path, &content) {
-        SpecFormat::Module => ModuleFile::from_str(&content).map_err(Error::from),
+        SpecFormat::Module => ModuleFile::parse_yaml(&content).map_err(Error::from),
         SpecFormat::LegacyProject | SpecFormat::Unknown => {
             let spec: ProjectSpec = serde_yaml::from_str(&content).with_context(|| {
                 format!("Failed to parse legacy project spec {}", path.display())
@@ -1105,7 +1105,7 @@ mod tests {
             .storage
             .read_plaintext_string(&submission_path.join(MODULE_YAML_FILE))
             .unwrap();
-        let module = crate::module_spec::ModuleFile::from_str(&module_yaml).unwrap();
+        let module = crate::module_spec::ModuleFile::parse_yaml(&module_yaml).unwrap();
         assert_eq!(module.kind, "Module");
 
         let record: SubmissionRecord = serde_yaml::from_str(

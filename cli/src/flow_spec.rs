@@ -100,7 +100,7 @@ pub struct FlowStoreSpec {
 }
 
 impl FlowFile {
-    pub fn from_str(raw: &str) -> Result<Self> {
+    pub fn parse_yaml(raw: &str) -> Result<Self> {
         let flow: FlowFile = serde_yaml::from_str(raw).context("Failed to parse flow spec")?;
         Ok(flow)
     }

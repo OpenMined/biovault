@@ -135,7 +135,7 @@ impl ProjectSpec {
                 ));
             }
             SpecFormat::Module => {
-                let module = ModuleFile::from_str(&raw).with_context(|| {
+                let module = ModuleFile::parse_yaml(&raw).with_context(|| {
                     format!("Failed to parse module spec at {}", path.display())
                 })?;
                 return module.to_project_spec().with_context(|| {

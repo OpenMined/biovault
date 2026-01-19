@@ -61,7 +61,7 @@ impl PipelineSpec {
             .with_context(|| format!("Failed to read pipeline spec at {}", path.display()))?;
         match detect_spec_format(path, &raw) {
             SpecFormat::Flow => {
-                let flow = FlowFile::from_str(&raw)
+                let flow = FlowFile::parse_yaml(&raw)
                     .with_context(|| format!("Failed to parse flow spec at {}", path.display()))?;
                 return flow
                     .to_pipeline_spec()
