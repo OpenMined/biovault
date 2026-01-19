@@ -1,0 +1,32 @@
+apiVersion: syftbox.openmined.org/v1alpha1
+kind: Module
+metadata:
+  name: pipeline-sum-total
+  version: 0.1.0
+  authors:
+    - madhava@openmined.org
+spec:
+  runner:
+    kind: nextflow
+    entrypoint: workflow.nf
+    template: dynamic-nextflow
+  assets:
+    - path: sum_counts.py
+  inputs:
+    - name: samplesheet
+      type: File
+      description: Samplesheet with aggregated columns to summarize
+      format:
+        kind: csv
+    - name: data_dir
+      type: Directory
+      description: Optional data directory (unused in this step)
+      optional: true
+  outputs:
+    - name: result_summary
+      type: File
+      description: Text file with the total of all line counts
+      format:
+        kind: txt
+      path: results.txt
+  parameters: []

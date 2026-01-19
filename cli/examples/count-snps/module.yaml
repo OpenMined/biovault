@@ -1,0 +1,17 @@
+apiVersion: syftbox.openmined.org/v1alpha1
+kind: Module
+metadata:
+  name: count-snps
+  version: 0.1.0
+  authors:
+    - dawnchen.xi96@gmail.com
+spec:
+  runner:
+    kind: nextflow
+    entrypoint: workflow.nf
+    template: snp
+  assets:
+    - path: count_number_of_snps.py
+  inputs: []
+  outputs: []
+  parameters: []

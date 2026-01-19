@@ -146,7 +146,7 @@ steps:
     run: |
       test ! -f datasites/client2@sandbox.local/app_data/biovault/rpc/session/syft.pub.yaml
 
-  - name: Client1 submits count-lines project to client2
+  - name: Client1 submits count-lines module to client2
     datasite: client1@sandbox.local
     run: |
       rm -rf count-lines
@@ -157,9 +157,9 @@ steps:
         --non-interactive \
         --force
 
-  - name: Wait for project.yaml to sync to client2
+  - name: Wait for module.yaml to sync to client2
     datasite: client2@sandbox.local
-    wait_for: datasites/client1@sandbox.local/shared/biovault/submissions/*/project.yaml
+    wait_for: datasites/client1@sandbox.local/shared/biovault/submissions/*/module.yaml
     timeout: 60
 
   - name: Capture submission path
@@ -174,20 +174,20 @@ steps:
       basename "{{submission_path}}"
     capture: submission_dir
 
-  - name: Client2 journal tracks downloaded project.yaml
+  - name: Client2 journal tracks downloaded module.yaml
     datasite: client2@sandbox.local
     run: |
-      KEY="client1@sandbox.local/shared/biovault/submissions/{{submission_dir}}/project.yaml"
+      KEY="client1@sandbox.local/shared/biovault/submissions/{{submission_dir}}/module.yaml"
       COUNT=$(sqlite3 .data/sync.db "select count(*) from sync_journal where path='${KEY}'")
       echo "count=${COUNT} key=${KEY}"
       test "${COUNT}" -ge 1
 
-  - name: Ensure no rejected project marker before mutation
+  - name: Ensure no rejected module marker before mutation
     datasite: client2@sandbox.local
     run: |
-      test ! -f "datasites/client1@sandbox.local/shared/biovault/submissions/{{submission_dir}}/project.rejected.yaml"
+      test ! -f "datasites/client1@sandbox.local/shared/biovault/submissions/{{submission_dir}}/module.rejected.yaml"
 
-  - name: Client2 syncs inbox to ingest project message
+  - name: Client2 syncs inbox to ingest module message
     datasite: client2@sandbox.local
     run: |
       {{workspace}}/cli/target/release/bv message sync --no-cleanup
@@ -198,7 +198,7 @@ steps:
       {{workspace}}/cli/target/release/bv inbox --plain --json
     capture: inbox_json
 
-  - name: Extract project message id
+  - name: Extract module message id
     datasite: client2@sandbox.local
     run: |
       jq -r '
@@ -208,7 +208,7 @@ steps:
       ' <<< '{{inbox_json}}' | head -n 1
     capture: project_msg_id
 
-  - name: Client2 processes project (test mode, approve)
+  - name: Client2 processes module (test mode, approve)
     datasite: client2@sandbox.local
     run: |
       {{workspace}}/cli/target/release/bv message process "{{project_msg_id}}" \
@@ -222,12 +222,12 @@ steps:
     wait_for: datasites/client1@sandbox.local/shared/biovault/submissions/*/results/ALL/line_counts.csv
     timeout: 120
 
-  - name: Client2 attempts forbidden edit of project.yaml (should be rejected)
+  - name: Client2 attempts forbidden edit of module.yaml (should be rejected)
     datasite: client2@sandbox.local
     run: |
-      echo "# forbidden edit" >> "datasites/client1@sandbox.local/shared/biovault/submissions/{{submission_dir}}/project.yaml"
+      echo "# forbidden edit" >> "datasites/client1@sandbox.local/shared/biovault/submissions/{{submission_dir}}/module.yaml"
 
   - name: Wait for rejected marker on unauthorized edit
     datasite: client2@sandbox.local
-    wait_for: datasites/client1@sandbox.local/shared/biovault/submissions/{{submission_dir}}/project.rejected.yaml
+    wait_for: datasites/client1@sandbox.local/shared/biovault/submissions/{{submission_dir}}/module.rejected.yaml
     timeout: 60

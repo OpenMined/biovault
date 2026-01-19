@@ -1,0 +1,20 @@
+apiVersion: syftbox.openmined.org/v1alpha1
+kind: Module
+metadata:
+  name: haplo-y
+  version: 0.1.0
+  description: Haplotype assembly and phasing of Y chromosome from linked-read data
+  authors:
+    - madhava@openmined.org
+spec:
+  runner:
+    kind: nextflow
+    entrypoint: workflow.nf
+    template: default
+  assets:
+    - path: interpret_y_haplogroup.py
+    - path: y_haplogroup_panel.GRCh38.tsv
+    - path: y_haplogroup_panel.GRCh37.tsv
+  inputs: []
+  outputs: []
+  parameters: []

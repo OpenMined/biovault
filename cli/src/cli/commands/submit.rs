@@ -3,14 +3,18 @@ use crate::cli::syft_url::SyftURL;
 use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::messages::{Message, MessageType};
+use crate::module_spec::{ModuleAsset, ModuleFile};
+use crate::project_spec::{resolve_project_spec_path, ProjectSpec, MODULE_YAML_FILE};
+use crate::spec_format::{detect_spec_format, SpecFormat};
 use crate::syftbox::storage::{SyftBoxStorage, WritePolicy};
 #[cfg(test)]
 use crate::syftbox::SyftBoxApp;
-use crate::types::{ProjectYaml, SyftPermissions};
+use crate::types::SyftPermissions;
 use anyhow::Context;
 use chrono::Local;
 use dialoguer::{Confirm, Editor};
 use serde::de::DeserializeOwned;
+use serde::Deserialize;
 use serde::Serialize;
 use serde_json::json;
 use serde_yaml;
@@ -18,6 +22,13 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
+
+const SUBMISSION_RECORD_FILE: &str = "submission.yaml";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SubmissionRecord {
+    files_hash: String,
+}
 
 pub async fn submit(
     project_path: String,
@@ -70,25 +81,24 @@ pub async fn submit(
         )));
     }
 
-    let project_yaml_path = project_dir.join("project.yaml");
+    let project_yaml_path = resolve_project_spec_path(&project_dir);
     if !project_yaml_path.exists() {
         return Err(Error::from(anyhow::anyhow!(
-            "project.yaml not found in: {}",
+            "module.yaml not found in: {}",
             project_dir.display()
         )));
     }
 
-    // Load and validate project
-    let mut project = ProjectYaml::from_file(&project_yaml_path)?;
+    // Load and validate module spec
+    let mut module = load_module_file(&project_yaml_path).with_context(|| {
+        format!(
+            "Failed to load module spec from {}",
+            project_yaml_path.display()
+        )
+    })?;
+    let module_name = module.metadata.name.clone();
 
-    // Override security-sensitive fields
-    project.author = config.email.clone();
-    project.datasites = Some(vec![datasite_email.clone()]);
-
-    // Handle participants from destination URL
-    if let Some(ref url) = participant_url {
-        project.participants = Some(vec![url.clone()]);
-    }
+    let participants = participant_url.map(|url| vec![url]);
 
     // Hash workflow.nf
     let workflow_path = project_dir.join("workflow.nf");
@@ -135,31 +145,34 @@ pub async fn submit(
         }
     }
 
-    project.assets = if asset_files.is_empty() {
+    module.spec.assets = if asset_files.is_empty() {
         None
     } else {
-        Some(asset_files)
+        Some(
+            asset_files
+                .iter()
+                .cloned()
+                .map(|path| ModuleAsset { path })
+                .collect(),
+        )
     };
-    project.b3_hashes = Some(b3_hashes);
 
     // Calculate project hash from workflow.nf and assets only (deterministic)
     let mut hash_content = String::new();
-    hash_content.push_str(&project.name);
+    hash_content.push_str(&module_name);
     hash_content.push_str(&workflow_hash);
-    if let Some(ref hashes) = project.b3_hashes {
-        let mut sorted_hashes: Vec<_> = hashes.iter().collect();
-        sorted_hashes.sort_by_key(|k| k.0);
-        for (file, hash) in sorted_hashes {
-            hash_content.push_str(file);
-            hash_content.push_str(hash);
-        }
+    let mut sorted_hashes: Vec<_> = b3_hashes.iter().collect();
+    sorted_hashes.sort_by_key(|k| k.0);
+    for (file, hash) in sorted_hashes {
+        hash_content.push_str(file);
+        hash_content.push_str(hash);
     }
     let project_hash = blake3::hash(hash_content.as_bytes()).to_hex().to_string();
 
     // Create submission folder name
     let date_str = Local::now().format("%Y-%m-%d").to_string();
     let short_hash = &project_hash[0..8];
-    let submission_folder_name = format!("{}-{}-{}", project.name, date_str, short_hash);
+    let submission_folder_name = format!("{}-{}-{}", module_name, date_str, short_hash);
 
     // Create submission path
     let submissions_path = config.get_shared_submissions_path()?;
@@ -169,36 +182,22 @@ pub async fn submit(
 
     // Check if already submitted
     if submission_path.exists() {
-        // Verify the hash matches using the same deterministic method
-        let existing_project_yaml = submission_path.join("project.yaml");
-        if existing_project_yaml.exists() {
-            let existing_project =
-                read_yaml_from_storage::<ProjectYaml>(&storage, &existing_project_yaml)?;
+        let existing_project_yaml = submission_path.join(MODULE_YAML_FILE);
+        let submission_record_path = submission_path.join(SUBMISSION_RECORD_FILE);
 
-            // Calculate existing project hash using same method
-            let mut existing_hash_content = String::new();
-            existing_hash_content.push_str(&existing_project.name);
+        let existing_hash = if submission_record_path.exists() {
+            Some(
+                read_yaml_from_storage::<SubmissionRecord>(&storage, &submission_record_path)?
+                    .files_hash,
+            )
+        } else if existing_project_yaml.exists() {
+            legacy_submission_hash(&storage, &existing_project_yaml)?
+        } else {
+            None
+        };
 
-            // Get workflow hash from existing submission
-            if let Some(ref existing_hashes) = existing_project.b3_hashes {
-                if let Some(existing_workflow_hash) = existing_hashes.get("workflow.nf") {
-                    existing_hash_content.push_str(existing_workflow_hash);
-
-                    let mut sorted_hashes: Vec<_> = existing_hashes.iter().collect();
-                    sorted_hashes.sort_by_key(|k| k.0);
-                    for (file, hash) in sorted_hashes {
-                        existing_hash_content.push_str(file);
-                        existing_hash_content.push_str(hash);
-                    }
-                }
-            }
-
-            let existing_hash = blake3::hash(existing_hash_content.as_bytes())
-                .to_hex()
-                .to_string();
-
+        if let Some(existing_hash) = existing_hash {
             if existing_hash == project_hash {
-                // Check if we're submitting to a different recipient
                 let existing_permissions_path = submission_path.join("syft.pub.yaml");
                 if existing_permissions_path.exists() && datasite_email != config.email {
                     println!(
@@ -206,47 +205,14 @@ pub async fn submit(
                         datasite_email
                     );
 
-                    // Update permissions to include new recipient
                     update_permissions_for_new_recipient(
                         &storage,
                         &existing_permissions_path,
                         &datasite_email,
                     )?;
 
-                    // Update project.yaml with new datasites
-                    let mut existing_project =
-                        read_yaml_from_storage::<ProjectYaml>(&storage, &existing_project_yaml)?;
-                    if let Some(ref mut datasites) = existing_project.datasites {
-                        if !datasites.contains(&datasite_email) {
-                            datasites.push(datasite_email.clone());
-                        }
-                    } else {
-                        existing_project.datasites = Some(vec![datasite_email.clone()]);
-                    }
-
-                    // Handle participants from destination URL
-                    if let Some(ref new_participant) = participant_url {
-                        if let Some(ref mut participants) = existing_project.participants {
-                            if !participants.contains(new_participant) {
-                                participants.push(new_participant.clone());
-                            }
-                        } else {
-                            existing_project.participants = Some(vec![new_participant.clone()]);
-                        }
-                    }
-
-                    write_yaml_to_storage(
-                        &storage,
-                        &existing_project_yaml,
-                        &existing_project,
-                        Some(datasite_email.as_str()),
-                        true,
-                    )?;
-
                     println!("✓ Permissions updated for existing submission");
                     println!("  Location: {}", submission_path.display());
-
-                    // Continue to send the message to the new recipient
                 } else if !force {
                     println!("⚠️  This exact project version has already been submitted.");
                     println!("   Location: {}", submission_path.display());
@@ -259,99 +225,73 @@ pub async fn submit(
                     );
                     println!("   Location: {}", submission_path.display());
                     println!("   Hash: {}", short_hash);
-
-                    // Check if destination has changed
-                    let existing_datasites = existing_project.datasites.clone().unwrap_or_default();
-                    let destination_changed = !existing_datasites.contains(&datasite_email);
-
-                    if destination_changed {
-                        // Update project.yaml and syft.pub.yaml with new destination
-                        println!("✓ Updating destination to: {}", datasite_email);
-
-                        // Update project.yaml with new datasite
-                        let mut updated_project = existing_project.clone();
-                        updated_project.datasites = Some(vec![datasite_email.clone()]);
-                        if let Some(ref url) = participant_url {
-                            updated_project.participants = Some(vec![url.clone()]);
-                        }
-                        write_yaml_to_storage(
-                            &storage,
-                            &existing_project_yaml,
-                            &updated_project,
-                            Some(datasite_email.as_str()),
-                            true,
-                        )?;
-
-                        // Update syft.pub.yaml
-                        let existing_permissions_path = submission_path.join("syft.pub.yaml");
-                        let updated_permissions =
-                            SyftPermissions::new_for_datasite(&datasite_email);
-                        write_yaml_to_storage(
-                            &storage,
-                            &existing_permissions_path,
-                            &updated_permissions,
-                            None,
-                            true,
-                        )?;
-                    }
-
-                    // Send new request message for same project
-                    return send_project_message(
-                        &config,
-                        &project,
-                        &datasite_email,
-                        &submission_path,
-                        &submission_folder_name,
-                        &project_hash,
-                        &date_str,
-                        non_interactive,
-                        is_self_submission,
-                    );
-                }
-            } else {
-                // Project has changed
-                if !force {
-                    println!("⚠️  A submission exists with the same name but different content.");
-                    println!("   Existing: {}", submission_path.display());
-                    println!("   Use --force to create a new version.");
-                    return Ok(());
                 }
 
-                // Create new submission with updated timestamp
-                let new_date_str = Local::now().format("%Y-%m-%d_%H-%M-%S").to_string();
-                let new_submission_folder =
-                    format!("{}-{}-{}", project.name, new_date_str, short_hash);
-                let new_submission_path = submissions_path.join(&new_submission_folder);
-
-                return create_and_submit_project(
+                return send_project_message(
                     &config,
-                    &storage,
-                    &project,
+                    &module,
+                    &asset_files,
+                    &b3_hashes,
+                    participants.as_ref(),
                     &datasite_email,
-                    &project_dir,
-                    &new_submission_path,
-                    &new_submission_folder,
+                    &submission_path,
+                    &submission_folder_name,
                     &project_hash,
-                    &new_date_str,
-                    participant_url,
+                    &date_str,
                     non_interactive,
+                    is_self_submission,
                 );
             }
+
+            if !force {
+                println!("⚠️  A submission exists with the same name but different content.");
+                println!("   Existing: {}", submission_path.display());
+                println!("   Use --force to create a new version.");
+                return Ok(());
+            }
+        } else if !force {
+            println!("⚠️  A submission exists but its hash could not be verified.");
+            println!("   Existing: {}", submission_path.display());
+            println!("   Use --force to create a new version.");
+            return Ok(());
         }
+
+        // Create new submission with updated timestamp
+        let new_date_str = Local::now().format("%Y-%m-%d_%H-%M-%S").to_string();
+        let new_submission_folder = format!("{}-{}-{}", module_name, new_date_str, short_hash);
+        let new_submission_path = submissions_path.join(&new_submission_folder);
+
+        return create_and_submit_project(
+            &config,
+            &storage,
+            &module,
+            &asset_files,
+            &b3_hashes,
+            participants.as_ref(),
+            &datasite_email,
+            &project_dir,
+            &new_submission_path,
+            &new_submission_folder,
+            &project_hash,
+            &new_date_str,
+            non_interactive,
+        );
     }
 
     // New submission - create and submit
     create_and_submit_project(
         &config,
         &storage,
-        &project,
+        &module,
+        &asset_files,
+        &b3_hashes,
+        participants.as_ref(),
         &datasite_email,
         &project_dir,
         &submission_path,
         &submission_folder_name,
         &project_hash,
         &date_str,
-        participant_url,
         non_interactive,
     )
 }
@@ -365,6 +305,63 @@ fn hash_file(path: &Path) -> Result<String> {
 fn syftbox_storage(config: &Config) -> Result<SyftBoxStorage> {
     let data_dir = config.get_syftbox_data_dir()?;
     Ok(SyftBoxStorage::new(&data_dir))
+}
+
+fn load_module_file(path: &Path) -> Result<ModuleFile> {
+    let content = fs::read_to_string(path)
+        .with_context(|| format!("Failed to read module spec from {}", path.display()))?;
+    match detect_spec_format(path, &content) {
+        SpecFormat::Module => ModuleFile::parse_yaml(&content).map_err(Error::from),
+        SpecFormat::LegacyProject | SpecFormat::Unknown => {
+            let spec: ProjectSpec = serde_yaml::from_str(&content).with_context(|| {
+                format!("Failed to parse legacy project spec {}", path.display())
+            })?;
+            Ok(ModuleFile::from_project_spec(&spec))
+        }
+        SpecFormat::Flow | SpecFormat::FlowOverlay | SpecFormat::LegacyPipeline => {
+            Err(Error::from(anyhow::anyhow!(
+                "Expected module spec at {}",
+                path.display()
+            )))
+        }
+    }
+}
+
+fn legacy_submission_hash(storage: &SyftBoxStorage, path: &Path) -> Result<Option<String>> {
+    let yaml: serde_yaml::Value = read_yaml_from_storage(storage, path)?;
+    let name = match yaml.get("name").and_then(|v| v.as_str()) {
+        Some(name) => name,
+        None => return Ok(None),
+    };
+    let hashes_value = match yaml.get("b3_hashes") {
+        Some(value) => value.clone(),
+        None => return Ok(None),
+    };
+    let hashes: HashMap<String, String> =
+        serde_yaml::from_value(hashes_value).with_context(|| {
+            format!(
+                "Failed to parse b3_hashes from legacy module spec {}",
+                path.display()
+            )
+        })?;
+    let workflow_hash = match hashes.get("workflow.nf") {
+        Some(hash) => hash,
+        None => return Ok(None),
+    };
+
+    let mut hash_content = String::new();
+    hash_content.push_str(name);
+    hash_content.push_str(workflow_hash);
+    let mut sorted_hashes: Vec<_> = hashes.iter().collect();
+    sorted_hashes.sort_by_key(|k| k.0);
+    for (file, hash) in sorted_hashes {
+        hash_content.push_str(file);
+        hash_content.push_str(hash);
+    }
+
+    Ok(Some(
+        blake3::hash(hash_content.as_bytes()).to_hex().to_string(),
+    ))
 }
 
 fn read_yaml_from_storage<T: DeserializeOwned>(storage: &SyftBoxStorage, path: &Path) -> Result<T> {
@@ -456,14 +453,16 @@ fn copy_project_files(
 fn create_and_submit_project(
     config: &Config,
     storage: &SyftBoxStorage,
-    project: &ProjectYaml,
+    module: &ModuleFile,
+    asset_files: &[String],
+    b3_hashes: &HashMap<String, String>,
+    participants: Option<&Vec<String>>,
     datasite_email: &str,
     project_dir: &Path,
     submission_path: &Path,
     submission_folder_name: &str,
     project_hash: &str,
     date_str: &str,
-    participant_url: Option<String>,
     non_interactive: bool,
 ) -> Result<()> {
     // Create submission directory
@@ -472,17 +471,21 @@ fn create_and_submit_project(
     // Copy project files
     copy_project_files(project_dir, submission_path, storage, datasite_email)?;
 
-    // Save updated project.yaml
-    let mut final_project = project.clone();
-    final_project.participants = participant_url.map(|url| vec![url]);
-    let project_yaml_path = submission_path.join("project.yaml");
+    // Save module.yaml
+    let project_yaml_path = submission_path.join(MODULE_YAML_FILE);
     write_yaml_to_storage(
         storage,
         &project_yaml_path,
-        &final_project,
+        &module,
         Some(datasite_email),
         true,
     )?;
+
+    let record = SubmissionRecord {
+        files_hash: project_hash.to_string(),
+    };
+    let record_path = submission_path.join(SUBMISSION_RECORD_FILE);
+    write_yaml_to_storage(storage, &record_path, &record, Some(datasite_email), true)?;
 
     // Create permissions file
     let permissions = SyftPermissions::new_for_datasite(datasite_email);
@@ -490,9 +493,9 @@ fn create_and_submit_project(
     write_yaml_to_storage(storage, &permissions_path, &permissions, None, true)?;
 
     println!("✓ Project submitted successfully!");
-    println!("  Name: {}", project.name);
+    println!("  Name: {}", module.metadata.name);
     println!("  To: {}", datasite_email);
-    if let Some(participants) = &final_project.participants {
+    if let Some(participants) = participants {
         println!("  Participants: {}", participants.join(", "));
     }
     println!("  Location: {}", submission_path.display());
@@ -505,7 +508,10 @@ fn create_and_submit_project(
 
     send_project_message(
         config,
-        &final_project,
+        module,
+        asset_files,
+        b3_hashes,
+        participants,
         datasite_email,
         submission_path,
         submission_folder_name,
@@ -519,7 +525,10 @@ fn create_and_submit_project(
 #[allow(clippy::too_many_arguments)]
 fn send_project_message(
     config: &Config,
-    project: &ProjectYaml,
+    module: &ModuleFile,
+    asset_files: &[String],
+    b3_hashes: &HashMap<String, String>,
+    participants: Option<&Vec<String>>,
     datasite_email: &str,
     submission_path: &Path,
     submission_folder_name: &str,
@@ -543,7 +552,7 @@ fn send_project_message(
     };
 
     // Prepare default message body and allow user to override
-    let default_body = "I would like to run the following project.".to_string();
+    let default_body = "I would like to run the following module.".to_string();
     let mut body = if non_interactive {
         // In non-interactive mode, use default message
         default_body.clone()
@@ -576,31 +585,33 @@ fn send_project_message(
     ));
 
     // Construct metadata for the message
-    let metadata = json!({
-        "project": project,
-        "project_location": submission_syft_url,
-        // Receiver guidance about which of their participants to use
-        "participants": "With your participants: ALL",
-        // Date component used in the submission folder name
-        "date": date_str,
-        // Explicit list of asset files (if any)
-        "assets": project.assets.clone().unwrap_or_default(),
-        // Helpful paths for receiver tooling
-        "sender_local_path": sender_local_path,
-        "receiver_local_path_template": receiver_local_path_template,
-    });
+    let mut metadata = serde_json::Map::new();
+    metadata.insert("module".into(), serde_json::to_value(module)?);
+    metadata.insert("module_location".into(), json!(submission_syft_url));
+    metadata.insert("project_location".into(), json!(submission_syft_url));
+    metadata.insert("date".into(), json!(date_str));
+    metadata.insert("assets".into(), json!(asset_files));
+    metadata.insert("b3_hashes".into(), json!(b3_hashes));
+    metadata.insert("sender_local_path".into(), json!(sender_local_path));
+    metadata.insert(
+        "receiver_local_path_template".into(),
+        json!(receiver_local_path_template),
+    );
+    if let Some(participants) = participants {
+        metadata.insert("participants".into(), json!(participants));
+    }
 
     // Initialize messaging system and send a project message
     let (db, sync) = init_message_system(config)?;
 
     let mut msg = Message::new(config.email.clone(), datasite_email.to_string(), body);
-    msg.subject = Some(format!("Project Request - {}", project.name));
+    msg.subject = Some(format!("Module Request - {}", module.metadata.name));
     msg.message_type = MessageType::Project {
-        project_name: project.name.clone(),
+        project_name: module.metadata.name.clone(),
         submission_id: submission_folder_name.to_string(),
         files_hash: Some(project_hash.to_string()),
     };
-    msg.metadata = Some(metadata);
+    msg.metadata = Some(serde_json::Value::Object(metadata));
 
     db.insert_message(&msg)?;
 
@@ -662,20 +673,21 @@ mod tests {
     use std::time::Duration;
     use tempfile::TempDir;
 
-    fn write_project_yaml(path: &Path, datasites: Option<Vec<String>>) {
-        let project = ProjectYaml {
+    fn write_module_yaml(path: &Path) {
+        let spec = crate::project_spec::ProjectSpec {
             name: "demo-project".into(),
             author: "author@example.com".into(),
-            datasites,
-            participants: None,
             workflow: "workflow.nf".into(),
             template: None,
-            assets: Some(vec!["assets/data.csv".into()]),
-            inputs: None,
-            outputs: None,
-            b3_hashes: None,
+            version: Some("0.1.0".into()),
+            assets: vec!["assets/data.csv".into()],
+            parameters: Vec::new(),
+            inputs: Vec::new(),
+            outputs: Vec::new(),
         };
-        project.save(&path.to_path_buf()).unwrap();
+        let module = crate::module_spec::ModuleFile::from_project_spec(&spec);
+        let yaml = serde_yaml::to_string(&module).unwrap();
+        fs::write(path, yaml).unwrap();
     }
 
     fn setup_submit_env(temp: &TempDir, config_email: &str) -> (PathBuf, SyftBoxApp, PathBuf) {
@@ -706,7 +718,7 @@ mod tests {
         fs::create_dir_all(project_dir.join("assets")).unwrap();
         fs::write(project_dir.join("workflow.nf"), b"process MAIN {}").unwrap();
         fs::write(project_dir.join("assets/data.csv"), b"data").unwrap();
-        write_project_yaml(&project_dir.join("project.yaml"), None);
+        write_module_yaml(&project_dir.join(MODULE_YAML_FILE));
 
         (project_dir, app, bv_home)
     }
@@ -975,29 +987,23 @@ mod tests {
             .join(submission_folder);
         app.storage.ensure_dir(&submission_path).unwrap();
 
-        let mut hashes = HashMap::new();
-        hashes.insert("workflow.nf".to_string(), "abc123".to_string());
-        let project = ProjectYaml {
-            name: "Demo Project".into(),
+        let spec = crate::project_spec::ProjectSpec {
+            name: "demo-project".into(),
             author: config.email.clone(),
-            datasites: Some(vec![config.email.clone()]),
-            participants: Some(vec!["participant1".into()]),
             workflow: "workflow.nf".into(),
             template: None,
-            assets: Some(vec!["assets/data.csv".into()]),
-            inputs: None,
-            outputs: None,
-            b3_hashes: Some(hashes),
+            version: Some("0.1.0".into()),
+            assets: vec!["data.csv".into()],
+            parameters: Vec::new(),
+            inputs: Vec::new(),
+            outputs: Vec::new(),
         };
-
-        write_yaml_to_storage(
-            &app.storage,
-            &submission_path.join("project.yaml"),
-            &project,
-            Some(config.email.as_str()),
-            true,
-        )
-        .unwrap();
+        let module = crate::module_spec::ModuleFile::from_project_spec(&spec);
+        let asset_files = vec!["data.csv".to_string()];
+        let participants = vec!["participant1".to_string()];
+        let mut hashes = HashMap::new();
+        hashes.insert("workflow.nf".to_string(), "abc123".to_string());
+        hashes.insert("assets/data.csv".to_string(), "def456".to_string());
         let perms = SyftPermissions::new_for_datasite(&config.email);
         write_yaml_to_storage(
             &app.storage,
@@ -1010,7 +1016,10 @@ mod tests {
 
         send_project_message(
             &config,
-            &project,
+            &module,
+            &asset_files,
+            &hashes,
+            Some(&participants),
             &config.email,
             &submission_path,
             submission_folder,
@@ -1092,9 +1101,20 @@ mod tests {
                 .contains(&"colleague@example.com".to_string()));
         }
 
-        let project = ProjectYaml::from_file(&submission_path.join("project.yaml")).unwrap();
-        let datasites = project.datasites.unwrap();
-        assert_eq!(datasites, vec!["colleague@example.com".to_string()]);
+        let module_yaml = app
+            .storage
+            .read_plaintext_string(&submission_path.join(MODULE_YAML_FILE))
+            .unwrap();
+        let module = crate::module_spec::ModuleFile::parse_yaml(&module_yaml).unwrap();
+        assert_eq!(module.kind, "Module");
+
+        let record: SubmissionRecord = serde_yaml::from_str(
+            &app.storage
+                .read_plaintext_string(&submission_path.join(SUBMISSION_RECORD_FILE))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(record.files_hash.len(), 64);
 
         let db_path = get_message_db_path(&Config {
             email: config_email.into(),
@@ -1142,7 +1162,7 @@ mod tests {
             b"process MAIN { echo 'changed' }",
         )
         .unwrap();
-        write_project_yaml(&project_dir.join("project.yaml"), None);
+        write_module_yaml(&project_dir.join(MODULE_YAML_FILE));
 
         submit(
             project_dir.to_string_lossy().to_string(),

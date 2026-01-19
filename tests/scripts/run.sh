@@ -7,7 +7,7 @@ Usage: ./run.sh --datasite EMAIL --project PATH [options]
 
 Options:
   --datasite EMAIL     Sandbox client email to run as (required).
-  --project PATH       Pipeline or project directory/file (required).
+  --project PATH       Flow or module directory/file (required).
   --sandbox DIR        Override sandbox root (default: ./sandbox).
   --samplesheet FILE   Use an existing samplesheet instead of generating one.
   --data VALUE         Select participants when generating samplesheet ('all' or comma list).
@@ -21,7 +21,7 @@ Options:
 
 The script uses the sandbox client configured by devstack, generates a samplesheet
 covering all imported files for that datasite (unless --samplesheet is provided),
-and runs `bv run` for the supplied project/pipeline with the samplesheet wired to
+and runs `bv run` for the supplied flow/module with the samplesheet wired to
 `inputs.samplesheet`.
 EOF
 }
@@ -252,7 +252,11 @@ requires_data_dir() {
   if [[ -f "$target" ]]; then
     file="$target"
   elif [[ -d "$target" ]]; then
-    if [[ -f "$target/pipeline.yaml" ]]; then
+    if [[ -f "$target/flow.yaml" ]]; then
+      file="$target/flow.yaml"
+    elif [[ -f "$target/module.yaml" ]]; then
+      file="$target/module.yaml"
+    elif [[ -f "$target/pipeline.yaml" ]]; then
       file="$target/pipeline.yaml"
     elif [[ -f "$target/project.yaml" ]]; then
       file="$target/project.yaml"
@@ -304,7 +308,7 @@ for entry in "${EXTRA_SET_ARGS[@]+"${EXTRA_SET_ARGS[@]}"}"; do
   RUN_CMD+=(--set "$entry")
 done
 
-echo "Running pipeline:"
+echo "Running flow:"
 printf '  bv %s\n' "${RUN_CMD[*]}"
 
 if ! run_bv "$CLIENT_DIR" "${RUN_CMD[@]}"; then
@@ -313,7 +317,7 @@ if ! run_bv "$CLIENT_DIR" "${RUN_CMD[@]}"; then
 fi
 
 echo ""
-echo "Pipeline completed successfully."
+echo "Flow completed successfully."
 echo "  Datasite : $DATASITE"
 echo "  Project  : $PROJECT_PATH"
 echo "  Results  : $RESULTS_DIR"

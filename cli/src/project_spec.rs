@@ -6,6 +6,20 @@ use std::path::Path;
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::module_spec::ModuleFile;
+use crate::spec_format::{detect_spec_format, SpecFormat};
+
+pub const MODULE_YAML_FILE: &str = "module.yaml";
+pub const PROJECT_YAML_FILE: &str = "project.yaml";
+
+pub fn resolve_project_spec_path(project_root: &Path) -> std::path::PathBuf {
+    let module_path = project_root.join(MODULE_YAML_FILE);
+    if module_path.exists() {
+        return module_path;
+    }
+    project_root.join(PROJECT_YAML_FILE)
+}
+
 macro_rules! wln {
     ($buf:expr) => {
         writeln!($buf).map_err(|e| anyhow!(e.to_string()))?
@@ -113,6 +127,35 @@ impl ProjectSpec {
     pub fn load(path: &Path) -> Result<Self> {
         let raw = fs::read_to_string(path)
             .with_context(|| format!("Failed to read project spec at {}", path.display()))?;
+        match detect_spec_format(path, &raw) {
+            SpecFormat::Flow => {
+                return Err(anyhow!(
+                    "Detected Flow spec at {}. ProjectSpec loader does not support Flow.",
+                    path.display()
+                ));
+            }
+            SpecFormat::Module => {
+                let module = ModuleFile::parse_yaml(&raw).with_context(|| {
+                    format!("Failed to parse module spec at {}", path.display())
+                })?;
+                return module.to_project_spec().with_context(|| {
+                    format!("Failed to convert module spec at {}", path.display())
+                });
+            }
+            SpecFormat::FlowOverlay => {
+                return Err(anyhow!(
+                    "Detected FlowOverlay spec at {}. ProjectSpec loader expects module.yaml.",
+                    path.display()
+                ));
+            }
+            SpecFormat::LegacyPipeline => {
+                return Err(anyhow!(
+                    "Detected legacy pipeline spec at {}. Expected module.yaml.",
+                    path.display()
+                ));
+            }
+            SpecFormat::LegacyProject | SpecFormat::Unknown => {}
+        }
         let spec: ProjectSpec = serde_yaml::from_str(&raw)
             .with_context(|| format!("Failed to parse project spec at {}", path.display()))?;
         Ok(spec)
@@ -148,12 +191,13 @@ pub fn scaffold_from_spec(mut spec: ProjectSpec, target_dir: &Path) -> Result<Pr
         .unwrap_or_else(|| "dynamic-nextflow".to_string());
     spec.template = Some(template_name);
 
-    let project_yaml_path = target_dir.join("project.yaml");
+    let project_yaml_path = target_dir.join(MODULE_YAML_FILE);
     let workflow_path = target_dir.join(&spec.workflow);
     let assets_dir = target_dir.join("assets");
 
-    let yaml = serde_yaml::to_string(&spec).context("Failed to serialize project spec")?;
-    fs::write(&project_yaml_path, yaml).context("Failed to write project.yaml")?;
+    let module = ModuleFile::from_project_spec(&spec);
+    let yaml = serde_yaml::to_string(&module).context("Failed to serialize module spec")?;
+    fs::write(&project_yaml_path, yaml).context("Failed to write module.yaml")?;
 
     if let Some(parent) = workflow_path.parent() {
         fs::create_dir_all(parent)
@@ -961,11 +1005,12 @@ pub fn scaffold_blank_project(
         // Add to assets list
         updated_spec.assets = vec![script_filename.to_string()];
 
-        // Update project.yaml with assets
-        let project_yaml_path = target_dir.join("project.yaml");
-        let yaml = serde_yaml::to_string(&updated_spec)
-            .context("Failed to serialize updated project spec")?;
-        fs::write(&project_yaml_path, yaml).context("Failed to update project.yaml with assets")?;
+        // Update module.yaml with assets
+        let project_yaml_path = target_dir.join(MODULE_YAML_FILE);
+        let module = ModuleFile::from_project_spec(&updated_spec);
+        let yaml =
+            serde_yaml::to_string(&module).context("Failed to serialize updated module spec")?;
+        fs::write(&project_yaml_path, yaml).context("Failed to update module.yaml with assets")?;
     }
 
     Ok(updated_spec)

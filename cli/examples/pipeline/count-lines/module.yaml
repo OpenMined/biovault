@@ -1,0 +1,34 @@
+apiVersion: syftbox.openmined.org/v1alpha1
+kind: Module
+metadata:
+  name: pipeline-count-lines
+  version: 0.1.0
+  authors:
+    - madhava@openmined.org
+spec:
+  runner:
+    kind: nextflow
+    entrypoint: workflow.nf
+    template: dynamic-nextflow
+  assets:
+    - path: count_lines.py
+  inputs:
+    - name: samplesheet
+      type: File
+      description: Samplesheet CSV with file paths to measure
+      format:
+        kind: csv
+    - name: data_dir
+      type: Directory
+      description: Base directory containing sample files
+  outputs:
+    - name: counted_sheet
+      type: File
+      description: Samplesheet annotated with per-file line counts
+      format:
+        kind: csv
+      path: line_counts.csv
+    - name: data_dir
+      type: Directory
+      description: Forwarded data directory for downstream steps
+  parameters: []

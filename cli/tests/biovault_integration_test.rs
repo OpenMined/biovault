@@ -15,8 +15,7 @@ const COUNT_LINES_PROJECT: &str = "count-lines";
 const COUNT_LINES_PROJECT_NAME: &str = "pipeline-count-lines";
 const GENOTYPE_FIXTURES_DIR: &str = "tests/data/genotype_files";
 const ALL_SAMPLESHEET_NAME: &str = "all_participants.csv";
-const COUNT_LINES_PROJECT_YAML: &str =
-    include_str!("../examples/pipeline/count-lines/project.yaml");
+const COUNT_LINES_PROJECT_YAML: &str = include_str!("../examples/pipeline/count-lines/module.yaml");
 const COUNT_LINES_WORKFLOW: &str = include_str!("../examples/pipeline/count-lines/workflow.nf");
 const COUNT_LINES_SCRIPT: &str =
     include_str!("../examples/pipeline/count-lines/assets/count_lines.py");
@@ -490,8 +489,8 @@ fn test_prepare_dynamic_project(client_base: &Path, _test_mode: &str) -> Result<
 
     fs::create_dir_all(project_dir.join("assets"))
         .with_context(|| format!("failed to create assets dir at {}", project_dir.display()))?;
-    fs::write(project_dir.join("project.yaml"), COUNT_LINES_PROJECT_YAML)
-        .with_context(|| format!("failed to write project.yaml at {}", project_dir.display()))?;
+    fs::write(project_dir.join("module.yaml"), COUNT_LINES_PROJECT_YAML)
+        .with_context(|| format!("failed to write module.yaml at {}", project_dir.display()))?;
     fs::write(project_dir.join("workflow.nf"), COUNT_LINES_WORKFLOW)
         .with_context(|| format!("failed to write workflow.nf at {}", project_dir.display()))?;
     fs::write(
@@ -514,8 +513,8 @@ fn test_prepare_dynamic_project(client_base: &Path, _test_mode: &str) -> Result<
         "workflow.nf should exist"
     );
     assert!(
-        project_dir.join("project.yaml").exists(),
-        "project.yaml should exist"
+        project_dir.join("module.yaml").exists(),
+        "module.yaml should exist"
     );
 
     println!("✓ Project prepared: {}", COUNT_LINES_PROJECT);
@@ -620,7 +619,7 @@ fn test_check_submission(client_base: &Path, sender_email: &str, test_mode: &str
                     // Check for expected files
                     let submission_dir = entry.path();
                     let workflow_file = submission_dir.join("workflow.nf");
-                    let project_file = submission_dir.join("project.yaml");
+                    let project_file = submission_dir.join("module.yaml");
                     let permission_file = submission_dir.join("syft.pub.yaml");
 
                     if workflow_file.exists() && project_file.exists() && permission_file.exists() {

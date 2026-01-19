@@ -10,11 +10,11 @@ steps:
         --clients client1@sandbox.local \
         --path-column genotype_file
 
-  - name: Run HERC2 classifier pipeline
+  - name: Run HERC2 classifier flow
     run: |
       ./tests/scripts/run.sh \
         --datasite client1@sandbox.local \
-        --project bioscript/examples/herc2/herc2-classifier/pipeline.yaml \
+        --project ../bioscript/examples/herc2/herc2-classifier/flow.yaml \
         --data all
 
   - name: Assert BioVault catalog contains 13 files

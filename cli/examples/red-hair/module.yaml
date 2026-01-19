@@ -1,0 +1,17 @@
+apiVersion: syftbox.openmined.org/v1alpha1
+kind: Module
+metadata:
+  name: red-hair
+  version: 0.1.0
+  authors:
+    - madhava@openmined.org
+spec:
+  runner:
+    kind: nextflow
+    entrypoint: workflow.nf
+    template: default
+  assets:
+    - path: red_hair.py
+  inputs: []
+  outputs: []
+  parameters: []

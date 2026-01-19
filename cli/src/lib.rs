@@ -3,9 +3,12 @@ pub mod config;
 pub mod data;
 pub mod defaults;
 pub mod error;
+pub mod flow_spec;
 pub mod messages;
+pub mod module_spec;
 pub mod pipeline_spec;
 pub mod project_spec;
+pub mod spec_format;
 pub mod telemetry;
 pub mod types;
 

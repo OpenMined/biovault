@@ -1,0 +1,21 @@
+apiVersion: syftbox.openmined.org/v1alpha1
+kind: Module
+metadata:
+  name: apol1-bs
+  version: 0.1.0
+  authors:
+    - madhava@openmined.org
+spec:
+  runner:
+    kind: nextflow
+    entrypoint: workflow.nf
+    template: sheet
+  assets:
+    - path: schema.yaml
+    - path: bs_classifier.py
+    - path: bioscript/classifier.py
+    - path: bioscript/reader.py
+    - path: bioscript/types.py
+  inputs: []
+  outputs: []
+  parameters: []

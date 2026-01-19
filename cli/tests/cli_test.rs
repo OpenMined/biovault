@@ -247,8 +247,8 @@ fn test_run_dry_run_cli() {
     let proj = tmp.path().join("proj");
     fs::create_dir_all(&proj).unwrap();
     fs::write(
-        proj.join("project.yaml"),
-        "name: p\nauthor: a\nworkflow: workflow.nf\ntemplate: dynamic-nextflow\ninputs:\n  - name: data\n    type: File?\n",
+        proj.join("module.yaml"),
+        "apiVersion: syftbox.openmined.org/v1alpha1\nkind: Module\nmetadata:\n  name: p\n  version: 0.1.0\n  authors:\n    - a\nspec:\n  runner:\n    kind: nextflow\n    entrypoint: workflow.nf\n    template: dynamic-nextflow\n  inputs:\n    - name: data\n      type: File\n      optional: true\n  outputs: []\n  parameters: []\n  assets: []\n",
     )
     .unwrap();
     fs::write(proj.join("workflow.nf"), "workflow USER { }").unwrap();

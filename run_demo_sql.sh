@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PIPELINE_FILE="${ROOT_DIR}/cli/examples/pipeline/pipeline.yaml"
+PIPELINE_FILE="${ROOT_DIR}/cli/examples/pipeline/flow.yaml"
 RESULTS_DIR="${ROOT_DIR}/results/demo-sql"
 SAMPLESHEET="${ROOT_DIR}/cli/examples/pipeline/data/participants.csv"
 DATA_DIR="${ROOT_DIR}/cli/examples/pipeline/data"
