@@ -194,12 +194,12 @@ impl FlowFile {
                 .iter()
                 .map(|(name, input)| {
                     let default = match input {
-                        PipelineInputSpec::Detailed { default, .. } => default
-                            .as_ref()
-                            .map(|value| {
+                        PipelineInputSpec::Detailed { default, .. } => {
+                            default.as_ref().map(|value| {
                                 serde_yaml::from_str::<YamlValue>(value)
                                     .unwrap_or_else(|_| YamlValue::String(value.clone()))
-                            }),
+                            })
+                        }
                         _ => None,
                     };
                     (
@@ -284,7 +284,11 @@ impl FlowFile {
             },
             spec: FlowSpec {
                 inputs,
-                modules: if modules.is_empty() { None } else { Some(modules) },
+                modules: if modules.is_empty() {
+                    None
+                } else {
+                    Some(modules)
+                },
                 steps,
             },
         })
