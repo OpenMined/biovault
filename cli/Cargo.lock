@@ -3590,6 +3590,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "sha1",
  "tokio",
  "tokio-tungstenite",
  "tower 0.5.2",
