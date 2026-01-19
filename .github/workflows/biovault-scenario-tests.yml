@@ -8,10 +8,11 @@ on:
 
 jobs:
   run-scenarios:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os == 'windows' && 'namespace-profile-windows-medium' || 'namespace-profile-linux-medium' }}
     strategy:
       fail-fast: false
       matrix:
+        os: [linux, windows]
         client_mode: [go, rust]
         scenario:
           - tests/scenarios/import-and-run.yaml
@@ -24,6 +25,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Setup workspace dependencies
+        shell: bash
         run: |
           chmod +x scripts/setup-workspace.sh
           ./scripts/setup-workspace.sh
@@ -52,7 +54,9 @@ jobs:
         with:
           go-version-file: syftbox/go.mod
 
-      - name: Install Nextflow
+      - name: Install Nextflow (Unix)
+        if: matrix.os != 'windows'
+        shell: bash
         run: |
           curl -fsSL https://get.nextflow.io | bash
           sudo mv nextflow /usr/local/bin/
@@ -63,10 +67,12 @@ jobs:
         run: cd cli && cargo build --release
 
       - name: Run scenario
+        shell: bash
         run: ./test-scenario.sh --client-mode ${{ matrix.client_mode }} ${{ matrix.scenario }}
 
       - name: Show logs on failure
         if: failure()
+        shell: bash
         run: |
           echo "=== Sandbox Directory Structure ==="
           find sandbox -type d -maxdepth 2 2>/dev/null || true
@@ -76,6 +82,7 @@ jobs:
 
       - name: Cleanup devstack
         if: always()
+        shell: bash
         run: |
           chmod +x ./tests/scripts/devstack.sh
           ./tests/scripts/devstack.sh --stop --reset || true

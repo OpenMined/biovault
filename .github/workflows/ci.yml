@@ -2,7 +2,7 @@ name: CI
 
 on:
   pull_request:
-    branches: [main, develop]
+    branches: [main]
   # Optionally, allow manual trigger for debugging
   workflow_dispatch:
 
@@ -15,10 +15,16 @@ concurrency:
 
 jobs:
   test:
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          - os: linux
+            runner: namespace-profile-linux-medium
+          - os: mac
+            runner: namespace-profile-mac-medium
+          - os: windows
+            runner: namespace-profile-windows-medium
 
     steps:
       - name: Checkout code
@@ -53,12 +59,12 @@ jobs:
           workspaces: 'cli -> target'
 
       - name: Run lint checks and tests
-        if: matrix.os != 'windows-latest'
+        if: matrix.os != 'windows'
         run: ./lint.sh --check --test
 
       - name: Run tests (Windows)
-        if: matrix.os == 'windows-latest'
-        run: cd cli && cargo test --verbose
+        if: matrix.os == 'windows'
+        run: cd cli && cargo test --all-features --verbose
 
       - name: Run slow tests (feature gated)
         run: cd cli && cargo test --features slow-tests --verbose
@@ -68,7 +74,7 @@ jobs:
 
   chaos:
     name: Chaos (short)
-    runs-on: ubuntu-latest
+    runs-on: namespace-profile-linux-medium
     timeout-minutes: 25
     env:
       CHAOS_BUILD_PROFILE: dev
