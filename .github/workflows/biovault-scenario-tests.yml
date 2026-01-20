@@ -12,23 +12,105 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Docker-dependent tests on Linux (namespace runners don't have WSL enabled)
-        # Non-Docker tests on Windows
+        # Testing Hyper-V + Podman for Docker on Windows
         include:
-          # Linux: Docker-dependent scenarios
-          - os: linux
+          - os: windows
             client_mode: go
             scenario: tests/scenarios/import-and-run.yaml
-          # Windows: non-Docker scenarios
-          - os: windows
-            client_mode: go
-            scenario: tests/scenarios/messaging-core.yaml
-          - os: windows
-            client_mode: go
-            scenario: tests/scenarios/key-management.yaml
+          # Commented out while testing Hyper-V:
+          # - os: linux
+          #   client_mode: go
+          #   scenario: tests/scenarios/import-and-run.yaml
+          # - os: windows
+          #   client_mode: go
+          #   scenario: tests/scenarios/messaging-core.yaml
+          # - os: windows
+          #   client_mode: go
+          #   scenario: tests/scenarios/key-management.yaml
 
     steps:
       - uses: actions/checkout@v4
+
+      # Try Hyper-V + Podman for Linux containers on Windows
+      - name: Setup Hyper-V and Podman (Windows)
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Continue"
+
+          Write-Host "=== System Info ===" -ForegroundColor Cyan
+          Write-Host "OS: $([System.Environment]::OSVersion.VersionString)"
+          whoami
+          whoami /groups
+
+          # Check current Hyper-V status
+          Write-Host ""
+          Write-Host "=== Hyper-V Status ===" -ForegroundColor Cyan
+          Get-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V* | Format-Table FeatureName, State
+
+          # Try to enable Hyper-V
+          Write-Host ""
+          Write-Host "=== Enabling Hyper-V ===" -ForegroundColor Cyan
+          Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V -All -NoRestart 2>&1
+
+          # Check status after enabling
+          Write-Host ""
+          Write-Host "=== Hyper-V Status After Enable ===" -ForegroundColor Cyan
+          Get-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V* | Format-Table FeatureName, State
+
+          # Install Chocolatey if needed
+          Write-Host ""
+          Write-Host "=== Installing Chocolatey ===" -ForegroundColor Cyan
+          if (-not (Get-Command choco -ErrorAction SilentlyContinue)) {
+            Set-ExecutionPolicy Bypass -Scope Process -Force
+            [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
+            Invoke-Expression ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
+            $env:PATH = "$env:PATH;C:\ProgramData\chocolatey\bin"
+          }
+          choco --version
+
+          # Install podman-cli
+          Write-Host ""
+          Write-Host "=== Installing Podman ===" -ForegroundColor Cyan
+          choco install podman-cli -y
+          $env:PATH = "C:\ProgramData\chocolatey\bin;$env:PATH"
+
+          Write-Host ""
+          Write-Host "=== Podman Version ===" -ForegroundColor Cyan
+          podman --version
+
+          # Set Hyper-V as provider
+          Write-Host ""
+          Write-Host "=== Initializing Podman with Hyper-V ===" -ForegroundColor Cyan
+          $env:CONTAINERS_MACHINE_PROVIDER = "hyperv"
+          [Environment]::SetEnvironmentVariable("CONTAINERS_MACHINE_PROVIDER", "hyperv", "Process")
+
+          # Try to init podman machine
+          podman machine init 2>&1
+
+          # Start podman machine
+          Write-Host ""
+          Write-Host "=== Starting Podman Machine ===" -ForegroundColor Cyan
+          podman machine start 2>&1
+
+          # Wait for machine
+          Start-Sleep -Seconds 15
+
+          # Test podman
+          Write-Host ""
+          Write-Host "=== Testing Podman ===" -ForegroundColor Cyan
+          podman info
+          podman run --rm hello-world
+
+          # Create docker alias
+          Write-Host ""
+          Write-Host "=== Creating Docker Alias ===" -ForegroundColor Cyan
+          Stop-Service docker -ErrorAction SilentlyContinue
+          $wrapperContent = "@echo off`r`nC:\ProgramData\chocolatey\bin\podman.exe %*"
+          Set-Content -Path "C:\Windows\docker.bat" -Value $wrapperContent -NoNewline
+
+          # Test via alias
+          C:\Windows\docker.bat run --rm hello-world
 
       - name: Setup workspace dependencies
         shell: bash
