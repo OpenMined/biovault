@@ -12,114 +12,27 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Docker-dependent scenarios (import-and-run) only on Linux
-        # Non-Docker scenarios can run on both
-        include:
-          # Linux: run all scenarios
-          - os: linux
-            client_mode: go
-            scenario: tests/scenarios/import-and-run.yaml
-          # - os: linux
-          #   client_mode: go
-          #   scenario: tests/scenarios/inbox-ping-pong.yaml
-          # Windows: only non-Docker scenarios for now
-          # - os: windows
-          #   client_mode: go
-          #   scenario: tests/scenarios/inbox-ping-pong.yaml
-        # Note: import-and-run requires Docker for Nextflow Linux containers
-        # Windows Server Docker Engine doesn't support Linux containers
+        # Windows: non-Docker scenarios only
+        # Docker-dependent scenarios (import-and-run) need Linux containers
+        # which Windows Server Docker Engine doesn't support
+        os: [windows]
+        client_mode: [go]
+        scenario:
+          - tests/scenarios/messaging-core.yaml
+          - tests/scenarios/key-management.yaml
+          # Docker-dependent (run on Linux only):
+          # - tests/scenarios/import-and-run.yaml
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup Docker for Linux containers (Windows)
-        if: matrix.os == 'windows'
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Continue"
-
-          Write-Host "=== Diagnostic Info ===" -ForegroundColor Cyan
-          Write-Host "OS: $([System.Environment]::OSVersion.VersionString)"
-          Write-Host "PowerShell: $($PSVersionTable.PSVersion)"
-
-          # Check current Docker status
-          Write-Host ""
-          Write-Host "=== Current Docker Status ===" -ForegroundColor Cyan
-          $dockerInfo = docker info 2>&1 | Out-String
-          Write-Host $dockerInfo
-
-          # Check if Docker can already run Linux containers
-          if ($dockerInfo -match "OSType:\s+linux") {
-            Write-Host "Docker is already configured for Linux containers!" -ForegroundColor Green
-            docker run --rm hello-world
-            exit 0
-          }
-
-          # Try DockerCli.exe switch (Docker Desktop)
-          Write-Host ""
-          Write-Host "=== Checking for Docker Desktop ===" -ForegroundColor Cyan
-          $dockerCli = "C:\Program Files\Docker\Docker\DockerCli.exe"
-          if (Test-Path $dockerCli) {
-            Write-Host "Found DockerCli.exe, attempting to switch to Linux engine..."
-            try {
-              & $dockerCli -SwitchLinuxEngine 2>&1
-              Start-Sleep -Seconds 20
-
-              $dockerInfo = docker info 2>&1 | Out-String
-              if ($dockerInfo -match "OSType:\s+linux") {
-                Write-Host "Successfully switched to Linux containers!" -ForegroundColor Green
-                docker run --rm hello-world
-                exit 0
-              }
-              Write-Host "DockerCli switch did not change to Linux" -ForegroundColor Yellow
-            } catch {
-              Write-Host "DockerCli switch failed: $_" -ForegroundColor Yellow
-            }
-          } else {
-            Write-Host "DockerCli.exe not found at $dockerCli" -ForegroundColor Yellow
-          }
-
-          # Check WSL status
-          Write-Host ""
-          Write-Host "=== WSL Status ===" -ForegroundColor Cyan
-          try {
-            $wslStatus = wsl --status 2>&1 | Out-String
-            Write-Host $wslStatus
-          } catch {
-            Write-Host "WSL status check failed: $_" -ForegroundColor Yellow
-          }
-
-          try {
-            $wslList = wsl --list --verbose 2>&1 | Out-String
-            Write-Host $wslList
-          } catch {
-            Write-Host "WSL list failed: $_" -ForegroundColor Yellow
-          }
-
-          # Check what's available
-          Write-Host ""
-          Write-Host "=== Available Container Runtimes ===" -ForegroundColor Cyan
-          $runtimes = @("docker", "podman", "nerdctl", "containerd")
-          foreach ($rt in $runtimes) {
-            $found = Get-Command $rt -ErrorAction SilentlyContinue
-            if ($found) {
-              Write-Host "  $rt : $($found.Source)"
-            } else {
-              Write-Host "  $rt : not found"
-            }
-          }
-
-          # For this test scenario, we need Linux containers
-          # If we can't get them, fail the job clearly
-          Write-Host ""
-          Write-Host "=== Result ===" -ForegroundColor Red
-          Write-Host "ERROR: Unable to configure Docker for Linux containers on this runner."
-          Write-Host "The import-and-run scenario requires Linux container support for Nextflow."
-          Write-Host ""
-          Write-Host "Options:"
-          Write-Host "  1. Use a runner with Docker Desktop pre-installed"
-          Write-Host "  2. Run Docker-dependent tests on Linux runners only"
-          exit 1
+      # NOTE: Docker setup commented out - Windows Server Docker Engine doesn't support
+      # Linux containers. Will revisit with Podman in a future PR.
+      # - name: Setup Docker for Linux containers (Windows)
+      #   if: matrix.os == 'windows'
+      #   shell: pwsh
+      #   run: |
+      #     # Docker setup code here...
 
       - name: Setup workspace dependencies
         shell: bash
