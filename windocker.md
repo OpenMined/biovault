@@ -253,12 +253,112 @@ process.shell = ['/bin/sh', '-ue']
 
 This config is passed to Nextflow with the `-c` flag.
 
+## Shell Compatibility Issues
+
+### The `printf '%q'` Problem
+
+The bioscript workflow templates used `printf '%q'` for shell-safe quoting:
+```groovy
+script:
+def genoFileName = genotype_file.getName()
+"""
+GENO_FILE=\$(printf '%q' "${genoFileName}")
+bioscript classify "${assets_dir}/classify_herc2.py" --file \$GENO_FILE --participant_id "${participant_id}"
+"""
+```
+
+This fails with `invalid directive` error because:
+- Nextflow containers use `/bin/sh` (configured via `process.shell = ['/bin/sh', '-ue']`)
+- `printf '%q'` is a **bash-specific** extension, not available in POSIX `/bin/sh`
+- Alpine-based containers (like bioscript) only have `/bin/sh`
+
+### The Fix
+
+Remove the `printf '%q'` wrapper and quote variables directly:
+```groovy
+script:
+def genoFileName = genotype_file.getName()
+"""
+bioscript classify "${assets_dir}/classify_herc2.py" --file "${genoFileName}" --participant_id "${participant_id}"
+"""
+```
+
+This is safe because:
+- Nextflow's `def genoFileName = genotype_file.getName()` already gives a clean filename
+- The filename comes from pipeline config, not untrusted user input
+- Double-quoting in shell handles spaces and special characters
+
+### Affected Files
+
+The fix was applied to all workflow files in the bioscript repo:
+- `examples/herc2/herc2-classifier/workflow.nf` (already on main)
+- `examples/apol1/apol1-classifier/workflow.nf`
+- `examples/brca/brca-classifier/workflow.nf`
+- `examples/thalassemia/thalassemia-classifier/workflow.nf`
+- `python/src/bioscript/biovault.py` (the workflow generator)
+
+PR: `fix/shell-compatibility` branch in bioscript repo
+
+## Path Format Handling
+
+### CSV Path Requirements
+
+BioVault CLI extracts file paths from CSV/TSV inputs to set up container mounts. For proper mount extraction:
+
+| Path Format | Works With | Example |
+|-------------|------------|---------|
+| Windows (`C:/...`) | BioVault CLI mount detection | `C:/Users/admin/data/file.vcf` |
+| WSL (`/mnt/c/...`) | Podman internal paths | `/mnt/c/Users/admin/data/file.vcf` |
+| Docker (`/c/...`) | Docker Desktop internal paths | `/c/Users/admin/data/file.vcf` |
+
+**Important**: Use Windows-style paths (`C:/Users/...`) in CSV files so the CLI can properly detect and mount the directories.
+
+### Path Conversion in Test Scripts
+
+The quick test script (`tests/scripts/quick-herc2-test.sh`) includes a helper:
+```bash
+# Convert Git Bash path (/c/Users/...) to Windows path (C:/Users/...)
+windows_path() {
+    local p="$1"
+    echo "$p" | sed 's|^/\([a-zA-Z]\)/|\1:/|'
+}
+```
+
+## Local Testing
+
+### Quick Test Script
+
+For rapid local testing without full CI:
+```bash
+./win.ps1 tests/scripts/quick-herc2-test.sh
+```
+
+This script:
+1. Sets up required environment variables (`SYC_VAULT`)
+2. Creates a temporary samplesheet with Windows paths
+3. Runs `biovault run` with the herc2 pipeline
+4. Cleans up temporary files
+
+### Successful Test Results
+
+Local testing with Podman nested containers:
+```
+[c0/3b0bc9] Submitted process > USER:herc2_classifier (p001)
+[23/7c95e6] Submitted process > USER:herc2_classifier (p002)
+...
+[c0/3b0bc9] Completed process > USER:herc2_classifier (p001)
+[23/7c95e6] Completed process > USER:herc2_classifier (p002)
+```
+
+All 13 herc2 classifier tasks complete successfully with the shell compatibility fix.
+
 ## Next Steps
 
 1. ~~**Test Hyper-V on CI**: Enable Hyper-V feature and try Podman with hyperv provider~~ ✅ Done!
 2. ~~**Nested container support**: Enable Nextflow to spawn task containers with Podman~~ ✅ Done!
-3. **Verify full pipeline execution**: Test `import-and-run.yaml` scenario with Podman
-4. **Document for users**: Update user docs for Podman as Docker alternative
+3. ~~**Shell compatibility**: Fix `printf '%q'` issue in workflow templates~~ ✅ Done!
+4. **Merge bioscript PR**: Merge `fix/shell-compatibility` branch to update all workflows
+5. **Document for users**: Update user docs for Podman as Docker alternative
 
 ## References
 
