@@ -93,10 +93,18 @@ jobs:
             }
           }
 
-          # If DockerCli doesn't exist or switch failed, install Docker Desktop
+          # If DockerCli doesn't exist or switch failed, install Docker Desktop via Chocolatey
           Write-Host ""
-          Write-Host "=== Installing Docker Desktop via winget ===" -ForegroundColor Cyan
-          winget install -e --id Docker.DockerDesktop --accept-source-agreements --accept-package-agreements
+          Write-Host "=== Installing Chocolatey (if needed) ===" -ForegroundColor Cyan
+          if (-not (Get-Command choco -ErrorAction SilentlyContinue)) {
+            Set-ExecutionPolicy Bypass -Scope Process -Force
+            [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
+            Invoke-Expression ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
+          }
+
+          Write-Host ""
+          Write-Host "=== Installing Docker Desktop via Chocolatey ===" -ForegroundColor Cyan
+          choco install docker-desktop -y --no-progress
 
           Write-Host ""
           Write-Host "=== Stopping Windows Docker service ===" -ForegroundColor Cyan
