@@ -43,17 +43,20 @@ jobs:
           # Download Podman installer
           Write-Host ""
           Write-Host "=== Downloading Podman ===" -ForegroundColor Cyan
-          $podmanVersion = "5.3.1"
-          $podmanMsi = "podman-$podmanVersion-setup.exe"
-          $podmanUrl = "https://github.com/containers/podman/releases/download/v$podmanVersion/$podmanMsi"
+          $podmanVersion = "5.7.1"
+          $podmanExe = "podman-$podmanVersion-setup.exe"
+          $podmanUrl = "https://github.com/containers/podman/releases/download/v$podmanVersion/$podmanExe"
 
           Write-Host "Downloading from $podmanUrl"
-          Invoke-WebRequest -Uri $podmanUrl -OutFile $podmanMsi -UseBasicParsing
+          Invoke-WebRequest -Uri $podmanUrl -OutFile $podmanExe -UseBasicParsing
+          Write-Host "Download complete, file size: $((Get-Item $podmanExe).Length) bytes"
 
           # Install Podman silently
           Write-Host ""
           Write-Host "=== Installing Podman ===" -ForegroundColor Cyan
-          Start-Process -FilePath ".\$podmanMsi" -ArgumentList "/install /quiet /norestart" -Wait -NoNewWindow
+          Write-Host "Running installer..."
+          Start-Process -FilePath ".\$podmanExe" -ArgumentList "/S" -Wait -NoNewWindow
+          Write-Host "Installer finished"
 
           # Add Podman to PATH
           $podmanPath = "C:\Program Files\RedHat\Podman"
