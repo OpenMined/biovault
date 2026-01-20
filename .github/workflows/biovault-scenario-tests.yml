@@ -77,15 +77,25 @@ jobs:
           $timer = [Diagnostics.Stopwatch]::StartNew()
           while ($timer.Elapsed.TotalSeconds -lt $timeout) {
             $info = docker info 2>&1
+            $osType = ($info | Select-String -Pattern "OSType:\s+(\w+)").Matches.Groups[1].Value
+            $hasError = $info -match "error|Error|ERROR"
+
+            Write-Host "Waiting... ($([int]$timer.Elapsed.TotalSeconds)s) - OSType: $osType, HasError: $hasError"
+
             # Check for Linux AND no errors (Internal Server Error means still starting)
-            if (($info -match "OSType:\s+linux") -and ($info -notmatch "Internal Server Error") -and ($info -notmatch "error")) {
+            if (($osType -eq "linux") -and (-not $hasError)) {
               Write-Host "Docker Desktop is ready with Linux containers!" -ForegroundColor Green
               break
             }
-            Write-Host "Waiting... ($([int]$timer.Elapsed.TotalSeconds)s)"
             Start-Sleep -Seconds 10
           }
           $timer.Stop()
+
+          if ($timer.Elapsed.TotalSeconds -ge $timeout) {
+            Write-Host "WARNING: Timeout waiting for Docker Desktop" -ForegroundColor Yellow
+            Write-Host "Last docker info output:" -ForegroundColor Yellow
+            docker info
+          }
 
           # Extra wait for stability
           Start-Sleep -Seconds 10
