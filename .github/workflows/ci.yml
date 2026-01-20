@@ -9,10 +9,9 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
-# Temporarily disabled to allow debugging multiple runs
-# concurrency:
-#   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-#   cancel-in-progress: true
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   # test:
