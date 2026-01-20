@@ -129,6 +129,65 @@ jobs:
           # Test via alias
           C:\Windows\docker.bat run --rm hello-world
 
+      # Quick diagnostic test for Nextflow + Podman I/O issues
+      - name: Test Nextflow in Podman (Windows)
+        if: matrix.os == 'windows'
+        shell: bash
+        run: |
+          set -x
+
+          # Create test workflow in /tmp (native Linux path)
+          TEST_DIR="/tmp/nf-test-$$"
+          mkdir -p "$TEST_DIR"
+
+          cat > "$TEST_DIR/test.nf" << 'EOF'
+          process HELLO {
+              output: stdout
+              script: "echo Hello from Nextflow"
+          }
+          workflow { HELLO() | view }
+          EOF
+
+          cat > "$TEST_DIR/nextflow.config" << 'EOF'
+          process.executor = 'local'
+          EOF
+
+          echo "=== Test 1: Run Nextflow with /tmp working directory ==="
+          podman run --rm \
+            --userns=keep-id \
+            --security-opt label=disable \
+            -e NXF_HOME=/tmp/.nextflow \
+            -e NXF_TEMP=/tmp \
+            -v "$TEST_DIR:$TEST_DIR" \
+            -w "$TEST_DIR" \
+            ghcr.io/openmined/nextflow-runner:25.10.2 \
+            nextflow -log /tmp/nf.log run test.nf -c nextflow.config
+
+          echo "=== Test 1 passed: /tmp working directory works ==="
+
+          # Now test with Windows mount as working directory
+          WIN_TEST_DIR="/mnt/c/Users/runneradmin/work/nf-win-test"
+          mkdir -p "$WIN_TEST_DIR" || true
+          cp "$TEST_DIR/test.nf" "$WIN_TEST_DIR/" || true
+          cp "$TEST_DIR/nextflow.config" "$WIN_TEST_DIR/" || true
+
+          echo "=== Test 2: Run Nextflow with Windows mount working directory ==="
+          podman run --rm \
+            --userns=keep-id \
+            --security-opt label=disable \
+            -e NXF_HOME=/tmp/.nextflow \
+            -e NXF_TEMP=/tmp \
+            -v "$WIN_TEST_DIR:$WIN_TEST_DIR" \
+            -w "$WIN_TEST_DIR" \
+            ghcr.io/openmined/nextflow-runner:25.10.2 \
+            nextflow -log /tmp/nf.log run test.nf -c nextflow.config || {
+              echo "=== Test 2 FAILED: Windows mount working directory has I/O issues ==="
+              echo "This confirms we need to use /tmp as working directory"
+              # Don't fail - this is expected to fail
+            }
+
+          echo "=== Diagnostic complete ==="
+
       - name: Setup workspace dependencies
         shell: bash
         run: |
