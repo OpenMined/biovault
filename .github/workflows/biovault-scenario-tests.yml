@@ -140,6 +140,14 @@ jobs:
         with:
           toolchain: 1.91.0
 
+      # Quick test to verify Podman nested containers work before full scenario
+      - name: Quick Podman Test (Windows)
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: |
+          Write-Host "=== Running Quick Podman Test (all 13 participants) ===" -ForegroundColor Cyan
+          .\win.ps1 tests/scripts/quick-herc2-test.sh --all
+
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
@@ -170,14 +178,6 @@ jobs:
 
       - name: Build BioVault CLI
         run: cd cli && cargo build --release
-
-      # Quick test to verify Podman nested containers work before full scenario
-      - name: Quick Podman Test (Windows)
-        if: matrix.os == 'windows'
-        shell: pwsh
-        run: |
-          Write-Host "=== Running Quick Podman Test (all 13 participants) ===" -ForegroundColor Cyan
-          .\win.ps1 tests/scripts/quick-herc2-test.sh --all
 
       - name: Run scenario (Unix)
         if: matrix.os != 'windows'
