@@ -47,49 +47,31 @@ jobs:
           wsl --status 2>&1
           wsl --list --verbose 2>&1
 
-          # Download and install Podman MSI directly
+          # Install Chocolatey if not present
           Write-Host ""
-          Write-Host "=== Downloading Podman MSI ===" -ForegroundColor Cyan
-          $podmanVersion = "5.7.1"
-          $podmanMsi = "podman-installer-windows-amd64.msi"
-          $podmanUrl = "https://github.com/containers/podman/releases/download/v$podmanVersion/$podmanMsi"
-
-          Write-Host "Downloading from $podmanUrl"
-          Invoke-WebRequest -Uri $podmanUrl -OutFile $podmanMsi -UseBasicParsing
-          Write-Host "Download complete, file size: $((Get-Item $podmanMsi).Length) bytes"
-
-          # Install Podman silently
-          Write-Host ""
-          Write-Host "=== Installing Podman ===" -ForegroundColor Cyan
-          $msiArgs = "/i `"$podmanMsi`" /quiet /norestart ADDLOCAL=ALL"
-          Write-Host "Running: msiexec $msiArgs"
-          Start-Process msiexec -ArgumentList $msiArgs -Wait -NoNewWindow
-          Write-Host "MSI installation complete"
-
-          # Add Podman to PATH
-          $podmanPath = "C:\Program Files\RedHat\Podman"
-          $env:PATH = "$podmanPath;$env:PATH"
-
-          # Also check alternate location
-          if (-not (Test-Path "$podmanPath\podman.exe")) {
-            $altPath = "$env:LOCALAPPDATA\Programs\Podman"
-            if (Test-Path "$altPath\podman.exe") {
-              $podmanPath = $altPath
-              $env:PATH = "$podmanPath;$env:PATH"
-            }
+          Write-Host "=== Installing Chocolatey ===" -ForegroundColor Cyan
+          if (-not (Get-Command choco -ErrorAction SilentlyContinue)) {
+            Set-ExecutionPolicy Bypass -Scope Process -Force
+            [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
+            Invoke-Expression ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
+            $env:PATH = "$env:PATH;C:\ProgramData\chocolatey\bin"
           }
+          choco --version
 
-          Write-Host "Podman path: $podmanPath"
-          Get-ChildItem $podmanPath -ErrorAction SilentlyContinue
+          # Install podman-cli via Chocolatey
+          Write-Host ""
+          Write-Host "=== Installing Podman CLI ===" -ForegroundColor Cyan
+          choco install podman-cli -y
+          $env:PATH = "C:\ProgramData\chocolatey\bin;$env:PATH"
 
           Write-Host ""
           Write-Host "=== Podman Version ===" -ForegroundColor Cyan
           podman --version
 
-          # Initialize podman machine with WSL
+          # Initialize podman machine (auto-detects WSL)
           Write-Host ""
           Write-Host "=== Initializing Podman Machine ===" -ForegroundColor Cyan
-          podman machine init --provider wsl 2>&1
+          podman machine init 2>&1
 
           # Start podman machine
           Write-Host ""
@@ -112,19 +94,17 @@ jobs:
           Stop-Service docker -ErrorAction SilentlyContinue
 
           # Create a batch file that wraps podman as docker
-          $wrapperContent = @"
-          @echo off
-          podman %*
-          "@
+          $wrapperContent = "@echo off`r`nC:\ProgramData\chocolatey\bin\podman.exe %*"
           $wrapperPath = "C:\Windows\docker.bat"
-          Set-Content -Path $wrapperPath -Value $wrapperContent
+          Set-Content -Path $wrapperPath -Value $wrapperContent -NoNewline
           Write-Host "Created docker wrapper at $wrapperPath"
+          Get-Content $wrapperPath
 
           # Test docker alias
           Write-Host ""
           Write-Host "=== Testing Docker Alias ===" -ForegroundColor Cyan
-          docker info
-          docker run --rm hello-world
+          C:\Windows\docker.bat info
+          C:\Windows\docker.bat run --rm hello-world
 
       - name: Setup workspace dependencies
         shell: bash
