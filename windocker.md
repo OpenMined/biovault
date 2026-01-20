@@ -64,17 +64,19 @@ Error: command C:\Windows\system32\wsl.exe [-l --quiet] failed: exit status 0xff
 - The `--provider` flag isn't available in `podman-cli` (remote client only)
 
 ### 5. Podman with Hyper-V Provider
-**Status**: 🔄 To be tested
+**Status**: ✅ Working on CI!
 
 ```powershell
 $env:CONTAINERS_MACHINE_PROVIDER = "hyperv"
 podman machine init
+podman machine start
 ```
 
-- Requires Hyper-V to be enabled
-- Can enable with: `Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V -All`
-- May require reboot (but CI VMs might have it pre-enabled or work without reboot)
-- Runner has admin privileges so should be able to enable
+- Hyper-V is already enabled on namespace runners
+- No reboot required
+- Podman 5.7.1 works with Hyper-V backend
+- Successfully runs Linux containers (Fedora CoreOS 43 VM)
+- Docker socket compatibility via `/var/run/docker.sock` symlink
 
 ### 6. Rancher Desktop
 **Status**: ❌ Didn't work on CI
@@ -176,13 +178,37 @@ This works because WSL2 is properly enabled on desktop Windows.
 
 - `biovault/.github/workflows/biovault-scenario-tests.yml` - CI workflow
 - `biovault/.github/workflows/ci.yml` - Main CI entry point
-- `biovault/cli/src/cli/commands/run_dynamic.rs` - Added `--platform=linux/amd64` for Windows docker pulls
+- `biovault/cli/src/cli/commands/run_dynamic.rs` - Container runtime auto-detection (Docker/Podman)
+- `biovault/cli/src/config.rs` - Added `container_runtime` config option
+
+## Container Runtime Configuration
+
+The CLI now supports both Docker and Podman with automatic detection:
+
+### Auto-detection (default)
+1. Tries configured Docker path (from `binary_paths.docker`)
+2. Tries system `docker` command
+3. Falls back to `podman` if Docker isn't available or isn't running Linux containers
+
+### Environment Variable
+```bash
+BIOVAULT_CONTAINER_RUNTIME=podman  # Force Podman
+BIOVAULT_CONTAINER_RUNTIME=docker  # Force Docker
+BIOVAULT_CONTAINER_RUNTIME=auto    # Auto-detect (default)
+```
+
+### Config File
+In `config.yaml`:
+```yaml
+binary_paths:
+  container_runtime: podman  # or "docker" or "auto"
+```
 
 ## Next Steps
 
-1. **Test Hyper-V on CI**: Enable Hyper-V feature and try Podman with hyperv provider
-2. **Contact namespace.so**: Ask about WSL support or Hyper-V-enabled runner profiles
-3. **Consider Linux-only for Docker tests**: If Windows container support isn't critical
+1. ~~**Test Hyper-V on CI**: Enable Hyper-V feature and try Podman with hyperv provider~~ ✅ Done!
+2. **Verify full pipeline execution**: Test `import-and-run.yaml` scenario with Podman
+3. **Document for users**: Update user docs for Podman as Docker alternative
 
 ## References
 
