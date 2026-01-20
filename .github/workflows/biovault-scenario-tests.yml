@@ -24,52 +24,75 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Setup WSL with Ubuntu for Linux container support on Windows
-      - name: Setup WSL (Ubuntu)
-        if: matrix.os == 'windows'
-        uses: Vampire/setup-wsl@v6
-        with:
-          distribution: Ubuntu-24.04
-          wsl-version: 2
-          # Skip update to speed up - docker.io install will update what it needs
-          update: false
-
-      # Install Docker Engine inside WSL and start the daemon
-      - name: Install Docker in WSL
-        if: matrix.os == 'windows'
-        shell: wsl-bash {0}
-        run: |
-          set -euxo pipefail
-
-          sudo apt-get update
-          sudo apt-get install -y docker.io
-
-          # Start dockerd and expose on localhost for Windows access
-          sudo nohup dockerd \
-            -H unix:///var/run/docker.sock \
-            -H tcp://127.0.0.1:2375 \
-            >/tmp/dockerd.log 2>&1 &
-
-          # Wait for readiness
-          for i in $(seq 1 60); do
-            sudo docker info >/dev/null 2>&1 && break
-            sleep 1
-          done
-
-          sudo docker run --rm hello-world
-
-      # Configure Windows to use the Linux Docker daemon
-      - name: Configure Docker for Windows
+      # Setup WSL2 and Docker for Linux container support on Windows
+      - name: Setup WSL2 with Docker
         if: matrix.os == 'windows'
         shell: pwsh
         run: |
-          # Stop Windows Docker service to avoid conflicts
+          $ErrorActionPreference = "Continue"
+
+          Write-Host "=== System Info ===" -ForegroundColor Cyan
+          Write-Host "OS: $([System.Environment]::OSVersion.VersionString)"
+          whoami
+          whoami /groups
+
+          # Check if WSL is available
+          Write-Host ""
+          Write-Host "=== Checking WSL Status ===" -ForegroundColor Cyan
+          wsl --status 2>&1
+          wsl --list --verbose 2>&1
+
+          # Try to set WSL2 as default
+          Write-Host ""
+          Write-Host "=== Setting WSL2 as default ===" -ForegroundColor Cyan
+          wsl --set-default-version 2 2>&1
+
+          # Install Debian (smaller than Ubuntu)
+          Write-Host ""
+          Write-Host "=== Installing Debian ===" -ForegroundColor Cyan
+          wsl --install -d Debian --no-launch 2>&1
+
+          # Wait for installation
+          Start-Sleep -Seconds 10
+
+          # Check installed distributions
+          Write-Host ""
+          Write-Host "=== Installed distributions ===" -ForegroundColor Cyan
+          wsl --list --verbose 2>&1
+
+          # Set Debian as default
+          wsl --set-default Debian 2>&1
+
+          # Initialize Debian and install Docker
+          Write-Host ""
+          Write-Host "=== Installing Docker in Debian ===" -ForegroundColor Cyan
+          wsl -d Debian -u root -- bash -c '
+            set -ex
+            apt-get update
+            apt-get install -y docker.io
+
+            # Start Docker daemon with TCP binding
+            nohup dockerd -H unix:///var/run/docker.sock -H tcp://0.0.0.0:2375 > /tmp/dockerd.log 2>&1 &
+
+            # Wait for Docker to start
+            for i in $(seq 1 60); do
+              docker info >/dev/null 2>&1 && break
+              sleep 1
+            done
+
+            docker info
+            docker run --rm hello-world
+          '
+
+          # Stop Windows Docker to avoid conflicts
           Stop-Service docker -ErrorAction SilentlyContinue
 
-          # Set DOCKER_HOST for this job
+          # Set DOCKER_HOST for subsequent steps
           echo "DOCKER_HOST=tcp://127.0.0.1:2375" >> $env:GITHUB_ENV
 
-          # Test connection
+          # Test from Windows
+          Write-Host ""
+          Write-Host "=== Testing Docker from Windows ===" -ForegroundColor Cyan
           $env:DOCKER_HOST = "tcp://127.0.0.1:2375"
           docker version
           docker info
