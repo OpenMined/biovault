@@ -1133,9 +1133,32 @@ pub async fn execute_dynamic(
 
         // When using Podman, add flags to fix permission issues with mounted volumes
         if using_podman {
-            // Pre-create .nextflow directory in project to avoid permission issues
-            // Nextflow creates this in the working directory for run history/locks
+            // Handle .nextflow directory permissions
+            // If switching from Docker to Podman, the old .nextflow dir may have wrong ownership
             let nextflow_local_dir = project_abs.join(".nextflow");
+            if nextflow_local_dir.exists() {
+                // Check if we can write to it by trying to create a test file
+                let test_file = nextflow_local_dir.join(".podman-write-test");
+                match fs::write(&test_file, "test") {
+                    Ok(_) => {
+                        let _ = fs::remove_file(&test_file);
+                    }
+                    Err(_) => {
+                        // Can't write - likely created by Docker with different permissions
+                        // Remove and recreate with correct ownership
+                        append_desktop_log(&format!(
+                            "[Pipeline] Removing .nextflow directory with incompatible permissions: {}",
+                            nextflow_local_dir.display()
+                        ));
+                        println!(
+                            "⚠️  Cleaning .nextflow directory (was created by different container runtime)"
+                        );
+                        let _ = fs::remove_dir_all(&nextflow_local_dir);
+                    }
+                }
+            }
+
+            // Create .nextflow directory if it doesn't exist
             if !nextflow_local_dir.exists() {
                 let _ = fs::create_dir_all(&nextflow_local_dir);
                 append_desktop_log(&format!(
