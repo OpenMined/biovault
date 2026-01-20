@@ -173,20 +173,9 @@ fn windows_path_to_container(path: &Path, use_podman_format: bool) -> String {
     }
 }
 
-/// Legacy function for backward compatibility - uses Docker Desktop format
-#[cfg(target_os = "windows")]
-fn windows_path_to_docker(path: &Path) -> String {
-    windows_path_to_container(path, false)
-}
-
 #[cfg(not(target_os = "windows"))]
 fn windows_path_to_container(_path: &Path, _use_podman_format: bool) -> String {
     _path.to_string_lossy().to_string()
-}
-
-#[cfg(not(target_os = "windows"))]
-fn windows_path_to_docker(path: &Path) -> String {
-    path.to_string_lossy().to_string()
 }
 
 /// Recursively remap Windows paths in JSON values to container-compatible paths
