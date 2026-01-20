@@ -115,18 +115,22 @@ jobs:
           Start-Process "C:\Program Files\Docker\Docker\Docker Desktop.exe"
 
           Write-Host "=== Waiting for Docker Desktop to start ===" -ForegroundColor Cyan
-          $timeout = 120
+          $timeout = 300
           $timer = [Diagnostics.Stopwatch]::StartNew()
           while ($timer.Elapsed.TotalSeconds -lt $timeout) {
             $info = docker info 2>&1
-            if ($info -match "OSType:\s+linux") {
+            # Check for Linux AND no errors (Internal Server Error means still starting)
+            if (($info -match "OSType:\s+linux") -and ($info -notmatch "Internal Server Error") -and ($info -notmatch "error")) {
               Write-Host "Docker Desktop is ready with Linux containers!" -ForegroundColor Green
               break
             }
             Write-Host "Waiting... ($([int]$timer.Elapsed.TotalSeconds)s)"
-            Start-Sleep -Seconds 5
+            Start-Sleep -Seconds 10
           }
           $timer.Stop()
+
+          # Extra wait for stability
+          Start-Sleep -Seconds 10
 
           Write-Host ""
           Write-Host "=== Docker Info (after Docker Desktop) ===" -ForegroundColor Cyan
