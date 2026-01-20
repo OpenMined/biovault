@@ -47,42 +47,40 @@ jobs:
           wsl --status 2>&1
           wsl --list --verbose 2>&1
 
-          # Install Chocolatey if not present
+          # Download and install Podman MSI directly
           Write-Host ""
-          Write-Host "=== Installing Chocolatey ===" -ForegroundColor Cyan
-          if (-not (Get-Command choco -ErrorAction SilentlyContinue)) {
-            Set-ExecutionPolicy Bypass -Scope Process -Force
-            [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
-            Invoke-Expression ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
-            $env:PATH = "$env:PATH;C:\ProgramData\chocolatey\bin"
-          }
-          choco --version
+          Write-Host "=== Downloading Podman MSI ===" -ForegroundColor Cyan
+          $podmanVersion = "5.7.1"
+          $podmanMsi = "podman-installer-windows-amd64.msi"
+          $podmanUrl = "https://github.com/containers/podman/releases/download/v$podmanVersion/$podmanMsi"
 
-          # Install Podman via Chocolatey
-          Write-Host ""
-          Write-Host "=== Installing Podman via Chocolatey ===" -ForegroundColor Cyan
-          choco install podman-desktop -y --no-progress 2>&1
-          # Also try podman-cli
-          choco install podman-cli -y --no-progress 2>&1
+          Write-Host "Downloading from $podmanUrl"
+          Invoke-WebRequest -Uri $podmanUrl -OutFile $podmanMsi -UseBasicParsing
+          Write-Host "Download complete, file size: $((Get-Item $podmanMsi).Length) bytes"
 
-          # Find where podman was installed
+          # Install Podman silently
           Write-Host ""
-          Write-Host "=== Finding Podman ===" -ForegroundColor Cyan
-          $podmanPaths = @(
-            "C:\Program Files\RedHat\Podman",
-            "C:\ProgramData\chocolatey\lib\podman-cli\tools",
-            "C:\ProgramData\chocolatey\bin"
-          )
-          foreach ($p in $podmanPaths) {
-            if (Test-Path "$p\podman.exe") {
-              Write-Host "Found podman at: $p"
-              $env:PATH = "$p;$env:PATH"
-              break
+          Write-Host "=== Installing Podman ===" -ForegroundColor Cyan
+          $msiArgs = "/i `"$podmanMsi`" /quiet /norestart ADDLOCAL=ALL"
+          Write-Host "Running: msiexec $msiArgs"
+          Start-Process msiexec -ArgumentList $msiArgs -Wait -NoNewWindow
+          Write-Host "MSI installation complete"
+
+          # Add Podman to PATH
+          $podmanPath = "C:\Program Files\RedHat\Podman"
+          $env:PATH = "$podmanPath;$env:PATH"
+
+          # Also check alternate location
+          if (-not (Test-Path "$podmanPath\podman.exe")) {
+            $altPath = "$env:LOCALAPPDATA\Programs\Podman"
+            if (Test-Path "$altPath\podman.exe") {
+              $podmanPath = $altPath
+              $env:PATH = "$podmanPath;$env:PATH"
             }
           }
 
-          # Refresh PATH
-          $env:PATH = [System.Environment]::GetEnvironmentVariable("PATH", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("PATH", "User") + ";C:\ProgramData\chocolatey\bin"
+          Write-Host "Podman path: $podmanPath"
+          Get-ChildItem $podmanPath -ErrorAction SilentlyContinue
 
           Write-Host ""
           Write-Host "=== Podman Version ===" -ForegroundColor Cyan
