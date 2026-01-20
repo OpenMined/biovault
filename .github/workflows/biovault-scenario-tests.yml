@@ -75,13 +75,25 @@ jobs:
           Write-Host "=== Waiting for Docker Desktop to start ===" -ForegroundColor Cyan
           $timeout = 300
           $timer = [Diagnostics.Stopwatch]::StartNew()
+          $lastInfo = ""
           while ($timer.Elapsed.TotalSeconds -lt $timeout) {
             $info = docker info 2>&1 | Out-String
             $osTypeMatch = [regex]::Match($info, "OSType:\s+(\w+)")
             $osType = if ($osTypeMatch.Success) { $osTypeMatch.Groups[1].Value } else { "unknown" }
             $hasError = $info -match "error|Error|ERROR"
 
-            Write-Host "Waiting... ($([int]$timer.Elapsed.TotalSeconds)s) - OSType: $osType, HasError: $hasError"
+            # Check Docker Desktop processes
+            $ddProcs = Get-Process -Name "Docker Desktop", "com.docker.backend", "com.docker.proxy" -ErrorAction SilentlyContinue
+            $procNames = if ($ddProcs) { ($ddProcs.Name -join ", ") } else { "none" }
+
+            Write-Host "Waiting... ($([int]$timer.Elapsed.TotalSeconds)s) - OSType: $osType, HasError: $hasError, Procs: $procNames"
+
+            # Show actual error on first iteration or when it changes
+            if ($hasError -and ($info -ne $lastInfo)) {
+              $errorLine = ($info -split "`n" | Where-Object { $_ -match "error|Error|ERROR" } | Select-Object -First 1)
+              Write-Host "  Error: $errorLine" -ForegroundColor Yellow
+              $lastInfo = $info
+            }
 
             # Check for Linux AND no errors (Internal Server Error means still starting)
             if (($osType -eq "linux") -and (-not $hasError)) {
