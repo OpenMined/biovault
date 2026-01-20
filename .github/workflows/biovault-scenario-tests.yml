@@ -51,7 +51,7 @@ jobs:
             }
           }
 
-          # If DockerCli doesn't exist or switch failed, install Docker Desktop via Chocolatey
+          # Try Rancher Desktop instead of Docker Desktop (better for server environments)
           Write-Host ""
           Write-Host "=== Installing Chocolatey (if needed) ===" -ForegroundColor Cyan
           if (-not (Get-Command choco -ErrorAction SilentlyContinue)) {
@@ -61,30 +61,31 @@ jobs:
           }
 
           Write-Host ""
-          Write-Host "=== Installing Docker Desktop via Chocolatey (unattended) ===" -ForegroundColor Cyan
-          choco install docker-desktop -y --no-progress --install-arguments="install --quiet --accept-license"
-
-          Write-Host ""
           Write-Host "=== Stopping Windows Docker service ===" -ForegroundColor Cyan
           Stop-Service docker -ErrorAction SilentlyContinue
 
           Write-Host ""
-          Write-Host "=== Starting Docker Desktop ===" -ForegroundColor Cyan
-          Start-Process "C:\Program Files\Docker\Docker\Docker Desktop.exe"
+          Write-Host "=== Installing Rancher Desktop via Chocolatey ===" -ForegroundColor Cyan
+          choco install rancher-desktop -y --no-progress
 
-          Write-Host "=== Waiting for Docker Desktop to start ===" -ForegroundColor Cyan
+          Write-Host ""
+          Write-Host "=== Starting Rancher Desktop ===" -ForegroundColor Cyan
+          Start-Process "C:\Program Files\Rancher Desktop\Rancher Desktop.exe"
+
+          Write-Host "=== Waiting for Rancher Desktop to start ===" -ForegroundColor Cyan
           $timeout = 300
           $timer = [Diagnostics.Stopwatch]::StartNew()
           $lastInfo = ""
           while ($timer.Elapsed.TotalSeconds -lt $timeout) {
+            # Rancher Desktop uses nerdctl by default, but can also expose docker API
             $info = docker info 2>&1 | Out-String
             $osTypeMatch = [regex]::Match($info, "OSType:\s+(\w+)")
             $osType = if ($osTypeMatch.Success) { $osTypeMatch.Groups[1].Value } else { "unknown" }
             $hasError = $info -match "error|Error|ERROR"
 
-            # Check Docker Desktop processes
-            $ddProcs = Get-Process -Name "Docker Desktop", "com.docker.backend", "com.docker.proxy" -ErrorAction SilentlyContinue
-            $procNames = if ($ddProcs) { ($ddProcs.Name -join ", ") } else { "none" }
+            # Check Rancher Desktop processes
+            $rdProcs = Get-Process -Name "Rancher Desktop", "rdctl" -ErrorAction SilentlyContinue
+            $procNames = if ($rdProcs) { ($rdProcs.Name -join ", ") } else { "none" }
 
             Write-Host "Waiting... ($([int]$timer.Elapsed.TotalSeconds)s) - OSType: $osType, HasError: $hasError, Procs: $procNames"
 
@@ -95,9 +96,9 @@ jobs:
               $lastInfo = $info
             }
 
-            # Check for Linux AND no errors (Internal Server Error means still starting)
+            # Check for Linux AND no errors
             if (($osType -eq "linux") -and (-not $hasError)) {
-              Write-Host "Docker Desktop is ready with Linux containers!" -ForegroundColor Green
+              Write-Host "Rancher Desktop is ready with Linux containers!" -ForegroundColor Green
               break
             }
             Start-Sleep -Seconds 10
@@ -105,23 +106,9 @@ jobs:
           $timer.Stop()
 
           if ($timer.Elapsed.TotalSeconds -ge $timeout) {
-            Write-Host "WARNING: Timeout waiting for Docker Desktop" -ForegroundColor Yellow
+            Write-Host "WARNING: Timeout waiting for Rancher Desktop" -ForegroundColor Yellow
             Write-Host "Last docker info output:" -ForegroundColor Yellow
             docker info
-
-            Write-Host ""
-            Write-Host "=== Docker Desktop Logs ===" -ForegroundColor Yellow
-            $logPaths = @(
-              "$env:APPDATA\Docker\log\host\Docker Desktop.txt",
-              "$env:LOCALAPPDATA\Docker\log\vm\dockerd.log",
-              "$env:LOCALAPPDATA\Docker\log\host\com.docker.backend.log"
-            )
-            foreach ($logPath in $logPaths) {
-              if (Test-Path $logPath) {
-                Write-Host "--- $logPath (last 50 lines) ---" -ForegroundColor Cyan
-                Get-Content $logPath -Tail 50
-              }
-            }
 
             Write-Host ""
             Write-Host "=== Checking WSL status ===" -ForegroundColor Yellow
@@ -133,7 +120,7 @@ jobs:
           Start-Sleep -Seconds 10
 
           Write-Host ""
-          Write-Host "=== Docker Info (after Docker Desktop) ===" -ForegroundColor Cyan
+          Write-Host "=== Docker Info ===" -ForegroundColor Cyan
           docker info
 
           Write-Host ""
