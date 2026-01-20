@@ -204,11 +204,61 @@ binary_paths:
   container_runtime: podman  # or "docker" or "auto"
 ```
 
+## Nested Container Support (Nextflow Tasks)
+
+When running Nextflow pipelines, the outer Nextflow container needs to spawn inner task containers. This requires:
+
+### Docker Desktop Mode
+- Mounts `/var/run/docker.sock` into the Nextflow container
+- Uses `docker.enabled = true` in Nextflow config
+- Task containers use Docker CLI to talk to Docker daemon
+
+### Podman Mode
+- Mounts Podman socket (e.g., `/run/user/1000/podman/podman.sock`) into container
+- Sets `CONTAINER_HOST=unix:///run/podman/podman.sock` environment variable
+- Uses `podman.enabled = true` in Nextflow config
+- Uses `/bin/sh` shell for alpine-based containers (no bash)
+- The `nextflow-runner` image includes both Docker CLI and Podman CLI
+
+### Nextflow Runner Image
+
+The `ghcr.io/openmined/nextflow-runner:25.10.2` image contains:
+- Nextflow 25.10.2
+- Docker CLI 28.0.1 (for Docker Desktop mode)
+- Podman CLI 5.3.1 (for Podman mode)
+
+Build from `docker/windows/Dockerfile.nextflow-runner`:
+```dockerfile
+FROM nextflow/nextflow:25.10.2
+# ... installs Docker CLI and Podman CLI
+```
+
+### Runtime Config Generation
+
+The CLI automatically generates a `.biovault-runtime.config` file in the project directory:
+
+**For Docker:**
+```groovy
+process.executor = 'local'
+docker.enabled = true
+docker.runOptions = '-u $(id -u):$(id -g)'
+```
+
+**For Podman:**
+```groovy
+process.executor = 'local'
+podman.enabled = true
+process.shell = ['/bin/sh', '-ue']
+```
+
+This config is passed to Nextflow with the `-c` flag.
+
 ## Next Steps
 
 1. ~~**Test Hyper-V on CI**: Enable Hyper-V feature and try Podman with hyperv provider~~ ✅ Done!
-2. **Verify full pipeline execution**: Test `import-and-run.yaml` scenario with Podman
-3. **Document for users**: Update user docs for Podman as Docker alternative
+2. ~~**Nested container support**: Enable Nextflow to spawn task containers with Podman~~ ✅ Done!
+3. **Verify full pipeline execution**: Test `import-and-run.yaml` scenario with Podman
+4. **Document for users**: Update user docs for Podman as Docker alternative
 
 ## References
 

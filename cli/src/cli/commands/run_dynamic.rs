@@ -748,6 +748,39 @@ fn is_container_runtime_working(binary: &str) -> bool {
     }
 }
 
+/// Get the Podman socket path for mounting into containers.
+/// On Windows with WSL, this is typically /run/user/<uid>/podman/podman.sock
+#[cfg(target_os = "windows")]
+fn get_podman_socket_path() -> Option<String> {
+    // Try to get socket path from `podman info`
+    let mut cmd = Command::new("podman");
+    super::configure_child_process(&mut cmd);
+    cmd.args(["info", "--format", "{{.Host.RemoteSocket.Path}}"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    if let Ok(output) = cmd.output() {
+        if output.status.success() {
+            let socket = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            // Strip unix:// prefix if present
+            let socket = socket.strip_prefix("unix://").unwrap_or(&socket);
+            if !socket.is_empty() {
+                append_desktop_log(&format!("[Runtime] Podman socket path: {}", socket));
+                return Some(socket.to_string());
+            }
+        }
+    }
+
+    // Fallback to common default path
+    append_desktop_log("[Runtime] Using default Podman socket path");
+    Some("/run/user/1000/podman/podman.sock".to_string())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn get_podman_socket_path() -> Option<String> {
+    None
+}
+
 /// Detect the best available container runtime on Windows.
 /// Checks config for explicit preference, then tries Docker, then Podman.
 /// Returns the binary path/name for the working runtime.
@@ -1095,19 +1128,41 @@ pub async fn execute_dynamic(
             .arg("run")
             .arg("--rm");
 
-        // When using Podman, add --userns=keep-id to map host user to container user
-        // This fixes permission issues with mounted volumes
-        if docker_bin.contains("podman") {
-            docker_cmd.arg("--userns=keep-id");
-        }
+        // Determine if we're using Podman and configure accordingly
+        let using_podman = docker_bin.contains("podman");
 
-        docker_cmd
+        // When using Podman, add flags to fix permission issues with mounted volumes
+        if using_podman {
+            docker_cmd
+                .arg("--userns=keep-id")
+                // Set NXF_HOME to a writable location inside the container
+                // This prevents Nextflow from trying to write .nextflow/ to mounted volumes
+                .arg("-e")
+                .arg("NXF_HOME=/tmp/.nextflow");
+
+            // Mount Podman socket and set CONTAINER_HOST for nested container execution
+            if let Some(podman_socket) = get_podman_socket_path() {
+                append_desktop_log(&format!(
+                    "[Pipeline] Mounting Podman socket: {} -> /run/podman/podman.sock",
+                    podman_socket
+                ));
+                docker_cmd
+                    .arg("-v")
+                    .arg(format!("{}:/run/podman/podman.sock", podman_socket))
+                    .arg("-e")
+                    .arg("CONTAINER_HOST=unix:///run/podman/podman.sock");
+            }
+        } else {
             // Mount Docker Desktop engine socket so Nextflow-in-Docker can launch workflow containers.
             //
             // With Docker Desktop (Linux containers), the daemon runs in a Linux VM and provides a Unix socket.
             // Binding it into the Nextflow container allows Nextflow to launch workflow containers.
-            .arg("-v")
-            .arg("/var/run/docker.sock:/var/run/docker.sock")
+            docker_cmd
+                .arg("-v")
+                .arg("/var/run/docker.sock:/var/run/docker.sock");
+        }
+
+        docker_cmd
             // Mount the BioVault home directory
             .arg("-v")
             .arg(format!(
@@ -1136,6 +1191,14 @@ pub async fn execute_dynamic(
                 .arg(format!("{}:{}", docker_mount, docker_mount));
         }
 
+        // Generate runtime-specific Nextflow config (Docker vs Podman)
+        let runtime_config_path = if !dry_run {
+            let config_path = generate_runtime_config(&project_abs, using_podman)?;
+            Some(windows_path_to_docker(&config_path))
+        } else {
+            None
+        };
+
         docker_cmd
             // Set working directory
             .arg("-w")
@@ -1147,8 +1210,14 @@ pub async fn execute_dynamic(
             // Nextflow arguments
             .arg("-log")
             .arg(&docker_log_path)
-            .arg("run")
-            .arg(&docker_template);
+            .arg("run");
+
+        // Pass runtime config file to Nextflow
+        if let Some(ref config_docker_path) = runtime_config_path {
+            docker_cmd.arg("-c").arg(config_docker_path);
+        }
+
+        docker_cmd.arg(&docker_template);
 
         if resume {
             docker_cmd.arg("-resume");
@@ -1556,6 +1625,39 @@ fn detect_format(path: &Path) -> Option<&'static str> {
         })
 }
 
+/// Generate a Nextflow config file for the specified container runtime.
+/// Returns the path to the generated config file.
+fn generate_runtime_config(project_path: &Path, using_podman: bool) -> Result<PathBuf> {
+    let config_path = project_path.join(".biovault-runtime.config");
+
+    let config_contents = if using_podman {
+        // Podman configuration
+        // - Use podman.enabled instead of docker.enabled
+        // - Use /bin/sh for alpine-based containers (no bash)
+        r#"process.executor = 'local'
+podman.enabled = true
+process.shell = ['/bin/sh', '-ue']
+"#
+    } else {
+        // Docker configuration
+        r#"process.executor = 'local'
+docker.enabled = true
+docker.runOptions = '-u $(id -u):$(id -g)'
+"#
+    };
+
+    fs::write(&config_path, config_contents)
+        .context("Failed to write runtime nextflow.config")?;
+
+    append_desktop_log(&format!(
+        "[Pipeline] Generated runtime config at {} (podman={})",
+        config_path.display(),
+        using_podman
+    ));
+
+    Ok(config_path)
+}
+
 fn install_dynamic_template(biovault_home: &Path) -> Result<()> {
     let env_dir = biovault_home.join("env").join("dynamic-nextflow");
     if !env_dir.exists() {
@@ -1569,13 +1671,9 @@ fn install_dynamic_template(biovault_home: &Path) -> Result<()> {
 
     println!("📦 Dynamic template ready at {}", template_path.display());
 
-    let config_path = env_dir.join("nextflow.config");
-    let config_contents = r#"process.executor = 'local'
-docker.enabled = true
-docker.runOptions = '-u $(id -u):$(id -g)'
-"#;
-    fs::write(&config_path, config_contents)
-        .context("Failed to install dynamic nextflow.config")?;
+    // Note: We no longer install a static nextflow.config here.
+    // Instead, we generate a runtime-specific config in generate_runtime_config()
+    // based on whether Docker or Podman is being used.
 
     Ok(())
 }
