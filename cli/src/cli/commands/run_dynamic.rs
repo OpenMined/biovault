@@ -993,6 +993,7 @@ pub async fn execute_dynamic(
     };
 
     append_desktop_log(&format!("[Pipeline] Selected container runtime: {}", docker_bin));
+    println!("🐳 Using container runtime: {}", docker_bin.bold());
 
     // Check container runtime availability (required for Windows Docker execution and workflow containers)
     // Skip checks in dry-run mode
@@ -1003,6 +1004,7 @@ pub async fn execute_dynamic(
             return Err(err);
         }
         append_desktop_log(&format!("[Pipeline] {} is running (info succeeded)", docker_bin));
+        println!("✅ {} daemon is running", docker_bin);
     }
 
     // Build command - use Docker on Windows, native Nextflow elsewhere
