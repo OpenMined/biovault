@@ -698,17 +698,24 @@ def main():
         print("SyftBox client mode: go (default)")
 
     setup = scenario.get("setup", {})
+    print("[DEBUG] Running setup.server commands...", flush=True)
     execute_commands(setup.get("server"), variables)
+    print("[DEBUG] setup.server complete", flush=True)
+    print("[DEBUG] Running setup.clients commands...", flush=True)
     execute_commands(setup.get("clients"), variables)
+    print("[DEBUG] setup.clients complete", flush=True)
 
     steps = scenario.get("steps", [])
     if not isinstance(steps, list):
         raise SystemExit("Scenario 'steps' must be a list.")
 
-    for step in steps:
+    print(f"[DEBUG] About to run {len(steps)} steps...", flush=True)
+    for i, step in enumerate(steps):
         if not isinstance(step, dict):
             raise SystemExit("Each step must be a mapping.")
+        print(f"[DEBUG] Starting step {i+1}/{len(steps)}: {step.get('name', 'unnamed')}", flush=True)
         run_step(step, variables)
+        print(f"[DEBUG] Completed step {i+1}/{len(steps)}", flush=True)
 
     print("\nScenario completed successfully.")
 
