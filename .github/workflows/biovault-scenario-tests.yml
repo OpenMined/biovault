@@ -26,48 +26,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup workspace dependencies
-        shell: bash
-        run: |
-          chmod +x scripts/setup-workspace.sh
-          ./scripts/setup-workspace.sh
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: 1.91.0
-
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: |
-            cli -> target
-            syftbox/rust -> target
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v3
-      - name: Install protoc
-        uses: arduino/setup-protoc@v2
-        with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Setup Go
-        uses: actions/setup-go@v5
-        with:
-          go-version-file: syftbox/go.mod
-
-      - name: Install Nextflow (Unix)
-        if: matrix.os != 'windows'
-        shell: bash
-        run: |
-          curl -fsSL https://get.nextflow.io | bash
-          sudo mv nextflow /usr/local/bin/
-          chmod +x /usr/local/bin/nextflow
-          nextflow -version
-
-      - name: Build BioVault CLI
-        run: cd cli && cargo build --release
-
       - name: Setup Docker for Linux containers (Windows)
         if: matrix.os == 'windows'
         shell: pwsh
@@ -139,6 +97,48 @@ jobs:
           Write-Host ""
           Write-Host "=== Testing Linux container ===" -ForegroundColor Cyan
           docker run --rm hello-world
+
+      - name: Setup workspace dependencies
+        shell: bash
+        run: |
+          chmod +x scripts/setup-workspace.sh
+          ./scripts/setup-workspace.sh
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.91.0
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            cli -> target
+            syftbox/rust -> target
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+      - name: Install protoc
+        uses: arduino/setup-protoc@v2
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: syftbox/go.mod
+
+      - name: Install Nextflow (Unix)
+        if: matrix.os != 'windows'
+        shell: bash
+        run: |
+          curl -fsSL https://get.nextflow.io | bash
+          sudo mv nextflow /usr/local/bin/
+          chmod +x /usr/local/bin/nextflow
+          nextflow -version
+
+      - name: Build BioVault CLI
+        run: cd cli && cargo build --release
 
       - name: Run scenario (Unix)
         if: matrix.os != 'windows'
