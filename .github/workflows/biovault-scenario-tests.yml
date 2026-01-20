@@ -68,6 +68,22 @@ jobs:
       - name: Build BioVault CLI
         run: cd cli && cargo build --release
 
+      - name: Debug Docker setup (Windows)
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: |
+          Write-Host "=== Docker Version ===" -ForegroundColor Cyan
+          docker version
+          Write-Host ""
+          Write-Host "=== Docker Info ===" -ForegroundColor Cyan
+          docker info
+          Write-Host ""
+          Write-Host "=== Testing Docker Pull with explicit platform ===" -ForegroundColor Cyan
+          docker pull --platform=linux/amd64 hello-world:latest
+          Write-Host ""
+          Write-Host "=== Running hello-world test ===" -ForegroundColor Cyan
+          docker run --rm --platform=linux/amd64 hello-world:latest
+
       - name: Run scenario (Unix)
         if: matrix.os != 'windows'
         shell: bash
