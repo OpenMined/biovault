@@ -1,0 +1,46 @@
+name: Update licenses
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+concurrency:
+  group: licenses-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  update-licenses:
+    if: ${{ github.actor != 'github-actions[bot]' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+      - name: Install Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22.x'
+      - name: Run license scan
+        run: |
+          chmod +x ./licenses.sh
+          ./licenses.sh --install --scan all --fetch
+      - name: Commit license artifacts
+        shell: bash
+        run: |
+          if [[ -n "$(git status --porcelain -- licenses)" ]]; then
+            git config user.name github-actions[bot]
+            git config user.email github-actions[bot]@users.noreply.github.com
+            git add licenses
+            git commit -m "chore: update license artifacts"
+            git push
+          else
+            echo "No license changes to commit"
+          fi
