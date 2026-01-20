@@ -127,7 +127,18 @@ impl ProjectSpec {
     pub fn load(path: &Path) -> Result<Self> {
         let raw = fs::read_to_string(path)
             .with_context(|| format!("Failed to read project spec at {}", path.display()))?;
-        match detect_spec_format(path, &raw) {
+        Self::load_from_str(path, &raw)
+    }
+
+    /// Load from raw bytes (useful when reading from decrypted storage)
+    pub fn load_from_bytes(path: &Path, bytes: &[u8]) -> Result<Self> {
+        let raw = std::str::from_utf8(bytes)
+            .with_context(|| format!("Failed to read project spec at {}", path.display()))?;
+        Self::load_from_str(path, raw)
+    }
+
+    fn load_from_str(path: &Path, raw: &str) -> Result<Self> {
+        match detect_spec_format(path, raw) {
             SpecFormat::Flow => {
                 return Err(anyhow!(
                     "Detected Flow spec at {}. ProjectSpec loader does not support Flow.",

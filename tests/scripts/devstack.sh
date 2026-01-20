@@ -145,15 +145,7 @@ if (( ! SKIP_RUST_BUILD )) && [[ "${BV_DEVSTACK_SKIP_RUST_BUILD:-0}" == "1" ]]; 
   SKIP_RUST_BUILD=1
 fi
 
-if [[ -n "$CLIENT_MODE" ]]; then
-  mode="$(printf '%s' "$CLIENT_MODE" | tr '[:upper:]' '[:lower:]')"
-  if [[ "$mode" != "embedded" ]]; then
-    echo "Go/mixed/rust client modes are disabled; forcing embedded." >&2
-    CLIENT_MODE="embedded"
-    CLIENT_MODE_EXPLICIT=1
-  fi
-fi
-
+# Default to embedded mode if not specified
 if (( ! CLIENT_MODE_EXPLICIT )); then
   CLIENT_MODE="embedded"
   CLIENT_MODE_EXPLICIT=1
@@ -430,17 +422,29 @@ start_stack() {
   [[ -n "${NXF_OPTS:-}" ]] && export NXF_OPTS
 
   echo "Starting SyftBox devstack via syftbox/cmd/devstack..."
-  # Use script to capture output while preventing pipe inheritance issues on Windows CI
-  # The devstack command starts servers as child processes; on Windows, if they inherit
-  # stderr, the parent pipe never closes and the script hangs.
-  local devstack_log="$SANDBOX_DIR/devstack-startup.log"
-  (cd "$SYFTBOX_DIR" && go run ./cmd/devstack start "${args[@]}" </dev/null >"$devstack_log" 2>&1) || {
-    echo "Devstack command failed. Log:" >&2
+
+  # Note: Don't put the log file in SANDBOX_DIR - the devstack --reset flag deletes it!
+  # Use a temp file instead
+  local devstack_log
+  devstack_log="$(mktemp)"
+
+  # Run devstack command (redirect output to prevent pipe inheritance issues on Windows)
+  (
+    cd "$SYFTBOX_DIR" || exit 1
+    go run ./cmd/devstack start "${args[@]}"
+  ) > "$devstack_log" 2>&1 </dev/null
+  local exit_code=$?
+
+  if [[ $exit_code -ne 0 ]]; then
+    echo "Devstack command failed (exit $exit_code). Log:" >&2
     cat "$devstack_log" >&2
+    rm -f "$devstack_log"
     exit 1
-  }
-  # Show the startup log
+  fi
+
+  # Show the startup log and cleanup
   cat "$devstack_log"
+  rm -f "$devstack_log"
 
   if (( EMBEDDED_MODE )); then
     local state_path="$SANDBOX_DIR/relay/state.json"
