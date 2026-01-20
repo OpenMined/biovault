@@ -129,15 +129,18 @@ fn should_use_docker_for_nextflow() -> bool {
     cfg!(target_os = "windows")
 }
 
-/// Convert a Windows path to a Docker-compatible path for volume mounts
-/// e.g., C:\Users\foo -> /c/Users/foo
+/// Convert a Windows path to a container-compatible path for volume mounts.
+/// - Docker Desktop: C:\Users\foo -> /c/Users/foo
+/// - Podman on WSL: C:\Users\foo -> /mnt/c/Users/foo
 #[cfg(target_os = "windows")]
-fn windows_path_to_docker(path: &Path) -> String {
+fn windows_path_to_container(path: &Path, use_podman_format: bool) -> String {
     let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     let path_str = canonical.to_string_lossy();
     // Convert backslashes to forward slashes
     let unix_path = path_str.replace('\\', "/");
-    // Convert drive letter: C:/... -> /c/...
+    // Prefix for drive letter mount
+    let prefix = if use_podman_format { "/mnt" } else { "" };
+    // Convert drive letter: C:/... -> /c/... or /mnt/c/...
     if unix_path.len() >= 2 && unix_path.chars().nth(1) == Some(':') {
         let drive = unix_path
             .chars()
@@ -146,7 +149,7 @@ fn windows_path_to_docker(path: &Path) -> String {
             .to_lowercase()
             .next()
             .unwrap();
-        format!("/{}{}", drive, &unix_path[2..])
+        format!("{}/{}{}", prefix, drive, &unix_path[2..])
     } else if unix_path.starts_with("\\\\?\\") || unix_path.starts_with("//?/") {
         // Handle extended path prefix \\?\C:\... or //?/C:/...
         let stripped = unix_path
@@ -161,13 +164,24 @@ fn windows_path_to_docker(path: &Path) -> String {
                 .to_lowercase()
                 .next()
                 .unwrap();
-            format!("/{}{}", drive, &stripped[2..])
+            format!("{}/{}{}", prefix, drive, &stripped[2..])
         } else {
-            format!("/{}", stripped)
+            format!("{}/{}", prefix, stripped)
         }
     } else {
         unix_path
     }
+}
+
+/// Legacy function for backward compatibility - uses Docker Desktop format
+#[cfg(target_os = "windows")]
+fn windows_path_to_docker(path: &Path) -> String {
+    windows_path_to_container(path, false)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn windows_path_to_container(_path: &Path, _use_podman_format: bool) -> String {
+    _path.to_string_lossy().to_string()
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -175,13 +189,13 @@ fn windows_path_to_docker(path: &Path) -> String {
     path.to_string_lossy().to_string()
 }
 
-/// Recursively remap Windows paths in JSON values to Docker-compatible paths
-fn remap_json_paths_for_docker(value: &JsonValue) -> JsonValue {
+/// Recursively remap Windows paths in JSON values to container-compatible paths
+fn remap_json_paths_for_container(value: &JsonValue, use_podman_format: bool) -> JsonValue {
     match value {
         JsonValue::String(s) => {
             // Check if it looks like a Windows path (contains backslash or drive letter)
             if s.contains('\\') || (s.len() >= 2 && s.chars().nth(1) == Some(':')) {
-                JsonValue::String(windows_path_to_docker(Path::new(s)))
+                JsonValue::String(windows_path_to_container(Path::new(s), use_podman_format))
             } else {
                 value.clone()
             }
@@ -189,12 +203,16 @@ fn remap_json_paths_for_docker(value: &JsonValue) -> JsonValue {
         JsonValue::Object(map) => {
             let mut new_map = serde_json::Map::new();
             for (k, v) in map {
-                new_map.insert(k.clone(), remap_json_paths_for_docker(v));
+                new_map.insert(k.clone(), remap_json_paths_for_container(v, use_podman_format));
             }
             JsonValue::Object(new_map)
         }
         JsonValue::Array(arr) => {
-            JsonValue::Array(arr.iter().map(remap_json_paths_for_docker).collect())
+            JsonValue::Array(
+                arr.iter()
+                    .map(|v| remap_json_paths_for_container(v, use_podman_format))
+                    .collect(),
+            )
         }
         _ => value.clone(),
     }
@@ -356,9 +374,9 @@ fn extract_paths_from_csv(content: &str, paths: &mut Vec<PathBuf>) {
     ));
 }
 
-/// Rewrite a CSV file converting Windows paths to Docker-compatible paths
+/// Rewrite a CSV file converting Windows paths to container-compatible paths
 #[cfg(target_os = "windows")]
-fn rewrite_csv_with_docker_paths(csv_path: &Path) -> Result<()> {
+fn rewrite_csv_with_container_paths(csv_path: &Path, use_podman_format: bool) -> Result<()> {
     let content = fs::read_to_string(csv_path)
         .with_context(|| format!("Failed to read CSV: {}", csv_path.display()))?;
 
@@ -379,7 +397,7 @@ fn rewrite_csv_with_docker_paths(csv_path: &Path) -> Result<()> {
             // Check if it's a Windows path (with backslash or forward slash)
             let new_value = if looks_like_windows_absolute_path(inner) {
                 converted_count += 1;
-                windows_path_to_docker(Path::new(inner))
+                windows_path_to_container(Path::new(inner), use_podman_format)
             } else {
                 inner.to_string()
             };
@@ -422,25 +440,25 @@ fn is_windows_path(s: &str) -> bool {
 
 /// Find and rewrite all CSV files referenced in inputs JSON
 #[cfg(target_os = "windows")]
-fn rewrite_input_csvs_for_docker(value: &JsonValue) -> Result<()> {
+fn rewrite_input_csvs_for_container(value: &JsonValue, use_podman_format: bool) -> Result<()> {
     match value {
         JsonValue::String(s) => {
             if is_windows_path(s) && s.to_lowercase().ends_with(".csv") {
                 let path = Path::new(s);
                 if path.exists() && path.is_file() {
                     append_desktop_log(&format!("[Pipeline] Rewriting CSV: {}", s));
-                    rewrite_csv_with_docker_paths(path)?;
+                    rewrite_csv_with_container_paths(path, use_podman_format)?;
                 }
             }
         }
         JsonValue::Object(map) => {
             for v in map.values() {
-                rewrite_input_csvs_for_docker(v)?;
+                rewrite_input_csvs_for_container(v, use_podman_format)?;
             }
         }
         JsonValue::Array(arr) => {
             for v in arr {
-                rewrite_input_csvs_for_docker(v)?;
+                rewrite_input_csvs_for_container(v, use_podman_format)?;
             }
         }
         _ => {}
@@ -1052,17 +1070,21 @@ pub async fn execute_dynamic(
             ensure_nextflow_runner_image(&docker_bin)?
         };
 
-        // Convert all paths to Docker-compatible format
-        let docker_biovault_home = windows_path_to_docker(&biovault_home_abs);
-        let docker_project_path = windows_path_to_docker(&project_abs);
-        let docker_template = windows_path_to_docker(&template_abs);
-        let docker_workflow = windows_path_to_docker(&workflow_abs);
-        let docker_project_spec = windows_path_to_docker(&project_spec_abs);
-        let docker_log_path = windows_path_to_docker(&nextflow_log_path);
+        // Detect if we're using Podman early so we can use correct path format
+        // Podman on WSL uses /mnt/c/... while Docker Desktop uses /c/...
+        let using_podman = docker_bin.contains("podman");
+
+        // Convert all paths to container-compatible format
+        let docker_biovault_home = windows_path_to_container(&biovault_home_abs, using_podman);
+        let docker_project_path = windows_path_to_container(&project_abs, using_podman);
+        let docker_template = windows_path_to_container(&template_abs, using_podman);
+        let docker_workflow = windows_path_to_container(&workflow_abs, using_podman);
+        let docker_project_spec = windows_path_to_container(&project_spec_abs, using_podman);
+        let docker_log_path = windows_path_to_container(&nextflow_log_path, using_podman);
         let results_abs = results_path_buf
             .canonicalize()
             .unwrap_or_else(|_| results_path_buf.clone());
-        let docker_results = windows_path_to_docker(&results_abs);
+        let docker_results = windows_path_to_container(&results_abs, using_podman);
 
         // Extract paths from inputs that need to be mounted (must do before rewriting CSVs)
         // This is Windows-specific: extract paths from CSV files and rewrite them for Docker
@@ -1075,17 +1097,17 @@ pub async fn execute_dynamic(
             extract_paths_from_json(&inputs_json_value, &mut data_paths);
             let roots = get_unique_mount_roots(data_paths);
 
-            // Rewrite CSV files to convert Windows paths to Docker-compatible paths
+            // Rewrite CSV files to convert Windows paths to container-compatible paths
             // Skip in dry-run mode since this modifies files
             if !dry_run {
                 append_desktop_log(
-                    "[Pipeline] Rewriting CSV files with Docker-compatible paths...",
+                    "[Pipeline] Rewriting CSV files with container-compatible paths...",
                 );
                 append_desktop_log(&format!(
                     "[Pipeline] inputs_json: {}",
                     serde_json::to_string(&inputs_json_value).unwrap_or_default()
                 ));
-                rewrite_input_csvs_for_docker(&inputs_json_value)?;
+                rewrite_input_csvs_for_container(&inputs_json_value, using_podman)?;
             }
 
             roots
@@ -1127,9 +1149,6 @@ pub async fn execute_dynamic(
         docker_cmd
             .arg("run")
             .arg("--rm");
-
-        // Determine if we're using Podman and configure accordingly
-        let using_podman = docker_bin.contains("podman");
 
         // When using Podman, add flags to fix permission issues with mounted volumes
         if using_podman {
@@ -1203,34 +1222,34 @@ pub async fn execute_dynamic(
             .arg("-v")
             .arg(format!(
                 "{}:{}",
-                windows_path_to_docker(&biovault_home),
+                windows_path_to_container(&biovault_home, using_podman),
                 docker_biovault_home
             ))
             // Mount the project path (may be same as above, Docker handles duplicates)
             .arg("-v")
             .arg(format!(
                 "{}:{}",
-                windows_path_to_docker(project_path),
+                windows_path_to_container(project_path, using_podman),
                 docker_project_path
             ));
 
         // Mount additional data directories discovered from inputs
         for mount_path in &mount_roots {
-            let docker_mount = windows_path_to_docker(mount_path);
+            let container_mount = windows_path_to_container(mount_path, using_podman);
             append_desktop_log(&format!(
                 "[Pipeline] Adding mount: {} -> {}",
                 mount_path.display(),
-                docker_mount
+                container_mount
             ));
             docker_cmd
                 .arg("-v")
-                .arg(format!("{}:{}", docker_mount, docker_mount));
+                .arg(format!("{}:{}", container_mount, container_mount));
         }
 
         // Generate runtime-specific Nextflow config (Docker vs Podman)
         let runtime_config_path = if !dry_run {
             let config_path = generate_runtime_config(&project_abs, using_podman)?;
-            Some(windows_path_to_docker(&config_path))
+            Some(windows_path_to_container(&config_path, using_podman))
         } else {
             None
         };
@@ -1263,11 +1282,11 @@ pub async fn execute_dynamic(
             docker_cmd.arg(extra);
         }
 
-        // Re-encode JSON with Docker paths (inputs_json_value already created above)
+        // Re-encode JSON with container paths (inputs_json_value already created above)
         let params_json_value: JsonValue =
             serde_json::to_value(&params_json).context("Failed to convert params to JSON value")?;
-        let docker_inputs_json = remap_json_paths_for_docker(&inputs_json_value);
-        let docker_params_json = remap_json_paths_for_docker(&params_json_value);
+        let docker_inputs_json = remap_json_paths_for_container(&inputs_json_value, using_podman);
+        let docker_params_json = remap_json_paths_for_container(&params_json_value, using_podman);
         let docker_inputs_json_str = serde_json::to_string(&docker_inputs_json)
             .context("Failed to encode Docker inputs metadata to JSON")?;
         let docker_params_json_str = serde_json::to_string(&docker_params_json)
