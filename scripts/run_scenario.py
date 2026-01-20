@@ -7,6 +7,7 @@ import os
 import subprocess
 import shutil
 import sys
+import threading
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -414,6 +415,7 @@ def run_shell(
     java_home = JAVA_HOME_OVERRIDE
     user_path = env.get("SCENARIO_USER_PATH")
 
+    # Build the command args and cwd
     if datasite:
         client_dir = SANDBOX_ROOT / datasite
         if not client_dir.is_dir():
@@ -449,15 +451,12 @@ def run_shell(
 
         bash_cmd = resolve_bash()
         env = ensure_shims(env)
-        result = subprocess.run(
-            bash_cmd + ["-lc", expanded],
-            cwd=client_dir,
-            env=env,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            capture_output=True,
-        )
+        # On Windows, don't use -l (login shell) as it resets PATH from profile files,
+        # losing the Python and other tool paths we've set up.
+        bash_flags = "-c" if os.name == "nt" else "-lc"
+        cmd_args = bash_cmd + [bash_flags, expanded]
+        cwd = client_dir
+        use_shell = False
     else:
         if java_home:
             env["JAVA_HOME"] = java_home
@@ -470,29 +469,64 @@ def run_shell(
         if use_bash:
             bash_cmd = resolve_bash()
             env = ensure_shims(env)
-            result = subprocess.run(
-                bash_cmd + ["-lc", expanded],
-                cwd=ROOT,
-                env=env,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                capture_output=True,
-            )
+            # On Windows, don't use -l (login shell) as it resets PATH from profile files
+            bash_flags = "-c" if os.name == "nt" else "-lc"
+            cmd_args = bash_cmd + [bash_flags, expanded]
+            cwd = ROOT
+            use_shell = False
         else:
-            result = subprocess.run(
-                expanded,
-                cwd=ROOT,
-                env=env,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                shell=True,
-                capture_output=True,
-            )
+            cmd_args = expanded
+            cwd = ROOT
+            use_shell = True
 
-    write_stream(sys.stdout, result.stdout)
-    write_stream(sys.stderr, result.stderr)
+    # Stream output in real-time instead of capturing
+    print(f"[run] {expanded}", flush=True)
+    stdout_lines: list[str] = []
+    stderr_lines: list[str] = []
+
+    process = subprocess.Popen(
+        cmd_args,
+        cwd=cwd,
+        env=env,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        shell=use_shell,
+    )
+
+    # Read stdout and stderr in real-time using threads
+    def read_stream(stream, lines_list, output_stream):
+        for line in iter(stream.readline, ''):
+            if line:
+                lines_list.append(line)
+                try:
+                    output_stream.write(line)
+                    output_stream.flush()
+                except UnicodeEncodeError:
+                    output_stream.buffer.write(line.encode("utf-8", errors="replace"))
+                    output_stream.flush()
+        stream.close()
+
+    stdout_thread = threading.Thread(target=read_stream, args=(process.stdout, stdout_lines, sys.stdout))
+    stderr_thread = threading.Thread(target=read_stream, args=(process.stderr, stderr_lines, sys.stderr))
+
+    stdout_thread.start()
+    stderr_thread.start()
+
+    process.wait()
+    stdout_thread.join()
+    stderr_thread.join()
+
+    # Create a CompletedProcess-like result for compatibility
+    result = subprocess.CompletedProcess(
+        args=cmd_args,
+        returncode=process.returncode,
+        stdout=''.join(stdout_lines),
+        stderr=''.join(stderr_lines),
+    )
+
     if result.returncode != 0:
         raise SystemExit(f"Command failed (exit {result.returncode}): {expanded}")
     return result

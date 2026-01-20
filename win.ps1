@@ -2,6 +2,11 @@
 # win.ps1 - Run bash scripts from PowerShell via Git Bash
 # Usage: .\win.ps1 ./test-scenario.sh --pipelines-collab --interactive
 
+# Explicitly disable PowerShell debugging to prevent unexpected debug mode entry
+# This can happen on some CI runners that have debugging configured
+Set-PSDebug -Off
+$DebugPreference = 'SilentlyContinue'
+
 $GitBash = "C:\Program Files\Git\bin\bash.exe"
 
 if (-not (Test-Path $GitBash)) {
@@ -138,8 +143,12 @@ foreach ($p in $toolPaths) {
 $extraPath = ($unixToolPaths -join ':')
 
 # Build the command with PATH additions
+# Note: We save PATH to a temp var first to avoid issues with spaces in PATH during export
 $cmd = @"
-export PATH="$extraPath`:`$PATH"
+# Save original PATH (may contain spaces in paths like /c/Program Files/...)
+_ORIG_PATH="`$PATH"
+export PATH="$extraPath`:`$_ORIG_PATH"
+
 cd '$unixPath'
 
 # On Windows, python3 might not exist but python does
@@ -167,8 +176,15 @@ $unixTempScript = $tempScript -replace '\\', '/' -replace '^([A-Za-z]):', '/$1'
 $unixTempScript = $unixTempScript.ToLower() -replace '^/([a-z])', '/$1'
 $scriptArgsList = @($scriptArgs)
 
+$exitCode = 0
 try {
     & $GitBash $unixTempScript @scriptArgsList
+    $exitCode = $LASTEXITCODE
+} catch {
+    Write-Host "PowerShell exception: $_" -ForegroundColor Red
+    $exitCode = 1
 } finally {
     Remove-Item $tempScript -ErrorAction SilentlyContinue
 }
+
+exit $exitCode
