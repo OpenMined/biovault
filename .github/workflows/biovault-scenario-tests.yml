@@ -24,87 +24,55 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup Podman for Linux containers (Windows)
+      # Setup WSL with Ubuntu for Linux container support on Windows
+      - name: Setup WSL (Ubuntu)
+        if: matrix.os == 'windows'
+        uses: Vampire/setup-wsl@v6
+        with:
+          distribution: Ubuntu-24.04
+          wsl-version: 2
+          update: true
+
+      # Install Docker Engine inside WSL and start the daemon
+      - name: Install Docker in WSL
+        if: matrix.os == 'windows'
+        shell: wsl-bash {0}
+        run: |
+          set -euxo pipefail
+
+          sudo apt-get update
+          sudo apt-get install -y docker.io
+
+          # Start dockerd and expose on localhost for Windows access
+          sudo nohup dockerd \
+            -H unix:///var/run/docker.sock \
+            -H tcp://127.0.0.1:2375 \
+            >/tmp/dockerd.log 2>&1 &
+
+          # Wait for readiness
+          for i in $(seq 1 60); do
+            sudo docker info >/dev/null 2>&1 && break
+            sleep 1
+          done
+
+          sudo docker run --rm hello-world
+
+      # Configure Windows to use the Linux Docker daemon
+      - name: Configure Docker for Windows
         if: matrix.os == 'windows'
         shell: pwsh
         run: |
-          $ErrorActionPreference = "Continue"
-
-          Write-Host "=== System Info ===" -ForegroundColor Cyan
-          Write-Host "OS: $([System.Environment]::OSVersion.VersionString)"
-          Write-Host "PowerShell: $($PSVersionTable.PSVersion)"
-
-          # Install/Update WSL2 first (required before podman machine init)
-          Write-Host ""
-          Write-Host "=== Installing/Updating WSL2 ===" -ForegroundColor Cyan
-          wsl --set-default-version 2 2>&1
-          wsl --install --no-launch 2>&1
-          wsl --update 2>&1
-
-          # Check WSL status
-          Write-Host ""
-          Write-Host "=== WSL Status ===" -ForegroundColor Cyan
-          wsl --status 2>&1
-          wsl --list --verbose 2>&1
-
-          # Install Chocolatey if not present
-          Write-Host ""
-          Write-Host "=== Installing Chocolatey ===" -ForegroundColor Cyan
-          if (-not (Get-Command choco -ErrorAction SilentlyContinue)) {
-            Set-ExecutionPolicy Bypass -Scope Process -Force
-            [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
-            Invoke-Expression ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
-            $env:PATH = "$env:PATH;C:\ProgramData\chocolatey\bin"
-          }
-          choco --version
-
-          # Install podman-cli via Chocolatey
-          Write-Host ""
-          Write-Host "=== Installing Podman CLI ===" -ForegroundColor Cyan
-          choco install podman-cli -y
-          $env:PATH = "C:\ProgramData\chocolatey\bin;$env:PATH"
-
-          Write-Host ""
-          Write-Host "=== Podman Version ===" -ForegroundColor Cyan
-          podman --version
-
-          # Initialize podman machine (auto-detects WSL)
-          Write-Host ""
-          Write-Host "=== Initializing Podman Machine ===" -ForegroundColor Cyan
-          podman machine init 2>&1
-
-          # Start podman machine
-          Write-Host ""
-          Write-Host "=== Starting Podman Machine ===" -ForegroundColor Cyan
-          podman machine start 2>&1
-
-          # Wait for machine to be ready
-          Start-Sleep -Seconds 10
-
-          # Test that it works
-          Write-Host ""
-          Write-Host "=== Testing Podman ===" -ForegroundColor Cyan
-          podman info
-          podman run --rm hello-world
-
-          # Create docker alias/wrapper so existing code works
-          Write-Host ""
-          Write-Host "=== Creating Docker compatibility ===" -ForegroundColor Cyan
           # Stop Windows Docker service to avoid conflicts
           Stop-Service docker -ErrorAction SilentlyContinue
 
-          # Create a batch file that wraps podman as docker
-          $wrapperContent = "@echo off`r`nC:\ProgramData\chocolatey\bin\podman.exe %*"
-          $wrapperPath = "C:\Windows\docker.bat"
-          Set-Content -Path $wrapperPath -Value $wrapperContent -NoNewline
-          Write-Host "Created docker wrapper at $wrapperPath"
-          Get-Content $wrapperPath
+          # Set DOCKER_HOST for this job
+          echo "DOCKER_HOST=tcp://127.0.0.1:2375" >> $env:GITHUB_ENV
 
-          # Test docker alias
-          Write-Host ""
-          Write-Host "=== Testing Docker Alias ===" -ForegroundColor Cyan
-          C:\Windows\docker.bat info
-          C:\Windows\docker.bat run --rm hello-world
+          # Test connection
+          $env:DOCKER_HOST = "tcp://127.0.0.1:2375"
+          docker version
+          docker info
+          docker run --rm hello-world
 
       - name: Setup workspace dependencies
         shell: bash
