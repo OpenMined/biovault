@@ -415,6 +415,19 @@ def run_shell(
     java_home = JAVA_HOME_OVERRIDE
     user_path = env.get("SCENARIO_USER_PATH")
 
+    # On Windows, ensure uv-managed Python is on PATH for bash subprocesses
+    if os.name == "nt":
+        uv_python = Path(os.environ.get("APPDATA", "")) / "uv" / "python"
+        if uv_python.exists():
+            for pydir in sorted(uv_python.glob("cpython-3.11*"), reverse=True):
+                if pydir.is_dir():
+                    uv_python_path = to_msys_path(str(pydir))
+                    if user_path:
+                        user_path = f"{uv_python_path}:{user_path}"
+                    else:
+                        user_path = uv_python_path
+                    break
+
     # Build the command args and cwd
     if datasite:
         client_dir = SANDBOX_ROOT / datasite
@@ -698,24 +711,17 @@ def main():
         print("SyftBox client mode: go (default)")
 
     setup = scenario.get("setup", {})
-    print("[DEBUG] Running setup.server commands...", flush=True)
     execute_commands(setup.get("server"), variables)
-    print("[DEBUG] setup.server complete", flush=True)
-    print("[DEBUG] Running setup.clients commands...", flush=True)
     execute_commands(setup.get("clients"), variables)
-    print("[DEBUG] setup.clients complete", flush=True)
 
     steps = scenario.get("steps", [])
     if not isinstance(steps, list):
         raise SystemExit("Scenario 'steps' must be a list.")
 
-    print(f"[DEBUG] About to run {len(steps)} steps...", flush=True)
-    for i, step in enumerate(steps):
+    for step in steps:
         if not isinstance(step, dict):
             raise SystemExit("Each step must be a mapping.")
-        print(f"[DEBUG] Starting step {i+1}/{len(steps)}: {step.get('name', 'unnamed')}", flush=True)
         run_step(step, variables)
-        print(f"[DEBUG] Completed step {i+1}/{len(steps)}", flush=True)
 
     print("\nScenario completed successfully.")
 

@@ -1,6 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# GitHub Actions Windows runners often provide `python` but not `python3` on PATH.
+# Normalize so the rest of the script can keep using `python3`.
+if ! command -v python3 >/dev/null 2>&1; then
+  if command -v python >/dev/null 2>&1; then
+    python3() { python "$@"; }
+    export -f python3
+  fi
+fi
+
 usage() {
   cat <<'EOF'
 Usage: ./import-data.sh --csv FILE [--clients email1,email2] [--sandbox DIR] [--skip-detect] [--path-column NAME]
@@ -64,7 +73,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 require_bin() {
-  command -v "$1" >/dev/null 2>&1 || { echo "Missing required tool: $1" >&2; exit 1; }
+  # Use 'type' instead of 'command -v' to also find shell functions (e.g., python3 wrapper)
+  type "$1" >/dev/null 2>&1 || { echo "Missing required tool: $1" >&2; exit 1; }
 }
 
 abs_path() {

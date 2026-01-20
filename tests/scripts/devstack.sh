@@ -394,7 +394,7 @@ start_syftboxd() {
     SYFTBOX_CONFIG_PATH="$config_path" \
     SYC_VAULT="$data_dir/.syc" \
     BV_SYFTBOX_BACKEND=embedded \
-    "$BV_BIN" syftboxd start >/dev/null
+    "$BV_BIN" syftboxd start || echo "[WARN] syftboxd start returned non-zero but continuing..."
   done
 }
 
