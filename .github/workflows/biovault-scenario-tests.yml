@@ -108,6 +108,25 @@ jobs:
             Write-Host "WARNING: Timeout waiting for Docker Desktop" -ForegroundColor Yellow
             Write-Host "Last docker info output:" -ForegroundColor Yellow
             docker info
+
+            Write-Host ""
+            Write-Host "=== Docker Desktop Logs ===" -ForegroundColor Yellow
+            $logPaths = @(
+              "$env:APPDATA\Docker\log\host\Docker Desktop.txt",
+              "$env:LOCALAPPDATA\Docker\log\vm\dockerd.log",
+              "$env:LOCALAPPDATA\Docker\log\host\com.docker.backend.log"
+            )
+            foreach ($logPath in $logPaths) {
+              if (Test-Path $logPath) {
+                Write-Host "--- $logPath (last 50 lines) ---" -ForegroundColor Cyan
+                Get-Content $logPath -Tail 50
+              }
+            }
+
+            Write-Host ""
+            Write-Host "=== Checking WSL status ===" -ForegroundColor Yellow
+            wsl --status
+            wsl --list --verbose
           }
 
           # Extra wait for stability
