@@ -1069,7 +1069,12 @@ pub async fn execute_dynamic(
         let docker_template = windows_path_to_container(&template_abs, using_podman);
         let docker_workflow = windows_path_to_container(&workflow_abs, using_podman);
         let docker_project_spec = windows_path_to_container(&project_spec_abs, using_podman);
-        let docker_log_path = windows_path_to_container(&nextflow_log_path, using_podman);
+        // Use /tmp for log file with Podman to avoid Windows mount I/O issues
+        let docker_log_path = if using_podman {
+            "/tmp/.nextflow.log".to_string()
+        } else {
+            windows_path_to_container(&nextflow_log_path, using_podman)
+        };
         let results_abs = results_path_buf
             .canonicalize()
             .unwrap_or_else(|_| results_path_buf.clone());
