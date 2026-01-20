@@ -61,8 +61,8 @@ jobs:
           }
 
           Write-Host ""
-          Write-Host "=== Installing Docker Desktop via Chocolatey ===" -ForegroundColor Cyan
-          choco install docker-desktop -y --no-progress
+          Write-Host "=== Installing Docker Desktop via Chocolatey (unattended) ===" -ForegroundColor Cyan
+          choco install docker-desktop -y --no-progress --install-arguments="install --quiet --accept-license"
 
           Write-Host ""
           Write-Host "=== Stopping Windows Docker service ===" -ForegroundColor Cyan
