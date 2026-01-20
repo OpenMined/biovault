@@ -387,14 +387,18 @@ start_syftboxd() {
     require_file "$config_path"
 
     echo "Starting syftboxd (embedded) for $email"
-    HOME="$client_dir" \
-    BIOVAULT_HOME="$client_dir/.biovault" \
-    SYFTBOX_EMAIL="$email" \
-    SYFTBOX_DATA_DIR="$data_dir" \
-    SYFTBOX_CONFIG_PATH="$config_path" \
-    SYC_VAULT="$data_dir/.syc" \
-    BV_SYFTBOX_BACKEND=embedded \
-    "$BV_BIN" syftboxd start || echo "[WARN] syftboxd start returned non-zero but continuing..."
+    # Redirect all output to prevent hanging (background process inherits file descriptors)
+    # Use a subshell to fully detach the background process's file descriptors
+    (
+      HOME="$client_dir" \
+      BIOVAULT_HOME="$client_dir/.biovault" \
+      SYFTBOX_EMAIL="$email" \
+      SYFTBOX_DATA_DIR="$data_dir" \
+      SYFTBOX_CONFIG_PATH="$config_path" \
+      SYC_VAULT="$data_dir/.syc" \
+      BV_SYFTBOX_BACKEND=embedded \
+      "$BV_BIN" syftboxd start </dev/null >/dev/null 2>&1
+    ) || true
   done
 }
 
