@@ -6,6 +6,12 @@ on:
   workflow_dispatch:
   workflow_call:
 
+# Version references for container runtimes (used in Dockerfile.nextflow-runner)
+# Update these when upgrading the nextflow-runner image
+env:
+  DOCKER_CLI_VERSION: "28.0.1"
+  PODMAN_VERSION: "5.3.1"
+
 jobs:
   run-scenarios:
     runs-on: ${{ matrix.os == 'windows' && 'namespace-profile-windows-medium' || 'namespace-profile-linux-medium' }}
