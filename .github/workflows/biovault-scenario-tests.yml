@@ -31,7 +31,8 @@ jobs:
         with:
           distribution: Ubuntu-24.04
           wsl-version: 2
-          update: true
+          # Skip update to speed up - docker.io install will update what it needs
+          update: false
 
       # Install Docker Engine inside WSL and start the daemon
       - name: Install Docker in WSL
