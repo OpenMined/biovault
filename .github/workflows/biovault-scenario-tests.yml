@@ -37,21 +37,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Cache Chocolatey packages and Podman machine images (Windows)
-      # Note: nscloud-cache-action requires cache volumes enabled in runner profile
+      # TODO: Enable namespace cache for Podman when cache volumes available on Windows
       # See: https://namespace.so/docs/solutions/github-actions/caching
-      # TODO: Enable cache volumes in namespace runner profile for Windows
-      - name: Cache Podman and Chocolatey
-        if: matrix.os == 'windows'
-        continue-on-error: true
-        uses: namespacelabs/nscloud-cache-action@v1
-        with:
-          path: |
-            C:\ProgramData\chocolatey\lib
-            C:\Windows\TEMP\chocolatey
-            ~\.local\share\containers\podman\machine
-            ~\.config\containers\podman\machine
-          cache: podman-${{ env.PODMAN_VERSION }}
+      # - name: Cache Podman and Chocolatey
+      #   if: matrix.os == 'windows'
+      #   uses: namespacelabs/nscloud-cache-action@v1
+      #   with:
+      #     path: |
+      #       C:\ProgramData\chocolatey\lib
+      #       ~\.local\share\containers\podman\machine
+      #     cache: podman-${{ env.PODMAN_VERSION }}
 
       # Try Hyper-V + Podman for Linux containers on Windows
       - name: Setup Hyper-V and Podman (Windows)
