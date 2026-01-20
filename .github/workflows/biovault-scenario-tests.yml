@@ -155,7 +155,8 @@ jobs:
           CONTAINER_DIR="/mnt/c/Users/runneradmin/work/nf-test"
 
           echo "=== Test: Run Nextflow with /tmp working directory (files mounted from Windows) ==="
-          podman run --rm \
+          # MSYS_NO_PATHCONV prevents Git Bash from mangling /mnt/c paths
+          MSYS_NO_PATHCONV=1 podman run --rm \
             --userns=keep-id \
             --security-opt label=disable \
             -e NXF_HOME=/tmp/.nextflow \
