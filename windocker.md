@@ -324,6 +324,50 @@ windows_path() {
 }
 ```
 
+## Hyper-V vs WSL2 Filesystem Issues
+
+### The Problem
+
+Podman can use two backends on Windows:
+- **WSL2**: Uses 9P/Plan9 protocol for Windows mounts, better POSIX compatibility
+- **Hyper-V**: Uses different mount mechanism (SMB/CIFS-like), stricter limitations
+
+On CI runners (namespace-profile-windows), WSL2 is not available, so we use Hyper-V. This causes I/O errors when Nextflow tries to perform POSIX operations on Windows-mounted paths:
+
+```
+mv: preserving times for '/mnt/c/.../nxf-tmp.XXX': Invalid argument
+mv: listing attributes of '/mnt/c/.../nxf-tmp.XXX': Invalid argument
+ERROR ~ Input/output error
+```
+
+### The Fix
+
+Set environment variables to redirect Nextflow temp files to native Linux paths:
+
+```rust
+// In run_dynamic.rs - Podman-specific settings
+.arg("-e").arg("NXF_HOME=/tmp/.nextflow")  // Nextflow home directory
+.arg("-e").arg("NXF_TEMP=/tmp")             // Temp files (nxf-tmp.*)
+```
+
+Also use `/tmp` for the Nextflow log file:
+```rust
+let docker_log_path = if using_podman {
+    "/tmp/.nextflow.log".to_string()
+} else {
+    windows_path_to_container(&nextflow_log_path, using_podman)
+};
+```
+
+### Why It Works Locally But Fails on CI
+
+| Environment | Backend | Windows Mount Protocol | POSIX Compatibility |
+|-------------|---------|------------------------|---------------------|
+| Local dev machine | WSL2 | 9P/Plan9 | Good - most operations work |
+| CI runners | Hyper-V | SMB-like | Limited - attribute operations fail |
+
+The fix ensures all Nextflow internal files go to `/tmp` (native Linux filesystem inside the Podman VM), while actual workflow data still uses mounted paths.
+
 ## Local Testing
 
 ### Quick Test Script
@@ -357,8 +401,10 @@ All 13 herc2 classifier tasks complete successfully with the shell compatibility
 1. ~~**Test Hyper-V on CI**: Enable Hyper-V feature and try Podman with hyperv provider~~ ✅ Done!
 2. ~~**Nested container support**: Enable Nextflow to spawn task containers with Podman~~ ✅ Done!
 3. ~~**Shell compatibility**: Fix `printf '%q'` issue in workflow templates~~ ✅ Done!
-4. **Merge bioscript PR**: Merge `fix/shell-compatibility` branch to update all workflows
-5. **Document for users**: Update user docs for Podman as Docker alternative
+4. ~~**Hyper-V filesystem fix**: Redirect Nextflow temp files to /tmp~~ ✅ Done!
+5. **Verify CI passes**: Confirm full pipeline runs on Windows CI with Hyper-V
+6. **Merge bioscript PR**: Merge `fix/shell-compatibility` branch to update all workflows
+7. **Document for users**: Update user docs for Podman as Docker alternative
 
 ## References
 
