@@ -146,7 +146,7 @@ impl ProjectSpec {
                 ));
             }
             SpecFormat::Module => {
-                let module = ModuleFile::parse_yaml(&raw).with_context(|| {
+                let module = ModuleFile::parse_yaml(raw).with_context(|| {
                     format!("Failed to parse module spec at {}", path.display())
                 })?;
                 return module.to_project_spec().with_context(|| {
@@ -167,7 +167,7 @@ impl ProjectSpec {
             }
             SpecFormat::LegacyProject | SpecFormat::Unknown => {}
         }
-        let spec: ProjectSpec = serde_yaml::from_str(&raw)
+        let spec: ProjectSpec = serde_yaml::from_str(raw)
             .with_context(|| format!("Failed to parse project spec at {}", path.display()))?;
         Ok(spec)
     }

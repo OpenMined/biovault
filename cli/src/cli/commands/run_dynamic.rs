@@ -563,7 +563,14 @@ fn pull_docker_image_if_needed(docker_bin: &str, image: &str) -> Result<()> {
     let mut pull_cmd = Command::new(docker_bin);
     super::configure_child_process(&mut pull_cmd);
     apply_docker_config_arg(&mut pull_cmd);
-    pull_cmd.arg("pull").arg(image);
+    pull_cmd.arg("pull");
+
+    // On Windows, explicitly specify linux/amd64 platform to avoid manifest resolution issues
+    // when Docker daemon might be misconfigured or in Windows container mode
+    #[cfg(target_os = "windows")]
+    pull_cmd.arg("--platform=linux/amd64");
+
+    pull_cmd.arg(image);
 
     // Add Docker PATH for credential helpers on Windows
     if let Some(docker_path) = build_docker_path(docker_bin) {
