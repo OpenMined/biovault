@@ -1093,7 +1093,15 @@ pub async fn execute_dynamic(
 
         docker_cmd
             .arg("run")
-            .arg("--rm")
+            .arg("--rm");
+
+        // When using Podman, add --userns=keep-id to map host user to container user
+        // This fixes permission issues with mounted volumes
+        if docker_bin.contains("podman") {
+            docker_cmd.arg("--userns=keep-id");
+        }
+
+        docker_cmd
             // Mount Docker Desktop engine socket so Nextflow-in-Docker can launch workflow containers.
             //
             // With Docker Desktop (Linux containers), the daemon runs in a Linux VM and provides a Unix socket.
