@@ -38,14 +38,17 @@ jobs:
       - uses: actions/checkout@v4
 
       # Cache Chocolatey packages and Podman machine images (Windows)
-      - name: Cache Chocolatey packages
+      # The VM image (~1GB) is the slowest part to download
+      - name: Cache Podman and Chocolatey
         if: matrix.os == 'windows'
         uses: namespacelabs/nscloud-cache-action@v1
         with:
           path: |
             C:\ProgramData\chocolatey\lib
             C:\Windows\TEMP\chocolatey
-          key: chocolatey-podman-${{ env.PODMAN_VERSION }}
+            ~\.local\share\containers\podman\machine
+            ~\.config\containers\podman\machine
+          key: podman-machine-${{ env.PODMAN_VERSION }}
 
       # Try Hyper-V + Podman for Linux containers on Windows
       - name: Setup Hyper-V and Podman (Windows)
