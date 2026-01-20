@@ -401,8 +401,9 @@ def run_shell(
     variables: Dict[str, str],
     capture: bool = False,
 ) -> subprocess.CompletedProcess:
+    use_bash = os.name == "nt"
     shell_vars = variables
-    if datasite and os.name == "nt":
+    if use_bash:
         shell_vars = dict(variables)
         shell_vars["workspace"] = to_msys_path(variables.get("workspace", ""))
         shell_vars["sandbox"] = to_msys_path(variables.get("sandbox", ""))
@@ -464,16 +465,31 @@ def run_shell(
         env.setdefault("NXF_DISABLE_JAVA_VERSION_CHECK", "true")
         env.setdefault("NXF_IGNORE_JAVA_VERSION", "true")
         env.setdefault("NXF_OPTS", "-Dnxf.java.check=false")
-        result = subprocess.run(
-            expanded,
-            cwd=ROOT,
-            env=env,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            shell=True,
-            capture_output=True,
-        )
+        if user_path:
+            env["PATH"] = user_path
+        if use_bash:
+            bash_cmd = resolve_bash()
+            env = ensure_shims(env)
+            result = subprocess.run(
+                bash_cmd + ["-lc", expanded],
+                cwd=ROOT,
+                env=env,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                capture_output=True,
+            )
+        else:
+            result = subprocess.run(
+                expanded,
+                cwd=ROOT,
+                env=env,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                shell=True,
+                capture_output=True,
+            )
 
     write_stream(sys.stdout, result.stdout)
     write_stream(sys.stderr, result.stderr)

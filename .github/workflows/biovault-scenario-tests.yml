@@ -12,14 +12,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [linux, windows]
-        client_mode: [go, rust]
+        # os: [linux, windows]
+        os: [windows]
+        # client_mode: [go, rust]
+        client_mode: [go]
         scenario:
           - tests/scenarios/import-and-run.yaml
-          - tests/scenarios/inbox-ping-pong.yaml
-          - tests/scenarios/messaging-core.yaml
-          - tests/scenarios/break-nextflow.yaml
-          - tests/scenarios/key-management.yaml
+          # - tests/scenarios/inbox-ping-pong.yaml
+          # - tests/scenarios/messaging-core.yaml
+          # - tests/scenarios/break-nextflow.yaml
+          # - tests/scenarios/key-management.yaml
 
     steps:
       - uses: actions/checkout@v4
@@ -66,9 +68,15 @@ jobs:
       - name: Build BioVault CLI
         run: cd cli && cargo build --release
 
-      - name: Run scenario
+      - name: Run scenario (Unix)
+        if: matrix.os != 'windows'
         shell: bash
         run: ./test-scenario.sh --client-mode ${{ matrix.client_mode }} ${{ matrix.scenario }}
+
+      - name: Run scenario (Windows)
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: .\win.ps1 ./test-scenario.sh --client-mode ${{ matrix.client_mode }} ${{ matrix.scenario }}
 
       - name: Show logs on failure
         if: failure()

@@ -204,13 +204,10 @@ fn remap_json_paths_for_docker(value: &JsonValue) -> JsonValue {
 #[cfg(target_os = "windows")]
 fn normalize_windows_path_str(s: &str) -> String {
     // Strip extended-length path prefix if present
-    let stripped = if s.starts_with("\\\\?\\") {
-        &s[4..]
-    } else if s.starts_with("//?/") {
-        &s[4..]
-    } else {
-        s
-    };
+    let stripped = s
+        .strip_prefix("\\\\?\\")
+        .or_else(|| s.strip_prefix("//?/"))
+        .unwrap_or(s);
     // Convert forward slashes to backslashes
     stripped.replace('/', "\\")
 }
@@ -284,13 +281,10 @@ fn extract_paths_from_json(value: &JsonValue, paths: &mut Vec<PathBuf>) {
 #[cfg(target_os = "windows")]
 fn looks_like_windows_absolute_path(s: &str) -> bool {
     // Handle extended-length path prefix: \\?\C:\... or //?/C:/...
-    let stripped = if s.starts_with("\\\\?\\") {
-        &s[4..]
-    } else if s.starts_with("//?/") {
-        &s[4..]
-    } else {
-        s
-    };
+    let stripped = s
+        .strip_prefix("\\\\?\\")
+        .or_else(|| s.strip_prefix("//?/"))
+        .unwrap_or(s);
 
     if stripped.len() < 3 {
         return false;

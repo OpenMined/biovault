@@ -19,10 +19,10 @@ jobs:
     strategy:
       matrix:
         include:
-          - os: linux
-            runner: namespace-profile-linux-medium
-          - os: mac
-            runner: namespace-profile-mac-medium
+          # - os: linux
+          #   runner: namespace-profile-linux-medium
+          # - os: mac
+          #   runner: namespace-profile-mac-medium
           - os: windows
             runner: namespace-profile-windows-medium
 

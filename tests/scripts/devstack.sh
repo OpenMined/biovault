@@ -420,7 +420,7 @@ start_stack() {
   # These will be inherited by the Go process and passed to spawned clients
   export GOCACHE="$GO_CACHE_DIR"
   [[ -n "${SCENARIO_JAVA_HOME:-}" ]] && export JAVA_HOME="$SCENARIO_JAVA_HOME" JAVA_CMD="$SCENARIO_JAVA_HOME/bin/java"
-  [[ -n "${SCENARIO_USER_PATH:-}" ]] && export PATH="$SCENARIO_USER_PATH"
+  [[ -n "${SCENARIO_USER_PATH:-}" ]] && export PATH="$SCENARIO_USER_PATH:$PATH"
   [[ -n "${NXF_DISABLE_JAVA_VERSION_CHECK:-}" ]] && export NXF_DISABLE_JAVA_VERSION_CHECK
   [[ -n "${NXF_IGNORE_JAVA_VERSION:-}" ]] && export NXF_IGNORE_JAVA_VERSION
   [[ -n "${NXF_OPTS:-}" ]] && export NXF_OPTS
