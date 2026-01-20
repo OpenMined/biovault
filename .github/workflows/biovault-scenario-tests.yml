@@ -68,51 +68,65 @@ jobs:
       - name: Build BioVault CLI
         run: cd cli && cargo build --release
 
-      - name: Setup WSL2 for Linux containers (Windows)
+      - name: Setup Docker for Linux containers (Windows)
         if: matrix.os == 'windows'
         shell: pwsh
         run: |
-          Write-Host "=== Current Docker Info (before WSL2) ===" -ForegroundColor Cyan
-          docker info | Select-String -Pattern "OSType|Storage Driver|Default Isolation|Server Version"
+          Write-Host "=== Current Docker Info ===" -ForegroundColor Cyan
+          docker info | Select-String -Pattern "OSType|Server Version"
+
+          # Try switching to Linux engine first (works if Docker Desktop is already installed)
+          Write-Host ""
+          Write-Host "=== Attempting to switch to Linux containers ===" -ForegroundColor Cyan
+          $dockerCli = "C:\Program Files\Docker\Docker\DockerCli.exe"
+          if (Test-Path $dockerCli) {
+            Write-Host "Found DockerCli.exe, attempting to switch to Linux engine..."
+            & $dockerCli -SwitchLinuxEngine
+            Start-Sleep -Seconds 10
+
+            $info = docker info 2>&1
+            if ($info -match "OSType:\s+linux") {
+              Write-Host "Successfully switched to Linux containers!" -ForegroundColor Green
+              docker info
+              docker run --rm hello-world
+              exit 0
+            }
+          }
+
+          # If DockerCli doesn't exist or switch failed, install Docker Desktop
+          Write-Host ""
+          Write-Host "=== Installing Docker Desktop via winget ===" -ForegroundColor Cyan
+          winget install -e --id Docker.DockerDesktop --accept-source-agreements --accept-package-agreements
 
           Write-Host ""
-          Write-Host "=== Checking Windows features ===" -ForegroundColor Cyan
-          Get-WindowsOptionalFeature -Online | Where-Object { $_.FeatureName -match "Microsoft-Windows-Subsystem-Linux|VirtualMachinePlatform|Hyper-V" } | Format-Table FeatureName, State
+          Write-Host "=== Stopping Windows Docker service ===" -ForegroundColor Cyan
+          Stop-Service docker -ErrorAction SilentlyContinue
 
           Write-Host ""
-          Write-Host "=== Installing WSL2 ===" -ForegroundColor Cyan
-          wsl --set-default-version 2
-          wsl --install --no-distribution
+          Write-Host "=== Starting Docker Desktop ===" -ForegroundColor Cyan
+          Start-Process "C:\Program Files\Docker\Docker\Docker Desktop.exe"
+
+          Write-Host "=== Waiting for Docker Desktop to start ===" -ForegroundColor Cyan
+          $timeout = 120
+          $timer = [Diagnostics.Stopwatch]::StartNew()
+          while ($timer.Elapsed.TotalSeconds -lt $timeout) {
+            $info = docker info 2>&1
+            if ($info -match "OSType:\s+linux") {
+              Write-Host "Docker Desktop is ready with Linux containers!" -ForegroundColor Green
+              break
+            }
+            Write-Host "Waiting... ($([int]$timer.Elapsed.TotalSeconds)s)"
+            Start-Sleep -Seconds 5
+          }
+          $timer.Stop()
 
           Write-Host ""
-          Write-Host "=== Installing Ubuntu distro in WSL2 ===" -ForegroundColor Cyan
-          wsl --install -d Ubuntu --no-launch
-
-          Write-Host ""
-          Write-Host "=== WSL Status ===" -ForegroundColor Cyan
-          wsl --status
-          wsl --list --verbose
-
-          Write-Host ""
-          Write-Host "=== Checking for Docker contexts ===" -ForegroundColor Cyan
-          docker context ls
-
-          Write-Host ""
-          Write-Host "=== Restarting Docker service ===" -ForegroundColor Cyan
-          Restart-Service docker
-          Start-Sleep -Seconds 10
-
-          Write-Host ""
-          Write-Host "=== Docker Info (after WSL2) ===" -ForegroundColor Cyan
+          Write-Host "=== Docker Info (after Docker Desktop) ===" -ForegroundColor Cyan
           docker info
 
           Write-Host ""
-          Write-Host "=== Testing Linux container pull ===" -ForegroundColor Cyan
-          docker pull --platform=linux/amd64 hello-world:latest
-
-          Write-Host ""
-          Write-Host "=== Running Linux container test ===" -ForegroundColor Cyan
-          docker run --rm --platform=linux/amd64 hello-world:latest
+          Write-Host "=== Testing Linux container ===" -ForegroundColor Cyan
+          docker run --rm hello-world
 
       - name: Run scenario (Unix)
         if: matrix.os != 'windows'
