@@ -430,7 +430,17 @@ start_stack() {
   [[ -n "${NXF_OPTS:-}" ]] && export NXF_OPTS
 
   echo "Starting SyftBox devstack via syftbox/cmd/devstack..."
-  (cd "$SYFTBOX_DIR" && go run ./cmd/devstack start "${args[@]}")
+  # Use script to capture output while preventing pipe inheritance issues on Windows CI
+  # The devstack command starts servers as child processes; on Windows, if they inherit
+  # stderr, the parent pipe never closes and the script hangs.
+  local devstack_log="$SANDBOX_DIR/devstack-startup.log"
+  (cd "$SYFTBOX_DIR" && go run ./cmd/devstack start "${args[@]}" </dev/null >"$devstack_log" 2>&1) || {
+    echo "Devstack command failed. Log:" >&2
+    cat "$devstack_log" >&2
+    exit 1
+  }
+  # Show the startup log
+  cat "$devstack_log"
 
   if (( EMBEDDED_MODE )); then
     local state_path="$SANDBOX_DIR/relay/state.json"

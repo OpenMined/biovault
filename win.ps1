@@ -7,6 +7,14 @@
 Set-PSDebug -Off
 $DebugPreference = 'SilentlyContinue'
 
+# Kill any running bv.exe processes to prevent "Access is denied" during compilation
+$bvProcesses = Get-Process -Name "bv" -ErrorAction SilentlyContinue
+if ($bvProcesses) {
+    Write-Host "Stopping running bv.exe processes..." -ForegroundColor Yellow
+    $bvProcesses | Stop-Process -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Milliseconds 500  # Give Windows time to release file handles
+}
+
 $GitBash = "C:\Program Files\Git\bin\bash.exe"
 
 if (-not (Test-Path $GitBash)) {
