@@ -34,9 +34,10 @@ jobs:
           Write-Host "OS: $([System.Environment]::OSVersion.VersionString)"
           Write-Host "PowerShell: $($PSVersionTable.PSVersion)"
 
-          # Install/Update WSL first (required before podman machine init)
+          # Install/Update WSL2 first (required before podman machine init)
           Write-Host ""
-          Write-Host "=== Installing/Updating WSL ===" -ForegroundColor Cyan
+          Write-Host "=== Installing/Updating WSL2 ===" -ForegroundColor Cyan
+          wsl --set-default-version 2 2>&1
           wsl --install --no-launch 2>&1
           wsl --update 2>&1
 
