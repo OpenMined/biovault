@@ -1182,7 +1182,11 @@ pub async fn execute_dynamic(
                 .arg("label=disable")
                 // Set NXF_HOME to a writable location inside the container
                 .arg("-e")
-                .arg("NXF_HOME=/tmp/.nextflow");
+                .arg("NXF_HOME=/tmp/.nextflow")
+                // Set NXF_TEMP to avoid writing temp files to Windows-mounted paths
+                // (Windows mounts don't support POSIX operations like mv with attribute preservation)
+                .arg("-e")
+                .arg("NXF_TEMP=/tmp");
 
             // Mount Podman socket and set CONTAINER_HOST for nested container execution
             if let Some(podman_socket) = get_podman_socket_path() {
