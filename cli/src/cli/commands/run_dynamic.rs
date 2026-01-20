@@ -1133,10 +1133,23 @@ pub async fn execute_dynamic(
 
         // When using Podman, add flags to fix permission issues with mounted volumes
         if using_podman {
+            // Pre-create .nextflow directory in project to avoid permission issues
+            // Nextflow creates this in the working directory for run history/locks
+            let nextflow_local_dir = project_abs.join(".nextflow");
+            if !nextflow_local_dir.exists() {
+                let _ = fs::create_dir_all(&nextflow_local_dir);
+                append_desktop_log(&format!(
+                    "[Pipeline] Created .nextflow directory: {}",
+                    nextflow_local_dir.display()
+                ));
+            }
+
             docker_cmd
                 .arg("--userns=keep-id")
+                // Disable SELinux labeling which can cause permission issues on mounted volumes
+                .arg("--security-opt")
+                .arg("label=disable")
                 // Set NXF_HOME to a writable location inside the container
-                // This prevents Nextflow from trying to write .nextflow/ to mounted volumes
                 .arg("-e")
                 .arg("NXF_HOME=/tmp/.nextflow");
 

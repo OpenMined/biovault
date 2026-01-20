@@ -38,9 +38,12 @@ jobs:
       - uses: actions/checkout@v4
 
       # Cache Chocolatey packages and Podman machine images (Windows)
-      # The VM image (~1GB) is the slowest part to download
+      # Note: nscloud-cache-action requires cache volumes enabled in runner profile
+      # See: https://namespace.so/docs/solutions/github-actions/caching
+      # TODO: Enable cache volumes in namespace runner profile for Windows
       - name: Cache Podman and Chocolatey
         if: matrix.os == 'windows'
+        continue-on-error: true
         uses: namespacelabs/nscloud-cache-action@v1
         with:
           path: |
@@ -48,7 +51,7 @@ jobs:
             C:\Windows\TEMP\chocolatey
             ~\.local\share\containers\podman\machine
             ~\.config\containers\podman\machine
-          key: podman-machine-${{ env.PODMAN_VERSION }}
+          cache: podman-${{ env.PODMAN_VERSION }}
 
       # Try Hyper-V + Podman for Linux containers on Windows
       - name: Setup Hyper-V and Podman (Windows)
