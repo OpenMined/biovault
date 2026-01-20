@@ -76,8 +76,9 @@ jobs:
           $timeout = 300
           $timer = [Diagnostics.Stopwatch]::StartNew()
           while ($timer.Elapsed.TotalSeconds -lt $timeout) {
-            $info = docker info 2>&1
-            $osType = ($info | Select-String -Pattern "OSType:\s+(\w+)").Matches.Groups[1].Value
+            $info = docker info 2>&1 | Out-String
+            $osTypeMatch = [regex]::Match($info, "OSType:\s+(\w+)")
+            $osType = if ($osTypeMatch.Success) { $osTypeMatch.Groups[1].Value } else { "unknown" }
             $hasError = $info -match "error|Error|ERROR"
 
             Write-Host "Waiting... ($([int]$timer.Elapsed.TotalSeconds)s) - OSType: $osType, HasError: $hasError"
