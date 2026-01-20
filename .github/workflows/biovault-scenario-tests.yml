@@ -68,20 +68,50 @@ jobs:
       - name: Build BioVault CLI
         run: cd cli && cargo build --release
 
-      - name: Debug Docker setup (Windows)
+      - name: Setup WSL2 for Linux containers (Windows)
         if: matrix.os == 'windows'
         shell: pwsh
         run: |
-          Write-Host "=== Docker Version ===" -ForegroundColor Cyan
-          docker version
+          Write-Host "=== Current Docker Info (before WSL2) ===" -ForegroundColor Cyan
+          docker info | Select-String -Pattern "OSType|Storage Driver|Default Isolation|Server Version"
+
           Write-Host ""
-          Write-Host "=== Docker Info ===" -ForegroundColor Cyan
+          Write-Host "=== Checking Windows features ===" -ForegroundColor Cyan
+          Get-WindowsOptionalFeature -Online | Where-Object { $_.FeatureName -match "Microsoft-Windows-Subsystem-Linux|VirtualMachinePlatform|Hyper-V" } | Format-Table FeatureName, State
+
+          Write-Host ""
+          Write-Host "=== Installing WSL2 ===" -ForegroundColor Cyan
+          wsl --set-default-version 2
+          wsl --install --no-distribution
+
+          Write-Host ""
+          Write-Host "=== Installing Ubuntu distro in WSL2 ===" -ForegroundColor Cyan
+          wsl --install -d Ubuntu --no-launch
+
+          Write-Host ""
+          Write-Host "=== WSL Status ===" -ForegroundColor Cyan
+          wsl --status
+          wsl --list --verbose
+
+          Write-Host ""
+          Write-Host "=== Checking for Docker contexts ===" -ForegroundColor Cyan
+          docker context ls
+
+          Write-Host ""
+          Write-Host "=== Restarting Docker service ===" -ForegroundColor Cyan
+          Restart-Service docker
+          Start-Sleep -Seconds 10
+
+          Write-Host ""
+          Write-Host "=== Docker Info (after WSL2) ===" -ForegroundColor Cyan
           docker info
+
           Write-Host ""
-          Write-Host "=== Testing Docker Pull with explicit platform ===" -ForegroundColor Cyan
+          Write-Host "=== Testing Linux container pull ===" -ForegroundColor Cyan
           docker pull --platform=linux/amd64 hello-world:latest
+
           Write-Host ""
-          Write-Host "=== Running hello-world test ===" -ForegroundColor Cyan
+          Write-Host "=== Running Linux container test ===" -ForegroundColor Cyan
           docker run --rm --platform=linux/amd64 hello-world:latest
 
       - name: Run scenario (Unix)
