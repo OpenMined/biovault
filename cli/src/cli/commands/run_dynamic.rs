@@ -720,6 +720,127 @@ fn check_docker_running(docker_bin: &str) -> Result<()> {
     .into())
 }
 
+/// Check if a container runtime binary is available and working (supports Linux containers).
+/// Returns true if `binary info` succeeds.
+#[cfg(target_os = "windows")]
+fn is_container_runtime_working(binary: &str) -> bool {
+    let mut cmd = Command::new(binary);
+    super::configure_child_process(&mut cmd);
+    cmd.arg("info").stdout(Stdio::piped()).stderr(Stdio::piped());
+
+    match cmd.output() {
+        Ok(output) => {
+            if !output.status.success() {
+                return false;
+            }
+            // Check if the output indicates Linux container support
+            // Docker Desktop in Windows container mode shows "OSType: windows"
+            // We need "OSType: linux" or Podman (which is always Linux)
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            // Podman always runs Linux containers, Docker needs to be in Linux mode
+            if binary.contains("podman") {
+                return true;
+            }
+            // For Docker, check if it's in Linux container mode
+            !stdout.contains("OSType: windows")
+        }
+        Err(_) => false,
+    }
+}
+
+/// Detect the best available container runtime on Windows.
+/// Checks config for explicit preference, then tries Docker, then Podman.
+/// Returns the binary path/name for the working runtime.
+#[cfg(target_os = "windows")]
+fn detect_container_runtime(cfg: Option<&crate::config::Config>) -> Result<String> {
+    // Check if user has explicitly configured a container runtime preference
+    if let Some(runtime_pref) = cfg.and_then(|c| c.get_binary_path("container_runtime")) {
+        let pref = runtime_pref.to_lowercase();
+        append_desktop_log(&format!(
+            "[Runtime] Config specifies container_runtime: {}",
+            pref
+        ));
+
+        match pref.as_str() {
+            "podman" => {
+                // User explicitly wants Podman
+                if is_container_runtime_working("podman") {
+                    append_desktop_log("[Runtime] Using configured Podman");
+                    return Ok("podman".to_string());
+                }
+                return Err(anyhow::anyhow!(
+                    "Container runtime 'podman' is configured but not working. Ensure Podman machine is running."
+                ).into());
+            }
+            "docker" => {
+                // User explicitly wants Docker
+                if let Some(docker_path) = resolve_binary_path(cfg, "docker") {
+                    if is_container_runtime_working(&docker_path) {
+                        append_desktop_log("[Runtime] Using configured Docker path");
+                        return Ok(docker_path);
+                    }
+                }
+                if is_container_runtime_working("docker") {
+                    append_desktop_log("[Runtime] Using system Docker");
+                    return Ok("docker".to_string());
+                }
+                return Err(anyhow::anyhow!(
+                    "Container runtime 'docker' is configured but not working. Ensure Docker Desktop is running in Linux container mode."
+                ).into());
+            }
+            "auto" | "" => {
+                // Fall through to auto-detection
+                append_desktop_log("[Runtime] Auto-detecting container runtime...");
+            }
+            _ => {
+                append_desktop_log(&format!(
+                    "[Runtime] Unknown container_runtime '{}', using auto-detection",
+                    pref
+                ));
+            }
+        }
+    }
+
+    // Auto-detection: try configured Docker path first
+    if let Some(docker_path) = resolve_binary_path(cfg, "docker") {
+        append_desktop_log(&format!(
+            "[Runtime] Checking configured Docker: {}",
+            docker_path
+        ));
+        if is_container_runtime_working(&docker_path) {
+            append_desktop_log("[Runtime] Configured Docker is working with Linux containers");
+            return Ok(docker_path);
+        }
+        append_desktop_log("[Runtime] Configured Docker not working or in Windows container mode");
+    }
+
+    // Try system Docker
+    append_desktop_log("[Runtime] Checking system docker...");
+    if is_container_runtime_working("docker") {
+        append_desktop_log("[Runtime] System docker is working with Linux containers");
+        return Ok("docker".to_string());
+    }
+    append_desktop_log("[Runtime] System docker not available or not working");
+
+    // Try Podman as fallback
+    append_desktop_log("[Runtime] Checking podman...");
+    if is_container_runtime_working("podman") {
+        append_desktop_log("[Runtime] Podman is working");
+        return Ok("podman".to_string());
+    }
+    append_desktop_log("[Runtime] Podman not available or not working");
+
+    Err(anyhow::anyhow!(
+        "No working container runtime found. Please install Docker Desktop (in Linux container mode) or Podman, and ensure the daemon/machine is running."
+    ).into())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn detect_container_runtime(cfg: Option<&crate::config::Config>) -> Result<String> {
+    // On non-Windows, just use Docker as before
+    Ok(resolve_binary_path(cfg, "docker").unwrap_or_else(|| "docker".to_string()))
+}
+
 pub async fn execute_dynamic(
     project_folder: &str,
     args: Vec<String>,
@@ -853,18 +974,35 @@ pub async fn execute_dynamic(
     let config = crate::config::get_config().ok();
     let nextflow_bin =
         resolve_binary_path(config.as_ref(), "nextflow").unwrap_or_else(|| "nextflow".to_string());
-    let docker_bin =
-        resolve_binary_path(config.as_ref(), "docker").unwrap_or_else(|| "docker".to_string());
 
-    // Check Docker availability (required for both Windows Docker execution and workflow containers)
-    // Skip Docker checks in dry-run mode
+    // Resolve container runtime: check env var first, then auto-detect
+    // Supports: BIOVAULT_CONTAINER_RUNTIME=docker|podman or configured docker path
+    let docker_bin = if let Ok(runtime) = std::env::var("BIOVAULT_CONTAINER_RUNTIME") {
+        let trimmed = runtime.trim();
+        if !trimmed.is_empty() {
+            append_desktop_log(&format!(
+                "[Pipeline] Using container runtime from BIOVAULT_CONTAINER_RUNTIME: {}",
+                trimmed
+            ));
+            trimmed.to_string()
+        } else {
+            detect_container_runtime(config.as_ref())?
+        }
+    } else {
+        detect_container_runtime(config.as_ref())?
+    };
+
+    append_desktop_log(&format!("[Pipeline] Selected container runtime: {}", docker_bin));
+
+    // Check container runtime availability (required for Windows Docker execution and workflow containers)
+    // Skip checks in dry-run mode
     if !dry_run && (run_settings.require_docker || use_docker) {
-        append_desktop_log("[Pipeline] Checking Docker availability...");
+        append_desktop_log("[Pipeline] Checking container runtime availability...");
         if let Err(err) = check_docker_running(&docker_bin) {
-            append_desktop_log(&format!("[Pipeline] Docker check failed: {}", err));
+            append_desktop_log(&format!("[Pipeline] Container runtime check failed: {}", err));
             return Err(err);
         }
-        append_desktop_log("[Pipeline] Docker is running (docker info succeeded)");
+        append_desktop_log(&format!("[Pipeline] {} is running (info succeeded)", docker_bin));
     }
 
     // Build command - use Docker on Windows, native Nextflow elsewhere
