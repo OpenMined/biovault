@@ -10,7 +10,7 @@ on:
 # Update these when upgrading the nextflow-runner image
 env:
   DOCKER_CLI_VERSION: "28.0.1"
-  PODMAN_VERSION: "5.3.1"
+  PODMAN_VERSION: "5.7.1"
 
 jobs:
   run-scenarios:
@@ -37,16 +37,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # TODO: Enable namespace cache for Podman when cache volumes available on Windows
-      # See: https://namespace.so/docs/solutions/github-actions/caching
-      # - name: Cache Podman and Chocolatey
-      #   if: matrix.os == 'windows'
-      #   uses: namespacelabs/nscloud-cache-action@v1
-      #   with:
-      #     path: |
-      #       C:\ProgramData\chocolatey\lib
-      #       ~\.local\share\containers\podman\machine
-      #     cache: podman-${{ env.PODMAN_VERSION }}
+      # Cache Podman CLI and machine image to speed up setup
+      - name: Cache Podman
+        if: matrix.os == 'windows'
+        uses: actions/cache@v4
+        with:
+          path: |
+            C:\ProgramData\chocolatey\lib\podman-cli
+            C:\Users\runneradmin\.local\share\containers\podman\machine
+          key: podman-windows-${{ env.PODMAN_VERSION }}
 
       # Try Hyper-V + Podman for Linux containers on Windows
       - name: Setup Hyper-V and Podman (Windows)
@@ -136,11 +135,11 @@ jobs:
         run: |
           set -x
 
-          # Create test workflow in /tmp (native Linux path)
-          TEST_DIR="/tmp/nf-test-$$"
-          mkdir -p "$TEST_DIR"
+          # Create test workflow on Windows filesystem
+          WIN_DIR="C:/Users/runneradmin/work/nf-test"
+          mkdir -p "$WIN_DIR"
 
-          cat > "$TEST_DIR/test.nf" << 'EOF'
+          cat > "$WIN_DIR/test.nf" << 'EOF'
           process HELLO {
               output: stdout
               script: "echo Hello from Nextflow"
@@ -148,45 +147,25 @@ jobs:
           workflow { HELLO() | view }
           EOF
 
-          cat > "$TEST_DIR/nextflow.config" << 'EOF'
+          cat > "$WIN_DIR/nextflow.config" << 'EOF'
           process.executor = 'local'
           EOF
 
-          echo "=== Test 1: Run Nextflow with /tmp working directory ==="
+          # Convert to container path
+          CONTAINER_DIR="/mnt/c/Users/runneradmin/work/nf-test"
+
+          echo "=== Test: Run Nextflow with /tmp working directory (files mounted from Windows) ==="
           podman run --rm \
             --userns=keep-id \
             --security-opt label=disable \
             -e NXF_HOME=/tmp/.nextflow \
             -e NXF_TEMP=/tmp \
-            -v "$TEST_DIR:$TEST_DIR" \
-            -w "$TEST_DIR" \
+            -v "$CONTAINER_DIR:$CONTAINER_DIR" \
+            -w /tmp \
             ghcr.io/openmined/nextflow-runner:25.10.2 \
-            nextflow -log /tmp/nf.log run test.nf -c nextflow.config
+            nextflow -log /tmp/nf.log run "$CONTAINER_DIR/test.nf" -c "$CONTAINER_DIR/nextflow.config"
 
-          echo "=== Test 1 passed: /tmp working directory works ==="
-
-          # Now test with Windows mount as working directory
-          WIN_TEST_DIR="/mnt/c/Users/runneradmin/work/nf-win-test"
-          mkdir -p "$WIN_TEST_DIR" || true
-          cp "$TEST_DIR/test.nf" "$WIN_TEST_DIR/" || true
-          cp "$TEST_DIR/nextflow.config" "$WIN_TEST_DIR/" || true
-
-          echo "=== Test 2: Run Nextflow with Windows mount working directory ==="
-          podman run --rm \
-            --userns=keep-id \
-            --security-opt label=disable \
-            -e NXF_HOME=/tmp/.nextflow \
-            -e NXF_TEMP=/tmp \
-            -v "$WIN_TEST_DIR:$WIN_TEST_DIR" \
-            -w "$WIN_TEST_DIR" \
-            ghcr.io/openmined/nextflow-runner:25.10.2 \
-            nextflow -log /tmp/nf.log run test.nf -c nextflow.config || {
-              echo "=== Test 2 FAILED: Windows mount working directory has I/O issues ==="
-              echo "This confirms we need to use /tmp as working directory"
-              # Don't fail - this is expected to fail
-            }
-
-          echo "=== Diagnostic complete ==="
+          echo "=== Test passed: /tmp working directory with mounted workflow files works ==="
 
       - name: Setup workspace dependencies
         shell: bash
