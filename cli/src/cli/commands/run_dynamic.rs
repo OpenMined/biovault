@@ -1639,6 +1639,14 @@ pub async fn execute_dynamic(
             nextflow_bin
         ));
 
+        // Generate runtime config for native Docker execution
+        // This config sets docker.enabled = true so Nextflow uses Docker for process containers
+        let native_runtime_config = if !dry_run && run_settings.require_docker {
+            Some(generate_runtime_config(&project_abs, false)?)
+        } else {
+            None
+        };
+
         // Log original PATH from environment
         if let Some(original_path) = std::env::var_os("PATH") {
             append_desktop_log(&format!(
@@ -1675,14 +1683,14 @@ pub async fn execute_dynamic(
 
         native_cmd.arg("-log").arg(&nextflow_log_path);
 
-        native_cmd.arg("run").arg(&template_abs);
+        native_cmd.arg("run");
 
-        // Enable Docker for workflow containers on native execution
-        // The workflow.nf files use container directives that need Docker
-        // Note: -with-docker must come AFTER the project file
-        if run_settings.require_docker {
-            native_cmd.arg("-with-docker");
+        // Pass runtime config file to Nextflow (enables docker.enabled = true)
+        if let Some(ref config_path) = native_runtime_config {
+            native_cmd.arg("-c").arg(config_path);
         }
+
+        native_cmd.arg(&template_abs);
 
         if resume {
             native_cmd.arg("-resume");
