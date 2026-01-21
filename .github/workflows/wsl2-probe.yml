@@ -1,0 +1,107 @@
+name: WSL2 Probe (Namespace)
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  wsl2-probe:
+    runs-on: namespace-profile-windows-medium
+    timeout-minutes: 10
+    steps:
+      - name: Collect system diagnostics
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $log = Join-Path $env:GITHUB_WORKSPACE "wsl2-probe.log"
+          function Write-Section([string]$title) {
+            "`n=== $title ===" | Tee-Object -FilePath $log -Append
+          }
+          Write-Section "Timestamp"
+          Get-Date | Tee-Object -FilePath $log -Append
+          Write-Section "SystemInfo"
+          systeminfo | Tee-Object -FilePath $log -Append
+          Write-Section "Windows Optional Features"
+          Get-WindowsOptionalFeature -Online -FeatureName `
+            Microsoft-Windows-Subsystem-Linux,VirtualMachinePlatform,Microsoft-Hyper-V,Microsoft-Hyper-V-All |
+            Select-Object FeatureName,State |
+            Format-Table -AutoSize | Out-String | Tee-Object -FilePath $log -Append
+          Write-Section "WSL --version"
+          try { wsl --version 2>&1 | Tee-Object -FilePath $log -Append } catch { $_ | Tee-Object -FilePath $log -Append }
+          Write-Section "WSL --status"
+          try { wsl --status 2>&1 | Tee-Object -FilePath $log -Append } catch { $_ | Tee-Object -FilePath $log -Append }
+          Write-Section "WSL -l -v"
+          try { wsl -l -v 2>&1 | Tee-Object -FilePath $log -Append } catch { $_ | Tee-Object -FilePath $log -Append }
+          Write-Section "WSL -l -q"
+          try { wsl -l -q 2>&1 | Tee-Object -FilePath $log -Append } catch { $_ | Tee-Object -FilePath $log -Append }
+
+      - name: Attempt WSL2 install or upgrade
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $log = Join-Path $env:GITHUB_WORKSPACE "wsl2-probe.log"
+          function Write-Section([string]$title) {
+            "`n=== $title ===" | Tee-Object -FilePath $log -Append
+          }
+          $dist = "Ubuntu-24.04"
+          Write-Section "Set default WSL version 2"
+          wsl --set-default-version 2
+          Write-Section "Check existing distros"
+          $installed = (wsl -l -q) | ForEach-Object { $_.Trim() } | Where-Object { $_ -eq $dist }
+          if (-not $installed) {
+            Write-Section "Install $dist"
+            wsl --install -d $dist
+          } else {
+            Write-Section "Set $dist to WSL2"
+            wsl --set-version $dist 2
+          }
+
+      - name: Verify Ubuntu-24.04
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $log = Join-Path $env:GITHUB_WORKSPACE "wsl2-probe.log"
+          function Write-Section([string]$title) {
+            "`n=== $title ===" | Tee-Object -FilePath $log -Append
+          }
+          Write-Section "WSL list after install"
+          wsl -l -v 2>&1 | Tee-Object -FilePath $log -Append
+          Write-Section "WSL uname"
+          wsl -d Ubuntu-24.04 --exec uname -a 2>&1 | Tee-Object -FilePath $log -Append
+          Write-Section "WSL os-release"
+          wsl -d Ubuntu-24.04 --exec cat /etc/os-release 2>&1 | Tee-Object -FilePath $log -Append
+
+      - name: Upload diagnostics
+        uses: actions/upload-artifact@v4
+        with:
+          name: wsl2-probe-logs
+          path: wsl2-probe.log
+
+      - name: Fail if WSL2 is not ready
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $log = Join-Path $env:GITHUB_WORKSPACE "wsl2-probe.log"
+          function Write-Section([string]$title) {
+            "`n=== $title ===" | Tee-Object -FilePath $log -Append
+          }
+          $dist = "Ubuntu-24.04"
+          Write-Section "Final readiness check"
+          $list = wsl -l -v 2>&1
+          $list | Tee-Object -FilePath $log -Append
+          if ($LASTEXITCODE -ne 0) {
+            Write-Section "WSL list failed"
+            exit 1
+          }
+          $distLine = $list | Where-Object { $_ -match "Ubuntu-24\\.04" }
+          if (-not $distLine) {
+            Write-Section "Ubuntu-24.04 not present"
+            exit 1
+          }
+          if ($distLine -notmatch "\\s+2\\s*$") {
+            Write-Section "Ubuntu-24.04 not WSL2"
+            exit 1
+          }

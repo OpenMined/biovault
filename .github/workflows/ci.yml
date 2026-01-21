@@ -1,9 +1,6 @@
 name: CI
 
 on:
-  pull_request:
-    branches: [main]
-  # Optionally, allow manual trigger for debugging
   workflow_dispatch:
 
 env:

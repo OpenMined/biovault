@@ -477,3 +477,49 @@ All 13 herc2 classifier tasks complete successfully with the shell compatibility
 - [Podman for Windows](https://github.com/containers/podman/blob/main/docs/tutorials/podman-for-windows.md)
 - [Vampire/setup-wsl Action](https://github.com/Vampire/setup-wsl)
 - [WSL Installation](https://docs.microsoft.com/en-us/windows/wsl/install)
+
+## Plan: Fast Local-First Path to a Working Windows CI HERC2 Run
+
+Goal: get the HERC2 nested pipeline (host-mounted inputs + nested containers)
+working on Windows CI with minimal remote iteration. Start local, then do a
+small CI probe only after a local hypothesis is validated.
+
+1) Validate WSL2 upgrade path (local first, then CI probe)
+   - Local check: `wsl --status`, `wsl -l -v`, `wsl --set-default-version 2`,
+     `wsl --install -d Ubuntu-24.04` (or Debian), then confirm it shows version 2.
+   - If local WSL2 works, run the fast tests with WSL backend:
+     - `./win.ps1 tests/scripts/quick-nextflow-test.sh`
+     - `./win.ps1 tests/scripts/quick-herc2-test.sh`
+   - If those pass locally, run a tiny CI probe job (just WSL version + a
+     trivial `wsl --exec` command) to confirm namespace runner support before
+     attempting full HERC2.
+
+2) Reproduce Hyper-V mount failures locally (simulate CI)
+   - Force Hyper-V: `CONTAINERS_MACHINE_PROVIDER=hyperv` and confirm with
+     `podman machine inspect --format "{{.VMType}}"`.
+   - Run these quick checks:
+     - `./win.ps1 tests/scripts/quick-nextflow-test.sh`
+     - `./win.ps1 tests/scripts/test-hyperv-herc2.sh`
+   - Move inputs to a path without junctions (e.g. `C:\bv-data`) and repeat.
+     This isolates the 9P junction bug vs. general mount failures.
+
+3) If Hyper-V mounts remain broken, lean into VM copy mode
+   - Extend or harden the existing Hyper-V VM copy approach so the pipeline
+     never uses Windows mounts for nested containers:
+     - Stage project + inputs into the VM (via `podman machine ssh` + tar/rsync).
+     - Run Nextflow inside the VM with internal paths only (`/tmp` + VM-local
+       work/results).
+     - Copy results back to Windows after completion.
+   - Add a CLI switch to force VM-copy mode for debug runs.
+   - Validate locally using `tests/scripts/test-hyperv-herc2.sh` (1 participant).
+
+4) Keep a tight local feedback loop
+   - Standardize on two fast scripts for iteration:
+     - `tests/scripts/quick-nextflow-test.sh` (nested-container smoke test)
+     - `tests/scripts/quick-herc2-test.sh` (1-row HERC2 run)
+   - Use these to validate each change before any CI run.
+
+5) CI execution strategy (after local validation)
+   - If WSL2 works on runners: use WSL2 backend (Podman or Docker Desktop).
+   - If WSL2 is blocked: run Docker-dependent tests on Linux, and keep Windows
+     for non-Docker scenarios until VM copy mode is reliable.
