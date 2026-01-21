@@ -112,6 +112,7 @@ Default Isolation: process
 - WSL commands (access denied at feature level)
 - Docker Linux containers without WSL or Hyper-V
 - Registering WSL distributions
+- Direct Hyper-V mounts of junctioned paths (use host-mount mode)
 
 ## Podman Configuration
 
@@ -133,29 +134,22 @@ Podman provider can be set via:
 ## Recommended Solution
 
 ### For CI (namespace runners without WSL)
-Try Hyper-V approach:
-```powershell
-# Enable Hyper-V (may need runner support)
-Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V -All -NoRestart
+Use Podman Hyper-V with host-mount mode:
 
-# Install Podman
+```powershell
+# Hyper-V is already enabled on namespace runners
 choco install podman-cli -y
 
-# Set provider to Hyper-V
 $env:CONTAINERS_MACHINE_PROVIDER = "hyperv"
+$env:BIOVAULT_CONTAINER_RUNTIME = "podman"
+$env:BIOVAULT_HYPERV_MOUNT = "1"
+$env:BIOVAULT_HYPERV_HOST_DIR = "C:vtemp"  # optional
 
-# Initialize and start
 podman machine init
 podman machine start
 
-# Create docker alias
 Set-Alias -Name docker -Value podman
 ```
-
-### Fallback
-If Hyper-V doesn't work on CI:
-- Run Docker-dependent tests (`import-and-run.yaml`) on Linux runners only
-- Run non-Docker tests (`messaging-core.yaml`, `key-management.yaml`) on Windows
 
 ## Local Development (Windows with WSL2)
 
@@ -368,58 +362,16 @@ let docker_log_path = if using_podman {
 
 The fix ensures all Nextflow internal files go to `/tmp` (native Linux filesystem inside the Podman VM), while actual workflow data still uses mounted paths.
 
-### Hyper-V 9P Mount Issue (Critical)
+### Hyper-V 9P Mount Issue (Workaround)
 
-**Status**: 🚫 **BLOCKING** - Hyper-V mounts don't work without Podman Desktop
+The Hyper-V backend uses a 9P file sharing stack that struggles with Windows
+directory junctions (common under user profiles). Directly mounting repo paths
+can produce "Permission denied" or empty directories inside the VM, especially
+for nested containers.
 
-When using Podman CLI with Hyper-V backend (without Podman Desktop), the 9P file sharing is completely broken:
-
-```bash
-# Inside Podman VM
-$ ls /mnt/c/
-ls: reading directory '/mnt/c/': Permission denied
-
-# Mount exists but is inaccessible
-$ mount | grep 9p
-9p on /var/mnt/c type 9p (rw,relatime,access=client,trans=fd,rfd=3,wfd=3)
-```
-
-**Symptoms**:
-- `/mnt/c/` mount point exists in VM
-- 9P filesystem is mounted with `access=client`
-- All access attempts return "Permission denied" (even as root)
-- Containers see empty directories when mounting Windows paths
-
-**Root Cause** (Confirmed via [GitHub Issue #25686](https://github.com/containers/podman/issues/25686)):
-
-The Hyper-V backend uses the `hugelgupf/p9` library for 9P file sharing. There's a known bug where **Windows directory junctions** (like those in `%HOME%`) break the directory reading logic:
-- The 9P server can't handle junction points correctly
-- This causes "Permission denied" when listing directories containing junctions
-- Interestingly, accessing **subfolders** directly works fine
-- The bug is tracked in [hugelgupf/p9#98](https://github.com/hugelgupf/p9/issues/98) and [hugelgupf/p9#99](https://github.com/hugelgupf/p9/issues/99)
-
-**WSL vs Hyper-V**:
-| Feature | WSL2 Backend | Hyper-V Backend |
-|---------|-------------|-----------------|
-| Mount mechanism | drvfs | v9fs (9P) |
-| Home directory access | ✅ Works | ❌ Permission denied |
-| Subfolder access | ✅ Works | ✅ Works |
-| Nested containers | ✅ Works | ❌ Broken |
-| CI availability | ❌ Not available | ✅ Available |
-
-**Implications**:
-1. WSL2 works perfectly for local development
-2. Hyper-V is available on CI but doesn't work due to 9P bug
-3. We need an alternative strategy for Windows CI
-
-**Workarounds Tested**:
-1. ~~Copy files into VM using `podman machine ssh` + scp~~ (too slow)
-2. ~~Use named volumes and copy data in/out~~ (requires workflow changes)
-3. ~~Mount subfolders directly instead of home~~ (works for direct containers, but nested containers still fail)
-4. **Request WSL support on CI runners** (best option, currently denied)
-5. **Run Docker-dependent tests on Linux runners only** ✅ **Recommended**
-
-**Important**: Even when mounting subfolders directly (avoiding junctions), nested container scenarios fail because the 9P file sharing doesn't properly expose files to sibling containers spawned via socket.
+Current workaround: use Hyper-V host-mount mode to stage inputs into a
+junction-free directory (e.g., `C:vtemp`) and rewrite CSV paths to that flat
+root. This avoids junctions and keeps nested containers working.
 
 ### Hyper-V Host Mount Mode (Junction-Free)
 
@@ -470,26 +422,21 @@ All 13 herc2 classifier tasks complete successfully with the shell compatibility
 
 ## Next Steps
 
-1. ~~**Test Hyper-V on CI**: Enable Hyper-V feature and try Podman with hyperv provider~~ ✅ Done!
-2. ~~**Nested container support**: Enable Nextflow to spawn task containers with Podman~~ ✅ Done!
-3. ~~**Shell compatibility**: Fix `printf '%q'` issue in workflow templates~~ ✅ Done!
-4. ~~**Hyper-V filesystem fix**: Redirect Nextflow temp files to /tmp~~ ✅ Done!
-5. ~~**Verify CI passes**: Confirm full pipeline runs on Windows CI with Hyper-V~~ ❌ **Blocked by 9P bug**
-6. **Merge bioscript PR**: Merge `fix/shell-compatibility` branch to update all workflows
-7. **Document for users**: Update user docs for Podman as Docker alternative
-8. **Update CI**: Run Docker tests on Linux, non-Docker tests on Windows
+1. Merge bioscript PR: Merge `fix/shell-compatibility` branch to update all workflows
+2. Document for users: Update user docs for Podman as Docker alternative
+3. Re-enable nightly schedule once CI is stable
 
 ## Summary
 
 **Local Development (Windows with WSL2)**:
-- ✅ Install Podman CLI via Chocolatey
-- ✅ Use WSL2 backend (default): `podman machine init && podman machine start`
-- ✅ All tests pass including nested containers
+- OK: Install Podman CLI via Chocolatey
+- OK: Use WSL2 backend (default): `podman machine init && podman machine start`
+- OK: Nested containers work
 
 **CI (namespace-profile-windows)**:
-- ❌ WSL not available (permission denied)
-- ❌ Hyper-V 9P mounts broken for nested containers
-- ✅ **Solution**: Run Docker tests on Linux runners only
+- WSL not available (permission denied)
+- OK: Podman Hyper-V with host-mount mode runs nested containers
+- Use `BIOVAULT_HYPERV_MOUNT=1` and a flat host dir (default `%SystemDrive%vtemp`)
 
 ## References
 
@@ -497,48 +444,3 @@ All 13 herc2 classifier tasks complete successfully with the shell compatibility
 - [Vampire/setup-wsl Action](https://github.com/Vampire/setup-wsl)
 - [WSL Installation](https://docs.microsoft.com/en-us/windows/wsl/install)
 
-## Plan: Fast Local-First Path to a Working Windows CI HERC2 Run
-
-Goal: get the HERC2 nested pipeline (host-mounted inputs + nested containers)
-working on Windows CI with minimal remote iteration. Start local, then do a
-small CI probe only after a local hypothesis is validated.
-
-1) Validate WSL2 upgrade path (local first, then CI probe)
-   - Local check: `wsl --status`, `wsl -l -v`, `wsl --set-default-version 2`,
-     `wsl --install -d Ubuntu-24.04` (or Debian), then confirm it shows version 2.
-   - If local WSL2 works, run the fast tests with WSL backend:
-     - `./win.ps1 tests/scripts/quick-nextflow-test.sh`
-     - `./win.ps1 tests/scripts/quick-herc2-test.sh`
-   - If those pass locally, run a tiny CI probe job (just WSL version + a
-     trivial `wsl --exec` command) to confirm namespace runner support before
-     attempting full HERC2.
-
-2) Reproduce Hyper-V mount failures locally (simulate CI)
-   - Force Hyper-V: `CONTAINERS_MACHINE_PROVIDER=hyperv` and confirm with
-     `podman machine inspect --format "{{.VMType}}"`.
-   - Run these quick checks:
-     - `./win.ps1 tests/scripts/quick-nextflow-test.sh`
-     - `./win.ps1 tests/scripts/test-hyperv-herc2.sh`
-   - Move inputs to a path without junctions (e.g. `C:\bv-data`) and repeat.
-     This isolates the 9P junction bug vs. general mount failures.
-
-3) If Hyper-V mounts remain broken, lean into VM copy mode
-   - Extend or harden the existing Hyper-V VM copy approach so the pipeline
-     never uses Windows mounts for nested containers:
-     - Stage project + inputs into the VM (via `podman machine ssh` + tar/rsync).
-     - Run Nextflow inside the VM with internal paths only (`/tmp` + VM-local
-       work/results).
-     - Copy results back to Windows after completion.
-   - Add a CLI switch to force VM-copy mode for debug runs.
-   - Validate locally using `tests/scripts/test-hyperv-herc2.sh` (1 participant).
-
-4) Keep a tight local feedback loop
-   - Standardize on two fast scripts for iteration:
-     - `tests/scripts/quick-nextflow-test.sh` (nested-container smoke test)
-     - `tests/scripts/quick-herc2-test.sh` (1-row HERC2 run)
-   - Use these to validate each change before any CI run.
-
-5) CI execution strategy (after local validation)
-   - If WSL2 works on runners: use WSL2 backend (Podman or Docker Desktop).
-   - If WSL2 is blocked: run Docker-dependent tests on Linux, and keep Windows
-     for non-Docker scenarios until VM copy mode is reliable.

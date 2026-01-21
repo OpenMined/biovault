@@ -192,17 +192,18 @@ fn remap_json_paths_for_container(value: &JsonValue, use_podman_format: bool) ->
         JsonValue::Object(map) => {
             let mut new_map = serde_json::Map::new();
             for (k, v) in map {
-                new_map.insert(k.clone(), remap_json_paths_for_container(v, use_podman_format));
+                new_map.insert(
+                    k.clone(),
+                    remap_json_paths_for_container(v, use_podman_format),
+                );
             }
             JsonValue::Object(new_map)
         }
-        JsonValue::Array(arr) => {
-            JsonValue::Array(
-                arr.iter()
-                    .map(|v| remap_json_paths_for_container(v, use_podman_format))
-                    .collect(),
-            )
-        }
+        JsonValue::Array(arr) => JsonValue::Array(
+            arr.iter()
+                .map(|v| remap_json_paths_for_container(v, use_podman_format))
+                .collect(),
+        ),
         _ => value.clone(),
     }
 }
@@ -229,13 +230,11 @@ fn remap_json_paths_for_vm(value: &JsonValue, vm_data_dir: &str) -> JsonValue {
             }
             JsonValue::Object(new_map)
         }
-        JsonValue::Array(arr) => {
-            JsonValue::Array(
-                arr.iter()
-                    .map(|v| remap_json_paths_for_vm(v, vm_data_dir))
-                    .collect(),
-            )
-        }
+        JsonValue::Array(arr) => JsonValue::Array(
+            arr.iter()
+                .map(|v| remap_json_paths_for_vm(v, vm_data_dir))
+                .collect(),
+        ),
         _ => value.clone(),
     }
 }
@@ -285,7 +284,10 @@ fn env_var_truthy(name: &str) -> bool {
     match std::env::var(name) {
         Ok(value) => {
             let normalized = value.trim().to_ascii_lowercase();
-            !normalized.is_empty() && normalized != "0" && normalized != "false" && normalized != "no"
+            !normalized.is_empty()
+                && normalized != "0"
+                && normalized != "false"
+                && normalized != "no"
         }
         Err(_) => false,
     }
@@ -298,12 +300,22 @@ fn normalize_windows_path_for_compare(path: &Path) -> PathBuf {
     PathBuf::from(normalized.to_ascii_lowercase())
 }
 
+#[cfg(not(target_os = "windows"))]
+fn normalize_windows_path_for_compare(path: &Path) -> PathBuf {
+    path.to_path_buf()
+}
+
 /// Return true if `target` is within `base` after normalizing Windows paths.
 #[cfg(target_os = "windows")]
 fn is_path_within(base: &Path, target: &Path) -> bool {
     let base_norm = normalize_windows_path_for_compare(base);
     let target_norm = normalize_windows_path_for_compare(target);
     target_norm.starts_with(&base_norm)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn is_path_within(base: &Path, target: &Path) -> bool {
+    target.starts_with(base)
 }
 
 /// Compute a relative path from base to target after normalizing Windows paths.
@@ -315,6 +327,11 @@ fn relative_to_base(base: &Path, target: &Path) -> PathBuf {
         .strip_prefix(&base_norm)
         .unwrap_or(&target_norm)
         .to_path_buf()
+}
+
+#[cfg(not(target_os = "windows"))]
+fn relative_to_base(base: &Path, target: &Path) -> PathBuf {
+    target.strip_prefix(base).unwrap_or(target).to_path_buf()
 }
 
 /// Extract all file/directory paths from a JSON value (for Docker volume mounting)
@@ -589,7 +606,10 @@ fn rewrite_csv_for_vm(csv_path: &Path, vm_data_dir: &str) -> Result<()> {
     let content = fs::read_to_string(csv_path)
         .with_context(|| format!("Failed to read CSV: {}", csv_path.display()))?;
 
-    append_desktop_log(&format!("[CSV Rewrite VM] Processing: {}", csv_path.display()));
+    append_desktop_log(&format!(
+        "[CSV Rewrite VM] Processing: {}",
+        csv_path.display()
+    ));
     let mut converted_count = 0;
 
     let mut new_lines = Vec::new();
@@ -914,7 +934,9 @@ fn check_docker_running(docker_bin: &str) -> Result<()> {
 fn is_container_runtime_working(binary: &str) -> bool {
     let mut cmd = Command::new(binary);
     super::configure_child_process(&mut cmd);
-    cmd.arg("info").stdout(Stdio::piped()).stderr(Stdio::piped());
+    cmd.arg("info")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
 
     match cmd.output() {
         Ok(output) => {
@@ -1215,7 +1237,10 @@ pub async fn execute_dynamic(
         detect_container_runtime(config.as_ref())?
     };
 
-    append_desktop_log(&format!("[Pipeline] Selected container runtime: {}", docker_bin));
+    append_desktop_log(&format!(
+        "[Pipeline] Selected container runtime: {}",
+        docker_bin
+    ));
     println!("🐳 Using container runtime: {}", docker_bin.bold());
 
     // Check container runtime availability (required for Windows Docker execution and workflow containers)
@@ -1223,16 +1248,23 @@ pub async fn execute_dynamic(
     if !dry_run && (run_settings.require_docker || use_docker) {
         append_desktop_log("[Pipeline] Checking container runtime availability...");
         if let Err(err) = check_docker_running(&docker_bin) {
-            append_desktop_log(&format!("[Pipeline] Container runtime check failed: {}", err));
+            append_desktop_log(&format!(
+                "[Pipeline] Container runtime check failed: {}",
+                err
+            ));
             return Err(err);
         }
-        append_desktop_log(&format!("[Pipeline] {} is running (info succeeded)", docker_bin));
+        append_desktop_log(&format!(
+            "[Pipeline] {} is running (info succeeded)",
+            docker_bin
+        ));
         println!("✅ {} daemon is running", docker_bin);
     }
 
     // Track Hyper-V mode for post-run cleanup (need to capture before if-else block)
     #[cfg(target_os = "windows")]
-    let using_hyperv_mode = use_docker && docker_bin.contains("podman") && is_podman_hyperv(&docker_bin);
+    let using_hyperv_mode =
+        use_docker && docker_bin.contains("podman") && is_podman_hyperv(&docker_bin);
     #[cfg(not(target_os = "windows"))]
     let using_hyperv_mode = false;
 
@@ -1280,10 +1312,14 @@ pub async fn execute_dynamic(
         let hyperv_mount_mode = using_hyperv && hyperv_host_mount;
         if using_hyperv {
             if hyperv_mount_mode {
-                append_desktop_log("[Pipeline] Detected Podman with Hyper-V backend - using host mount mode");
+                append_desktop_log(
+                    "[Pipeline] Detected Podman with Hyper-V backend - using host mount mode",
+                );
                 println!("Using Hyper-V host mount mode (copying inputs to flat dir)");
             } else {
-                append_desktop_log("[Pipeline] Detected Podman with Hyper-V backend - using VM copy mode");
+                append_desktop_log(
+                    "[Pipeline] Detected Podman with Hyper-V backend - using VM copy mode",
+                );
                 println!("📋 Using Hyper-V mode (copying files to VM instead of mounting)");
             }
         }
@@ -1304,70 +1340,77 @@ pub async fn execute_dynamic(
 
         // Convert all paths to container-compatible format
         // For Hyper-V mode, paths will be in the VM temp directory
-        let (docker_biovault_home, docker_project_path, docker_template, docker_workflow, docker_project_spec, docker_results, docker_log_path) =
-            if let Some(ref vm_dir) = vm_temp_dir {
-                // Hyper-V mode: use VM-local paths
-                let vm_project = format!("{}/project", vm_dir);
-                let vm_biovault_home = format!("{}/biovault_home", vm_dir);
-                let vm_results = format!("{}/results", vm_dir);
+        let (
+            docker_biovault_home,
+            docker_project_path,
+            docker_template,
+            docker_workflow,
+            docker_project_spec,
+            docker_results,
+            docker_log_path,
+        ) = if let Some(ref vm_dir) = vm_temp_dir {
+            // Hyper-V mode: use VM-local paths
+            let vm_project = format!("{}/project", vm_dir);
+            let vm_biovault_home = format!("{}/biovault_home", vm_dir);
+            let vm_results = format!("{}/results", vm_dir);
 
-                // Capture for post-run copy-back
-                #[cfg(target_os = "windows")]
-                {
-                    vm_results_dir = Some(vm_results.clone());
-                }
+            // Capture for post-run copy-back
+            #[cfg(target_os = "windows")]
+            {
+                vm_results_dir = Some(vm_results.clone());
+            }
 
-                // Template/workflow/spec are relative to project when possible
-                let template_in_project = is_path_within(&project_abs, &template_abs);
-                let template_rel = relative_to_base(&project_abs, &template_abs);
-                let workflow_rel = relative_to_base(&project_abs, &workflow_abs);
-                let spec_rel = relative_to_base(&project_abs, &project_spec_abs);
+            // Template/workflow/spec are relative to project when possible
+            let template_in_project = is_path_within(&project_abs, &template_abs);
+            let template_rel = relative_to_base(&project_abs, &template_abs);
+            let workflow_rel = relative_to_base(&project_abs, &workflow_abs);
+            let spec_rel = relative_to_base(&project_abs, &project_spec_abs);
 
-                let vm_template = if template_in_project {
-                    format!("{}/{}", vm_project, template_rel.display()).replace('\\', "/")
-                } else {
-                    format!("{}/env/{}/template.nf", vm_biovault_home, template_name)
-                        .replace('\\', "/")
-                };
-                let vm_workflow = format!("{}/{}", vm_project, workflow_rel.display()).replace('\\', "/");
-                let vm_spec = format!("{}/{}", vm_project, spec_rel.display()).replace('\\', "/");
-
-                (
-                    vm_biovault_home,
-                    vm_project,
-                    vm_template,
-                    vm_workflow,
-                    vm_spec,
-                    vm_results,
-                    "/tmp/.nextflow.log".to_string(),
-                )
+            let vm_template = if template_in_project {
+                format!("{}/{}", vm_project, template_rel.display()).replace('\\', "/")
             } else {
-                // Normal mode: convert Windows paths to container format
-                let docker_biovault_home = windows_path_to_container(&biovault_home_abs, using_podman);
-                let docker_project_path = windows_path_to_container(&project_abs, using_podman);
-                let docker_template = windows_path_to_container(&template_abs, using_podman);
-                let docker_workflow = windows_path_to_container(&workflow_abs, using_podman);
-                let docker_project_spec = windows_path_to_container(&project_spec_abs, using_podman);
-                let docker_log_path = if using_podman {
-                    "/tmp/.nextflow.log".to_string()
-                } else {
-                    windows_path_to_container(&nextflow_log_path, using_podman)
-                };
-                let results_abs = results_path_for_run
-                    .canonicalize()
-                    .unwrap_or_else(|_| results_path_for_run.clone());
-                let docker_results = windows_path_to_container(&results_abs, using_podman);
-
-                (
-                    docker_biovault_home,
-                    docker_project_path,
-                    docker_template,
-                    docker_workflow,
-                    docker_project_spec,
-                    docker_results,
-                    docker_log_path,
-                )
+                format!("{}/env/{}/template.nf", vm_biovault_home, template_name).replace('\\', "/")
             };
+            let vm_workflow =
+                format!("{}/{}", vm_project, workflow_rel.display()).replace('\\', "/");
+            let vm_spec = format!("{}/{}", vm_project, spec_rel.display()).replace('\\', "/");
+
+            (
+                vm_biovault_home,
+                vm_project,
+                vm_template,
+                vm_workflow,
+                vm_spec,
+                vm_results,
+                "/tmp/.nextflow.log".to_string(),
+            )
+        } else {
+            // Normal mode: convert Windows paths to container format
+            let docker_biovault_home = windows_path_to_container(&biovault_home_abs, using_podman);
+            let docker_project_path = windows_path_to_container(&project_abs, using_podman);
+            let docker_template = windows_path_to_container(&template_abs, using_podman);
+            let docker_workflow = windows_path_to_container(&workflow_abs, using_podman);
+            let docker_project_spec = windows_path_to_container(&project_spec_abs, using_podman);
+            let docker_log_path = if using_podman {
+                "/tmp/.nextflow.log".to_string()
+            } else {
+                windows_path_to_container(&nextflow_log_path, using_podman)
+            };
+            let results_abs = results_path_for_run
+                .canonicalize()
+                .unwrap_or_else(|_| results_path_for_run.clone());
+            let docker_results = windows_path_to_container(&results_abs, using_podman);
+
+            (
+                docker_biovault_home,
+                docker_project_path,
+                docker_template,
+                docker_workflow,
+                docker_project_spec,
+                docker_results,
+                docker_log_path,
+            )
+        };
 
         let _results_abs = results_path_buf
             .canonicalize()
@@ -1384,15 +1427,27 @@ pub async fn execute_dynamic(
                 let drive = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".to_string());
                 format!("{}\\bvtemp", drive)
             });
-            let unique_id = format!("biovault-{}-{}", std::process::id(), Local::now().format("%Y%m%d-%H%M%S"));
+            let unique_id = format!(
+                "biovault-{}-{}",
+                std::process::id(),
+                Local::now().format("%Y%m%d-%H%M%S")
+            );
             let flat_root = PathBuf::from(host_root).join(unique_id);
             let flat_data_dir = flat_root.join("data");
             let flat_results_dir = flat_root.join("results");
 
-            fs::create_dir_all(&flat_data_dir)
-                .with_context(|| format!("Failed to create Hyper-V flat data dir: {}", flat_data_dir.display()))?;
-            fs::create_dir_all(&flat_results_dir)
-                .with_context(|| format!("Failed to create Hyper-V flat results dir: {}", flat_results_dir.display()))?;
+            fs::create_dir_all(&flat_data_dir).with_context(|| {
+                format!(
+                    "Failed to create Hyper-V flat data dir: {}",
+                    flat_data_dir.display()
+                )
+            })?;
+            fs::create_dir_all(&flat_results_dir).with_context(|| {
+                format!(
+                    "Failed to create Hyper-V flat results dir: {}",
+                    flat_results_dir.display()
+                )
+            })?;
 
             append_desktop_log(&format!(
                 "[Pipeline] Hyper-V host mount staging dir: {}",
@@ -1410,7 +1465,11 @@ pub async fn execute_dynamic(
                 if !data_path.exists() {
                     continue;
                 }
-                let file_name = data_path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                let file_name = data_path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string();
                 if !seen_names.insert(file_name.clone()) {
                     append_desktop_log(&format!(
                         "[Pipeline] Warning: duplicate filename {} for {} (skipping)",
@@ -1431,7 +1490,8 @@ pub async fn execute_dynamic(
             }
 
             // Remap inputs JSON to the flat data dir so mounts stay junction-free
-            inputs_json_value = remap_json_paths_for_flat_dir(&inputs_json_value, &flat_data_dir_str);
+            inputs_json_value =
+                remap_json_paths_for_flat_dir(&inputs_json_value, &flat_data_dir_str);
 
             hyperv_flat_dir = Some(flat_root);
             hyperv_flat_results_dir = Some(flat_results_dir.clone());
@@ -1453,7 +1513,10 @@ pub async fn execute_dynamic(
             }
 
             if !dry_run && !data_paths.is_empty() {
-                append_desktop_log(&format!("[Pipeline] Copying {} data files to VM...", data_paths.len()));
+                append_desktop_log(&format!(
+                    "[Pipeline] Copying {} data files to VM...",
+                    data_paths.len()
+                ));
                 println!("📁 Copying {} data files to VM...", data_paths.len());
 
                 // Create data directory in VM
@@ -1559,7 +1622,11 @@ pub async fn execute_dynamic(
         if let Some(ref vm_dir) = vm_temp_dir {
             let vm_project = format!("{}/project", vm_dir);
             let vm_biovault_home = format!("{}/biovault_home", vm_dir);
-            append_desktop_log(&format!("[Pipeline] Copying project to VM: {} -> {}", project_abs.display(), vm_project));
+            append_desktop_log(&format!(
+                "[Pipeline] Copying project to VM: {} -> {}",
+                project_abs.display(),
+                vm_project
+            ));
             println!("📁 Copying project files to VM...");
             copy_dir_to_vm(&docker_bin, &project_abs, &vm_project)?;
 
@@ -1581,10 +1648,16 @@ pub async fn execute_dynamic(
             // Create results directory in VM
             let vm_results = format!("{}/results", vm_dir);
             let _ = podman_machine_ssh_cmd(&docker_bin)
-                .arg(format!("mkdir -p '{}' && chmod 777 '{}'", vm_results, vm_results))
+                .arg(format!(
+                    "mkdir -p '{}' && chmod 777 '{}'",
+                    vm_results, vm_results
+                ))
                 .status();
 
-            append_desktop_log(&format!("[Pipeline] VM directories created: project={}, results={}", vm_project, vm_results));
+            append_desktop_log(&format!(
+                "[Pipeline] VM directories created: project={}, results={}",
+                vm_project, vm_results
+            ));
         }
 
         let mut docker_cmd = Command::new(&docker_bin);
@@ -1596,9 +1669,7 @@ pub async fn execute_dynamic(
             docker_cmd.env("PATH", docker_path);
         }
 
-        docker_cmd
-            .arg("run")
-            .arg("--rm");
+        docker_cmd.arg("run").arg("--rm");
 
         // When using Podman, add flags to fix permission issues with mounted volumes
         if using_podman {
@@ -1676,10 +1747,11 @@ pub async fn execute_dynamic(
         if let Some(ref vm_dir) = vm_temp_dir {
             // Hyper-V mode: mount the VM temp directory into the container
             // Files were copied to the VM's native filesystem, now mount them into container
-            append_desktop_log(&format!("[Pipeline] Hyper-V mode: mounting VM directory {} into container", vm_dir));
-            docker_cmd
-                .arg("-v")
-                .arg(format!("{}:{}", vm_dir, vm_dir));
+            append_desktop_log(&format!(
+                "[Pipeline] Hyper-V mode: mounting VM directory {} into container",
+                vm_dir
+            ));
+            docker_cmd.arg("-v").arg(format!("{}:{}", vm_dir, vm_dir));
         } else {
             // Normal mode: mount Windows paths
             docker_cmd
@@ -1714,16 +1786,23 @@ pub async fn execute_dynamic(
 
         // Generate runtime-specific Nextflow config (Docker vs Podman)
         let runtime_config_path = if !dry_run {
-            let config_path = generate_runtime_config(&project_abs, using_podman, hyperv_host_mount)?;
+            let config_path =
+                generate_runtime_config(&project_abs, using_podman, hyperv_host_mount)?;
             // For Hyper-V mode, the config file was copied to VM along with project
             // Reference it via the VM project path
             #[cfg(target_os = "windows")]
             if let Some(ref vm_dir) = vm_temp_dir {
                 // Copy the config file to VM if it wasn't part of the project copy
-                let config_name = config_path.file_name().unwrap_or_default().to_string_lossy();
+                let config_name = config_path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy();
                 let vm_config_path = format!("{}/project/{}", vm_dir, config_name);
                 if let Err(e) = copy_file_to_vm(&docker_bin, &config_path, &vm_config_path) {
-                    append_desktop_log(&format!("[Pipeline] Warning: Failed to copy config to VM: {}", e));
+                    append_desktop_log(&format!(
+                        "[Pipeline] Warning: Failed to copy config to VM: {}",
+                        e
+                    ));
                 }
                 Some(vm_config_path)
             } else {
@@ -1932,17 +2011,29 @@ pub async fn execute_dynamic(
     // For Hyper-V mode: copy results back from VM and cleanup
     #[cfg(target_os = "windows")]
     if using_hyperv_mode {
-        if let (Some(ref vm_results), Some(ref vm_dir)) = (&vm_results_dir, &vm_temp_dir_for_cleanup) {
-            append_desktop_log(&format!("[Pipeline] Copying results back from VM: {} -> {}", vm_results, results_path_buf.display()));
+        if let (Some(ref vm_results), Some(ref vm_dir)) =
+            (&vm_results_dir, &vm_temp_dir_for_cleanup)
+        {
+            append_desktop_log(&format!(
+                "[Pipeline] Copying results back from VM: {} -> {}",
+                vm_results,
+                results_path_buf.display()
+            ));
             println!("📁 Copying results back from VM...");
 
             if let Err(e) = copy_from_vm(&docker_bin, vm_results, &results_path_buf) {
-                append_desktop_log(&format!("[Pipeline] Warning: Failed to copy results from VM: {}", e));
+                append_desktop_log(&format!(
+                    "[Pipeline] Warning: Failed to copy results from VM: {}",
+                    e
+                ));
                 eprintln!("⚠️  Warning: Failed to copy results from VM: {}", e);
             }
 
             // Cleanup VM temp directory
-            append_desktop_log(&format!("[Pipeline] Cleaning up VM temp directory: {}", vm_dir));
+            append_desktop_log(&format!(
+                "[Pipeline] Cleaning up VM temp directory: {}",
+                vm_dir
+            ));
             cleanup_vm_dir(&docker_bin, vm_dir);
         }
     }
@@ -2301,8 +2392,8 @@ fn is_podman_hyperv(_docker_bin: &str) -> bool {
 fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
     fs::create_dir_all(dst)
         .with_context(|| format!("Failed to create directory: {}", dst.display()))?;
-    for entry in fs::read_dir(src)
-        .with_context(|| format!("Failed to read directory: {}", src.display()))?
+    for entry in
+        fs::read_dir(src).with_context(|| format!("Failed to read directory: {}", src.display()))?
     {
         let entry = entry.with_context(|| "Failed to read directory entry")?;
         let path = entry.path();
@@ -2495,8 +2586,13 @@ fn podman_machine_ssh_cmd(docker_bin: &str) -> Command {
 fn copy_file_to_vm(docker_bin: &str, local_path: &Path, vm_path: &str) -> Result<()> {
     use std::io::Read;
 
-    let mut file = fs::File::open(local_path)
-        .map_err(|e| anyhow::anyhow!("Failed to open file for VM copy: {}: {}", local_path.display(), e))?;
+    let mut file = fs::File::open(local_path).map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to open file for VM copy: {}: {}",
+            local_path.display(),
+            e
+        )
+    })?;
 
     let mut contents = Vec::new();
     file.read_to_end(&mut contents)
@@ -2515,7 +2611,9 @@ fn copy_file_to_vm(docker_bin: &str, local_path: &Path, vm_path: &str) -> Result
             .map_err(|e| anyhow::anyhow!("Failed to write to VM: {}", e))?;
     }
 
-    let status = child.wait().map_err(|e| anyhow::anyhow!("Failed to wait for VM copy: {}", e))?;
+    let status = child
+        .wait()
+        .map_err(|e| anyhow::anyhow!("Failed to wait for VM copy: {}", e))?;
     if !status.success() {
         return Err(anyhow::anyhow!("Failed to copy file to VM: {}", local_path.display()).into());
     }
@@ -2594,8 +2692,9 @@ fn copy_from_vm(docker_bin: &str, vm_path: &str, local_path: &Path) -> Result<()
             .map_err(|e| anyhow::anyhow!("Failed to extract tar archive: {}", e))?;
     } else {
         // Plain file
-        fs::write(local_path, &output.stdout)
-            .map_err(|e| anyhow::anyhow!("Failed to write file: {}: {}", local_path.display(), e))?;
+        fs::write(local_path, &output.stdout).map_err(|e| {
+            anyhow::anyhow!("Failed to write file: {}: {}", local_path.display(), e)
+        })?;
     }
 
     Ok(())
@@ -2616,7 +2715,8 @@ fn create_vm_temp_dir(docker_bin: &str, prefix: &str) -> Result<String> {
         return Err(anyhow::anyhow!(
             "Failed to create temp directory in VM: {}",
             String::from_utf8_lossy(&output.stderr)
-        ).into());
+        )
+        .into());
     }
 
     let vm_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -2664,8 +2764,7 @@ docker.runOptions = '-u $(id -u):$(id -g)'
         .to_string()
     };
 
-    fs::write(&config_path, config_contents)
-        .context("Failed to write runtime nextflow.config")?;
+    fs::write(&config_path, config_contents).context("Failed to write runtime nextflow.config")?;
 
     append_desktop_log(&format!(
         "[Pipeline] Generated runtime config at {} (podman={})",

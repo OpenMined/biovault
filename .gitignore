@@ -229,6 +229,7 @@ test-clients-local/
 NUL
 cli/nextflow
 cli/test_project/*
+cli/examples/pipeline/count-lines/.biovault-runtime.config
 
 sandbox/*
 tests/scripts/sbdev

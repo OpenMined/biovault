@@ -17,39 +17,53 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Focused run: Windows Hyper-V import-and-run
+          # Linux + Windows coverage for all scenarios.
+          - os: linux
+            client_mode: go
+            scenario: tests/scenarios/import-and-run.yaml
+            needs_container: true
+          - os: linux
+            client_mode: go
+            scenario: tests/scenarios/inbox-ping-pong.yaml
+            needs_container: false
+          - os: linux
+            client_mode: go
+            scenario: tests/scenarios/messaging-core.yaml
+            needs_container: false
+          - os: linux
+            client_mode: go
+            scenario: tests/scenarios/break-nextflow.yaml
+            needs_container: true
+          - os: linux
+            client_mode: go
+            scenario: tests/scenarios/key-management.yaml
+            needs_container: false
           - os: windows
             client_mode: go
             scenario: tests/scenarios/import-and-run.yaml
-            hyperv: true
-          # Full matrix temporarily disabled:
-          # - os: linux
-          #   client_mode: go
-          #   scenario: tests/scenarios/import-and-run.yaml
-          # - os: linux
-          #   client_mode: go
-          #   scenario: tests/scenarios/inbox-ping-pong.yaml
-          # - os: linux
-          #   client_mode: go
-          #   scenario: tests/scenarios/messaging-core.yaml
-          # - os: linux
-          #   client_mode: go
-          #   scenario: tests/scenarios/break-nextflow.yaml
-          # - os: linux
-          #   client_mode: go
-          #   scenario: tests/scenarios/key-management.yaml
-          # - os: windows
-          #   client_mode: go
-          #   scenario: tests/scenarios/messaging-core.yaml
-          # - os: windows
-          #   client_mode: go
-          #   scenario: tests/scenarios/key-management.yaml
+            needs_container: true
+          - os: windows
+            client_mode: go
+            scenario: tests/scenarios/inbox-ping-pong.yaml
+            needs_container: false
+          - os: windows
+            client_mode: go
+            scenario: tests/scenarios/messaging-core.yaml
+            needs_container: false
+          - os: windows
+            client_mode: go
+            scenario: tests/scenarios/break-nextflow.yaml
+            needs_container: true
+          - os: windows
+            client_mode: go
+            scenario: tests/scenarios/key-management.yaml
+            needs_container: false
 
     steps:
       - uses: actions/checkout@v4
 
       - name: Setup Podman Hyper-V (Windows)
-        if: matrix.os == 'windows' && matrix.hyperv == true
+        if: matrix.os == 'windows' && matrix.needs_container == true
         shell: pwsh
         run: |
           $ErrorActionPreference = "Continue"
@@ -143,17 +157,17 @@ jobs:
         shell: bash
         run: ./test-scenario.sh --client-mode ${{ matrix.client_mode }} ${{ matrix.scenario }}
 
-      - name: Hyper-V smoke test (Windows)
-        if: matrix.os == 'windows' && matrix.hyperv == true
-        shell: pwsh
-        env:
-          CONTAINERS_MACHINE_PROVIDER: hyperv
-          BIOVAULT_CONTAINER_RUNTIME: podman
-          BIOVAULT_HYPERV_MOUNT: "1"
-        run: .\win.ps1 tests/scripts/test-hyperv-herc2.sh
+      # - name: Hyper-V smoke test (Windows)
+      #   if: matrix.os == 'windows' && matrix.needs_container == true
+      #   shell: pwsh
+      #   env:
+      #     CONTAINERS_MACHINE_PROVIDER: hyperv
+      #     BIOVAULT_CONTAINER_RUNTIME: podman
+      #     BIOVAULT_HYPERV_MOUNT: "1"
+      #   run: .\win.ps1 tests/scripts/test-hyperv-herc2.sh
 
       - name: Run scenario (Windows Hyper-V)
-        if: matrix.os == 'windows' && matrix.hyperv == true
+        if: matrix.os == 'windows' && matrix.needs_container == true
         shell: pwsh
         env:
           CONTAINERS_MACHINE_PROVIDER: hyperv
@@ -162,7 +176,7 @@ jobs:
         run: .\win.ps1 ./test-scenario.sh --client-mode ${{ matrix.client_mode }} ${{ matrix.scenario }}
 
       - name: Run scenario (Windows)
-        if: matrix.os == 'windows' && matrix.hyperv != true
+        if: matrix.os == 'windows' && matrix.needs_container != true
         shell: pwsh
         run: .\win.ps1 ./test-scenario.sh --client-mode ${{ matrix.client_mode }} ${{ matrix.scenario }}
 
