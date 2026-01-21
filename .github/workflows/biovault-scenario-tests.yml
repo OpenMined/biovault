@@ -1,8 +1,8 @@
 name: BioVault Scenario Tests
 
 on:
-  schedule:
-    - cron: '45 2 * * *'
+  pull_request:
+    branches: [main]
   workflow_dispatch:
   workflow_call:
 

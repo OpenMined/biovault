@@ -1,8 +1,6 @@
 name: WSL2 Probe (Namespace)
 
 on:
-  pull_request:
-    branches: [main]
   workflow_dispatch:
 
 jobs:
