@@ -18,23 +18,56 @@ jobs:
           function Write-Section([string]$title) {
             "`n=== $title ===" | Tee-Object -FilePath $log -Append
           }
+          function Run-Cmd([string]$title, [scriptblock]$cmd) {
+            Write-Section $title
+            try { & $cmd 2>&1 | Tee-Object -FilePath $log -Append } catch { $_ | Tee-Object -FilePath $log -Append }
+          }
           Write-Section "Timestamp"
           Get-Date | Tee-Object -FilePath $log -Append
-          Write-Section "SystemInfo"
-          systeminfo | Tee-Object -FilePath $log -Append
-          Write-Section "Windows Optional Features"
-          Get-WindowsOptionalFeature -Online -FeatureName `
-            Microsoft-Windows-Subsystem-Linux,VirtualMachinePlatform,Microsoft-Hyper-V,Microsoft-Hyper-V-All |
-            Select-Object FeatureName,State |
-            Format-Table -AutoSize | Out-String | Tee-Object -FilePath $log -Append
-          Write-Section "WSL --version"
-          try { wsl --version 2>&1 | Tee-Object -FilePath $log -Append } catch { $_ | Tee-Object -FilePath $log -Append }
-          Write-Section "WSL --status"
-          try { wsl --status 2>&1 | Tee-Object -FilePath $log -Append } catch { $_ | Tee-Object -FilePath $log -Append }
-          Write-Section "WSL -l -v"
-          try { wsl -l -v 2>&1 | Tee-Object -FilePath $log -Append } catch { $_ | Tee-Object -FilePath $log -Append }
-          Write-Section "WSL -l -q"
-          try { wsl -l -q 2>&1 | Tee-Object -FilePath $log -Append } catch { $_ | Tee-Object -FilePath $log -Append }
+          Run-Cmd "WhoAmI" { whoami }
+          Run-Cmd "WhoAmI (groups)" { whoami /all }
+          Run-Cmd "SystemInfo" { systeminfo }
+          Run-Cmd "ComputerInfo (selected)" {
+            Get-ComputerInfo |
+              Select-Object OsName,OsVersion,OsBuildNumber,WindowsProductName,WindowsVersion,OsHardwareAbstractionLayer,HyperVisorPresent |
+              Format-List
+          }
+          Run-Cmd "WSL Executable Version" {
+            Get-Item "C:\\Windows\\System32\\wsl.exe" | Select-Object Name,VersionInfo
+          }
+          Run-Cmd "Windows Optional Features" {
+            $features = @(
+              "Microsoft-Windows-Subsystem-Linux",
+              "VirtualMachinePlatform",
+              "Microsoft-Hyper-V",
+              "Microsoft-Hyper-V-All"
+            )
+            Get-WindowsOptionalFeature -Online -FeatureName $features |
+              Select-Object FeatureName,State |
+              Format-Table -AutoSize | Out-String
+          }
+          Run-Cmd "DISM Feature Info (WSL/VM)" {
+            dism /online /Get-FeatureInfo /FeatureName:Microsoft-Windows-Subsystem-Linux
+            dism /online /Get-FeatureInfo /FeatureName:VirtualMachinePlatform
+          }
+          Run-Cmd "Services (LxssManager/vmcompute)" {
+            Get-Service LxssManager,vmcompute | Format-Table -AutoSize
+            sc.exe qc LxssManager
+            sc.exe qc vmcompute
+          }
+          Run-Cmd "WSL Policy (registry)" {
+            reg query "HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\WindowsSubsystemForLinux"
+          }
+          Run-Cmd "WSL Lxss (registry)" {
+            reg query "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Lxss"
+          }
+          Run-Cmd "WSL --version" { wsl --version }
+          Run-Cmd "WSL --status" { wsl --status }
+          Run-Cmd "WSL -l -v" { wsl -l -v }
+          Run-Cmd "WSL -l -q" { wsl -l -q }
+          Run-Cmd "WSL -l -o" { wsl -l -o }
+          if ($LASTEXITCODE -ne 0) { $global:LASTEXITCODE = 0 }
+          exit 0
 
       - name: Attempt WSL2 install or upgrade
         shell: pwsh
@@ -47,16 +80,18 @@ jobs:
           }
           $dist = "Ubuntu-24.04"
           Write-Section "Set default WSL version 2"
-          wsl --set-default-version 2
+          wsl --set-default-version 2 2>&1 | Tee-Object -FilePath $log -Append
           Write-Section "Check existing distros"
           $installed = (wsl -l -q) | ForEach-Object { $_.Trim() } | Where-Object { $_ -eq $dist }
           if (-not $installed) {
             Write-Section "Install $dist"
-            wsl --install -d $dist
+            wsl --install -d $dist 2>&1 | Tee-Object -FilePath $log -Append
           } else {
             Write-Section "Set $dist to WSL2"
-            wsl --set-version $dist 2
+            wsl --set-version $dist 2 2>&1 | Tee-Object -FilePath $log -Append
           }
+          if ($LASTEXITCODE -ne 0) { $global:LASTEXITCODE = 0 }
+          exit 0
 
       - name: Verify Ubuntu-24.04
         shell: pwsh
