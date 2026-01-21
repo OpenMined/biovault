@@ -421,6 +421,25 @@ The Hyper-V backend uses the `hugelgupf/p9` library for 9P file sharing. There's
 
 **Important**: Even when mounting subfolders directly (avoiding junctions), nested container scenarios fail because the 9P file sharing doesn't properly expose files to sibling containers spawned via socket.
 
+### Hyper-V Host Mount Mode (Junction-Free)
+
+To work around Hyper-V 9P and junction issues, the CLI supports a host-mount
+mode that stages inputs into a junction-free directory and rewrites CSV paths.
+This keeps all mounted paths under a clean root like `%SystemDrive%\\bvtemp`.
+
+Enable via env vars:
+```
+BIOVAULT_HYPERV_MOUNT=1
+BIOVAULT_HYPERV_HOST_DIR=C:\bvtemp   # optional; default is %SystemDrive%\bvtemp
+BIOVAULT_KEEP_HYPERV_HOST_DIR=1      # optional; keep staging dir for debugging
+```
+
+In this mode:
+- Inputs are copied into a flat `data/` directory under the host mount root.
+- CSV paths are rewritten to point at that flat directory.
+- Nextflow uses `process.stageInMode = 'copy'` to avoid symlink issues.
+- Results are written to a mounted `results/` dir and copied back to the requested output path.
+
 ## Local Testing
 
 ### Quick Test Script
