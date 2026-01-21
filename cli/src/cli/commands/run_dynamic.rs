@@ -1675,15 +1675,14 @@ pub async fn execute_dynamic(
 
         native_cmd.arg("-log").arg(&nextflow_log_path);
 
-        native_cmd.arg("run");
+        native_cmd.arg("run").arg(&template_abs);
 
         // Enable Docker for workflow containers on native execution
         // The workflow.nf files use container directives that need Docker
+        // Note: -with-docker must come AFTER the project file
         if run_settings.require_docker {
             native_cmd.arg("-with-docker");
         }
-
-        native_cmd.arg(&template_abs);
 
         if resume {
             native_cmd.arg("-resume");
