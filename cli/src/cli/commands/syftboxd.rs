@@ -205,9 +205,30 @@ pub async fn start(config: &Config, foreground: bool) -> Result<()> {
 
         #[cfg(not(unix))]
         {
+            // On Windows, signal::ctrl_c() can fail with "The operation was canceled"
+            // when running without a console (e.g., spawned with CREATE_NO_WINDOW).
+            // We handle this by using a separate task for ctrl_c that won't panic on error.
+            let shutdown_signal = async {
+                match signal::ctrl_c().await {
+                    Ok(()) => {}
+                    Err(e) => {
+                        // On Windows without console, ctrl_c setup may fail.
+                        // Log and wait indefinitely (process will be killed externally).
+                        eprintln!(
+                            "Warning: ctrl_c handler error (expected in background mode): {}",
+                            e
+                        );
+                        // Wait forever - process will be terminated via taskkill
+                        std::future::pending::<()>().await;
+                    }
+                }
+            };
+
+            tokio::pin!(shutdown_signal);
+
             loop {
                 tokio::select! {
-                    _ = signal::ctrl_c() => break,
+                    _ = &mut shutdown_signal => break,
                     _ = tokio::time::sleep(Duration::from_secs(2)) => {
                         if !is_syftbox_running(&runtime).unwrap_or(false) {
                             let _ = start_syftbox(&runtime);

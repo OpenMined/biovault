@@ -642,8 +642,15 @@ pub async fn process_project_message(
     let dest = build_run_project_copy(config, &msg)?;
 
     // Load spec to determine runtime handling (dynamic vs legacy)
+    // Use storage decryption since the file may be encrypted in the private folder
     let project_spec_path = dest.join(MODULE_YAML_FILE);
-    let spec = ProjectSpec::load(&project_spec_path)?;
+    let storage = syftbox_storage(config)?;
+    let spec = if storage.contains(&project_spec_path) {
+        let bytes = storage.read_with_shadow(&project_spec_path)?;
+        ProjectSpec::load_from_bytes(&project_spec_path, &bytes)?
+    } else {
+        ProjectSpec::load(&project_spec_path)?
+    };
 
     if spec.template.as_deref() == Some("dynamic-nextflow") {
         return process_dynamic_project_message(
@@ -1193,7 +1200,14 @@ fn prepare_dynamic_run_non_interactive(
     test: bool,
 ) -> anyhow::Result<DynamicRunInvocation> {
     let spec_path = resolve_project_spec_path(project_dir);
-    let spec = ProjectSpec::load(&spec_path)?;
+    // Use storage decryption since the file may be encrypted in the private folder
+    let storage = syftbox_storage(config)?;
+    let spec = if storage.contains(&spec_path) {
+        let bytes = storage.read_with_shadow(&spec_path)?;
+        ProjectSpec::load_from_bytes(&spec_path, &bytes)?
+    } else {
+        ProjectSpec::load(&spec_path)?
+    };
 
     if participant_hint.eq_ignore_ascii_case("ALL") || participant_hint.eq_ignore_ascii_case("AUTO")
     {
@@ -1603,15 +1617,41 @@ fn try_prepare_dynamic_run(
         return Ok(None);
     }
 
-    let spec = match ProjectSpec::load(&spec_path) {
-        Ok(spec) => spec,
-        Err(err) => {
-            println!(
-                "⚠ Failed to load project spec at {}: {}",
-                spec_path.display(),
-                err
-            );
-            return Ok(None);
+    // Use storage decryption since the file may be encrypted in the private folder
+    let storage = syftbox_storage(config)?;
+    let spec = if storage.contains(&spec_path) {
+        match storage.read_with_shadow(&spec_path) {
+            Ok(bytes) => match ProjectSpec::load_from_bytes(&spec_path, &bytes) {
+                Ok(spec) => spec,
+                Err(err) => {
+                    println!(
+                        "⚠ Failed to load project spec at {}: {}",
+                        spec_path.display(),
+                        err
+                    );
+                    return Ok(None);
+                }
+            },
+            Err(err) => {
+                println!(
+                    "⚠ Failed to read project spec at {}: {}",
+                    spec_path.display(),
+                    err
+                );
+                return Ok(None);
+            }
+        }
+    } else {
+        match ProjectSpec::load(&spec_path) {
+            Ok(spec) => spec,
+            Err(err) => {
+                println!(
+                    "⚠ Failed to load project spec at {}: {}",
+                    spec_path.display(),
+                    err
+                );
+                return Ok(None);
+            }
         }
     };
 

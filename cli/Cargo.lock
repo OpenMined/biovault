@@ -373,6 +373,7 @@ dependencies = [
  "sha2",
  "syftbox-sdk",
  "sysinfo",
+ "tar",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",

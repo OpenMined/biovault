@@ -143,6 +143,10 @@ pub struct BinaryPaths {
     pub syftbox: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub uv: Option<String>,
+    /// Container runtime preference: "docker", "podman", or "auto" (default).
+    /// When set to "auto", tries Docker first, then Podman.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub container_runtime: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -246,6 +250,7 @@ impl Config {
             "nextflow" => paths.nextflow.clone(),
             "syftbox" => paths.syftbox.clone(),
             "uv" => paths.uv.clone(),
+            "container_runtime" => paths.container_runtime.clone(),
             _ => None,
         })
     }

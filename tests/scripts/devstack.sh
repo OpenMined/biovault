@@ -145,15 +145,7 @@ if (( ! SKIP_RUST_BUILD )) && [[ "${BV_DEVSTACK_SKIP_RUST_BUILD:-0}" == "1" ]]; 
   SKIP_RUST_BUILD=1
 fi
 
-if [[ -n "$CLIENT_MODE" ]]; then
-  mode="$(printf '%s' "$CLIENT_MODE" | tr '[:upper:]' '[:lower:]')"
-  if [[ "$mode" != "embedded" ]]; then
-    echo "Go/mixed/rust client modes are disabled; forcing embedded." >&2
-    CLIENT_MODE="embedded"
-    CLIENT_MODE_EXPLICIT=1
-  fi
-fi
-
+# Default to embedded mode if not specified
 if (( ! CLIENT_MODE_EXPLICIT )); then
   CLIENT_MODE="embedded"
   CLIENT_MODE_EXPLICIT=1
@@ -387,14 +379,18 @@ start_syftboxd() {
     require_file "$config_path"
 
     echo "Starting syftboxd (embedded) for $email"
-    HOME="$client_dir" \
-    BIOVAULT_HOME="$client_dir/.biovault" \
-    SYFTBOX_EMAIL="$email" \
-    SYFTBOX_DATA_DIR="$data_dir" \
-    SYFTBOX_CONFIG_PATH="$config_path" \
-    SYC_VAULT="$data_dir/.syc" \
-    BV_SYFTBOX_BACKEND=embedded \
-    "$BV_BIN" syftboxd start >/dev/null
+    # Redirect all output to prevent hanging (background process inherits file descriptors)
+    # Use a subshell to fully detach the background process's file descriptors
+    (
+      HOME="$client_dir" \
+      BIOVAULT_HOME="$client_dir/.biovault" \
+      SYFTBOX_EMAIL="$email" \
+      SYFTBOX_DATA_DIR="$data_dir" \
+      SYFTBOX_CONFIG_PATH="$config_path" \
+      SYC_VAULT="$data_dir/.syc" \
+      BV_SYFTBOX_BACKEND=embedded \
+      "$BV_BIN" syftboxd start </dev/null >/dev/null 2>&1
+    ) || true
   done
 }
 
@@ -420,13 +416,35 @@ start_stack() {
   # These will be inherited by the Go process and passed to spawned clients
   export GOCACHE="$GO_CACHE_DIR"
   [[ -n "${SCENARIO_JAVA_HOME:-}" ]] && export JAVA_HOME="$SCENARIO_JAVA_HOME" JAVA_CMD="$SCENARIO_JAVA_HOME/bin/java"
-  [[ -n "${SCENARIO_USER_PATH:-}" ]] && export PATH="$SCENARIO_USER_PATH"
+  [[ -n "${SCENARIO_USER_PATH:-}" ]] && export PATH="$SCENARIO_USER_PATH:$PATH"
   [[ -n "${NXF_DISABLE_JAVA_VERSION_CHECK:-}" ]] && export NXF_DISABLE_JAVA_VERSION_CHECK
   [[ -n "${NXF_IGNORE_JAVA_VERSION:-}" ]] && export NXF_IGNORE_JAVA_VERSION
   [[ -n "${NXF_OPTS:-}" ]] && export NXF_OPTS
 
   echo "Starting SyftBox devstack via syftbox/cmd/devstack..."
-  (cd "$SYFTBOX_DIR" && go run ./cmd/devstack start "${args[@]}")
+
+  # Note: Don't put the log file in SANDBOX_DIR - the devstack --reset flag deletes it!
+  # Use a temp file instead
+  local devstack_log
+  devstack_log="$(mktemp)"
+
+  # Run devstack command (redirect output to prevent pipe inheritance issues on Windows)
+  (
+    cd "$SYFTBOX_DIR" || exit 1
+    go run ./cmd/devstack start "${args[@]}"
+  ) > "$devstack_log" 2>&1 </dev/null
+  local exit_code=$?
+
+  if [[ $exit_code -ne 0 ]]; then
+    echo "Devstack command failed (exit $exit_code). Log:" >&2
+    cat "$devstack_log" >&2
+    rm -f "$devstack_log"
+    exit 1
+  fi
+
+  # Show the startup log and cleanup
+  cat "$devstack_log"
+  rm -f "$devstack_log"
 
   if (( EMBEDDED_MODE )); then
     local state_path="$SANDBOX_DIR/relay/state.json"

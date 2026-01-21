@@ -293,9 +293,42 @@ impl Daemon {
             ),
         );
 
+        // On Windows, signal::ctrl_c() can fail with "The operation was canceled"
+        // when running without a console (e.g., spawned with CREATE_NO_WINDOW).
+        // We handle this by using a separate task for ctrl_c that won't panic on error.
+        #[cfg(not(unix))]
+        let shutdown_signal = {
+            let log_writer = self.log_writer.clone();
+            async move {
+                match signal::ctrl_c().await {
+                    Ok(()) => true,
+                    Err(e) => {
+                        // On Windows without console, ctrl_c setup may fail.
+                        // Log and wait indefinitely (process will be killed externally).
+                        let timestamp = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S%.3f UTC");
+                        let log_line = format!(
+                            "[{}] [WARN] ctrl_c handler error (expected in background mode): {}\n",
+                            timestamp, e
+                        );
+                        if let Ok(mut writer) = log_writer.lock() {
+                            let _ = std::io::Write::write_all(&mut *writer, log_line.as_bytes());
+                            let _ = std::io::Write::flush(&mut *writer);
+                        }
+                        // Wait forever - process will be terminated via taskkill
+                        std::future::pending::<bool>().await
+                    }
+                }
+            }
+        };
+
+        #[cfg(unix)]
+        let shutdown_signal = async { signal::ctrl_c().await.is_ok() };
+
+        tokio::pin!(shutdown_signal);
+
         loop {
             tokio::select! {
-                _ = signal::ctrl_c() => {
+                _ = &mut shutdown_signal => {
                     self.log("INFO", "Received shutdown signal");
                     break;
                 }

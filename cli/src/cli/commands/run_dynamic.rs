@@ -129,15 +129,18 @@ fn should_use_docker_for_nextflow() -> bool {
     cfg!(target_os = "windows")
 }
 
-/// Convert a Windows path to a Docker-compatible path for volume mounts
-/// e.g., C:\Users\foo -> /c/Users/foo
+/// Convert a Windows path to a container-compatible path for volume mounts.
+/// - Docker Desktop: C:\Users\foo -> /c/Users/foo
+/// - Podman on WSL: C:\Users\foo -> /mnt/c/Users/foo
 #[cfg(target_os = "windows")]
-fn windows_path_to_docker(path: &Path) -> String {
+fn windows_path_to_container(path: &Path, use_podman_format: bool) -> String {
     let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     let path_str = canonical.to_string_lossy();
     // Convert backslashes to forward slashes
     let unix_path = path_str.replace('\\', "/");
-    // Convert drive letter: C:/... -> /c/...
+    // Prefix for drive letter mount
+    let prefix = if use_podman_format { "/mnt" } else { "" };
+    // Convert drive letter: C:/... -> /c/... or /mnt/c/...
     if unix_path.len() >= 2 && unix_path.chars().nth(1) == Some(':') {
         let drive = unix_path
             .chars()
@@ -146,7 +149,7 @@ fn windows_path_to_docker(path: &Path) -> String {
             .to_lowercase()
             .next()
             .unwrap();
-        format!("/{}{}", drive, &unix_path[2..])
+        format!("{}/{}{}", prefix, drive, &unix_path[2..])
     } else if unix_path.starts_with("\\\\?\\") || unix_path.starts_with("//?/") {
         // Handle extended path prefix \\?\C:\... or //?/C:/...
         let stripped = unix_path
@@ -161,9 +164,9 @@ fn windows_path_to_docker(path: &Path) -> String {
                 .to_lowercase()
                 .next()
                 .unwrap();
-            format!("/{}{}", drive, &stripped[2..])
+            format!("{}/{}{}", prefix, drive, &stripped[2..])
         } else {
-            format!("/{}", stripped)
+            format!("{}/{}", prefix, stripped)
         }
     } else {
         unix_path
@@ -171,17 +174,17 @@ fn windows_path_to_docker(path: &Path) -> String {
 }
 
 #[cfg(not(target_os = "windows"))]
-fn windows_path_to_docker(path: &Path) -> String {
-    path.to_string_lossy().to_string()
+fn windows_path_to_container(_path: &Path, _use_podman_format: bool) -> String {
+    _path.to_string_lossy().to_string()
 }
 
-/// Recursively remap Windows paths in JSON values to Docker-compatible paths
-fn remap_json_paths_for_docker(value: &JsonValue) -> JsonValue {
+/// Recursively remap Windows paths in JSON values to container-compatible paths
+fn remap_json_paths_for_container(value: &JsonValue, use_podman_format: bool) -> JsonValue {
     match value {
         JsonValue::String(s) => {
             // Check if it looks like a Windows path (contains backslash or drive letter)
             if s.contains('\\') || (s.len() >= 2 && s.chars().nth(1) == Some(':')) {
-                JsonValue::String(windows_path_to_docker(Path::new(s)))
+                JsonValue::String(windows_path_to_container(Path::new(s), use_podman_format))
             } else {
                 value.clone()
             }
@@ -189,12 +192,49 @@ fn remap_json_paths_for_docker(value: &JsonValue) -> JsonValue {
         JsonValue::Object(map) => {
             let mut new_map = serde_json::Map::new();
             for (k, v) in map {
-                new_map.insert(k.clone(), remap_json_paths_for_docker(v));
+                new_map.insert(k.clone(), remap_json_paths_for_container(v, use_podman_format));
             }
             JsonValue::Object(new_map)
         }
         JsonValue::Array(arr) => {
-            JsonValue::Array(arr.iter().map(remap_json_paths_for_docker).collect())
+            JsonValue::Array(
+                arr.iter()
+                    .map(|v| remap_json_paths_for_container(v, use_podman_format))
+                    .collect(),
+            )
+        }
+        _ => value.clone(),
+    }
+}
+
+/// Remap paths in JSON to VM-local paths (for Hyper-V mode)
+/// Windows paths are converted to point to the vm_data_dir by filename
+#[cfg(target_os = "windows")]
+fn remap_json_paths_for_vm(value: &JsonValue, vm_data_dir: &str) -> JsonValue {
+    match value {
+        JsonValue::String(s) => {
+            // Check if it looks like a Windows path
+            if s.contains('\\') || (s.len() >= 2 && s.chars().nth(1) == Some(':')) {
+                let path = Path::new(s);
+                let file_name = path.file_name().unwrap_or_default().to_string_lossy();
+                JsonValue::String(format!("{}/{}", vm_data_dir, file_name))
+            } else {
+                value.clone()
+            }
+        }
+        JsonValue::Object(map) => {
+            let mut new_map = serde_json::Map::new();
+            for (k, v) in map {
+                new_map.insert(k.clone(), remap_json_paths_for_vm(v, vm_data_dir));
+            }
+            JsonValue::Object(new_map)
+        }
+        JsonValue::Array(arr) => {
+            JsonValue::Array(
+                arr.iter()
+                    .map(|v| remap_json_paths_for_vm(v, vm_data_dir))
+                    .collect(),
+            )
         }
         _ => value.clone(),
     }
@@ -204,13 +244,10 @@ fn remap_json_paths_for_docker(value: &JsonValue) -> JsonValue {
 #[cfg(target_os = "windows")]
 fn normalize_windows_path_str(s: &str) -> String {
     // Strip extended-length path prefix if present
-    let stripped = if s.starts_with("\\\\?\\") {
-        &s[4..]
-    } else if s.starts_with("//?/") {
-        &s[4..]
-    } else {
-        s
-    };
+    let stripped = s
+        .strip_prefix("\\\\?\\")
+        .or_else(|| s.strip_prefix("//?/"))
+        .unwrap_or(s);
     // Convert forward slashes to backslashes
     stripped.replace('/', "\\")
 }
@@ -284,13 +321,10 @@ fn extract_paths_from_json(value: &JsonValue, paths: &mut Vec<PathBuf>) {
 #[cfg(target_os = "windows")]
 fn looks_like_windows_absolute_path(s: &str) -> bool {
     // Handle extended-length path prefix: \\?\C:\... or //?/C:/...
-    let stripped = if s.starts_with("\\\\?\\") {
-        &s[4..]
-    } else if s.starts_with("//?/") {
-        &s[4..]
-    } else {
-        s
-    };
+    let stripped = s
+        .strip_prefix("\\\\?\\")
+        .or_else(|| s.strip_prefix("//?/"))
+        .unwrap_or(s);
 
     if stripped.len() < 3 {
         return false;
@@ -362,9 +396,9 @@ fn extract_paths_from_csv(content: &str, paths: &mut Vec<PathBuf>) {
     ));
 }
 
-/// Rewrite a CSV file converting Windows paths to Docker-compatible paths
+/// Rewrite a CSV file converting Windows paths to container-compatible paths
 #[cfg(target_os = "windows")]
-fn rewrite_csv_with_docker_paths(csv_path: &Path) -> Result<()> {
+fn rewrite_csv_with_container_paths(csv_path: &Path, use_podman_format: bool) -> Result<()> {
     let content = fs::read_to_string(csv_path)
         .with_context(|| format!("Failed to read CSV: {}", csv_path.display()))?;
 
@@ -385,7 +419,7 @@ fn rewrite_csv_with_docker_paths(csv_path: &Path) -> Result<()> {
             // Check if it's a Windows path (with backslash or forward slash)
             let new_value = if looks_like_windows_absolute_path(inner) {
                 converted_count += 1;
-                windows_path_to_docker(Path::new(inner))
+                windows_path_to_container(Path::new(inner), use_podman_format)
             } else {
                 inner.to_string()
             };
@@ -428,29 +462,112 @@ fn is_windows_path(s: &str) -> bool {
 
 /// Find and rewrite all CSV files referenced in inputs JSON
 #[cfg(target_os = "windows")]
-fn rewrite_input_csvs_for_docker(value: &JsonValue) -> Result<()> {
+fn rewrite_input_csvs_for_container(value: &JsonValue, use_podman_format: bool) -> Result<()> {
     match value {
         JsonValue::String(s) => {
             if is_windows_path(s) && s.to_lowercase().ends_with(".csv") {
                 let path = Path::new(s);
                 if path.exists() && path.is_file() {
                     append_desktop_log(&format!("[Pipeline] Rewriting CSV: {}", s));
-                    rewrite_csv_with_docker_paths(path)?;
+                    rewrite_csv_with_container_paths(path, use_podman_format)?;
                 }
             }
         }
         JsonValue::Object(map) => {
             for v in map.values() {
-                rewrite_input_csvs_for_docker(v)?;
+                rewrite_input_csvs_for_container(v, use_podman_format)?;
             }
         }
         JsonValue::Array(arr) => {
             for v in arr {
-                rewrite_input_csvs_for_docker(v)?;
+                rewrite_input_csvs_for_container(v, use_podman_format)?;
             }
         }
         _ => {}
     }
+    Ok(())
+}
+
+/// Find and rewrite all CSV files referenced in inputs JSON to use VM-local paths.
+/// This is used for Hyper-V mode where Windows paths can't be mounted directly.
+#[cfg(target_os = "windows")]
+fn rewrite_input_csvs_for_vm(value: &JsonValue, vm_data_dir: &str) -> Result<()> {
+    match value {
+        JsonValue::String(s) => {
+            if is_windows_path(s) && s.to_lowercase().ends_with(".csv") {
+                let path = Path::new(s);
+                if path.exists() && path.is_file() {
+                    append_desktop_log(&format!("[Pipeline] Rewriting CSV for VM: {}", s));
+                    rewrite_csv_for_vm(path, vm_data_dir)?;
+                }
+            }
+        }
+        JsonValue::Object(map) => {
+            for v in map.values() {
+                rewrite_input_csvs_for_vm(v, vm_data_dir)?;
+            }
+        }
+        JsonValue::Array(arr) => {
+            for v in arr {
+                rewrite_input_csvs_for_vm(v, vm_data_dir)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Rewrite a CSV file to use VM-local paths instead of Windows paths.
+/// Windows paths like C:/Users/foo/data/file.txt become /tmp/biovault-xxx/data/file.txt
+#[cfg(target_os = "windows")]
+fn rewrite_csv_for_vm(csv_path: &Path, vm_data_dir: &str) -> Result<()> {
+    let content = fs::read_to_string(csv_path)
+        .with_context(|| format!("Failed to read CSV: {}", csv_path.display()))?;
+
+    append_desktop_log(&format!("[CSV Rewrite VM] Processing: {}", csv_path.display()));
+    let mut converted_count = 0;
+
+    let mut new_lines = Vec::new();
+    for line in content.lines() {
+        let mut new_fields = Vec::new();
+        for field in line.split(',') {
+            let trimmed = field.trim();
+            let (was_quoted, inner) = if trimmed.starts_with('"') && trimmed.ends_with('"') {
+                (true, &trimmed[1..trimmed.len() - 1])
+            } else {
+                (false, trimmed)
+            };
+
+            // Check if it's a Windows path - convert to VM-local path
+            let new_value = if looks_like_windows_absolute_path(inner) {
+                converted_count += 1;
+                // Extract just the filename and put it in the VM data directory
+                let path = Path::new(inner);
+                let file_name = path.file_name().unwrap_or_default().to_string_lossy();
+                format!("{}/{}", vm_data_dir, file_name)
+            } else {
+                inner.to_string()
+            };
+
+            if was_quoted {
+                new_fields.push(format!("\"{}\"", new_value));
+            } else {
+                new_fields.push(new_value);
+            }
+        }
+        new_lines.push(new_fields.join(","));
+    }
+
+    append_desktop_log(&format!(
+        "[CSV Rewrite VM] Converted {} paths to VM-local in {}",
+        converted_count,
+        csv_path.display()
+    ));
+
+    let new_content = new_lines.join("\n");
+    fs::write(csv_path, new_content)
+        .with_context(|| format!("Failed to write converted CSV: {}", csv_path.display()))?;
+
     Ok(())
 }
 
@@ -569,7 +686,14 @@ fn pull_docker_image_if_needed(docker_bin: &str, image: &str) -> Result<()> {
     let mut pull_cmd = Command::new(docker_bin);
     super::configure_child_process(&mut pull_cmd);
     apply_docker_config_arg(&mut pull_cmd);
-    pull_cmd.arg("pull").arg(image);
+    pull_cmd.arg("pull");
+
+    // On Windows, explicitly specify linux/amd64 platform to avoid manifest resolution issues
+    // when Docker daemon might be misconfigured or in Windows container mode
+    #[cfg(target_os = "windows")]
+    pull_cmd.arg("--platform=linux/amd64");
+
+    pull_cmd.arg(image);
 
     // Add Docker PATH for credential helpers on Windows
     if let Some(docker_path) = build_docker_path(docker_bin) {
@@ -719,6 +843,160 @@ fn check_docker_running(docker_bin: &str) -> Result<()> {
     .into())
 }
 
+/// Check if a container runtime binary is available and working (supports Linux containers).
+/// Returns true if `binary info` succeeds.
+#[cfg(target_os = "windows")]
+fn is_container_runtime_working(binary: &str) -> bool {
+    let mut cmd = Command::new(binary);
+    super::configure_child_process(&mut cmd);
+    cmd.arg("info").stdout(Stdio::piped()).stderr(Stdio::piped());
+
+    match cmd.output() {
+        Ok(output) => {
+            if !output.status.success() {
+                return false;
+            }
+            // Check if the output indicates Linux container support
+            // Docker Desktop in Windows container mode shows "OSType: windows"
+            // We need "OSType: linux" or Podman (which is always Linux)
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            // Podman always runs Linux containers, Docker needs to be in Linux mode
+            if binary.contains("podman") {
+                return true;
+            }
+            // For Docker, check if it's in Linux container mode
+            !stdout.contains("OSType: windows")
+        }
+        Err(_) => false,
+    }
+}
+
+/// Get the Podman socket path for mounting into containers.
+/// On Windows with WSL, this is typically /run/user/<uid>/podman/podman.sock
+#[cfg(target_os = "windows")]
+fn get_podman_socket_path() -> Option<String> {
+    // Try to get socket path from `podman info`
+    let mut cmd = Command::new("podman");
+    super::configure_child_process(&mut cmd);
+    cmd.args(["info", "--format", "{{.Host.RemoteSocket.Path}}"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    if let Ok(output) = cmd.output() {
+        if output.status.success() {
+            let socket = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            // Strip unix:// prefix if present
+            let socket = socket.strip_prefix("unix://").unwrap_or(&socket);
+            if !socket.is_empty() {
+                append_desktop_log(&format!("[Runtime] Podman socket path: {}", socket));
+                return Some(socket.to_string());
+            }
+        }
+    }
+
+    // Fallback to common default path
+    append_desktop_log("[Runtime] Using default Podman socket path");
+    Some("/run/user/1000/podman/podman.sock".to_string())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn get_podman_socket_path() -> Option<String> {
+    None
+}
+
+/// Detect the best available container runtime on Windows.
+/// Checks config for explicit preference, then tries Docker, then Podman.
+/// Returns the binary path/name for the working runtime.
+#[cfg(target_os = "windows")]
+fn detect_container_runtime(cfg: Option<&crate::config::Config>) -> Result<String> {
+    // Check if user has explicitly configured a container runtime preference
+    if let Some(runtime_pref) = cfg.and_then(|c| c.get_binary_path("container_runtime")) {
+        let pref = runtime_pref.to_lowercase();
+        append_desktop_log(&format!(
+            "[Runtime] Config specifies container_runtime: {}",
+            pref
+        ));
+
+        match pref.as_str() {
+            "podman" => {
+                // User explicitly wants Podman
+                if is_container_runtime_working("podman") {
+                    append_desktop_log("[Runtime] Using configured Podman");
+                    return Ok("podman".to_string());
+                }
+                return Err(anyhow::anyhow!(
+                    "Container runtime 'podman' is configured but not working. Ensure Podman machine is running."
+                ).into());
+            }
+            "docker" => {
+                // User explicitly wants Docker
+                if let Some(docker_path) = resolve_binary_path(cfg, "docker") {
+                    if is_container_runtime_working(&docker_path) {
+                        append_desktop_log("[Runtime] Using configured Docker path");
+                        return Ok(docker_path);
+                    }
+                }
+                if is_container_runtime_working("docker") {
+                    append_desktop_log("[Runtime] Using system Docker");
+                    return Ok("docker".to_string());
+                }
+                return Err(anyhow::anyhow!(
+                    "Container runtime 'docker' is configured but not working. Ensure Docker Desktop is running in Linux container mode."
+                ).into());
+            }
+            "auto" | "" => {
+                // Fall through to auto-detection
+                append_desktop_log("[Runtime] Auto-detecting container runtime...");
+            }
+            _ => {
+                append_desktop_log(&format!(
+                    "[Runtime] Unknown container_runtime '{}', using auto-detection",
+                    pref
+                ));
+            }
+        }
+    }
+
+    // Auto-detection: try configured Docker path first
+    if let Some(docker_path) = resolve_binary_path(cfg, "docker") {
+        append_desktop_log(&format!(
+            "[Runtime] Checking configured Docker: {}",
+            docker_path
+        ));
+        if is_container_runtime_working(&docker_path) {
+            append_desktop_log("[Runtime] Configured Docker is working with Linux containers");
+            return Ok(docker_path);
+        }
+        append_desktop_log("[Runtime] Configured Docker not working or in Windows container mode");
+    }
+
+    // Try system Docker
+    append_desktop_log("[Runtime] Checking system docker...");
+    if is_container_runtime_working("docker") {
+        append_desktop_log("[Runtime] System docker is working with Linux containers");
+        return Ok("docker".to_string());
+    }
+    append_desktop_log("[Runtime] System docker not available or not working");
+
+    // Try Podman as fallback
+    append_desktop_log("[Runtime] Checking podman...");
+    if is_container_runtime_working("podman") {
+        append_desktop_log("[Runtime] Podman is working");
+        return Ok("podman".to_string());
+    }
+    append_desktop_log("[Runtime] Podman not available or not working");
+
+    Err(anyhow::anyhow!(
+        "No working container runtime found. Please install Docker Desktop (in Linux container mode) or Podman, and ensure the daemon/machine is running."
+    ).into())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn detect_container_runtime(cfg: Option<&crate::config::Config>) -> Result<String> {
+    // On non-Windows, just use Docker as before
+    Ok(resolve_binary_path(cfg, "docker").unwrap_or_else(|| "docker".to_string()))
+}
+
 pub async fn execute_dynamic(
     project_folder: &str,
     args: Vec<String>,
@@ -852,19 +1130,56 @@ pub async fn execute_dynamic(
     let config = crate::config::get_config().ok();
     let nextflow_bin =
         resolve_binary_path(config.as_ref(), "nextflow").unwrap_or_else(|| "nextflow".to_string());
-    let docker_bin =
-        resolve_binary_path(config.as_ref(), "docker").unwrap_or_else(|| "docker".to_string());
 
-    // Check Docker availability (required for both Windows Docker execution and workflow containers)
-    // Skip Docker checks in dry-run mode
+    // Resolve container runtime: check env var first, then auto-detect
+    // Supports: BIOVAULT_CONTAINER_RUNTIME=docker|podman or configured docker path
+    let docker_bin = if let Ok(runtime) = std::env::var("BIOVAULT_CONTAINER_RUNTIME") {
+        let trimmed = runtime.trim();
+        if !trimmed.is_empty() {
+            append_desktop_log(&format!(
+                "[Pipeline] Using container runtime from BIOVAULT_CONTAINER_RUNTIME: {}",
+                trimmed
+            ));
+            trimmed.to_string()
+        } else {
+            detect_container_runtime(config.as_ref())?
+        }
+    } else {
+        detect_container_runtime(config.as_ref())?
+    };
+
+    append_desktop_log(&format!("[Pipeline] Selected container runtime: {}", docker_bin));
+    println!("🐳 Using container runtime: {}", docker_bin.bold());
+
+    // Check container runtime availability (required for Windows Docker execution and workflow containers)
+    // Skip checks in dry-run mode
     if !dry_run && (run_settings.require_docker || use_docker) {
-        append_desktop_log("[Pipeline] Checking Docker availability...");
+        append_desktop_log("[Pipeline] Checking container runtime availability...");
         if let Err(err) = check_docker_running(&docker_bin) {
-            append_desktop_log(&format!("[Pipeline] Docker check failed: {}", err));
+            append_desktop_log(&format!("[Pipeline] Container runtime check failed: {}", err));
             return Err(err);
         }
-        append_desktop_log("[Pipeline] Docker is running (docker info succeeded)");
+        append_desktop_log(&format!("[Pipeline] {} is running (info succeeded)", docker_bin));
+        println!("✅ {} daemon is running", docker_bin);
     }
+
+    // Track Hyper-V mode for post-run cleanup (need to capture before if-else block)
+    #[cfg(target_os = "windows")]
+    let using_hyperv_mode = use_docker && docker_bin.contains("podman") && is_podman_hyperv(&docker_bin);
+    #[cfg(not(target_os = "windows"))]
+    let using_hyperv_mode = false;
+
+    // For Hyper-V mode: capture VM temp dir and results path for post-run copy-back
+    #[cfg(target_os = "windows")]
+    let mut vm_temp_dir_for_cleanup: Option<String> = None;
+    #[cfg(not(target_os = "windows"))]
+    let vm_temp_dir_for_cleanup: Option<String> = None;
+
+    // Store docker_results path for post-run copy-back (will be set inside if-else)
+    #[cfg(target_os = "windows")]
+    let mut vm_results_dir: Option<String> = None;
+    #[cfg(not(target_os = "windows"))]
+    let vm_results_dir: Option<String> = None;
 
     // Build command - use Docker on Windows, native Nextflow elsewhere
     let mut cmd = if use_docker {
@@ -878,17 +1193,96 @@ pub async fn execute_dynamic(
             ensure_nextflow_runner_image(&docker_bin)?
         };
 
-        // Convert all paths to Docker-compatible format
-        let docker_biovault_home = windows_path_to_docker(&biovault_home_abs);
-        let docker_project_path = windows_path_to_docker(&project_abs);
-        let docker_template = windows_path_to_docker(&template_abs);
-        let docker_workflow = windows_path_to_docker(&workflow_abs);
-        let docker_project_spec = windows_path_to_docker(&project_spec_abs);
-        let docker_log_path = windows_path_to_docker(&nextflow_log_path);
-        let results_abs = results_path_buf
+        // Detect if we're using Podman early so we can use correct path format
+        // Podman on WSL uses /mnt/c/... while Docker Desktop uses /c/...
+        let using_podman = docker_bin.contains("podman");
+
+        // Check if using Podman with Hyper-V backend (which has broken 9P mounts)
+        // In this mode, we copy files to the VM instead of mounting Windows paths
+        let using_hyperv = using_podman && is_podman_hyperv(&docker_bin);
+        if using_hyperv {
+            append_desktop_log("[Pipeline] Detected Podman with Hyper-V backend - using VM copy mode");
+            println!("📋 Using Hyper-V mode (copying files to VM instead of mounting)");
+        }
+
+        // For Hyper-V mode: create a temp directory in the VM and track paths
+        #[cfg(target_os = "windows")]
+        let vm_temp_dir: Option<String> = if using_hyperv && !dry_run {
+            let dir = create_vm_temp_dir(&docker_bin, "biovault")?;
+            // Capture for post-run cleanup
+            vm_temp_dir_for_cleanup = Some(dir.clone());
+            Some(dir)
+        } else {
+            None
+        };
+
+        #[cfg(not(target_os = "windows"))]
+        let vm_temp_dir: Option<String> = None;
+
+        // Convert all paths to container-compatible format
+        // For Hyper-V mode, paths will be in the VM temp directory
+        let (docker_biovault_home, docker_project_path, docker_template, docker_workflow, docker_project_spec, docker_results, docker_log_path) =
+            if let Some(ref vm_dir) = vm_temp_dir {
+                // Hyper-V mode: use VM-local paths
+                let vm_project = format!("{}/project", vm_dir);
+                let vm_biovault_home = format!("{}/biovault_home", vm_dir);
+                let vm_results = format!("{}/results", vm_dir);
+
+                // Capture for post-run copy-back
+                #[cfg(target_os = "windows")]
+                {
+                    vm_results_dir = Some(vm_results.clone());
+                }
+
+                // Template and workflow are relative to project
+                let template_rel = template_abs.strip_prefix(&project_abs).unwrap_or(&template_abs);
+                let workflow_rel = workflow_abs.strip_prefix(&project_abs).unwrap_or(&workflow_abs);
+                let spec_rel = project_spec_abs.strip_prefix(&project_abs).unwrap_or(&project_spec_abs);
+
+                let vm_template = format!("{}/{}", vm_project, template_rel.display()).replace('\\', "/");
+                let vm_workflow = format!("{}/{}", vm_project, workflow_rel.display()).replace('\\', "/");
+                let vm_spec = format!("{}/{}", vm_project, spec_rel.display()).replace('\\', "/");
+
+                (
+                    vm_biovault_home,
+                    vm_project,
+                    vm_template,
+                    vm_workflow,
+                    vm_spec,
+                    vm_results,
+                    "/tmp/.nextflow.log".to_string(),
+                )
+            } else {
+                // Normal mode: convert Windows paths to container format
+                let docker_biovault_home = windows_path_to_container(&biovault_home_abs, using_podman);
+                let docker_project_path = windows_path_to_container(&project_abs, using_podman);
+                let docker_template = windows_path_to_container(&template_abs, using_podman);
+                let docker_workflow = windows_path_to_container(&workflow_abs, using_podman);
+                let docker_project_spec = windows_path_to_container(&project_spec_abs, using_podman);
+                let docker_log_path = if using_podman {
+                    "/tmp/.nextflow.log".to_string()
+                } else {
+                    windows_path_to_container(&nextflow_log_path, using_podman)
+                };
+                let results_abs = results_path_buf
+                    .canonicalize()
+                    .unwrap_or_else(|_| results_path_buf.clone());
+                let docker_results = windows_path_to_container(&results_abs, using_podman);
+
+                (
+                    docker_biovault_home,
+                    docker_project_path,
+                    docker_template,
+                    docker_workflow,
+                    docker_project_spec,
+                    docker_results,
+                    docker_log_path,
+                )
+            };
+
+        let _results_abs = results_path_buf
             .canonicalize()
             .unwrap_or_else(|_| results_path_buf.clone());
-        let docker_results = windows_path_to_docker(&results_abs);
 
         // Extract paths from inputs that need to be mounted (must do before rewriting CSVs)
         // This is Windows-specific: extract paths from CSV files and rewrite them for Docker
@@ -896,26 +1290,72 @@ pub async fn execute_dynamic(
             serde_json::to_value(&inputs_json).context("Failed to convert inputs to JSON value")?;
 
         #[cfg(target_os = "windows")]
-        let mount_roots = {
+        let (mount_roots, vm_data_dir) = if let Some(ref vm_dir) = vm_temp_dir {
+            // Hyper-V mode: extract data paths and copy them to VM
+            let mut data_paths: Vec<PathBuf> = Vec::new();
+            extract_paths_from_json(&inputs_json_value, &mut data_paths);
+
+            let vm_data = format!("{}/data", vm_dir);
+
+            if !dry_run && !data_paths.is_empty() {
+                append_desktop_log(&format!("[Pipeline] Copying {} data files to VM...", data_paths.len()));
+                println!("📁 Copying {} data files to VM...", data_paths.len());
+
+                // Create data directory in VM
+                let _ = Command::new(&docker_bin)
+                    .arg("machine").arg("ssh").arg("--")
+                    .arg(format!("mkdir -p '{}' && chmod 777 '{}'", vm_data, vm_data))
+                    .status();
+
+                // Copy each data file
+                for data_path in &data_paths {
+                    if data_path.exists() {
+                        let file_name = data_path.file_name().unwrap_or_default().to_string_lossy();
+                        let vm_file_path = format!("{}/{}", vm_data, file_name);
+                        if let Err(e) = copy_file_to_vm(&docker_bin, data_path, &vm_file_path) {
+                            append_desktop_log(&format!("[Pipeline] Warning: Failed to copy {}: {}", data_path.display(), e));
+                        }
+                    }
+                }
+
+                // Make all data files readable
+                let _ = Command::new(&docker_bin)
+                    .arg("machine").arg("ssh").arg("--")
+                    .arg(format!("chmod -R 777 '{}'", vm_data))
+                    .status();
+            }
+
+            // Rewrite CSV files to use VM-local paths
+            if !dry_run {
+                append_desktop_log("[Pipeline] Rewriting CSV files with VM-local paths...");
+                rewrite_input_csvs_for_vm(&inputs_json_value, &vm_data)?;
+            }
+
+            (Vec::new(), Some(vm_data))
+        } else {
+            // Normal mode: extract and mount Windows paths
             let mut data_paths: Vec<PathBuf> = Vec::new();
             extract_paths_from_json(&inputs_json_value, &mut data_paths);
             let roots = get_unique_mount_roots(data_paths);
 
-            // Rewrite CSV files to convert Windows paths to Docker-compatible paths
+            // Rewrite CSV files to convert Windows paths to container-compatible paths
             // Skip in dry-run mode since this modifies files
             if !dry_run {
                 append_desktop_log(
-                    "[Pipeline] Rewriting CSV files with Docker-compatible paths...",
+                    "[Pipeline] Rewriting CSV files with container-compatible paths...",
                 );
                 append_desktop_log(&format!(
                     "[Pipeline] inputs_json: {}",
                     serde_json::to_string(&inputs_json_value).unwrap_or_default()
                 ));
-                rewrite_input_csvs_for_docker(&inputs_json_value)?;
+                rewrite_input_csvs_for_container(&inputs_json_value, using_podman)?;
             }
 
-            roots
+            (roots, None)
         };
+
+        #[cfg(not(target_os = "windows"))]
+        let vm_data_dir: Option<String> = None;
 
         #[cfg(not(target_os = "windows"))]
         let mount_roots: Vec<PathBuf> = Vec::new();
@@ -941,6 +1381,24 @@ pub async fn execute_dynamic(
             mount_roots
         ));
 
+        // For Hyper-V mode: copy project files to VM before building command
+        #[cfg(target_os = "windows")]
+        if let Some(ref vm_dir) = vm_temp_dir {
+            let vm_project = format!("{}/project", vm_dir);
+            append_desktop_log(&format!("[Pipeline] Copying project to VM: {} -> {}", project_abs.display(), vm_project));
+            println!("📁 Copying project files to VM...");
+            copy_dir_to_vm(&docker_bin, &project_abs, &vm_project)?;
+
+            // Create results directory in VM
+            let vm_results = format!("{}/results", vm_dir);
+            let _ = Command::new(&docker_bin)
+                .arg("machine").arg("ssh").arg("--")
+                .arg(format!("mkdir -p '{}' && chmod 777 '{}'", vm_results, vm_results))
+                .status();
+
+            append_desktop_log(&format!("[Pipeline] VM directories created: project={}, results={}", vm_project, vm_results));
+        }
+
         let mut docker_cmd = Command::new(&docker_bin);
         super::configure_child_process(&mut docker_cmd);
         apply_docker_config_arg(&mut docker_cmd);
@@ -952,45 +1410,155 @@ pub async fn execute_dynamic(
 
         docker_cmd
             .arg("run")
-            .arg("--rm")
+            .arg("--rm");
+
+        // When using Podman, add flags to fix permission issues with mounted volumes
+        if using_podman {
+            // Handle .nextflow directory permissions
+            // If switching from Docker to Podman, the old .nextflow dir may have wrong ownership
+            let nextflow_local_dir = project_abs.join(".nextflow");
+            if nextflow_local_dir.exists() {
+                // Check if we can write to it by trying to create a test file
+                let test_file = nextflow_local_dir.join(".podman-write-test");
+                match fs::write(&test_file, "test") {
+                    Ok(_) => {
+                        let _ = fs::remove_file(&test_file);
+                    }
+                    Err(_) => {
+                        // Can't write - likely created by Docker with different permissions
+                        // Remove and recreate with correct ownership
+                        append_desktop_log(&format!(
+                            "[Pipeline] Removing .nextflow directory with incompatible permissions: {}",
+                            nextflow_local_dir.display()
+                        ));
+                        println!(
+                            "⚠️  Cleaning .nextflow directory (was created by different container runtime)"
+                        );
+                        let _ = fs::remove_dir_all(&nextflow_local_dir);
+                    }
+                }
+            }
+
+            // Create .nextflow directory if it doesn't exist
+            if !nextflow_local_dir.exists() {
+                let _ = fs::create_dir_all(&nextflow_local_dir);
+                append_desktop_log(&format!(
+                    "[Pipeline] Created .nextflow directory: {}",
+                    nextflow_local_dir.display()
+                ));
+            }
+
+            docker_cmd
+                .arg("--userns=keep-id")
+                // Disable SELinux labeling which can cause permission issues on mounted volumes
+                .arg("--security-opt")
+                .arg("label=disable")
+                // Set NXF_HOME to a writable location inside the container
+                .arg("-e")
+                .arg("NXF_HOME=/tmp/.nextflow")
+                // Set NXF_TEMP to avoid writing temp files to Windows-mounted paths
+                // (Windows mounts don't support POSIX operations like mv with attribute preservation)
+                .arg("-e")
+                .arg("NXF_TEMP=/tmp");
+
+            // Mount Podman socket and set CONTAINER_HOST for nested container execution
+            if let Some(podman_socket) = get_podman_socket_path() {
+                append_desktop_log(&format!(
+                    "[Pipeline] Mounting Podman socket: {} -> /run/podman/podman.sock",
+                    podman_socket
+                ));
+                docker_cmd
+                    .arg("-v")
+                    .arg(format!("{}:/run/podman/podman.sock", podman_socket))
+                    .arg("-e")
+                    .arg("CONTAINER_HOST=unix:///run/podman/podman.sock");
+            }
+        } else {
             // Mount Docker Desktop engine socket so Nextflow-in-Docker can launch workflow containers.
             //
             // With Docker Desktop (Linux containers), the daemon runs in a Linux VM and provides a Unix socket.
             // Binding it into the Nextflow container allows Nextflow to launch workflow containers.
-            .arg("-v")
-            .arg("/var/run/docker.sock:/var/run/docker.sock")
-            // Mount the BioVault home directory
-            .arg("-v")
-            .arg(format!(
-                "{}:{}",
-                windows_path_to_docker(&biovault_home),
-                docker_biovault_home
-            ))
-            // Mount the project path (may be same as above, Docker handles duplicates)
-            .arg("-v")
-            .arg(format!(
-                "{}:{}",
-                windows_path_to_docker(project_path),
-                docker_project_path
-            ));
-
-        // Mount additional data directories discovered from inputs
-        for mount_path in &mount_roots {
-            let docker_mount = windows_path_to_docker(mount_path);
-            append_desktop_log(&format!(
-                "[Pipeline] Adding mount: {} -> {}",
-                mount_path.display(),
-                docker_mount
-            ));
             docker_cmd
                 .arg("-v")
-                .arg(format!("{}:{}", docker_mount, docker_mount));
+                .arg("/var/run/docker.sock:/var/run/docker.sock");
         }
+
+        // For Hyper-V mode: we don't mount Windows paths (they're copied to VM)
+        // For normal mode: mount Windows paths into container
+        if let Some(ref vm_dir) = vm_temp_dir {
+            // Hyper-V mode: mount the VM temp directory into the container
+            // Files were copied to the VM's native filesystem, now mount them into container
+            append_desktop_log(&format!("[Pipeline] Hyper-V mode: mounting VM directory {} into container", vm_dir));
+            docker_cmd
+                .arg("-v")
+                .arg(format!("{}:{}", vm_dir, vm_dir));
+        } else {
+            // Normal mode: mount Windows paths
+            docker_cmd
+                // Mount the BioVault home directory
+                .arg("-v")
+                .arg(format!(
+                    "{}:{}",
+                    windows_path_to_container(&biovault_home, using_podman),
+                    docker_biovault_home
+                ))
+                // Mount the project path (may be same as above, Docker handles duplicates)
+                .arg("-v")
+                .arg(format!(
+                    "{}:{}",
+                    windows_path_to_container(project_path, using_podman),
+                    docker_project_path
+                ));
+
+            // Mount additional data directories discovered from inputs
+            for mount_path in &mount_roots {
+                let container_mount = windows_path_to_container(mount_path, using_podman);
+                append_desktop_log(&format!(
+                    "[Pipeline] Adding mount: {} -> {}",
+                    mount_path.display(),
+                    container_mount
+                ));
+                docker_cmd
+                    .arg("-v")
+                    .arg(format!("{}:{}", container_mount, container_mount));
+            }
+        }
+
+        // Generate runtime-specific Nextflow config (Docker vs Podman)
+        let runtime_config_path = if !dry_run {
+            let config_path = generate_runtime_config(&project_abs, using_podman)?;
+            // For Hyper-V mode, the config file was copied to VM along with project
+            // Reference it via the VM project path
+            #[cfg(target_os = "windows")]
+            if let Some(ref vm_dir) = vm_temp_dir {
+                // Copy the config file to VM if it wasn't part of the project copy
+                let config_name = config_path.file_name().unwrap_or_default().to_string_lossy();
+                let vm_config_path = format!("{}/project/{}", vm_dir, config_name);
+                if let Err(e) = copy_file_to_vm(&docker_bin, &config_path, &vm_config_path) {
+                    append_desktop_log(&format!("[Pipeline] Warning: Failed to copy config to VM: {}", e));
+                }
+                Some(vm_config_path)
+            } else {
+                Some(windows_path_to_container(&config_path, using_podman))
+            }
+            #[cfg(not(target_os = "windows"))]
+            Some(config_path.to_string_lossy().to_string())
+        } else {
+            None
+        };
+
+        // Use /tmp as working directory for Podman to avoid Windows mount I/O issues
+        // All paths are absolute so this is safe. /tmp always exists in containers.
+        let container_work_dir = if using_podman {
+            "/tmp".to_string()
+        } else {
+            docker_project_path.clone()
+        };
 
         docker_cmd
             // Set working directory
             .arg("-w")
-            .arg(&docker_project_path)
+            .arg(&container_work_dir)
             // Use Nextflow runner image with modern Docker CLI
             .arg(nextflow_image)
             // Nextflow command (container entrypoint is bash, not nextflow)
@@ -998,8 +1566,21 @@ pub async fn execute_dynamic(
             // Nextflow arguments
             .arg("-log")
             .arg(&docker_log_path)
-            .arg("run")
-            .arg(&docker_template);
+            .arg("run");
+
+        // Pass runtime config file to Nextflow
+        if let Some(ref config_docker_path) = runtime_config_path {
+            docker_cmd.arg("-c").arg(config_docker_path);
+        }
+
+        docker_cmd.arg(&docker_template);
+
+        // For Podman: work directory must be on Windows mount so nested containers can access it
+        // We use /tmp as working directory (-w) but explicit -work-dir on the mount
+        if using_podman {
+            let work_dir_path = format!("{}/work", docker_project_path);
+            docker_cmd.arg("-work-dir").arg(&work_dir_path);
+        }
 
         if resume {
             docker_cmd.arg("-resume");
@@ -1009,11 +1590,30 @@ pub async fn execute_dynamic(
             docker_cmd.arg(extra);
         }
 
-        // Re-encode JSON with Docker paths (inputs_json_value already created above)
+        // Re-encode JSON with container paths (inputs_json_value already created above)
         let params_json_value: JsonValue =
             serde_json::to_value(&params_json).context("Failed to convert params to JSON value")?;
-        let docker_inputs_json = remap_json_paths_for_docker(&inputs_json_value);
-        let docker_params_json = remap_json_paths_for_docker(&params_json_value);
+
+        // For Hyper-V mode: use VM-local paths. For normal mode: use container mount paths.
+        #[cfg(target_os = "windows")]
+        let (docker_inputs_json, docker_params_json) = if let Some(ref vm_data) = vm_data_dir {
+            (
+                remap_json_paths_for_vm(&inputs_json_value, vm_data),
+                remap_json_paths_for_vm(&params_json_value, vm_data),
+            )
+        } else {
+            (
+                remap_json_paths_for_container(&inputs_json_value, using_podman),
+                remap_json_paths_for_container(&params_json_value, using_podman),
+            )
+        };
+
+        #[cfg(not(target_os = "windows"))]
+        let (docker_inputs_json, docker_params_json) = (
+            remap_json_paths_for_container(&inputs_json_value, using_podman),
+            remap_json_paths_for_container(&params_json_value, using_podman),
+        );
+
         let docker_inputs_json_str = serde_json::to_string(&docker_inputs_json)
             .context("Failed to encode Docker inputs metadata to JSON")?;
         let docker_params_json_str = serde_json::to_string(&docker_params_json)
@@ -1038,6 +1638,14 @@ pub async fn execute_dynamic(
             "[Pipeline] Using native nextflow binary: {}",
             nextflow_bin
         ));
+
+        // Generate runtime config for native Docker execution
+        // This config sets docker.enabled = true so Nextflow uses Docker for process containers
+        let native_runtime_config = if !dry_run && run_settings.require_docker {
+            Some(generate_runtime_config(&project_abs, false)?)
+        } else {
+            None
+        };
 
         // Log original PATH from environment
         if let Some(original_path) = std::env::var_os("PATH") {
@@ -1075,7 +1683,14 @@ pub async fn execute_dynamic(
 
         native_cmd.arg("-log").arg(&nextflow_log_path);
 
-        native_cmd.arg("run").arg(&template_abs);
+        native_cmd.arg("run");
+
+        // Pass runtime config file to Nextflow (enables docker.enabled = true)
+        if let Some(ref config_path) = native_runtime_config {
+            native_cmd.arg("-c").arg(config_path);
+        }
+
+        native_cmd.arg(&template_abs);
 
         if resume {
             native_cmd.arg("-resume");
@@ -1125,6 +1740,29 @@ pub async fn execute_dynamic(
         Some(project_path.to_path_buf()),
     )
     .context("Failed to execute nextflow")?;
+
+    // For Hyper-V mode: copy results back from VM and cleanup
+    #[cfg(target_os = "windows")]
+    if using_hyperv_mode {
+        if let (Some(ref vm_results), Some(ref vm_dir)) = (&vm_results_dir, &vm_temp_dir_for_cleanup) {
+            append_desktop_log(&format!("[Pipeline] Copying results back from VM: {} -> {}", vm_results, results_path_buf.display()));
+            println!("📁 Copying results back from VM...");
+
+            if let Err(e) = copy_from_vm(&docker_bin, vm_results, &results_path_buf) {
+                append_desktop_log(&format!("[Pipeline] Warning: Failed to copy results from VM: {}", e));
+                eprintln!("⚠️  Warning: Failed to copy results from VM: {}", e);
+            }
+
+            // Cleanup VM temp directory
+            append_desktop_log(&format!("[Pipeline] Cleaning up VM temp directory: {}", vm_dir));
+            cleanup_vm_dir(&docker_bin, vm_dir);
+        }
+    }
+
+    // Suppress unused variable warnings on non-Windows
+    let _ = &vm_temp_dir_for_cleanup;
+    let _ = &vm_results_dir;
+    let _ = &using_hyperv_mode;
 
     if !status.success() {
         append_desktop_log(&format!(
@@ -1407,6 +2045,234 @@ fn detect_format(path: &Path) -> Option<&'static str> {
         })
 }
 
+/// Check if Podman is using the Hyper-V backend on Windows.
+/// This is detected by checking the CONTAINERS_MACHINE_PROVIDER env var
+/// or by running `podman machine inspect` to check the VM type.
+#[cfg(target_os = "windows")]
+fn is_podman_hyperv(docker_bin: &str) -> bool {
+    if !docker_bin.contains("podman") {
+        return false;
+    }
+
+    // Check environment variable first
+    if let Ok(provider) = std::env::var("CONTAINERS_MACHINE_PROVIDER") {
+        return provider.to_lowercase() == "hyperv";
+    }
+
+    // Try to detect from podman machine info
+    let output = Command::new(docker_bin)
+        .arg("machine")
+        .arg("inspect")
+        .output();
+
+    if let Ok(output) = output {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // Hyper-V machines have ConfigDir containing "hyperv"
+        return stdout.contains("hyperv");
+    }
+
+    false
+}
+
+#[cfg(not(target_os = "windows"))]
+fn is_podman_hyperv(_docker_bin: &str) -> bool {
+    false
+}
+
+/// Copy a file into the Podman VM using stdin pipe.
+/// This works around the 9P mount issues on Hyper-V.
+#[cfg(target_os = "windows")]
+fn copy_file_to_vm(docker_bin: &str, local_path: &Path, vm_path: &str) -> Result<()> {
+    use std::io::Read;
+
+    let mut file = fs::File::open(local_path)
+        .map_err(|e| anyhow::anyhow!("Failed to open file for VM copy: {}: {}", local_path.display(), e))?;
+
+    let mut contents = Vec::new();
+    file.read_to_end(&mut contents)
+        .map_err(|e| anyhow::anyhow!("Failed to read file: {}: {}", local_path.display(), e))?;
+
+    let mut child = Command::new(docker_bin)
+        .arg("machine")
+        .arg("ssh")
+        .arg("--")
+        .arg(format!("cat > '{}'", vm_path))
+        .stdin(Stdio::piped())
+        .spawn()
+        .map_err(|e| anyhow::anyhow!("Failed to spawn podman machine ssh: {}", e))?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(&contents)
+            .map_err(|e| anyhow::anyhow!("Failed to write to VM: {}", e))?;
+    }
+
+    let status = child.wait().map_err(|e| anyhow::anyhow!("Failed to wait for VM copy: {}", e))?;
+    if !status.success() {
+        return Err(anyhow::anyhow!("Failed to copy file to VM: {}", local_path.display()).into());
+    }
+
+    Ok(())
+}
+
+/// Copy a directory recursively into the Podman VM.
+#[cfg(target_os = "windows")]
+fn copy_dir_to_vm(docker_bin: &str, local_dir: &Path, vm_dir: &str) -> Result<()> {
+    // Create the directory in the VM
+    let status = Command::new(docker_bin)
+        .arg("machine")
+        .arg("ssh")
+        .arg("--")
+        .arg(format!("mkdir -p '{}' && chmod 777 '{}'", vm_dir, vm_dir))
+        .status()
+        .map_err(|e| anyhow::anyhow!("Failed to create directory in VM: {}", e))?;
+
+    if !status.success() {
+        return Err(anyhow::anyhow!("Failed to create directory in VM: {}", vm_dir).into());
+    }
+
+    // Copy each file/subdir
+    for entry in fs::read_dir(local_dir)
+        .map_err(|e| anyhow::anyhow!("Failed to read directory: {}: {}", local_dir.display(), e))?
+    {
+        let entry = entry.map_err(|e| anyhow::anyhow!("Failed to read directory entry: {}", e))?;
+        let path = entry.path();
+        let name = entry.file_name();
+        let vm_path = format!("{}/{}", vm_dir, name.to_string_lossy());
+
+        if path.is_dir() {
+            copy_dir_to_vm(docker_bin, &path, &vm_path)?;
+        } else {
+            copy_file_to_vm(docker_bin, &path, &vm_path)?;
+        }
+    }
+
+    // Make files world-readable for nested containers
+    let _ = Command::new(docker_bin)
+        .arg("machine")
+        .arg("ssh")
+        .arg("--")
+        .arg(format!("chmod -R 777 '{}'", vm_dir))
+        .status();
+
+    Ok(())
+}
+
+/// Copy a file or directory from the Podman VM back to Windows.
+#[cfg(target_os = "windows")]
+fn copy_from_vm(docker_bin: &str, vm_path: &str, local_path: &Path) -> Result<()> {
+    // Create parent directory if needed
+    if let Some(parent) = local_path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| anyhow::anyhow!("Failed to create parent directory: {}", e))?;
+    }
+
+    // Use tar to copy directory contents
+    let output = Command::new(docker_bin)
+        .arg("machine")
+        .arg("ssh")
+        .arg("--")
+        .arg(format!(
+            "if [ -d '{}' ]; then cd '{}' && tar -cf - .; else cat '{}'; fi",
+            vm_path, vm_path, vm_path
+        ))
+        .output()
+        .map_err(|e| anyhow::anyhow!("Failed to read from VM: {}", e))?;
+
+    if !output.status.success() {
+        // Directory might be empty or not exist, that's ok for results
+        return Ok(());
+    }
+
+    // Check if it's a tar archive (starts with tar magic) or plain file
+    if output.stdout.len() >= 262 && &output.stdout[257..262] == b"ustar" {
+        // It's a tar archive, extract it
+        use std::io::Cursor;
+        let cursor = Cursor::new(output.stdout);
+        let mut archive = tar::Archive::new(cursor);
+        archive
+            .unpack(local_path)
+            .map_err(|e| anyhow::anyhow!("Failed to extract tar archive: {}", e))?;
+    } else {
+        // Plain file
+        fs::write(local_path, &output.stdout)
+            .map_err(|e| anyhow::anyhow!("Failed to write file: {}: {}", local_path.display(), e))?;
+    }
+
+    Ok(())
+}
+
+/// Create a temporary directory in the Podman VM and return its path.
+#[cfg(target_os = "windows")]
+fn create_vm_temp_dir(docker_bin: &str, prefix: &str) -> Result<String> {
+    let output = Command::new(docker_bin)
+        .arg("machine")
+        .arg("ssh")
+        .arg("--")
+        .arg(format!(
+            "mktemp -d /tmp/{}-XXXXXX && chmod 777 /tmp/{}-*",
+            prefix, prefix
+        ))
+        .output()
+        .map_err(|e| anyhow::anyhow!("Failed to create temp directory in VM: {}", e))?;
+
+    if !output.status.success() {
+        return Err(anyhow::anyhow!(
+            "Failed to create temp directory in VM: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ).into());
+    }
+
+    let vm_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Ok(vm_path)
+}
+
+/// Clean up a directory in the Podman VM.
+#[cfg(target_os = "windows")]
+fn cleanup_vm_dir(docker_bin: &str, vm_dir: &str) {
+    let _ = Command::new(docker_bin)
+        .arg("machine")
+        .arg("ssh")
+        .arg("--")
+        .arg(format!("sudo rm -rf '{}'", vm_dir))
+        .status();
+}
+
+/// Generate a Nextflow config file for the specified container runtime.
+/// Returns the path to the generated config file.
+fn generate_runtime_config(project_path: &Path, using_podman: bool) -> Result<PathBuf> {
+    let config_path = project_path.join(".biovault-runtime.config");
+
+    let config_contents = if using_podman {
+        // Podman configuration
+        // - Use podman.enabled instead of docker.enabled
+        // - Use /bin/sh for alpine-based containers (no bash)
+        // - Add security-opt to disable SELinux labeling for nested containers
+        r#"process.executor = 'local'
+podman.enabled = true
+process.shell = ['/bin/sh', '-ue']
+podman.runOptions = '--security-opt label=disable'
+"#
+    } else {
+        // Docker configuration
+        r#"process.executor = 'local'
+docker.enabled = true
+docker.runOptions = '-u $(id -u):$(id -g)'
+"#
+    };
+
+    fs::write(&config_path, config_contents)
+        .context("Failed to write runtime nextflow.config")?;
+
+    append_desktop_log(&format!(
+        "[Pipeline] Generated runtime config at {} (podman={})",
+        config_path.display(),
+        using_podman
+    ));
+
+    Ok(config_path)
+}
+
 fn install_dynamic_template(biovault_home: &Path) -> Result<()> {
     let env_dir = biovault_home.join("env").join("dynamic-nextflow");
     if !env_dir.exists() {
@@ -1420,13 +2286,9 @@ fn install_dynamic_template(biovault_home: &Path) -> Result<()> {
 
     println!("📦 Dynamic template ready at {}", template_path.display());
 
-    let config_path = env_dir.join("nextflow.config");
-    let config_contents = r#"process.executor = 'local'
-docker.enabled = true
-docker.runOptions = '-u $(id -u):$(id -g)'
-"#;
-    fs::write(&config_path, config_contents)
-        .context("Failed to install dynamic nextflow.config")?;
+    // Note: We no longer install a static nextflow.config here.
+    // Instead, we generate a runtime-specific config in generate_runtime_config()
+    // based on whether Docker or Podman is being used.
 
     Ok(())
 }
