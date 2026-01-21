@@ -2369,10 +2369,9 @@ fn is_podman_hyperv(docker_bin: &str) -> bool {
     }
 
     // Try to detect from podman machine info
-    let output = Command::new(docker_bin)
-        .arg("machine")
-        .arg("inspect")
-        .output();
+    let mut cmd = Command::new(docker_bin);
+    super::configure_child_process(&mut cmd);
+    let output = cmd.arg("machine").arg("inspect").output();
 
     if let Ok(output) = output {
         let stdout = String::from_utf8_lossy(&output.stdout);
