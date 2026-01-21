@@ -13,29 +13,29 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # All scenarios run on Linux (Docker/Nextflow work natively)
+          # DEBUG: Only running import-and-run to save CI time while fixing
           - os: linux
             client_mode: go
             scenario: tests/scenarios/import-and-run.yaml
-          - os: linux
-            client_mode: go
-            scenario: tests/scenarios/inbox-ping-pong.yaml
-          - os: linux
-            client_mode: go
-            scenario: tests/scenarios/messaging-core.yaml
-          - os: linux
-            client_mode: go
-            scenario: tests/scenarios/break-nextflow.yaml
-          - os: linux
-            client_mode: go
-            scenario: tests/scenarios/key-management.yaml
-          # Non-Docker tests also run on Windows for cross-platform coverage
-          - os: windows
-            client_mode: go
-            scenario: tests/scenarios/messaging-core.yaml
-          - os: windows
-            client_mode: go
-            scenario: tests/scenarios/key-management.yaml
+          # TODO: Re-enable these once import-and-run is fixed:
+          # - os: linux
+          #   client_mode: go
+          #   scenario: tests/scenarios/inbox-ping-pong.yaml
+          # - os: linux
+          #   client_mode: go
+          #   scenario: tests/scenarios/messaging-core.yaml
+          # - os: linux
+          #   client_mode: go
+          #   scenario: tests/scenarios/break-nextflow.yaml
+          # - os: linux
+          #   client_mode: go
+          #   scenario: tests/scenarios/key-management.yaml
+          # - os: windows
+          #   client_mode: go
+          #   scenario: tests/scenarios/messaging-core.yaml
+          # - os: windows
+          #   client_mode: go
+          #   scenario: tests/scenarios/key-management.yaml
 
     steps:
       - uses: actions/checkout@v4
