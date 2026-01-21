@@ -1529,6 +1529,7 @@ pub async fn execute_dynamic(
             let config_path = generate_runtime_config(&project_abs, using_podman)?;
             // For Hyper-V mode, the config file was copied to VM along with project
             // Reference it via the VM project path
+            #[cfg(target_os = "windows")]
             if let Some(ref vm_dir) = vm_temp_dir {
                 // Copy the config file to VM if it wasn't part of the project copy
                 let config_name = config_path.file_name().unwrap_or_default().to_string_lossy();
@@ -1540,6 +1541,8 @@ pub async fn execute_dynamic(
             } else {
                 Some(windows_path_to_container(&config_path, using_podman))
             }
+            #[cfg(not(target_os = "windows"))]
+            Some(config_path.to_string_lossy().to_string())
         } else {
             None
         };

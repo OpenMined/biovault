@@ -13,11 +13,23 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Docker-dependent tests run on Linux only (Docker works natively)
+          # All scenarios run on Linux (Docker/Nextflow work natively)
           - os: linux
             client_mode: go
             scenario: tests/scenarios/import-and-run.yaml
-          # Non-Docker tests run on Windows
+          - os: linux
+            client_mode: go
+            scenario: tests/scenarios/inbox-ping-pong.yaml
+          - os: linux
+            client_mode: go
+            scenario: tests/scenarios/messaging-core.yaml
+          - os: linux
+            client_mode: go
+            scenario: tests/scenarios/break-nextflow.yaml
+          - os: linux
+            client_mode: go
+            scenario: tests/scenarios/key-management.yaml
+          # Non-Docker tests also run on Windows for cross-platform coverage
           - os: windows
             client_mode: go
             scenario: tests/scenarios/messaging-core.yaml
