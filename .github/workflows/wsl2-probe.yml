@@ -42,9 +42,10 @@ jobs:
               "Microsoft-Hyper-V",
               "Microsoft-Hyper-V-All"
             )
-            Get-WindowsOptionalFeature -Online -FeatureName $features |
-              Select-Object FeatureName,State |
-              Format-Table -AutoSize | Out-String
+            $results = foreach ($feature in $features) {
+              Get-WindowsOptionalFeature -Online -FeatureName $feature
+            }
+            $results | Select-Object FeatureName,State | Format-Table -AutoSize | Out-String
           }
           Run-Cmd "DISM Feature Info (WSL/VM)" {
             dism /online /Get-FeatureInfo /FeatureName:Microsoft-Windows-Subsystem-Linux
@@ -55,11 +56,22 @@ jobs:
             sc.exe qc LxssManager
             sc.exe qc vmcompute
           }
+          Run-Cmd "Service Start (LxssManager)" {
+            Start-Service LxssManager
+            Get-Service LxssManager | Format-Table -AutoSize
+            sc.exe query LxssManager
+            sc.exe sdshow LxssManager
+          }
+          Run-Cmd "WSL Event Log (Operational)" {
+            Get-WinEvent -LogName "Microsoft-Windows-Lxss/Operational" -MaxEvents 50 |
+              Select-Object TimeCreated,Id,LevelDisplayName,Message |
+              Format-List
+          }
           Run-Cmd "WSL Policy (registry)" {
-            reg query "HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\WindowsSubsystemForLinux"
+            reg query "HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\WindowsSubsystemForLinux" /s
           }
           Run-Cmd "WSL Lxss (registry)" {
-            reg query "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Lxss"
+            reg query "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Lxss" /s
           }
           Run-Cmd "WSL --version" { wsl --version }
           Run-Cmd "WSL --status" { wsl --status }
