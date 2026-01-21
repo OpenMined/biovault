@@ -1253,9 +1253,9 @@ pub async fn execute_dynamic(
         };
 
         // Use /tmp as working directory for Podman to avoid Windows mount I/O issues
-        // All paths are absolute so this is safe
-        let work_dir = if using_podman {
-            "/tmp/nf-work".to_string()
+        // All paths are absolute so this is safe. /tmp always exists in containers.
+        let container_work_dir = if using_podman {
+            "/tmp".to_string()
         } else {
             docker_project_path.clone()
         };
@@ -1263,7 +1263,7 @@ pub async fn execute_dynamic(
         docker_cmd
             // Set working directory
             .arg("-w")
-            .arg(&work_dir)
+            .arg(&container_work_dir)
             // Use Nextflow runner image with modern Docker CLI
             .arg(nextflow_image)
             // Nextflow command (container entrypoint is bash, not nextflow)
@@ -1279,6 +1279,13 @@ pub async fn execute_dynamic(
         }
 
         docker_cmd.arg(&docker_template);
+
+        // For Podman: work directory must be on Windows mount so nested containers can access it
+        // We use /tmp as working directory (-w) but explicit -work-dir on the mount
+        if using_podman {
+            let work_dir_path = format!("{}/work", docker_project_path);
+            docker_cmd.arg("-work-dir").arg(&work_dir_path);
+        }
 
         if resume {
             docker_cmd.arg("-resume");
