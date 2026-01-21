@@ -8,7 +8,7 @@ on:
 
 jobs:
   run-scenarios:
-    runs-on: ${{ matrix.os == 'windows' && 'namespace-profile-windows-medium' || 'namespace-profile-linux-medium' }}
+    runs-on: ${{ matrix.os == 'windows' && 'namespace-profile-windows-medium' || 'ubuntu-latest' }}
     strategy:
       fail-fast: false
       matrix:
