@@ -364,9 +364,62 @@ let docker_log_path = if using_podman {
 | Environment | Backend | Windows Mount Protocol | POSIX Compatibility |
 |-------------|---------|------------------------|---------------------|
 | Local dev machine | WSL2 | 9P/Plan9 | Good - most operations work |
-| CI runners | Hyper-V | SMB-like | Limited - attribute operations fail |
+| CI runners | Hyper-V | 9P (Fedora CoreOS VM) | **Broken** - permission denied |
 
 The fix ensures all Nextflow internal files go to `/tmp` (native Linux filesystem inside the Podman VM), while actual workflow data still uses mounted paths.
+
+### Hyper-V 9P Mount Issue (Critical)
+
+**Status**: 🚫 **BLOCKING** - Hyper-V mounts don't work without Podman Desktop
+
+When using Podman CLI with Hyper-V backend (without Podman Desktop), the 9P file sharing is completely broken:
+
+```bash
+# Inside Podman VM
+$ ls /mnt/c/
+ls: reading directory '/mnt/c/': Permission denied
+
+# Mount exists but is inaccessible
+$ mount | grep 9p
+9p on /var/mnt/c type 9p (rw,relatime,access=client,trans=fd,rfd=3,wfd=3)
+```
+
+**Symptoms**:
+- `/mnt/c/` mount point exists in VM
+- 9P filesystem is mounted with `access=client`
+- All access attempts return "Permission denied" (even as root)
+- Containers see empty directories when mounting Windows paths
+
+**Root Cause** (Confirmed via [GitHub Issue #25686](https://github.com/containers/podman/issues/25686)):
+
+The Hyper-V backend uses the `hugelgupf/p9` library for 9P file sharing. There's a known bug where **Windows directory junctions** (like those in `%HOME%`) break the directory reading logic:
+- The 9P server can't handle junction points correctly
+- This causes "Permission denied" when listing directories containing junctions
+- Interestingly, accessing **subfolders** directly works fine
+- The bug is tracked in [hugelgupf/p9#98](https://github.com/hugelgupf/p9/issues/98) and [hugelgupf/p9#99](https://github.com/hugelgupf/p9/issues/99)
+
+**WSL vs Hyper-V**:
+| Feature | WSL2 Backend | Hyper-V Backend |
+|---------|-------------|-----------------|
+| Mount mechanism | drvfs | v9fs (9P) |
+| Home directory access | ✅ Works | ❌ Permission denied |
+| Subfolder access | ✅ Works | ✅ Works |
+| Nested containers | ✅ Works | ❌ Broken |
+| CI availability | ❌ Not available | ✅ Available |
+
+**Implications**:
+1. WSL2 works perfectly for local development
+2. Hyper-V is available on CI but doesn't work due to 9P bug
+3. We need an alternative strategy for Windows CI
+
+**Workarounds Tested**:
+1. ~~Copy files into VM using `podman machine ssh` + scp~~ (too slow)
+2. ~~Use named volumes and copy data in/out~~ (requires workflow changes)
+3. ~~Mount subfolders directly instead of home~~ (works for direct containers, but nested containers still fail)
+4. **Request WSL support on CI runners** (best option, currently denied)
+5. **Run Docker-dependent tests on Linux runners only** ✅ **Recommended**
+
+**Important**: Even when mounting subfolders directly (avoiding junctions), nested container scenarios fail because the 9P file sharing doesn't properly expose files to sibling containers spawned via socket.
 
 ## Local Testing
 
@@ -402,9 +455,22 @@ All 13 herc2 classifier tasks complete successfully with the shell compatibility
 2. ~~**Nested container support**: Enable Nextflow to spawn task containers with Podman~~ ✅ Done!
 3. ~~**Shell compatibility**: Fix `printf '%q'` issue in workflow templates~~ ✅ Done!
 4. ~~**Hyper-V filesystem fix**: Redirect Nextflow temp files to /tmp~~ ✅ Done!
-5. **Verify CI passes**: Confirm full pipeline runs on Windows CI with Hyper-V
+5. ~~**Verify CI passes**: Confirm full pipeline runs on Windows CI with Hyper-V~~ ❌ **Blocked by 9P bug**
 6. **Merge bioscript PR**: Merge `fix/shell-compatibility` branch to update all workflows
 7. **Document for users**: Update user docs for Podman as Docker alternative
+8. **Update CI**: Run Docker tests on Linux, non-Docker tests on Windows
+
+## Summary
+
+**Local Development (Windows with WSL2)**:
+- ✅ Install Podman CLI via Chocolatey
+- ✅ Use WSL2 backend (default): `podman machine init && podman machine start`
+- ✅ All tests pass including nested containers
+
+**CI (namespace-profile-windows)**:
+- ❌ WSL not available (permission denied)
+- ❌ Hyper-V 9P mounts broken for nested containers
+- ✅ **Solution**: Run Docker tests on Linux runners only
 
 ## References
 
