@@ -1693,6 +1693,199 @@ fn detect_format(path: &Path) -> Option<&'static str> {
         })
 }
 
+/// Check if Podman is using the Hyper-V backend on Windows.
+/// This is detected by checking the CONTAINERS_MACHINE_PROVIDER env var
+/// or by running `podman machine inspect` to check the VM type.
+#[cfg(target_os = "windows")]
+fn is_podman_hyperv(docker_bin: &str) -> bool {
+    if !docker_bin.contains("podman") {
+        return false;
+    }
+
+    // Check environment variable first
+    if let Ok(provider) = std::env::var("CONTAINERS_MACHINE_PROVIDER") {
+        return provider.to_lowercase() == "hyperv";
+    }
+
+    // Try to detect from podman machine info
+    let output = Command::new(docker_bin)
+        .arg("machine")
+        .arg("inspect")
+        .output();
+
+    if let Ok(output) = output {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // Hyper-V machines have ConfigDir containing "hyperv"
+        return stdout.contains("hyperv");
+    }
+
+    false
+}
+
+#[cfg(not(target_os = "windows"))]
+fn is_podman_hyperv(_docker_bin: &str) -> bool {
+    false
+}
+
+/// Copy a file into the Podman VM using stdin pipe.
+/// This works around the 9P mount issues on Hyper-V.
+#[cfg(target_os = "windows")]
+fn copy_file_to_vm(docker_bin: &str, local_path: &Path, vm_path: &str) -> Result<()> {
+    use std::io::Read;
+
+    let mut file = fs::File::open(local_path)
+        .map_err(|e| anyhow::anyhow!("Failed to open file for VM copy: {}: {}", local_path.display(), e))?;
+
+    let mut contents = Vec::new();
+    file.read_to_end(&mut contents)
+        .map_err(|e| anyhow::anyhow!("Failed to read file: {}: {}", local_path.display(), e))?;
+
+    let mut child = Command::new(docker_bin)
+        .arg("machine")
+        .arg("ssh")
+        .arg("--")
+        .arg(format!("cat > '{}'", vm_path))
+        .stdin(Stdio::piped())
+        .spawn()
+        .map_err(|e| anyhow::anyhow!("Failed to spawn podman machine ssh: {}", e))?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(&contents)
+            .map_err(|e| anyhow::anyhow!("Failed to write to VM: {}", e))?;
+    }
+
+    let status = child.wait().map_err(|e| anyhow::anyhow!("Failed to wait for VM copy: {}", e))?;
+    if !status.success() {
+        return Err(anyhow::anyhow!("Failed to copy file to VM: {}", local_path.display()).into());
+    }
+
+    Ok(())
+}
+
+/// Copy a directory recursively into the Podman VM.
+#[cfg(target_os = "windows")]
+fn copy_dir_to_vm(docker_bin: &str, local_dir: &Path, vm_dir: &str) -> Result<()> {
+    // Create the directory in the VM
+    let status = Command::new(docker_bin)
+        .arg("machine")
+        .arg("ssh")
+        .arg("--")
+        .arg(format!("mkdir -p '{}' && chmod 777 '{}'", vm_dir, vm_dir))
+        .status()
+        .map_err(|e| anyhow::anyhow!("Failed to create directory in VM: {}", e))?;
+
+    if !status.success() {
+        return Err(anyhow::anyhow!("Failed to create directory in VM: {}", vm_dir).into());
+    }
+
+    // Copy each file/subdir
+    for entry in fs::read_dir(local_dir)
+        .map_err(|e| anyhow::anyhow!("Failed to read directory: {}: {}", local_dir.display(), e))?
+    {
+        let entry = entry.map_err(|e| anyhow::anyhow!("Failed to read directory entry: {}", e))?;
+        let path = entry.path();
+        let name = entry.file_name();
+        let vm_path = format!("{}/{}", vm_dir, name.to_string_lossy());
+
+        if path.is_dir() {
+            copy_dir_to_vm(docker_bin, &path, &vm_path)?;
+        } else {
+            copy_file_to_vm(docker_bin, &path, &vm_path)?;
+        }
+    }
+
+    // Make files world-readable for nested containers
+    let _ = Command::new(docker_bin)
+        .arg("machine")
+        .arg("ssh")
+        .arg("--")
+        .arg(format!("chmod -R 777 '{}'", vm_dir))
+        .status();
+
+    Ok(())
+}
+
+/// Copy a file or directory from the Podman VM back to Windows.
+#[cfg(target_os = "windows")]
+fn copy_from_vm(docker_bin: &str, vm_path: &str, local_path: &Path) -> Result<()> {
+    // Create parent directory if needed
+    if let Some(parent) = local_path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| anyhow::anyhow!("Failed to create parent directory: {}", e))?;
+    }
+
+    // Use tar to copy directory contents
+    let output = Command::new(docker_bin)
+        .arg("machine")
+        .arg("ssh")
+        .arg("--")
+        .arg(format!(
+            "if [ -d '{}' ]; then cd '{}' && tar -cf - .; else cat '{}'; fi",
+            vm_path, vm_path, vm_path
+        ))
+        .output()
+        .map_err(|e| anyhow::anyhow!("Failed to read from VM: {}", e))?;
+
+    if !output.status.success() {
+        // Directory might be empty or not exist, that's ok for results
+        return Ok(());
+    }
+
+    // Check if it's a tar archive (starts with tar magic) or plain file
+    if output.stdout.len() >= 262 && &output.stdout[257..262] == b"ustar" {
+        // It's a tar archive, extract it
+        use std::io::Cursor;
+        let cursor = Cursor::new(output.stdout);
+        let mut archive = tar::Archive::new(cursor);
+        archive
+            .unpack(local_path)
+            .map_err(|e| anyhow::anyhow!("Failed to extract tar archive: {}", e))?;
+    } else {
+        // Plain file
+        fs::write(local_path, &output.stdout)
+            .map_err(|e| anyhow::anyhow!("Failed to write file: {}: {}", local_path.display(), e))?;
+    }
+
+    Ok(())
+}
+
+/// Create a temporary directory in the Podman VM and return its path.
+#[cfg(target_os = "windows")]
+fn create_vm_temp_dir(docker_bin: &str, prefix: &str) -> Result<String> {
+    let output = Command::new(docker_bin)
+        .arg("machine")
+        .arg("ssh")
+        .arg("--")
+        .arg(format!(
+            "mktemp -d /tmp/{}-XXXXXX && chmod 777 /tmp/{}-*",
+            prefix, prefix
+        ))
+        .output()
+        .map_err(|e| anyhow::anyhow!("Failed to create temp directory in VM: {}", e))?;
+
+    if !output.status.success() {
+        return Err(anyhow::anyhow!(
+            "Failed to create temp directory in VM: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ).into());
+    }
+
+    let vm_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Ok(vm_path)
+}
+
+/// Clean up a directory in the Podman VM.
+#[cfg(target_os = "windows")]
+fn cleanup_vm_dir(docker_bin: &str, vm_dir: &str) {
+    let _ = Command::new(docker_bin)
+        .arg("machine")
+        .arg("ssh")
+        .arg("--")
+        .arg(format!("sudo rm -rf '{}'", vm_dir))
+        .status();
+}
+
 /// Generate a Nextflow config file for the specified container runtime.
 /// Returns the path to the generated config file.
 fn generate_runtime_config(project_path: &Path, using_podman: bool) -> Result<PathBuf> {
@@ -1702,9 +1895,11 @@ fn generate_runtime_config(project_path: &Path, using_podman: bool) -> Result<Pa
         // Podman configuration
         // - Use podman.enabled instead of docker.enabled
         // - Use /bin/sh for alpine-based containers (no bash)
+        // - Add security-opt to disable SELinux labeling for nested containers
         r#"process.executor = 'local'
 podman.enabled = true
 process.shell = ['/bin/sh', '-ue']
+podman.runOptions = '--security-opt label=disable'
 "#
     } else {
         // Docker configuration
