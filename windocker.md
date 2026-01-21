@@ -6,7 +6,7 @@ The `import-and-run.yaml` scenario requires Nextflow, which pulls Linux containe
 ## Approaches Tried
 
 ### 1. Docker Desktop with DockerCli.exe Switch
-**Status**: ❌ Not available on CI runners
+**Status**: NO - not available on CI runners
 
 ```powershell
 $dockerCli = "C:\Program Files\Docker\Docker\DockerCli.exe"
@@ -18,7 +18,7 @@ $dockerCli = "C:\Program Files\Docker\Docker\DockerCli.exe"
 - `docker info` shows `OSType: windows`
 
 ### 2. WSL2 with Docker Inside
-**Status**: ❌ WSL not enabled on namespace runners
+**Status**: NO - WSL not enabled on namespace runners
 
 ```powershell
 wsl --status  # Returns "Access is denied"
@@ -31,7 +31,7 @@ wsl --install -d Debian  # Error: 0x8000ffff
 - Actually using WSL distributions fails with access denied
 
 ### 3. Vampire/setup-wsl GitHub Action
-**Status**: ❌ Permission denied
+**Status**: NO - permission denied
 
 ```yaml
 - uses: Vampire/setup-wsl@v6
@@ -47,7 +47,7 @@ Error: 0x80070005 Access is denied.
 ```
 
 ### 4. Podman with WSL Provider
-**Status**: ❌ WSL not available
+**Status**: NO - WSL not available
 
 ```powershell
 choco install podman-cli -y
@@ -64,7 +64,7 @@ Error: command C:\Windows\system32\wsl.exe [-l --quiet] failed: exit status 0xff
 - The `--provider` flag isn't available in `podman-cli` (remote client only)
 
 ### 5. Podman with Hyper-V Provider
-**Status**: ✅ Working on CI!
+**Status**: OK - working on CI with host-mount mode
 
 ```powershell
 $env:CONTAINERS_MACHINE_PROVIDER = "hyperv"
@@ -79,7 +79,7 @@ podman machine start
 - Docker socket compatibility via `/var/run/docker.sock` symlink
 
 ### 6. Rancher Desktop
-**Status**: ❌ Didn't work on CI
+**Status**: NO - didn't work on CI
 
 - Tried installing via Chocolatey
 - GUI application, hard to run headless
@@ -143,7 +143,7 @@ choco install podman-cli -y
 $env:CONTAINERS_MACHINE_PROVIDER = "hyperv"
 $env:BIOVAULT_CONTAINER_RUNTIME = "podman"
 $env:BIOVAULT_HYPERV_MOUNT = "1"
-$env:BIOVAULT_HYPERV_HOST_DIR = "C:vtemp"  # optional
+$env:BIOVAULT_HYPERV_HOST_DIR = "C:\bvtemp"  # optional
 
 podman machine init
 podman machine start
@@ -370,7 +370,7 @@ can produce "Permission denied" or empty directories inside the VM, especially
 for nested containers.
 
 Current workaround: use Hyper-V host-mount mode to stage inputs into a
-junction-free directory (e.g., `C:vtemp`) and rewrite CSV paths to that flat
+junction-free directory (e.g., `C:\bvtemp`) and rewrite CSV paths to that flat
 root. This avoids junctions and keeps nested containers working.
 
 ### Hyper-V Host Mount Mode (Junction-Free)
@@ -436,7 +436,7 @@ All 13 herc2 classifier tasks complete successfully with the shell compatibility
 **CI (namespace-profile-windows)**:
 - WSL not available (permission denied)
 - OK: Podman Hyper-V with host-mount mode runs nested containers
-- Use `BIOVAULT_HYPERV_MOUNT=1` and a flat host dir (default `%SystemDrive%vtemp`)
+- Use `BIOVAULT_HYPERV_MOUNT=1` and a flat host dir (default `%SystemDrive%\bvtemp`)
 
 ## References
 

@@ -25,7 +25,7 @@ jobs:
           - os: linux
             client_mode: go
             scenario: tests/scenarios/inbox-ping-pong.yaml
-            needs_container: false
+            needs_container: true
           - os: linux
             client_mode: go
             scenario: tests/scenarios/messaging-core.yaml
@@ -45,7 +45,7 @@ jobs:
           - os: windows
             client_mode: go
             scenario: tests/scenarios/inbox-ping-pong.yaml
-            needs_container: false
+            needs_container: true
           - os: windows
             client_mode: go
             scenario: tests/scenarios/messaging-core.yaml
