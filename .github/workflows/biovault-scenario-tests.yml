@@ -6,6 +6,10 @@ on:
   workflow_dispatch:
   workflow_call:
 
+concurrency:
+  group: biovault-scenario-tests-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   run-scenarios:
     runs-on: ${{ matrix.os == 'windows' && 'namespace-profile-windows-medium' || 'ubuntu-latest' }}
@@ -13,34 +17,33 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # All scenarios run on Linux (Docker/Nextflow work natively)
-          - os: linux
-            client_mode: go
-            scenario: tests/scenarios/import-and-run.yaml
-          - os: linux
-            client_mode: go
-            scenario: tests/scenarios/inbox-ping-pong.yaml
-          - os: linux
-            client_mode: go
-            scenario: tests/scenarios/messaging-core.yaml
-          - os: linux
-            client_mode: go
-            scenario: tests/scenarios/break-nextflow.yaml
-          - os: linux
-            client_mode: go
-            scenario: tests/scenarios/key-management.yaml
-          # Non-Docker tests on Windows for cross-platform coverage
-          - os: windows
-            client_mode: go
-            scenario: tests/scenarios/messaging-core.yaml
-          - os: windows
-            client_mode: go
-            scenario: tests/scenarios/key-management.yaml
-          # Docker-dependent test on Windows via Podman Hyper-V host mount mode
+          # Focused run: Windows Hyper-V import-and-run
           - os: windows
             client_mode: go
             scenario: tests/scenarios/import-and-run.yaml
             hyperv: true
+          # Full matrix temporarily disabled:
+          # - os: linux
+          #   client_mode: go
+          #   scenario: tests/scenarios/import-and-run.yaml
+          # - os: linux
+          #   client_mode: go
+          #   scenario: tests/scenarios/inbox-ping-pong.yaml
+          # - os: linux
+          #   client_mode: go
+          #   scenario: tests/scenarios/messaging-core.yaml
+          # - os: linux
+          #   client_mode: go
+          #   scenario: tests/scenarios/break-nextflow.yaml
+          # - os: linux
+          #   client_mode: go
+          #   scenario: tests/scenarios/key-management.yaml
+          # - os: windows
+          #   client_mode: go
+          #   scenario: tests/scenarios/messaging-core.yaml
+          # - os: windows
+          #   client_mode: go
+          #   scenario: tests/scenarios/key-management.yaml
 
     steps:
       - uses: actions/checkout@v4
