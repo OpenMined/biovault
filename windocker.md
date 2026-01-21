@@ -6,7 +6,7 @@ The `import-and-run.yaml` scenario requires Nextflow, which pulls Linux containe
 ## Approaches Tried
 
 ### 1. Docker Desktop with DockerCli.exe Switch
-**Status**: ❌ Not available on CI runners
+**Status**: NO - not available on CI runners
 
 ```powershell
 $dockerCli = "C:\Program Files\Docker\Docker\DockerCli.exe"
@@ -18,7 +18,7 @@ $dockerCli = "C:\Program Files\Docker\Docker\DockerCli.exe"
 - `docker info` shows `OSType: windows`
 
 ### 2. WSL2 with Docker Inside
-**Status**: ❌ WSL not enabled on namespace runners
+**Status**: NO - WSL not enabled on namespace runners
 
 ```powershell
 wsl --status  # Returns "Access is denied"
@@ -31,7 +31,7 @@ wsl --install -d Debian  # Error: 0x8000ffff
 - Actually using WSL distributions fails with access denied
 
 ### 3. Vampire/setup-wsl GitHub Action
-**Status**: ❌ Permission denied
+**Status**: NO - permission denied
 
 ```yaml
 - uses: Vampire/setup-wsl@v6
@@ -47,7 +47,7 @@ Error: 0x80070005 Access is denied.
 ```
 
 ### 4. Podman with WSL Provider
-**Status**: ❌ WSL not available
+**Status**: NO - WSL not available
 
 ```powershell
 choco install podman-cli -y
@@ -64,7 +64,7 @@ Error: command C:\Windows\system32\wsl.exe [-l --quiet] failed: exit status 0xff
 - The `--provider` flag isn't available in `podman-cli` (remote client only)
 
 ### 5. Podman with Hyper-V Provider
-**Status**: ✅ Working on CI!
+**Status**: OK - working on CI with host-mount mode
 
 ```powershell
 $env:CONTAINERS_MACHINE_PROVIDER = "hyperv"
@@ -79,7 +79,7 @@ podman machine start
 - Docker socket compatibility via `/var/run/docker.sock` symlink
 
 ### 6. Rancher Desktop
-**Status**: ❌ Didn't work on CI
+**Status**: NO - didn't work on CI
 
 - Tried installing via Chocolatey
 - GUI application, hard to run headless
@@ -112,6 +112,7 @@ Default Isolation: process
 - WSL commands (access denied at feature level)
 - Docker Linux containers without WSL or Hyper-V
 - Registering WSL distributions
+- Direct Hyper-V mounts of junctioned paths (use host-mount mode)
 
 ## Podman Configuration
 
@@ -133,29 +134,22 @@ Podman provider can be set via:
 ## Recommended Solution
 
 ### For CI (namespace runners without WSL)
-Try Hyper-V approach:
-```powershell
-# Enable Hyper-V (may need runner support)
-Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V -All -NoRestart
+Use Podman Hyper-V with host-mount mode:
 
-# Install Podman
+```powershell
+# Hyper-V is already enabled on namespace runners
 choco install podman-cli -y
 
-# Set provider to Hyper-V
 $env:CONTAINERS_MACHINE_PROVIDER = "hyperv"
+$env:BIOVAULT_CONTAINER_RUNTIME = "podman"
+$env:BIOVAULT_HYPERV_MOUNT = "1"
+$env:BIOVAULT_HYPERV_HOST_DIR = "C:\bvtemp"  # optional
 
-# Initialize and start
 podman machine init
 podman machine start
 
-# Create docker alias
 Set-Alias -Name docker -Value podman
 ```
-
-### Fallback
-If Hyper-V doesn't work on CI:
-- Run Docker-dependent tests (`import-and-run.yaml`) on Linux runners only
-- Run non-Docker tests (`messaging-core.yaml`, `key-management.yaml`) on Windows
 
 ## Local Development (Windows with WSL2)
 
@@ -368,58 +362,35 @@ let docker_log_path = if using_podman {
 
 The fix ensures all Nextflow internal files go to `/tmp` (native Linux filesystem inside the Podman VM), while actual workflow data still uses mounted paths.
 
-### Hyper-V 9P Mount Issue (Critical)
+### Hyper-V 9P Mount Issue (Workaround)
 
-**Status**: 🚫 **BLOCKING** - Hyper-V mounts don't work without Podman Desktop
+The Hyper-V backend uses a 9P file sharing stack that struggles with Windows
+directory junctions (common under user profiles). Directly mounting repo paths
+can produce "Permission denied" or empty directories inside the VM, especially
+for nested containers.
 
-When using Podman CLI with Hyper-V backend (without Podman Desktop), the 9P file sharing is completely broken:
+Current workaround: use Hyper-V host-mount mode to stage inputs into a
+junction-free directory (e.g., `C:\bvtemp`) and rewrite CSV paths to that flat
+root. This avoids junctions and keeps nested containers working.
 
-```bash
-# Inside Podman VM
-$ ls /mnt/c/
-ls: reading directory '/mnt/c/': Permission denied
+### Hyper-V Host Mount Mode (Junction-Free)
 
-# Mount exists but is inaccessible
-$ mount | grep 9p
-9p on /var/mnt/c type 9p (rw,relatime,access=client,trans=fd,rfd=3,wfd=3)
+To work around Hyper-V 9P and junction issues, the CLI supports a host-mount
+mode that stages inputs into a junction-free directory and rewrites CSV paths.
+This keeps all mounted paths under a clean root like `%SystemDrive%\\bvtemp`.
+
+Enable via env vars:
+```
+BIOVAULT_HYPERV_MOUNT=1
+BIOVAULT_HYPERV_HOST_DIR=C:\bvtemp   # optional; default is %SystemDrive%\bvtemp
+BIOVAULT_KEEP_HYPERV_HOST_DIR=1      # optional; keep staging dir for debugging
 ```
 
-**Symptoms**:
-- `/mnt/c/` mount point exists in VM
-- 9P filesystem is mounted with `access=client`
-- All access attempts return "Permission denied" (even as root)
-- Containers see empty directories when mounting Windows paths
-
-**Root Cause** (Confirmed via [GitHub Issue #25686](https://github.com/containers/podman/issues/25686)):
-
-The Hyper-V backend uses the `hugelgupf/p9` library for 9P file sharing. There's a known bug where **Windows directory junctions** (like those in `%HOME%`) break the directory reading logic:
-- The 9P server can't handle junction points correctly
-- This causes "Permission denied" when listing directories containing junctions
-- Interestingly, accessing **subfolders** directly works fine
-- The bug is tracked in [hugelgupf/p9#98](https://github.com/hugelgupf/p9/issues/98) and [hugelgupf/p9#99](https://github.com/hugelgupf/p9/issues/99)
-
-**WSL vs Hyper-V**:
-| Feature | WSL2 Backend | Hyper-V Backend |
-|---------|-------------|-----------------|
-| Mount mechanism | drvfs | v9fs (9P) |
-| Home directory access | ✅ Works | ❌ Permission denied |
-| Subfolder access | ✅ Works | ✅ Works |
-| Nested containers | ✅ Works | ❌ Broken |
-| CI availability | ❌ Not available | ✅ Available |
-
-**Implications**:
-1. WSL2 works perfectly for local development
-2. Hyper-V is available on CI but doesn't work due to 9P bug
-3. We need an alternative strategy for Windows CI
-
-**Workarounds Tested**:
-1. ~~Copy files into VM using `podman machine ssh` + scp~~ (too slow)
-2. ~~Use named volumes and copy data in/out~~ (requires workflow changes)
-3. ~~Mount subfolders directly instead of home~~ (works for direct containers, but nested containers still fail)
-4. **Request WSL support on CI runners** (best option, currently denied)
-5. **Run Docker-dependent tests on Linux runners only** ✅ **Recommended**
-
-**Important**: Even when mounting subfolders directly (avoiding junctions), nested container scenarios fail because the 9P file sharing doesn't properly expose files to sibling containers spawned via socket.
+In this mode:
+- Inputs are copied into a flat `data/` directory under the host mount root.
+- CSV paths are rewritten to point at that flat directory.
+- Nextflow uses `process.stageInMode = 'copy'` to avoid symlink issues.
+- Results are written to a mounted `results/` dir and copied back to the requested output path.
 
 ## Local Testing
 
@@ -451,29 +422,25 @@ All 13 herc2 classifier tasks complete successfully with the shell compatibility
 
 ## Next Steps
 
-1. ~~**Test Hyper-V on CI**: Enable Hyper-V feature and try Podman with hyperv provider~~ ✅ Done!
-2. ~~**Nested container support**: Enable Nextflow to spawn task containers with Podman~~ ✅ Done!
-3. ~~**Shell compatibility**: Fix `printf '%q'` issue in workflow templates~~ ✅ Done!
-4. ~~**Hyper-V filesystem fix**: Redirect Nextflow temp files to /tmp~~ ✅ Done!
-5. ~~**Verify CI passes**: Confirm full pipeline runs on Windows CI with Hyper-V~~ ❌ **Blocked by 9P bug**
-6. **Merge bioscript PR**: Merge `fix/shell-compatibility` branch to update all workflows
-7. **Document for users**: Update user docs for Podman as Docker alternative
-8. **Update CI**: Run Docker tests on Linux, non-Docker tests on Windows
+1. Merge bioscript PR: Merge `fix/shell-compatibility` branch to update all workflows
+2. Document for users: Update user docs for Podman as Docker alternative
+3. Re-enable nightly schedule once CI is stable
 
 ## Summary
 
 **Local Development (Windows with WSL2)**:
-- ✅ Install Podman CLI via Chocolatey
-- ✅ Use WSL2 backend (default): `podman machine init && podman machine start`
-- ✅ All tests pass including nested containers
+- OK: Install Podman CLI via Chocolatey
+- OK: Use WSL2 backend (default): `podman machine init && podman machine start`
+- OK: Nested containers work
 
 **CI (namespace-profile-windows)**:
-- ❌ WSL not available (permission denied)
-- ❌ Hyper-V 9P mounts broken for nested containers
-- ✅ **Solution**: Run Docker tests on Linux runners only
+- WSL not available (permission denied)
+- OK: Podman Hyper-V with host-mount mode runs nested containers
+- Use `BIOVAULT_HYPERV_MOUNT=1` and a flat host dir (default `%SystemDrive%\bvtemp`)
 
 ## References
 
 - [Podman for Windows](https://github.com/containers/podman/blob/main/docs/tutorials/podman-for-windows.md)
 - [Vampire/setup-wsl Action](https://github.com/Vampire/setup-wsl)
 - [WSL Installation](https://docs.microsoft.com/en-us/windows/wsl/install)
+

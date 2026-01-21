@@ -22,29 +22,40 @@ echo "=== Hyper-V Podman Test ==="
 echo "Testing SSH file copy mode for Hyper-V backend"
 echo ""
 
+# Force Hyper-V mode via environment variable (needed for machine inspect/list)
+export CONTAINERS_MACHINE_PROVIDER="hyperv"
+export BIOVAULT_CONTAINER_RUNTIME="podman"
+# Force Hyper-V host mount mode (copy inputs to a junction-free host dir)
+export BIOVAULT_HYPERV_MOUNT="1"
+HOST_DRIVE="${SYSTEMDRIVE:-C:}"
+export BIOVAULT_HYPERV_HOST_DIR="${HOST_DRIVE}/bvtemp"
+
 # Check Podman is available
 if ! command -v podman &> /dev/null; then
     echo "Error: podman not found. Install with: choco install podman-cli"
     exit 1
 fi
 
-# Check Podman machine is running
-if ! podman machine list --format "{{.Running}}" | grep -q "true"; then
-    echo "Error: Podman machine not running."
-    echo "Start with: podman machine start"
+# Check Podman Hyper-V machine is running
+if ! podman machine inspect podman-hyperv &> /dev/null; then
+    echo "Error: Podman Hyper-V machine not found."
+    echo "Create with: CONTAINERS_MACHINE_PROVIDER=hyperv podman machine init podman-hyperv"
+    exit 1
+fi
+if [[ "$(podman machine inspect podman-hyperv --format '{{.State}}')" != "running" ]]; then
+    echo "Error: Podman Hyper-V machine not running."
+    echo "Start with: CONTAINERS_MACHINE_PROVIDER=hyperv podman machine start podman-hyperv"
     exit 1
 fi
 
 # Check if Hyper-V backend
-PROVIDER=$(podman machine inspect --format "{{.VMType}}" 2>/dev/null || echo "unknown")
+PROVIDER=$(podman machine inspect podman-hyperv --format "{{.ConfigDir.Path}}" 2>/dev/null | grep -qi "hyperv" && echo "hyperv" || echo "unknown")
 echo "Podman VM type: $PROVIDER"
-
-# Force Hyper-V mode via environment variable
-export CONTAINERS_MACHINE_PROVIDER="hyperv"
-export BIOVAULT_CONTAINER_RUNTIME="podman"
 
 echo "CONTAINERS_MACHINE_PROVIDER=$CONTAINERS_MACHINE_PROVIDER"
 echo "BIOVAULT_CONTAINER_RUNTIME=$BIOVAULT_CONTAINER_RUNTIME"
+echo "BIOVAULT_HYPERV_MOUNT=$BIOVAULT_HYPERV_MOUNT"
+echo "BIOVAULT_HYPERV_HOST_DIR=$BIOVAULT_HYPERV_HOST_DIR"
 echo ""
 
 # Test data
@@ -55,6 +66,9 @@ HERC2_PROJECT="$BIOSCRIPT_DIR/examples/herc2/herc2-classifier"
 TEST_DIR="/tmp/hyperv-herc2-test-$$"
 mkdir -p "$TEST_DIR"
 echo "Test directory: $TEST_DIR"
+
+# Ensure junction-free host staging dir exists
+mkdir -p /c/bvtemp
 
 # Set up minimal vault environment (needed by bv CLI)
 export SYC_VAULT="$TEST_DIR/.syc"
