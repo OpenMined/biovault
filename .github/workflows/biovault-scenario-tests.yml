@@ -246,6 +246,21 @@ jobs:
           echo ""
           echo "=== Client Logs ==="
           find sandbox -name "*.log" -exec echo "--- {} ---" \; -exec cat {} \; 2>/dev/null || true
+          echo ""
+          echo "=== Nextflow Task Errors (first failed task) ==="
+          # Find a .command.err file from the work directory
+          WORK_DIR=$(find ../bioscript -name "work" -type d 2>/dev/null | head -1)
+          if [ -n "$WORK_DIR" ]; then
+            echo "Work directory: $WORK_DIR"
+            # Find first .command.err with content
+            find "$WORK_DIR" -name ".command.err" -size +0 2>/dev/null | head -1 | xargs cat 2>/dev/null || echo "No error files found"
+            echo ""
+            echo "=== Nextflow Task Script ==="
+            find "$WORK_DIR" -name ".command.sh" 2>/dev/null | head -1 | xargs cat 2>/dev/null || echo "No script files found"
+            echo ""
+            echo "=== Nextflow Task Run Script ==="
+            find "$WORK_DIR" -name ".command.run" 2>/dev/null | head -1 | xargs cat 2>/dev/null || echo "No run files found"
+          fi
 
       - name: Cleanup devstack
         if: always()
