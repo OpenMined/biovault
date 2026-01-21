@@ -13,14 +13,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Docker test on Windows with Podman (WSL backend)
-          - os: windows
-            client_mode: go
-            scenario: tests/scenarios/import-and-run.yaml
-          # Also run on Linux as fallback
+          # Docker-dependent tests run on Linux only (Docker works natively)
           - os: linux
             client_mode: go
             scenario: tests/scenarios/import-and-run.yaml
+          # Non-Docker tests run on Windows
           - os: windows
             client_mode: go
             scenario: tests/scenarios/messaging-core.yaml
@@ -31,51 +28,66 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Setup Podman with WSL backend on Windows for Docker tests
-      - name: Setup Podman (Windows)
-        if: matrix.os == 'windows' && contains(matrix.scenario, 'import-and-run')
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Continue"
-
-          Write-Host "=== Installing Podman ===" -ForegroundColor Cyan
-
-          # Install Chocolatey if needed
-          if (-not (Get-Command choco -ErrorAction SilentlyContinue)) {
-            Set-ExecutionPolicy Bypass -Scope Process -Force
-            [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
-            Invoke-Expression ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
-            $env:PATH = "$env:PATH;C:\ProgramData\chocolatey\bin"
-          }
-
-          # Install podman-cli
-          choco install podman-cli -y
-          $env:PATH = "C:\ProgramData\chocolatey\bin;$env:PATH"
-
-          Write-Host ""
-          Write-Host "=== Podman Version ===" -ForegroundColor Cyan
-          podman --version
-
-          # Try WSL backend first (works better than Hyper-V for nested containers)
-          Write-Host ""
-          Write-Host "=== Initializing Podman Machine (trying WSL) ===" -ForegroundColor Cyan
-          $env:CONTAINERS_MACHINE_PROVIDER = "wsl"
-
-          # Initialize and start
-          podman machine init 2>&1
-          podman machine start 2>&1
-
-          # Wait for machine to be ready
-          Start-Sleep -Seconds 10
-
-          # Test podman
-          Write-Host ""
-          Write-Host "=== Testing Podman ===" -ForegroundColor Cyan
-          podman info
-          podman run --rm hello-world
-
-          # Set provider for subsequent steps
-          [Environment]::SetEnvironmentVariable("CONTAINERS_MACHINE_PROVIDER", "wsl", "Machine")
+      # =====================================================================
+      # BACKUP: Podman Hyper-V setup for Windows Docker-dependent tests
+      # This is commented out while we work on VM copy mode to fix 9P mount issues.
+      # See windocker.md for details on the Hyper-V 9P bug.
+      # =====================================================================
+      # - name: Setup Podman with Hyper-V (Windows)
+      #   if: matrix.os == 'windows' && contains(matrix.scenario, 'import-and-run')
+      #   shell: pwsh
+      #   run: |
+      #     $ErrorActionPreference = "Continue"
+      #
+      #     Write-Host "=== System Info ===" -ForegroundColor Cyan
+      #     Write-Host "OS: $([System.Environment]::OSVersion.VersionString)"
+      #     whoami
+      #
+      #     # Check Hyper-V status
+      #     Write-Host ""
+      #     Write-Host "=== Hyper-V Status ===" -ForegroundColor Cyan
+      #     Get-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V* | Format-Table FeatureName, State
+      #
+      #     # Install Chocolatey if needed
+      #     Write-Host ""
+      #     Write-Host "=== Installing Chocolatey ===" -ForegroundColor Cyan
+      #     if (-not (Get-Command choco -ErrorAction SilentlyContinue)) {
+      #       Set-ExecutionPolicy Bypass -Scope Process -Force
+      #       [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
+      #       Invoke-Expression ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
+      #       $env:PATH = "$env:PATH;C:\ProgramData\chocolatey\bin"
+      #     }
+      #     choco --version
+      #
+      #     # Install podman-cli
+      #     Write-Host ""
+      #     Write-Host "=== Installing Podman ===" -ForegroundColor Cyan
+      #     choco install podman-cli -y
+      #     $env:PATH = "C:\ProgramData\chocolatey\bin;$env:PATH"
+      #
+      #     Write-Host ""
+      #     Write-Host "=== Podman Version ===" -ForegroundColor Cyan
+      #     podman --version
+      #
+      #     # Use Hyper-V backend
+      #     Write-Host ""
+      #     Write-Host "=== Initializing Podman with Hyper-V ===" -ForegroundColor Cyan
+      #     $env:CONTAINERS_MACHINE_PROVIDER = "hyperv"
+      #     [Environment]::SetEnvironmentVariable("CONTAINERS_MACHINE_PROVIDER", "hyperv", "Process")
+      #
+      #     # Initialize and start
+      #     podman machine init 2>&1
+      #     podman machine start 2>&1
+      #
+      #     # Wait for machine to be ready
+      #     Start-Sleep -Seconds 15
+      #
+      #     # Test podman
+      #     Write-Host ""
+      #     Write-Host "=== Testing Podman ===" -ForegroundColor Cyan
+      #     podman info
+      #     podman run --rm hello-world
+      # =====================================================================
 
       - name: Setup workspace dependencies
         shell: bash

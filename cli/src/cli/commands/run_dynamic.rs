@@ -207,6 +207,39 @@ fn remap_json_paths_for_container(value: &JsonValue, use_podman_format: bool) ->
     }
 }
 
+/// Remap paths in JSON to VM-local paths (for Hyper-V mode)
+/// Windows paths are converted to point to the vm_data_dir by filename
+#[cfg(target_os = "windows")]
+fn remap_json_paths_for_vm(value: &JsonValue, vm_data_dir: &str) -> JsonValue {
+    match value {
+        JsonValue::String(s) => {
+            // Check if it looks like a Windows path
+            if s.contains('\\') || (s.len() >= 2 && s.chars().nth(1) == Some(':')) {
+                let path = Path::new(s);
+                let file_name = path.file_name().unwrap_or_default().to_string_lossy();
+                JsonValue::String(format!("{}/{}", vm_data_dir, file_name))
+            } else {
+                value.clone()
+            }
+        }
+        JsonValue::Object(map) => {
+            let mut new_map = serde_json::Map::new();
+            for (k, v) in map {
+                new_map.insert(k.clone(), remap_json_paths_for_vm(v, vm_data_dir));
+            }
+            JsonValue::Object(new_map)
+        }
+        JsonValue::Array(arr) => {
+            JsonValue::Array(
+                arr.iter()
+                    .map(|v| remap_json_paths_for_vm(v, vm_data_dir))
+                    .collect(),
+            )
+        }
+        _ => value.clone(),
+    }
+}
+
 /// Normalize a Windows path string (strip extended prefix, convert to backslashes)
 #[cfg(target_os = "windows")]
 fn normalize_windows_path_str(s: &str) -> String {
@@ -452,6 +485,89 @@ fn rewrite_input_csvs_for_container(value: &JsonValue, use_podman_format: bool) 
         }
         _ => {}
     }
+    Ok(())
+}
+
+/// Find and rewrite all CSV files referenced in inputs JSON to use VM-local paths.
+/// This is used for Hyper-V mode where Windows paths can't be mounted directly.
+#[cfg(target_os = "windows")]
+fn rewrite_input_csvs_for_vm(value: &JsonValue, vm_data_dir: &str) -> Result<()> {
+    match value {
+        JsonValue::String(s) => {
+            if is_windows_path(s) && s.to_lowercase().ends_with(".csv") {
+                let path = Path::new(s);
+                if path.exists() && path.is_file() {
+                    append_desktop_log(&format!("[Pipeline] Rewriting CSV for VM: {}", s));
+                    rewrite_csv_for_vm(path, vm_data_dir)?;
+                }
+            }
+        }
+        JsonValue::Object(map) => {
+            for v in map.values() {
+                rewrite_input_csvs_for_vm(v, vm_data_dir)?;
+            }
+        }
+        JsonValue::Array(arr) => {
+            for v in arr {
+                rewrite_input_csvs_for_vm(v, vm_data_dir)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Rewrite a CSV file to use VM-local paths instead of Windows paths.
+/// Windows paths like C:/Users/foo/data/file.txt become /tmp/biovault-xxx/data/file.txt
+#[cfg(target_os = "windows")]
+fn rewrite_csv_for_vm(csv_path: &Path, vm_data_dir: &str) -> Result<()> {
+    let content = fs::read_to_string(csv_path)
+        .with_context(|| format!("Failed to read CSV: {}", csv_path.display()))?;
+
+    append_desktop_log(&format!("[CSV Rewrite VM] Processing: {}", csv_path.display()));
+    let mut converted_count = 0;
+
+    let mut new_lines = Vec::new();
+    for line in content.lines() {
+        let mut new_fields = Vec::new();
+        for field in line.split(',') {
+            let trimmed = field.trim();
+            let (was_quoted, inner) = if trimmed.starts_with('"') && trimmed.ends_with('"') {
+                (true, &trimmed[1..trimmed.len() - 1])
+            } else {
+                (false, trimmed)
+            };
+
+            // Check if it's a Windows path - convert to VM-local path
+            let new_value = if looks_like_windows_absolute_path(inner) {
+                converted_count += 1;
+                // Extract just the filename and put it in the VM data directory
+                let path = Path::new(inner);
+                let file_name = path.file_name().unwrap_or_default().to_string_lossy();
+                format!("{}/{}", vm_data_dir, file_name)
+            } else {
+                inner.to_string()
+            };
+
+            if was_quoted {
+                new_fields.push(format!("\"{}\"", new_value));
+            } else {
+                new_fields.push(new_value);
+            }
+        }
+        new_lines.push(new_fields.join(","));
+    }
+
+    append_desktop_log(&format!(
+        "[CSV Rewrite VM] Converted {} paths to VM-local in {}",
+        converted_count,
+        csv_path.display()
+    ));
+
+    let new_content = new_lines.join("\n");
+    fs::write(csv_path, new_content)
+        .with_context(|| format!("Failed to write converted CSV: {}", csv_path.display()))?;
+
     Ok(())
 }
 
@@ -1047,6 +1163,24 @@ pub async fn execute_dynamic(
         println!("✅ {} daemon is running", docker_bin);
     }
 
+    // Track Hyper-V mode for post-run cleanup (need to capture before if-else block)
+    #[cfg(target_os = "windows")]
+    let using_hyperv_mode = use_docker && docker_bin.contains("podman") && is_podman_hyperv(&docker_bin);
+    #[cfg(not(target_os = "windows"))]
+    let using_hyperv_mode = false;
+
+    // For Hyper-V mode: capture VM temp dir and results path for post-run copy-back
+    #[cfg(target_os = "windows")]
+    let mut vm_temp_dir_for_cleanup: Option<String> = None;
+    #[cfg(not(target_os = "windows"))]
+    let vm_temp_dir_for_cleanup: Option<String> = None;
+
+    // Store docker_results path for post-run copy-back (will be set inside if-else)
+    #[cfg(target_os = "windows")]
+    let mut vm_results_dir: Option<String> = None;
+    #[cfg(not(target_os = "windows"))]
+    let vm_results_dir: Option<String> = None;
+
     // Build command - use Docker on Windows, native Nextflow elsewhere
     let mut cmd = if use_docker {
         append_desktop_log("[Pipeline] Using Docker to run Nextflow (Windows mode)");
@@ -1063,22 +1197,92 @@ pub async fn execute_dynamic(
         // Podman on WSL uses /mnt/c/... while Docker Desktop uses /c/...
         let using_podman = docker_bin.contains("podman");
 
-        // Convert all paths to container-compatible format
-        let docker_biovault_home = windows_path_to_container(&biovault_home_abs, using_podman);
-        let docker_project_path = windows_path_to_container(&project_abs, using_podman);
-        let docker_template = windows_path_to_container(&template_abs, using_podman);
-        let docker_workflow = windows_path_to_container(&workflow_abs, using_podman);
-        let docker_project_spec = windows_path_to_container(&project_spec_abs, using_podman);
-        // Use /tmp for log file with Podman to avoid Windows mount I/O issues
-        let docker_log_path = if using_podman {
-            "/tmp/.nextflow.log".to_string()
+        // Check if using Podman with Hyper-V backend (which has broken 9P mounts)
+        // In this mode, we copy files to the VM instead of mounting Windows paths
+        let using_hyperv = using_podman && is_podman_hyperv(&docker_bin);
+        if using_hyperv {
+            append_desktop_log("[Pipeline] Detected Podman with Hyper-V backend - using VM copy mode");
+            println!("📋 Using Hyper-V mode (copying files to VM instead of mounting)");
+        }
+
+        // For Hyper-V mode: create a temp directory in the VM and track paths
+        #[cfg(target_os = "windows")]
+        let vm_temp_dir: Option<String> = if using_hyperv && !dry_run {
+            let dir = create_vm_temp_dir(&docker_bin, "biovault")?;
+            // Capture for post-run cleanup
+            vm_temp_dir_for_cleanup = Some(dir.clone());
+            Some(dir)
         } else {
-            windows_path_to_container(&nextflow_log_path, using_podman)
+            None
         };
-        let results_abs = results_path_buf
+
+        #[cfg(not(target_os = "windows"))]
+        let vm_temp_dir: Option<String> = None;
+
+        // Convert all paths to container-compatible format
+        // For Hyper-V mode, paths will be in the VM temp directory
+        let (docker_biovault_home, docker_project_path, docker_template, docker_workflow, docker_project_spec, docker_results, docker_log_path) =
+            if let Some(ref vm_dir) = vm_temp_dir {
+                // Hyper-V mode: use VM-local paths
+                let vm_project = format!("{}/project", vm_dir);
+                let vm_biovault_home = format!("{}/biovault_home", vm_dir);
+                let vm_results = format!("{}/results", vm_dir);
+
+                // Capture for post-run copy-back
+                #[cfg(target_os = "windows")]
+                {
+                    vm_results_dir = Some(vm_results.clone());
+                }
+
+                // Template and workflow are relative to project
+                let template_rel = template_abs.strip_prefix(&project_abs).unwrap_or(&template_abs);
+                let workflow_rel = workflow_abs.strip_prefix(&project_abs).unwrap_or(&workflow_abs);
+                let spec_rel = project_spec_abs.strip_prefix(&project_abs).unwrap_or(&project_spec_abs);
+
+                let vm_template = format!("{}/{}", vm_project, template_rel.display()).replace('\\', "/");
+                let vm_workflow = format!("{}/{}", vm_project, workflow_rel.display()).replace('\\', "/");
+                let vm_spec = format!("{}/{}", vm_project, spec_rel.display()).replace('\\', "/");
+
+                (
+                    vm_biovault_home,
+                    vm_project,
+                    vm_template,
+                    vm_workflow,
+                    vm_spec,
+                    vm_results,
+                    "/tmp/.nextflow.log".to_string(),
+                )
+            } else {
+                // Normal mode: convert Windows paths to container format
+                let docker_biovault_home = windows_path_to_container(&biovault_home_abs, using_podman);
+                let docker_project_path = windows_path_to_container(&project_abs, using_podman);
+                let docker_template = windows_path_to_container(&template_abs, using_podman);
+                let docker_workflow = windows_path_to_container(&workflow_abs, using_podman);
+                let docker_project_spec = windows_path_to_container(&project_spec_abs, using_podman);
+                let docker_log_path = if using_podman {
+                    "/tmp/.nextflow.log".to_string()
+                } else {
+                    windows_path_to_container(&nextflow_log_path, using_podman)
+                };
+                let results_abs = results_path_buf
+                    .canonicalize()
+                    .unwrap_or_else(|_| results_path_buf.clone());
+                let docker_results = windows_path_to_container(&results_abs, using_podman);
+
+                (
+                    docker_biovault_home,
+                    docker_project_path,
+                    docker_template,
+                    docker_workflow,
+                    docker_project_spec,
+                    docker_results,
+                    docker_log_path,
+                )
+            };
+
+        let _results_abs = results_path_buf
             .canonicalize()
             .unwrap_or_else(|_| results_path_buf.clone());
-        let docker_results = windows_path_to_container(&results_abs, using_podman);
 
         // Extract paths from inputs that need to be mounted (must do before rewriting CSVs)
         // This is Windows-specific: extract paths from CSV files and rewrite them for Docker
@@ -1086,7 +1290,50 @@ pub async fn execute_dynamic(
             serde_json::to_value(&inputs_json).context("Failed to convert inputs to JSON value")?;
 
         #[cfg(target_os = "windows")]
-        let mount_roots = {
+        let (mount_roots, vm_data_dir) = if let Some(ref vm_dir) = vm_temp_dir {
+            // Hyper-V mode: extract data paths and copy them to VM
+            let mut data_paths: Vec<PathBuf> = Vec::new();
+            extract_paths_from_json(&inputs_json_value, &mut data_paths);
+
+            let vm_data = format!("{}/data", vm_dir);
+
+            if !dry_run && !data_paths.is_empty() {
+                append_desktop_log(&format!("[Pipeline] Copying {} data files to VM...", data_paths.len()));
+                println!("📁 Copying {} data files to VM...", data_paths.len());
+
+                // Create data directory in VM
+                let _ = Command::new(&docker_bin)
+                    .arg("machine").arg("ssh").arg("--")
+                    .arg(format!("mkdir -p '{}' && chmod 777 '{}'", vm_data, vm_data))
+                    .status();
+
+                // Copy each data file
+                for data_path in &data_paths {
+                    if data_path.exists() {
+                        let file_name = data_path.file_name().unwrap_or_default().to_string_lossy();
+                        let vm_file_path = format!("{}/{}", vm_data, file_name);
+                        if let Err(e) = copy_file_to_vm(&docker_bin, data_path, &vm_file_path) {
+                            append_desktop_log(&format!("[Pipeline] Warning: Failed to copy {}: {}", data_path.display(), e));
+                        }
+                    }
+                }
+
+                // Make all data files readable
+                let _ = Command::new(&docker_bin)
+                    .arg("machine").arg("ssh").arg("--")
+                    .arg(format!("chmod -R 777 '{}'", vm_data))
+                    .status();
+            }
+
+            // Rewrite CSV files to use VM-local paths
+            if !dry_run {
+                append_desktop_log("[Pipeline] Rewriting CSV files with VM-local paths...");
+                rewrite_input_csvs_for_vm(&inputs_json_value, &vm_data)?;
+            }
+
+            (Vec::new(), Some(vm_data))
+        } else {
+            // Normal mode: extract and mount Windows paths
             let mut data_paths: Vec<PathBuf> = Vec::new();
             extract_paths_from_json(&inputs_json_value, &mut data_paths);
             let roots = get_unique_mount_roots(data_paths);
@@ -1104,8 +1351,11 @@ pub async fn execute_dynamic(
                 rewrite_input_csvs_for_container(&inputs_json_value, using_podman)?;
             }
 
-            roots
+            (roots, None)
         };
+
+        #[cfg(not(target_os = "windows"))]
+        let vm_data_dir: Option<String> = None;
 
         #[cfg(not(target_os = "windows"))]
         let mount_roots: Vec<PathBuf> = Vec::new();
@@ -1130,6 +1380,24 @@ pub async fn execute_dynamic(
             "[Pipeline] Additional data mounts: {:?}",
             mount_roots
         ));
+
+        // For Hyper-V mode: copy project files to VM before building command
+        #[cfg(target_os = "windows")]
+        if let Some(ref vm_dir) = vm_temp_dir {
+            let vm_project = format!("{}/project", vm_dir);
+            append_desktop_log(&format!("[Pipeline] Copying project to VM: {} -> {}", project_abs.display(), vm_project));
+            println!("📁 Copying project files to VM...");
+            copy_dir_to_vm(&docker_bin, &project_abs, &vm_project)?;
+
+            // Create results directory in VM
+            let vm_results = format!("{}/results", vm_dir);
+            let _ = Command::new(&docker_bin)
+                .arg("machine").arg("ssh").arg("--")
+                .arg(format!("mkdir -p '{}' && chmod 777 '{}'", vm_results, vm_results))
+                .status();
+
+            append_desktop_log(&format!("[Pipeline] VM directories created: project={}, results={}", vm_project, vm_results));
+        }
 
         let mut docker_cmd = Command::new(&docker_bin);
         super::configure_child_process(&mut docker_cmd);
@@ -1215,39 +1483,63 @@ pub async fn execute_dynamic(
                 .arg("/var/run/docker.sock:/var/run/docker.sock");
         }
 
-        docker_cmd
-            // Mount the BioVault home directory
-            .arg("-v")
-            .arg(format!(
-                "{}:{}",
-                windows_path_to_container(&biovault_home, using_podman),
-                docker_biovault_home
-            ))
-            // Mount the project path (may be same as above, Docker handles duplicates)
-            .arg("-v")
-            .arg(format!(
-                "{}:{}",
-                windows_path_to_container(project_path, using_podman),
-                docker_project_path
-            ));
-
-        // Mount additional data directories discovered from inputs
-        for mount_path in &mount_roots {
-            let container_mount = windows_path_to_container(mount_path, using_podman);
-            append_desktop_log(&format!(
-                "[Pipeline] Adding mount: {} -> {}",
-                mount_path.display(),
-                container_mount
-            ));
+        // For Hyper-V mode: we don't mount Windows paths (they're copied to VM)
+        // For normal mode: mount Windows paths into container
+        if let Some(ref vm_dir) = vm_temp_dir {
+            // Hyper-V mode: mount the VM temp directory into the container
+            // Files were copied to the VM's native filesystem, now mount them into container
+            append_desktop_log(&format!("[Pipeline] Hyper-V mode: mounting VM directory {} into container", vm_dir));
             docker_cmd
                 .arg("-v")
-                .arg(format!("{}:{}", container_mount, container_mount));
+                .arg(format!("{}:{}", vm_dir, vm_dir));
+        } else {
+            // Normal mode: mount Windows paths
+            docker_cmd
+                // Mount the BioVault home directory
+                .arg("-v")
+                .arg(format!(
+                    "{}:{}",
+                    windows_path_to_container(&biovault_home, using_podman),
+                    docker_biovault_home
+                ))
+                // Mount the project path (may be same as above, Docker handles duplicates)
+                .arg("-v")
+                .arg(format!(
+                    "{}:{}",
+                    windows_path_to_container(project_path, using_podman),
+                    docker_project_path
+                ));
+
+            // Mount additional data directories discovered from inputs
+            for mount_path in &mount_roots {
+                let container_mount = windows_path_to_container(mount_path, using_podman);
+                append_desktop_log(&format!(
+                    "[Pipeline] Adding mount: {} -> {}",
+                    mount_path.display(),
+                    container_mount
+                ));
+                docker_cmd
+                    .arg("-v")
+                    .arg(format!("{}:{}", container_mount, container_mount));
+            }
         }
 
         // Generate runtime-specific Nextflow config (Docker vs Podman)
         let runtime_config_path = if !dry_run {
             let config_path = generate_runtime_config(&project_abs, using_podman)?;
-            Some(windows_path_to_container(&config_path, using_podman))
+            // For Hyper-V mode, the config file was copied to VM along with project
+            // Reference it via the VM project path
+            if let Some(ref vm_dir) = vm_temp_dir {
+                // Copy the config file to VM if it wasn't part of the project copy
+                let config_name = config_path.file_name().unwrap_or_default().to_string_lossy();
+                let vm_config_path = format!("{}/project/{}", vm_dir, config_name);
+                if let Err(e) = copy_file_to_vm(&docker_bin, &config_path, &vm_config_path) {
+                    append_desktop_log(&format!("[Pipeline] Warning: Failed to copy config to VM: {}", e));
+                }
+                Some(vm_config_path)
+            } else {
+                Some(windows_path_to_container(&config_path, using_podman))
+            }
         } else {
             None
         };
@@ -1298,8 +1590,27 @@ pub async fn execute_dynamic(
         // Re-encode JSON with container paths (inputs_json_value already created above)
         let params_json_value: JsonValue =
             serde_json::to_value(&params_json).context("Failed to convert params to JSON value")?;
-        let docker_inputs_json = remap_json_paths_for_container(&inputs_json_value, using_podman);
-        let docker_params_json = remap_json_paths_for_container(&params_json_value, using_podman);
+
+        // For Hyper-V mode: use VM-local paths. For normal mode: use container mount paths.
+        #[cfg(target_os = "windows")]
+        let (docker_inputs_json, docker_params_json) = if let Some(ref vm_data) = vm_data_dir {
+            (
+                remap_json_paths_for_vm(&inputs_json_value, vm_data),
+                remap_json_paths_for_vm(&params_json_value, vm_data),
+            )
+        } else {
+            (
+                remap_json_paths_for_container(&inputs_json_value, using_podman),
+                remap_json_paths_for_container(&params_json_value, using_podman),
+            )
+        };
+
+        #[cfg(not(target_os = "windows"))]
+        let (docker_inputs_json, docker_params_json) = (
+            remap_json_paths_for_container(&inputs_json_value, using_podman),
+            remap_json_paths_for_container(&params_json_value, using_podman),
+        );
+
         let docker_inputs_json_str = serde_json::to_string(&docker_inputs_json)
             .context("Failed to encode Docker inputs metadata to JSON")?;
         let docker_params_json_str = serde_json::to_string(&docker_params_json)
@@ -1411,6 +1722,29 @@ pub async fn execute_dynamic(
         Some(project_path.to_path_buf()),
     )
     .context("Failed to execute nextflow")?;
+
+    // For Hyper-V mode: copy results back from VM and cleanup
+    #[cfg(target_os = "windows")]
+    if using_hyperv_mode {
+        if let (Some(ref vm_results), Some(ref vm_dir)) = (&vm_results_dir, &vm_temp_dir_for_cleanup) {
+            append_desktop_log(&format!("[Pipeline] Copying results back from VM: {} -> {}", vm_results, results_path_buf.display()));
+            println!("📁 Copying results back from VM...");
+
+            if let Err(e) = copy_from_vm(&docker_bin, vm_results, &results_path_buf) {
+                append_desktop_log(&format!("[Pipeline] Warning: Failed to copy results from VM: {}", e));
+                eprintln!("⚠️  Warning: Failed to copy results from VM: {}", e);
+            }
+
+            // Cleanup VM temp directory
+            append_desktop_log(&format!("[Pipeline] Cleaning up VM temp directory: {}", vm_dir));
+            cleanup_vm_dir(&docker_bin, vm_dir);
+        }
+    }
+
+    // Suppress unused variable warnings on non-Windows
+    let _ = &vm_temp_dir_for_cleanup;
+    let _ = &vm_results_dir;
+    let _ = &using_hyperv_mode;
 
     if !status.success() {
         append_desktop_log(&format!(
