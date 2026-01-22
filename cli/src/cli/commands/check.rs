@@ -1337,8 +1337,13 @@ pub async fn execute(json: bool) -> Result<()> {
 fn check_if_running(service: &str) -> bool {
     match service {
         "docker" => {
-            // Check if Docker daemon is running
-            let mut cmd = Command::new("docker");
+            // Check if Docker/Podman daemon is running
+            // Use BIOVAULT_CONTAINER_RUNTIME env var if set (e.g., "podman" on Windows)
+            let runtime = env::var("BIOVAULT_CONTAINER_RUNTIME")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or_else(|| "docker".to_string());
+            let mut cmd = Command::new(&runtime);
             cmd.arg("info");
             configure_child_process(&mut cmd);
             cmd.output()
@@ -1558,8 +1563,15 @@ fn command_for_version(path: Option<&str>, fallback: &str) -> Option<Command> {
 }
 
 fn get_docker_version(version_source: Option<&str>) -> Option<String> {
-    let mut command = command_for_version(version_source, "docker")?;
-    let output = command.arg("--version").output().ok()?;
+    // Use BIOVAULT_CONTAINER_RUNTIME env var if set (e.g., "podman" on Windows)
+    let fallback = env::var("BIOVAULT_CONTAINER_RUNTIME")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "docker".to_string());
+    let mut command = command_for_version(version_source, &fallback)?;
+    command.arg("--version");
+    configure_child_process(&mut command);
+    let output = command.output().ok()?;
     if !output.status.success() {
         return None;
     }
@@ -1582,7 +1594,9 @@ fn get_syftbox_version(version_source: Option<&str>) -> Option<String> {
         command.env("SYFTBOX_CONFIG_PATH", syftbox_dir.join("config.json"));
     }
 
-    let output = command.arg("--version").output().ok()?;
+    command.arg("--version");
+    configure_child_process(&mut command);
+    let output = command.output().ok()?;
     if !output.status.success() {
         return None;
     }
