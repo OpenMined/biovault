@@ -23,10 +23,10 @@ serde_json = "1.0"
 serde_yaml = "0.9"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-tracing-opentelemetry = "0.28"
-opentelemetry = "0.27"
-opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"] }
-opentelemetry-otlp = { version = "0.27", features = ["http-proto", "reqwest-client"] }
+tracing-opentelemetry = { version = "0.28", optional = true }
+opentelemetry = { version = "0.27", optional = true }
+opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"], optional = true }
+opentelemetry-otlp = { version = "0.27", features = ["http-proto", "reqwest-client"], optional = true }
 dirs = "5.0"
 sysinfo = "0.30"
 which = "6.0"
@@ -79,3 +79,9 @@ serial_test = "3.1"
 # Enable to include slower, IO-heavy tests (e.g., FASTQ helpers)
 slow-tests = []
 e2e-tests = []
+telemetry = [
+    "dep:opentelemetry",
+    "dep:opentelemetry_sdk",
+    "dep:opentelemetry-otlp",
+    "dep:tracing-opentelemetry",
+]
