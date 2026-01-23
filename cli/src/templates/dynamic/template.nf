@@ -124,7 +124,13 @@ workflow {
         println "[bv] Input '${name}': type=${meta.type}, format=${meta.format}, path=${meta.path}"
     }
 
+<<<<<<< HEAD
     def specInputs = (moduleSpec.inputs ?: []) as List
+=======
+    def isModuleSpec = (spec?.kind == 'Module' && spec?.spec instanceof Map)
+    def specInputs = (isModuleSpec ? (spec.spec.inputs ?: []) : (spec.inputs ?: [])) as List
+    def specName = isModuleSpec ? (spec?.metadata?.name ?: 'unknown') : (spec?.name ?: 'unknown')
+>>>>>>> main
     def boundInputs = specInputs.collect { specInput ->
         def name = specInput.name
         def meta = inputsMap[name]
@@ -142,7 +148,11 @@ workflow {
             *(boundInputs.collect { it[1] })
         )
     } catch (Throwable t) {
+<<<<<<< HEAD
         println "[bv] ERROR: Workflow '${specName ?: 'unknown'}' failed - ${t.message}"
+=======
+        println "[bv] ERROR: Workflow '${specName}' failed - ${t.message}"
+>>>>>>> main
         throw t
     }
 }

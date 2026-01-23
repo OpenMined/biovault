@@ -83,21 +83,7 @@ pub async fn execute(email: Option<&str>, quiet: bool) -> Result<()> {
     }
 
     let config_file = biovault_dir.join("config.yaml");
-    let syc_vault = {
-        let colocated = syc::vault_path_for_home(&biovault_dir);
-        if colocated.exists() {
-            colocated
-        } else {
-            let legacy = dirs::home_dir()
-                .map(|h| h.join(".syc"))
-                .unwrap_or_else(|| PathBuf::from(".syc"));
-            if legacy.exists() {
-                legacy
-            } else {
-                colocated
-            }
-        }
-    };
+    let syc_vault = crate::config::resolve_syc_vault_path()?;
 
     // Step 1: Create config.yaml if it doesn't exist
     let config = if config_file.exists() {
@@ -432,6 +418,8 @@ mod tests {
         crate::config::set_test_biovault_home(temp_dir.path().join(".biovault"));
         let data_dir = temp_dir.path().join("syftbox");
         crate::config::set_test_syftbox_data_dir(&data_dir);
+        let data_dir_env = data_dir.to_string_lossy().to_string();
+        crate::config::set_test_env_override("SYFTBOX_DATA_DIR", Some(&data_dir_env));
 
         // Initialize with email argument (quiet=true for non-interactive test)
         let result = execute(Some("test@example.com"), true).await;
@@ -443,6 +431,7 @@ mod tests {
 
         crate::config::clear_test_syftbox_data_dir();
         crate::config::clear_test_biovault_home();
+        crate::config::clear_test_env_override("SYFTBOX_DATA_DIR");
     }
 
     #[tokio::test]
@@ -451,6 +440,8 @@ mod tests {
         crate::config::set_test_biovault_home(temp_dir.path().join(".biovault"));
         let data_dir = temp_dir.path().join("syftbox");
         crate::config::set_test_syftbox_data_dir(&data_dir);
+        let data_dir_env = data_dir.to_string_lossy().to_string();
+        crate::config::set_test_env_override("SYFTBOX_DATA_DIR", Some(&data_dir_env));
 
         // Set SYFTBOX_EMAIL env var
         env::set_var("SYFTBOX_EMAIL", "syftbox@example.com");
@@ -463,6 +454,7 @@ mod tests {
         env::remove_var("SYFTBOX_EMAIL");
         crate::config::clear_test_syftbox_data_dir();
         crate::config::clear_test_biovault_home();
+        crate::config::clear_test_env_override("SYFTBOX_DATA_DIR");
 
         // The result depends on whether we're in TTY or not
         // In CI/test environment, it's usually non-TTY
@@ -476,6 +468,8 @@ mod tests {
         crate::config::set_test_biovault_home(temp_dir.path().join(".biovault"));
         let data_dir = temp_dir.path().join("syftbox");
         crate::config::set_test_syftbox_data_dir(&data_dir);
+        let data_dir_env = data_dir.to_string_lossy().to_string();
+        crate::config::set_test_env_override("SYFTBOX_DATA_DIR", Some(&data_dir_env));
 
         // Create initial config
         let initial_config = Config {
@@ -500,6 +494,7 @@ mod tests {
 
         crate::config::clear_test_syftbox_data_dir();
         crate::config::clear_test_biovault_home();
+        crate::config::clear_test_env_override("SYFTBOX_DATA_DIR");
     }
 
     #[tokio::test]
@@ -509,6 +504,8 @@ mod tests {
         crate::config::set_test_biovault_home(biovault_path.clone());
         let data_dir = temp_dir.path().join("syftbox");
         crate::config::set_test_syftbox_data_dir(&data_dir);
+        let data_dir_env = data_dir.to_string_lossy().to_string();
+        crate::config::set_test_env_override("SYFTBOX_DATA_DIR", Some(&data_dir_env));
 
         // Directory shouldn't exist initially
         assert!(!biovault_path.exists());
@@ -522,6 +519,7 @@ mod tests {
 
         crate::config::clear_test_syftbox_data_dir();
         crate::config::clear_test_biovault_home();
+        crate::config::clear_test_env_override("SYFTBOX_DATA_DIR");
     }
 
     #[tokio::test]

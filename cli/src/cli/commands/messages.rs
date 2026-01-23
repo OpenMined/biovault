@@ -4,16 +4,22 @@ use crate::cli::syft_url::SyftURL;
 use crate::config::Config;
 use crate::data::{self, BioVaultDb};
 use crate::messages::{Message, MessageDb, MessageSync};
+<<<<<<< HEAD
 use crate::module_spec::ModuleSpec;
 use crate::syftbox::storage::SyftBoxStorage;
 use crate::types::ModuleYaml;
+=======
+use crate::module_spec::ModuleFile;
+use crate::project_spec::{resolve_project_spec_path, ProjectSpec, MODULE_YAML_FILE};
+use crate::syftbox::storage::SyftBoxStorage;
+>>>>>>> main
 use crate::types::SyftPermissions;
 use anyhow::{Context as _, Result};
 use colored::Colorize;
 use csv::Writer;
 use dialoguer::{Confirm, Input, Select};
 use serde_json::json;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
@@ -437,7 +443,11 @@ pub async fn read_message(config: &Config, message_id: &str, non_interactive: bo
 
     // If this is a module message with metadata, attempt verification and show details
     if let Some(meta) = &msg.metadata {
+<<<<<<< HEAD
         if msg.message_type.to_string() == "module" {
+=======
+        if msg.message_type.to_string() == "project" {
+>>>>>>> main
             println!("\nModule Verification:");
             println!("──────────────────────");
             match verify_module_from_metadata(config, meta) {
@@ -448,7 +458,11 @@ pub async fn read_message(config: &Config, message_id: &str, non_interactive: bo
 
             println!("\nDetails:");
             println!("────────");
+<<<<<<< HEAD
             if let Some(loc) = meta.get("module_location").and_then(|v| v.as_str()) {
+=======
+            if let Some(loc) = metadata_submission_location(meta) {
+>>>>>>> main
                 println!("Module location: {}", loc.cyan());
                 if let Ok(p) = resolve_syft_url_to_path(config, loc) {
                     println!("Local path: {}", p.display());
@@ -457,6 +471,7 @@ pub async fn read_message(config: &Config, message_id: &str, non_interactive: bo
             if let Some(date) = meta.get("date").and_then(|v| v.as_str()) {
                 println!("Date: {}", date);
             }
+<<<<<<< HEAD
             if let Some(module) = meta.get("module") {
                 if let Some(participants) = module.get("participants").and_then(|v| v.as_array()) {
                     if !participants.is_empty() {
@@ -474,6 +489,23 @@ pub async fn read_message(config: &Config, message_id: &str, non_interactive: bo
                             if let Some(s) = a.as_str() {
                                 println!("  - {}", s);
                             }
+=======
+            if let Some(participants) = meta.get("participants").and_then(|v| v.as_array()) {
+                if !participants.is_empty() {
+                    let parts: Vec<String> = participants
+                        .iter()
+                        .filter_map(|p| p.as_str().map(|s| s.to_string()))
+                        .collect();
+                    println!("Desired participants: {}", parts.join(", "));
+                }
+            }
+            if let Some(assets) = meta.get("assets").and_then(|v| v.as_array()) {
+                if !assets.is_empty() {
+                    println!("Assets:");
+                    for a in assets {
+                        if let Some(s) = a.as_str() {
+                            println!("  - {}", s);
+>>>>>>> main
                         }
                     }
                 }
@@ -495,7 +527,11 @@ pub async fn read_message(config: &Config, message_id: &str, non_interactive: bo
                             println!("Results tree:");
                             print_dir_tree(storage_opt.as_ref(), &results, 3)?;
                         }
+<<<<<<< HEAD
                     } else if let Some(loc) = meta.get("module_location").and_then(|v| v.as_str()) {
+=======
+                    } else if let Some(loc) = metadata_submission_location(meta) {
+>>>>>>> main
                         if let Ok(root) = resolve_syft_url_to_path(config, loc) {
                             let results = root.join("results");
                             println!("Results location: {}", results.display());
@@ -644,8 +680,20 @@ pub async fn process_module_message(
     let dest = build_run_module_copy(config, &msg)?;
 
     // Load spec to determine runtime handling (dynamic vs legacy)
+<<<<<<< HEAD
     let module_spec_path = dest.join("module.yaml");
     let spec = ModuleSpec::load(&module_spec_path)?;
+=======
+    // Use storage decryption since the file may be encrypted in the private folder
+    let project_spec_path = dest.join(MODULE_YAML_FILE);
+    let storage = syftbox_storage(config)?;
+    let spec = if storage.contains(&project_spec_path) {
+        let bytes = storage.read_with_shadow(&project_spec_path)?;
+        ProjectSpec::load_from_bytes(&project_spec_path, &bytes)?
+    } else {
+        ProjectSpec::load(&project_spec_path)?
+    };
+>>>>>>> main
 
     match spec.runtime.as_deref() {
         Some("nextflow") | Some("dynamic-nextflow") => {
@@ -745,11 +793,17 @@ fn archive_module(config: &Config, msg: &Message) -> anyhow::Result<()> {
         .metadata
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("missing metadata"))?;
+<<<<<<< HEAD
     let module_location = meta
         .get("module_location")
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow::anyhow!("missing module_location"))?;
     let root = resolve_syft_url_to_path(config, module_location)?;
+=======
+    let project_location = metadata_submission_location(meta)
+        .ok_or_else(|| anyhow::anyhow!("missing module_location"))?;
+    let root = resolve_syft_url_to_path(config, project_location)?;
+>>>>>>> main
     let perm_path = root.join("syft.pub.yaml");
     if perm_path.exists() {
         let storage = syftbox_storage(config)?;
@@ -780,12 +834,19 @@ fn sender_module_root(
     config: &Config,
     meta: &serde_json::Value,
 ) -> anyhow::Result<(PathBuf, String)> {
+<<<<<<< HEAD
     let module_location = meta
         .get("module_location")
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow::anyhow!("missing module_location"))?;
     let path = resolve_syft_url_to_path(config, module_location)?;
     let folder = Path::new(module_location)
+=======
+    let project_location = metadata_submission_location(meta)
+        .ok_or_else(|| anyhow::anyhow!("missing module_location"))?;
+    let path = resolve_syft_url_to_path(config, project_location)?;
+    let folder = Path::new(project_location)
+>>>>>>> main
         .components()
         .next_back()
         .and_then(|c| match c {
@@ -937,6 +998,7 @@ fn build_run_module_copy(config: &Config, msg: &Message) -> anyhow::Result<PathB
     let dest_root = receiver_private_submissions_path(config)?;
     let dest_path = dest_root.join(&folder_name);
 
+<<<<<<< HEAD
     // Always copy if key files are missing (handles incomplete/failed copies)
     let module_yaml = dest_path.join("module.yaml");
     let assets_dir = dest_path.join("assets");
@@ -945,6 +1007,11 @@ fn build_run_module_copy(config: &Config, msg: &Message) -> anyhow::Result<PathB
             .map(|mut entries| entries.next().is_none())
             .unwrap_or(true);
     if !module_yaml.exists() || assets_missing {
+=======
+    // Always copy if module.yaml is missing (handles incomplete/failed copies)
+    let project_yaml = dest_path.join(MODULE_YAML_FILE);
+    if !project_yaml.exists() {
+>>>>>>> main
         copy_dir_recursive(config, &sender_root, &dest_path)?;
     }
 
@@ -1248,8 +1315,20 @@ fn prepare_dynamic_run_non_interactive(
     participant_hint: &str,
     test: bool,
 ) -> anyhow::Result<DynamicRunInvocation> {
+<<<<<<< HEAD
     let spec_path = module_dir.join("module.yaml");
     let spec = ModuleSpec::load(&spec_path)?;
+=======
+    let spec_path = resolve_project_spec_path(project_dir);
+    // Use storage decryption since the file may be encrypted in the private folder
+    let storage = syftbox_storage(config)?;
+    let spec = if storage.contains(&spec_path) {
+        let bytes = storage.read_with_shadow(&spec_path)?;
+        ProjectSpec::load_from_bytes(&spec_path, &bytes)?
+    } else {
+        ProjectSpec::load(&spec_path)?
+    };
+>>>>>>> main
 
     if participant_hint.eq_ignore_ascii_case("ALL") || participant_hint.eq_ignore_ascii_case("AUTO")
     {
@@ -1480,11 +1559,16 @@ async fn approve_module_non_interactive(
     let sender_results = sender_root.join("results");
     copy_dir_recursive(config, &results_dir, &sender_results)?;
 
+<<<<<<< HEAD
     // Get module details for the message
     let module_location = meta
         .get("module_location")
         .and_then(|v| v.as_str())
         .unwrap_or("unknown");
+=======
+    // Get project details for the message
+    let project_location = metadata_submission_location(meta).unwrap_or("unknown");
+>>>>>>> main
 
     // Check if results exist and get basic info
     let results_info = if sender_results.exists() {
@@ -1559,11 +1643,16 @@ async fn approve_module(config: &Config, msg: &Message) -> anyhow::Result<()> {
     let sender_results = sender_root.join("results");
     copy_dir_recursive(config, &results_dir, &sender_results)?;
 
+<<<<<<< HEAD
     // Get module details for the message
     let module_location = meta
         .get("module_location")
         .and_then(|v| v.as_str())
         .unwrap_or("unknown");
+=======
+    // Get project details for the message
+    let project_location = metadata_submission_location(meta).unwrap_or("unknown");
+>>>>>>> main
 
     // Check if results exist and get basic info
     let results_info = if sender_results.exists() {
@@ -1660,11 +1749,16 @@ fn try_prepare_dynamic_run(
     module_dir: &Path,
     is_test: bool,
 ) -> anyhow::Result<Option<DynamicRunInvocation>> {
+<<<<<<< HEAD
     let spec_path = module_dir.join("module.yaml");
+=======
+    let spec_path = resolve_project_spec_path(project_dir);
+>>>>>>> main
     if !spec_path.exists() {
         return Ok(None);
     }
 
+<<<<<<< HEAD
     let spec = match ModuleSpec::load(&spec_path) {
         Ok(spec) => spec,
         Err(err) => {
@@ -1674,6 +1768,43 @@ fn try_prepare_dynamic_run(
                 err
             );
             return Ok(None);
+=======
+    // Use storage decryption since the file may be encrypted in the private folder
+    let storage = syftbox_storage(config)?;
+    let spec = if storage.contains(&spec_path) {
+        match storage.read_with_shadow(&spec_path) {
+            Ok(bytes) => match ProjectSpec::load_from_bytes(&spec_path, &bytes) {
+                Ok(spec) => spec,
+                Err(err) => {
+                    println!(
+                        "⚠ Failed to load project spec at {}: {}",
+                        spec_path.display(),
+                        err
+                    );
+                    return Ok(None);
+                }
+            },
+            Err(err) => {
+                println!(
+                    "⚠ Failed to read project spec at {}: {}",
+                    spec_path.display(),
+                    err
+                );
+                return Ok(None);
+            }
+        }
+    } else {
+        match ProjectSpec::load(&spec_path) {
+            Ok(spec) => spec,
+            Err(err) => {
+                println!(
+                    "⚠ Failed to load project spec at {}: {}",
+                    spec_path.display(),
+                    err
+                );
+                return Ok(None);
+            }
+>>>>>>> main
         }
     };
 
@@ -1956,12 +2087,27 @@ fn resolve_syft_url_to_path(config: &Config, url: &str) -> anyhow::Result<PathBu
         .join(parsed.path))
 }
 
+<<<<<<< HEAD
 /// Verify a module message using embedded metadata
+=======
+fn metadata_submission_location(meta: &serde_json::Value) -> Option<&str> {
+    meta.get("module_location")
+        .and_then(|v| v.as_str())
+        .or_else(|| meta.get("project_location").and_then(|v| v.as_str()))
+}
+
+fn metadata_module_value(meta: &serde_json::Value) -> Option<&serde_json::Value> {
+    meta.get("module").or_else(|| meta.get("project"))
+}
+
+/// Verify a project message using embedded metadata
+>>>>>>> main
 /// Returns (is_ok, extra_note)
 fn verify_module_from_metadata(
     config: &Config,
     metadata: &serde_json::Value,
 ) -> anyhow::Result<(bool, String)> {
+<<<<<<< HEAD
     // Extract the embedded module.yaml
     let module_val = metadata
         .get("module")
@@ -1974,6 +2120,15 @@ fn verify_module_from_metadata(
     let module_location = metadata
         .get("module_location")
         .and_then(|v| v.as_str())
+=======
+    // Extract the embedded module spec
+    let module_val = metadata_module_value(metadata)
+        .ok_or_else(|| anyhow::anyhow!("missing module metadata"))?;
+    let _ = serde_json::from_value::<ModuleFile>(module_val.clone());
+
+    // Extract submission location syft URL
+    let project_location = metadata_submission_location(metadata)
+>>>>>>> main
         .ok_or_else(|| anyhow::anyhow!("missing module_location syft URL"))?;
 
     let root = resolve_syft_url_to_path(config, module_location)?;
@@ -1984,8 +2139,19 @@ fn verify_module_from_metadata(
     let storage = syftbox_storage(config)?;
 
     // Need b3_hashes to verify
+<<<<<<< HEAD
     let Some(expected_hashes) = module.b3_hashes.clone() else {
         return Ok((false, " (no hashes provided)".to_string()));
+=======
+    let b3_hashes_value = metadata
+        .get("b3_hashes")
+        .cloned()
+        .or_else(|| module_val.get("b3_hashes").cloned());
+    let expected_hashes: HashMap<String, String> = match b3_hashes_value {
+        Some(value) => serde_json::from_value(value)
+            .map_err(|e| anyhow::anyhow!("invalid b3_hashes metadata: {}", e))?,
+        None => return Ok((false, " (no hashes provided)".to_string())),
+>>>>>>> main
     };
 
     // Verify each expected file hash
@@ -2252,6 +2418,7 @@ mod tests {
             .to_string();
 
         // Construct embedded module.yaml equivalent in metadata
+<<<<<<< HEAD
         let module = serde_json::to_value(ModuleYaml {
             name: "n".into(),
             version: "0.1.0".into(),
@@ -2270,6 +2437,12 @@ mod tests {
             ])),
             extra: std::collections::HashMap::new(),
         })?;
+=======
+        let project = json!({
+            "name": "n", "author":"a", "workflow":"w",
+            "b3_hashes": {"a.txt": h1, "b.txt": h2}
+        });
+>>>>>>> main
         let meta_ok = json!({
             "module": module,
             "module_location": "syft://u@example.com/app_data/biovault/submissions/projZ"

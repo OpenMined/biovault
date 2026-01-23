@@ -1,0 +1,206 @@
+#!/usr/bin/env python
+"""
+Minimal jq shim for Windows test scenarios.
+
+Supports a small subset of jq filters used in messaging-core.yaml:
+- .messages | length
+- .messages[] | select(.field=="value") | .id/.thread_id/etc
+- map(select(.field=="value")) | .[0].session_id // empty
+- .[] | select(.session_id=="value")
+- map(select(.session_id=="value")) | length == 0
+"""
+from __future__ import annotations
+
+import json
+import re
+import sys
+from typing import Any, Iterable
+
+
+def parse_args(argv: list[str]) -> tuple[bool, bool, str]:
+    raw = False
+    check = False
+    args = []
+    for arg in argv:
+        if arg == "-r":
+            raw = True
+            continue
+        if arg == "-e":
+            check = True
+            continue
+        args.append(arg)
+    if not args:
+        raise SystemExit("jq shim: missing filter")
+    return raw, check, args[0]
+
+
+def get_field(obj: Any, path: list[str]) -> Any:
+    cur = obj
+    for token in path:
+        if token == "[0]":
+            if isinstance(cur, list):
+                cur = cur[0] if cur else None
+            else:
+                return None
+            continue
+        if isinstance(cur, dict):
+            cur = cur.get(token)
+        else:
+            return None
+    return cur
+
+
+def select_items(items: Iterable[Any], cond: str) -> list[Any]:
+    m = re.match(r'^\.(.+?)=="(.*)"$', cond)
+    if not m:
+        return list(items)
+    path = m.group(1).split(".")
+    value = m.group(2)
+    matched = []
+    for item in items:
+        if get_field(item, path) == value:
+            matched.append(item)
+    return matched
+
+
+def apply_field(value: Any, token: str) -> Any:
+    if token == "[0]":
+        if isinstance(value, list):
+            return value[0] if value else None
+        return None
+    if isinstance(value, list):
+        return [get_field(item, [token]) for item in value]
+    if isinstance(value, dict):
+        return value.get(token)
+    return None
+
+
+def eval_filter(expr: str, data: Any) -> Any:
+    expr = " ".join(expr.split())
+    steps = [step.strip() for step in expr.split("|") if step.strip()]
+    value: Any = data
+    for step in steps:
+        if step == ".messages":
+            value = value.get("messages") if isinstance(value, dict) else None
+            continue
+        if step == ".messages[]":
+            if isinstance(value, dict):
+                value = list(value.get("messages", []))
+            else:
+                value = list(value or [])
+            continue
+        if step == ".[]":
+            value = list(value or []) if isinstance(value, list) else []
+            continue
+        if step.startswith("map(select(") and step.endswith("))"):
+            cond = step[len("map(select(") : -2]
+            value = select_items(value if isinstance(value, list) else [], cond)
+            continue
+        if step.startswith("select(") and step.endswith(")"):
+            cond = step[len("select(") : -1]
+            if isinstance(value, list):
+                value = select_items(value, cond)
+            elif isinstance(value, dict):
+                value = value if select_items([value], cond) else None
+            else:
+                value = None
+            continue
+        if step == ".[0]":
+            value = value[0] if isinstance(value, list) and value else None
+            continue
+        if step == "length":
+            value = len(value) if isinstance(value, list) else 0
+            continue
+        if step == "length == 0":
+            value = (len(value) == 0) if isinstance(value, list) else True
+            continue
+        if " // empty" in step:
+            base = step.replace(" // empty", "").strip()
+            base_val = eval_filter(base, value)
+            value = "" if base_val is None else base_val
+            continue
+        if step.startswith("."):
+            path = step[1:].split(".")
+            for token in path:
+                value = apply_field(value, token)
+            continue
+        raise SystemExit(f"jq shim: unsupported filter: {step}")
+    return value
+
+
+def is_truthy(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, list):
+        return len([v for v in value if v not in (None, "")]) > 0
+    if isinstance(value, str):
+        return value != ""
+    return bool(value)
+
+
+def main() -> int:
+    raw, check, expr = parse_args(sys.argv[1:])
+    text = sys.stdin.read()
+    data = None
+    if text.strip():
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            cleaned = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", text)
+            cleaned = cleaned.lstrip("\ufeff")
+            start = None
+            for idx, ch in enumerate(cleaned):
+                if ch in "[{":
+                    start = idx
+                    break
+            if start is None:
+                raise
+            stack = [cleaned[start]]
+            in_str = False
+            escape = False
+            end = None
+            for idx in range(start + 1, len(cleaned)):
+                ch = cleaned[idx]
+                if in_str:
+                    if escape:
+                        escape = False
+                        continue
+                    if ch == "\\":
+                        escape = True
+                        continue
+                    if ch == '"':
+                        in_str = False
+                    continue
+                if ch == '"':
+                    in_str = True
+                    continue
+                if ch in "[{":
+                    stack.append(ch)
+                elif ch in "]}":
+                    if stack:
+                        stack.pop()
+                    if not stack:
+                        end = idx + 1
+                        break
+            if end is None:
+                end = len(cleaned)
+            candidate = cleaned[start:end]
+            candidate = re.sub(r'\\(?!["\\/bfnrtu])', r"\\\\", candidate)
+            data = json.loads(candidate)
+    result = eval_filter(expr, data)
+    if check:
+        return 0 if is_truthy(result) else 1
+    if isinstance(result, list):
+        for item in result:
+            if item is None:
+                continue
+            sys.stdout.write(f"{item}\n")
+    elif result is not None:
+        sys.stdout.write(f"{result}\n")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

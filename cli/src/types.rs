@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 use crate::module_spec::{
     InputSpec, ModuleAsset, ModuleFile, ModuleFileFormatSpec, ModuleFileInputSpec,
     ModuleFileOutputSpec, ModuleFileParameterSpec, ModuleFileSpec, ModuleRunnerSpec, OutputSpec,
@@ -7,6 +8,9 @@ use serde::de::Deserializer;
 use serde::ser::Serializer;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+=======
+use serde::{Deserialize, Serialize};
+>>>>>>> main
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -83,6 +87,7 @@ impl SyftPermissions {
     }
 }
 
+<<<<<<< HEAD
 #[derive(Debug, Clone)]
 pub struct ModuleYaml {
     pub name: String,
@@ -470,6 +475,8 @@ fn to_module_parameter(param: ParameterSpec) -> ModuleFileParameterSpec {
     }
 }
 
+=======
+>>>>>>> main
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InboxSubmission {
     pub name: String,
@@ -509,6 +516,7 @@ mod tests {
     }
 
     #[test]
+<<<<<<< HEAD
     fn module_yaml_round_trip_and_error() {
         let tmp = TempDir::new().unwrap();
         let p = tmp.path().join("module.yaml");
@@ -539,6 +547,8 @@ mod tests {
     }
 
     #[test]
+=======
+>>>>>>> main
     fn inbox_submission_from_file_and_error() {
         let tmp = TempDir::new().unwrap();
         let p = tmp.path().join("inbox.yaml");

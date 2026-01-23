@@ -98,6 +98,7 @@ impl DatabaseLock {
 
                         // Check if process is still alive first (more important than age)
                         let mut should_remove = false;
+                        #[allow(unused_mut)] // Mutated only on Unix
                         let mut process_exists = true;
 
                         #[cfg(unix)]

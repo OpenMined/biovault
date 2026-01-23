@@ -1,15 +1,22 @@
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::env;
 use std::io::{BufRead, BufReader, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::signal;
 
 use crate::config::Config;
 use syftbox_sdk::syftbox::config::SyftboxRuntimeConfig;
 use syftbox_sdk::syftbox::control::{is_syftbox_running, start_syftbox, stop_syftbox};
+
+fn command<S: AsRef<std::ffi::OsStr>>(program: S) -> Command {
+    let mut cmd = Command::new(program);
+    super::configure_child_process(&mut cmd);
+    cmd
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SyftboxdStatus {
@@ -56,6 +63,22 @@ fn write_status(config: &Config, status: &SyftboxdStatus) -> Result<()> {
     Ok(())
 }
 
+fn tail_log(path: &Path, max_lines: usize) -> Result<Option<String>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("Failed to read syftboxd log file: {:?}", path))?;
+    let lines: Vec<&str> = content.lines().collect();
+    let start = lines.len().saturating_sub(max_lines);
+    Ok(Some(lines[start..].join("\n")))
+}
+
+fn syftboxd_debug_enabled() -> bool {
+    env::var_os("SYFTBOX_DEBUG_CRYPTO").is_some() || env::var_os("BV_SYFTBOXD_DEBUG").is_some()
+}
+
 pub fn is_syftboxd_running(config: &Config) -> Result<bool> {
     let pid_path = get_pid_file_path(config)?;
     if !pid_path.exists() {
@@ -88,7 +111,7 @@ fn check_process_running(pid: u32) -> Result<bool> {
             return Ok(false);
         }
 
-        let output = Command::new("ps")
+        let output = command("ps")
             .args(["-p", &pid.to_string(), "-o", "command="])
             .output()
             .context("Failed to run ps")?;
@@ -101,7 +124,7 @@ fn check_process_running(pid: u32) -> Result<bool> {
 
     #[cfg(windows)]
     {
-        let output = Command::new("tasklist")
+        let output = command("tasklist")
             .args(["/FI", &format!("PID eq {}", pid), "/NH", "/FO", "CSV"])
             .output()?;
         if !output.status.success() {
@@ -182,9 +205,30 @@ pub async fn start(config: &Config, foreground: bool) -> Result<()> {
 
         #[cfg(not(unix))]
         {
+            // On Windows, signal::ctrl_c() can fail with "The operation was canceled"
+            // when running without a console (e.g., spawned with CREATE_NO_WINDOW).
+            // We handle this by using a separate task for ctrl_c that won't panic on error.
+            let shutdown_signal = async {
+                match signal::ctrl_c().await {
+                    Ok(()) => {}
+                    Err(e) => {
+                        // On Windows without console, ctrl_c setup may fail.
+                        // Log and wait indefinitely (process will be killed externally).
+                        eprintln!(
+                            "Warning: ctrl_c handler error (expected in background mode): {}",
+                            e
+                        );
+                        // Wait forever - process will be terminated via taskkill
+                        std::future::pending::<()>().await;
+                    }
+                }
+            };
+
+            tokio::pin!(shutdown_signal);
+
             loop {
                 tokio::select! {
-                    _ = signal::ctrl_c() => break,
+                    _ = &mut shutdown_signal => break,
                     _ = tokio::time::sleep(Duration::from_secs(2)) => {
                         if !is_syftbox_running(&runtime).unwrap_or(false) {
                             let _ = start_syftbox(&runtime);
@@ -222,7 +266,7 @@ pub async fn start(config: &Config, foreground: bool) -> Result<()> {
 
     let pid_path = get_pid_file_path(config)?;
 
-    let mut child = Command::new(current_exe)
+    let mut child = command(current_exe)
         .args(["syftboxd", "start", "--foreground"])
         .env("BV_SYFTBOXD_CONFIG", config_json)
         .env(
@@ -240,28 +284,53 @@ pub async fn start(config: &Config, foreground: bool) -> Result<()> {
         .context("Failed to spawn syftboxd process")?;
 
     let pid = child.id();
-    tokio::time::sleep(Duration::from_millis(750)).await;
+    let wait_timeout = Duration::from_secs(5);
+    let poll_interval = Duration::from_millis(100);
+    let start_time = Instant::now();
 
-    match child.try_wait() {
-        Ok(Some(status)) => {
-            return Err(anyhow!(
-                "syftboxd exited immediately with status: {}",
-                status
-            ));
-        }
-        Ok(None) => {
-            if pid_path.exists() {
-                println!("✅ syftboxd started successfully (PID: {})", pid);
-            } else {
-                return Err(anyhow!("syftboxd started but PID file was not created"));
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                return Err(anyhow!(
+                    "syftboxd exited immediately with status: {}",
+                    status
+                ));
+            }
+            Ok(None) => {}
+            Err(e) => {
+                return Err(anyhow!("Failed to check syftboxd status: {}", e));
             }
         }
-        Err(e) => {
-            return Err(anyhow!("Failed to check syftboxd status: {}", e));
+
+        if pid_path.exists() {
+            println!("✅ syftboxd started successfully (PID: {})", pid);
+            return Ok(());
         }
+
+        if start_time.elapsed() >= wait_timeout {
+            break;
+        }
+
+        tokio::time::sleep(poll_interval).await;
     }
 
-    Ok(())
+    let mut details = format!(
+        "syftboxd started but PID file was not created within {:?} (pid_path={:?}, log_path={:?}, child_pid={})",
+        wait_timeout, pid_path, log_path, pid
+    );
+
+    if syftboxd_debug_enabled() {
+        if let Ok(Some(tail)) = tail_log(&log_path, 40) {
+            details.push_str("\n---- syftboxd log tail ----\n");
+            details.push_str(&tail);
+        }
+    } else {
+        details.push_str(
+            "\n(set BV_SYFTBOXD_DEBUG=1 or SYFTBOX_DEBUG_CRYPTO=1 for syftboxd log tail)",
+        );
+    }
+
+    Err(anyhow!(details))
 }
 
 pub async fn stop(config: &Config) -> Result<()> {
@@ -284,7 +353,7 @@ pub async fn stop(config: &Config) -> Result<()> {
 
     #[cfg(windows)]
     {
-        let output = Command::new("taskkill")
+        let output = command("taskkill")
             .args(["/F", "/PID", &pid.to_string()])
             .output()?;
         if !output.status.success() {
@@ -316,7 +385,7 @@ pub async fn logs(config: &Config, follow: bool, lines: Option<usize>) -> Result
     }
 
     if follow {
-        let mut child = Command::new("tail")
+        let mut child = command("tail")
             .args(["-f", &log_path.to_string_lossy()])
             .stdout(Stdio::piped())
             .spawn()
@@ -335,7 +404,7 @@ pub async fn logs(config: &Config, follow: bool, lines: Option<usize>) -> Result
         let _ = child.wait();
     } else {
         let tail_lines = lines.unwrap_or(50);
-        let output = Command::new("tail")
+        let output = command("tail")
             .args(["-n", &tail_lines.to_string(), &log_path.to_string_lossy()])
             .output()
             .context("Failed to read log file")?;

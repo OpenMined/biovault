@@ -1466,9 +1466,15 @@ pub async fn execute(params: RunParams) -> anyhow::Result<()> {
         return Err(Error::ModuleFolderMissing(params.module_folder.clone()).into());
     }
 
+<<<<<<< HEAD
     let module_yaml = module_path.join("module.yaml");
     if !module_yaml.exists() {
         return Err(Error::ModuleConfigMissing(params.module_folder.clone()).into());
+=======
+    let project_yaml = crate::project_spec::resolve_project_spec_path(&project_path);
+    if !project_yaml.exists() {
+        return Err(Error::ProjectConfigMissing(params.project_folder.clone()).into());
+>>>>>>> main
     }
 
     let workflow_file = module_path
@@ -1480,9 +1486,29 @@ pub async fn execute(params: RunParams) -> anyhow::Result<()> {
         return Err(Error::WorkflowMissing(params.module_folder.clone()).into());
     }
 
+<<<<<<< HEAD
     // Read module config
     let config_content = fs::read_to_string(&module_yaml).context("Failed to read module.yaml")?;
     let config = ModuleConfig::from_yaml(&config_content).context("Failed to parse module.yaml")?;
+=======
+    // Read project config
+    let config_content = fs::read_to_string(&project_yaml).context("Failed to read module spec")?;
+    let config: ProjectConfig =
+        match crate::spec_format::detect_spec_format(&project_yaml, &config_content) {
+            crate::spec_format::SpecFormat::Module => {
+                let spec = crate::project_spec::ProjectSpec::load(&project_yaml)?;
+                ProjectConfig {
+                    name: spec.name,
+                    author: spec.author,
+                    workflow: spec.workflow,
+                    template: spec.template,
+                    assets: spec.assets,
+                    participants: Vec::new(),
+                }
+            }
+            _ => serde_yaml::from_str(&config_content).context("Failed to parse project.yaml")?,
+        };
+>>>>>>> main
 
     // Check if this is a sheet template module
     let is_sheet_template = config
@@ -1510,7 +1536,11 @@ pub async fn execute(params: RunParams) -> anyhow::Result<()> {
         ensure_files_exist(&participant, params.download, &source, mock_key.as_deref()).await?;
 
     // Determine which template to use
+<<<<<<< HEAD
     // Priority: CLI flag > module.yaml > default
+=======
+    // Priority: CLI flag > module spec > default
+>>>>>>> main
     let template_name = params
         .template
         .or(config.runtime.clone())

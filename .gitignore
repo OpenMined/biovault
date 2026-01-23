@@ -226,8 +226,10 @@ test-clients-local/
 
 .syftbox_binary_path
 .DS_Store
+NUL
 cli/nextflow
 cli/test_project/*
+cli/examples/pipeline/count-lines/.biovault-runtime.config
 
 sandbox/*
 tests/scripts/sbdev

@@ -17,13 +17,13 @@ usage() {
 Usage: ./devstack.sh [--clients email1,email2] [--sandbox DIR] [--reset] [--stop] [--status]
 
 Starts or stops the SyftBox devstack (server + clients) without Docker using the
-sbdev tool from the syftbox submodule. Defaults to the sandbox clients already
+sbdev tool from the syftbox checkout. Defaults to the sandbox clients already
 used in the scenario tests.
 
 Options:
   --clients list   Comma-separated client emails (default: client1@sandbox.local,client2@sandbox.local)
   --sandbox DIR    Sandbox root path (default: ./sandbox)
-  --client-mode MODE  Client implementation: go|rust|mixed|embedded (default: go)
+  --client-mode MODE  Client implementation: go|rust|mixed|embedded (default: embedded; go disabled)
   --rust-client-bin PATH  Path to Rust syftbox client binary (default: syftbox/rust/target/release/syftbox-rs)
   --skip-rust-build Skip building the Rust client (assumes binary exists)
   --skip-client-daemons Do not launch syftbox client daemons (server+minio only; still writes per-client config.json)
@@ -35,16 +35,14 @@ Options:
   -h, --help       Show this message
 
 Environment (optional defaults when flags not provided):
-  BV_DEVSTACK_CLIENT_MODE      go|rust|mixed|embedded
+  BV_DEVSTACK_CLIENT_MODE      go|rust|mixed|embedded (go disabled)
   BV_DEVSTACK_RUST_CLIENT_BIN  Path to Rust client binary
   BV_DEVSTACK_SKIP_RUST_BUILD  Set to 1 to skip building Rust client
 EOF
 }
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-SYFTBOX_DIR="$ROOT_DIR/syftbox"
 SANDBOX_DIR="${SANDBOX_DIR:-$ROOT_DIR/sandbox}"
-GO_CACHE_DIR="$SYFTBOX_DIR/.gocache"
 ACTION="start"
 RESET_FLAG=0
 SKIP_SYNC_CHECK=0
@@ -147,6 +145,12 @@ if (( ! SKIP_RUST_BUILD )) && [[ "${BV_DEVSTACK_SKIP_RUST_BUILD:-0}" == "1" ]]; 
   SKIP_RUST_BUILD=1
 fi
 
+# Default to embedded mode if not specified
+if (( ! CLIENT_MODE_EXPLICIT )); then
+  CLIENT_MODE="embedded"
+  CLIENT_MODE_EXPLICIT=1
+fi
+
 abs_path() {
   python3 - <<'PY' "$1"
 import os, sys
@@ -155,6 +159,37 @@ PY
 }
 
 SANDBOX_DIR="$(abs_path "$SANDBOX_DIR")"
+
+resolve_syftbox_dir() {
+  local candidate
+
+  if [[ -n "${SYFTBOX_DIR:-}" ]]; then
+    echo "$(abs_path "$SYFTBOX_DIR")"
+    return 0
+  fi
+
+  candidate="$ROOT_DIR/syftbox"
+  if [[ -d "$candidate" ]]; then
+    echo "$(abs_path "$candidate")"
+    return 0
+  fi
+
+  local current="$ROOT_DIR"
+  while [[ "$current" != "/" ]]; do
+    if [[ -d "$current/.repo" || ( -d "$current/syftbox" && -d "$current/biovault" ) ]]; then
+      if [[ -d "$current/syftbox" ]]; then
+        echo "$(abs_path "$current/syftbox")"
+        return 0
+      fi
+    fi
+    current="$(dirname "$current")"
+  done
+
+  echo "$(abs_path "$candidate")"
+}
+
+SYFTBOX_DIR="$(resolve_syftbox_dir)"
+GO_CACHE_DIR="$SYFTBOX_DIR/.gocache"
 
 require_bin() {
   command -v "$1" >/dev/null 2>&1 || { echo "Missing required tool: $1" >&2; exit 1; }
@@ -202,14 +237,27 @@ fi
 BV_BIN="${BV_BIN:-$ROOT_DIR/cli/target/release/bv}"
 
 ensure_bv_binary() {
+  if [[ "${BV_FORCE_REBUILD:-1}" == "1" ]]; then
+    require_bin cargo
+    echo "Building BioVault CLI (release)..."
+    (cd "$ROOT_DIR/cli" && cargo build --release)
+    [[ -x "$BV_BIN" ]] || { echo "Failed to build BioVault CLI at $BV_BIN" >&2; exit 1; }
+    return 0
+  fi
   local cargo_toml="$ROOT_DIR/cli/Cargo.toml"
   local cargo_lock="$ROOT_DIR/cli/Cargo.lock"
   if [[ -x "$BV_BIN" ]]; then
+    local src_changed=0
     if [[ -f "$cargo_toml" && "$cargo_toml" -nt "$BV_BIN" ]]; then
-      :
+      src_changed=1
     elif [[ -f "$cargo_lock" && "$cargo_lock" -nt "$BV_BIN" ]]; then
-      :
-    else
+      src_changed=1
+    elif [[ -f "$ROOT_DIR/cli/build.rs" && "$ROOT_DIR/cli/build.rs" -nt "$BV_BIN" ]]; then
+      src_changed=1
+    elif find "$ROOT_DIR/cli/src" -type f -newer "$BV_BIN" -print -quit 2>/dev/null | grep -q .; then
+      src_changed=1
+    fi
+    if [[ "$src_changed" -eq 0 ]]; then
       return 0
     fi
   fi
@@ -331,13 +379,18 @@ start_syftboxd() {
     require_file "$config_path"
 
     echo "Starting syftboxd (embedded) for $email"
-    HOME="$client_dir" \
-    BIOVAULT_HOME="$client_dir/.biovault" \
-    SYFTBOX_EMAIL="$email" \
-    SYFTBOX_DATA_DIR="$data_dir" \
-    SYFTBOX_CONFIG_PATH="$config_path" \
-    BV_SYFTBOX_BACKEND=embedded \
-    "$BV_BIN" syftboxd start >/dev/null
+    # Redirect all output to prevent hanging (background process inherits file descriptors)
+    # Use a subshell to fully detach the background process's file descriptors
+    (
+      HOME="$client_dir" \
+      BIOVAULT_HOME="$client_dir/.biovault" \
+      SYFTBOX_EMAIL="$email" \
+      SYFTBOX_DATA_DIR="$data_dir" \
+      SYFTBOX_CONFIG_PATH="$config_path" \
+      SYC_VAULT="$data_dir/.syc" \
+      BV_SYFTBOX_BACKEND=embedded \
+      "$BV_BIN" syftboxd start </dev/null >/dev/null 2>&1
+    ) || true
   done
 }
 
@@ -363,13 +416,35 @@ start_stack() {
   # These will be inherited by the Go process and passed to spawned clients
   export GOCACHE="$GO_CACHE_DIR"
   [[ -n "${SCENARIO_JAVA_HOME:-}" ]] && export JAVA_HOME="$SCENARIO_JAVA_HOME" JAVA_CMD="$SCENARIO_JAVA_HOME/bin/java"
-  [[ -n "${SCENARIO_USER_PATH:-}" ]] && export PATH="$SCENARIO_USER_PATH"
+  [[ -n "${SCENARIO_USER_PATH:-}" ]] && export PATH="$SCENARIO_USER_PATH:$PATH"
   [[ -n "${NXF_DISABLE_JAVA_VERSION_CHECK:-}" ]] && export NXF_DISABLE_JAVA_VERSION_CHECK
   [[ -n "${NXF_IGNORE_JAVA_VERSION:-}" ]] && export NXF_IGNORE_JAVA_VERSION
   [[ -n "${NXF_OPTS:-}" ]] && export NXF_OPTS
 
   echo "Starting SyftBox devstack via syftbox/cmd/devstack..."
-  (cd "$SYFTBOX_DIR" && go run ./cmd/devstack start "${args[@]}")
+
+  # Note: Don't put the log file in SANDBOX_DIR - the devstack --reset flag deletes it!
+  # Use a temp file instead
+  local devstack_log
+  devstack_log="$(mktemp)"
+
+  # Run devstack command (redirect output to prevent pipe inheritance issues on Windows)
+  (
+    cd "$SYFTBOX_DIR" || exit 1
+    go run ./cmd/devstack start "${args[@]}"
+  ) > "$devstack_log" 2>&1 </dev/null
+  local exit_code=$?
+
+  if [[ $exit_code -ne 0 ]]; then
+    echo "Devstack command failed (exit $exit_code). Log:" >&2
+    cat "$devstack_log" >&2
+    rm -f "$devstack_log"
+    exit 1
+  fi
+
+  # Show the startup log and cleanup
+  cat "$devstack_log"
+  rm -f "$devstack_log"
 
   if (( EMBEDDED_MODE )); then
     local state_path="$SANDBOX_DIR/relay/state.json"

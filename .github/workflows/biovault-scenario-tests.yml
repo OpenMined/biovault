@@ -2,12 +2,17 @@ name: BioVault Scenario Tests
 
 on:
   pull_request:
+    branches: [main]
   push:
     branches: [main]
   schedule:
     - cron: '45 2 * * *'
   workflow_dispatch:
   workflow_call:
+
+concurrency:
+  group: biovault-scenario-tests-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   syqure-distributed:
@@ -28,6 +33,7 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Setup workspace dependencies
+        shell: bash
         run: |
           chmod +x scripts/setup-workspace.sh
           ./scripts/setup-workspace.sh
@@ -67,6 +73,7 @@ jobs:
 
       - name: Show logs on failure
         if: failure()
+        shell: bash
         run: |
           echo "=== Sandbox Directory Structure ==="
           find sandbox -type d -maxdepth 3 2>/dev/null || true
@@ -79,28 +86,70 @@ jobs:
 
       - name: Cleanup devstack
         if: always()
+        shell: bash
         run: |
           chmod +x ./tests/scripts/devstack.sh
           ./tests/scripts/devstack.sh --stop --reset || true
 
   # Commented out - only running syqure-distributed for now
   # run-scenarios:
-  #   runs-on: ubuntu-latest
+  #   runs-on: ${{ matrix.os == 'windows' && 'namespace-profile-windows-medium' || 'ubuntu-latest' }}
   #   strategy:
   #     fail-fast: false
   #     matrix:
-  #       client_mode: [go, rust]
-  #       scenario:
-  #         - tests/scenarios/import-and-run.yaml
-  #         - tests/scenarios/inbox-ping-pong.yaml
-  #         - tests/scenarios/messaging-core.yaml
-  #         - tests/scenarios/break-nextflow.yaml
-  #         - tests/scenarios/key-management.yaml
+  #       include:
+  #         - os: linux
+  #           client_mode: go
+  #           scenario: tests/scenarios/import-and-run.yaml
+  #           needs_container: true
+  #         - os: linux
+  #           client_mode: go
+  #           scenario: tests/scenarios/inbox-ping-pong.yaml
+  #           needs_container: true
+  #         - os: linux
+  #           client_mode: go
+  #           scenario: tests/scenarios/messaging-core.yaml
+  #           needs_container: false
+  #         - os: linux
+  #           client_mode: go
+  #           scenario: tests/scenarios/break-nextflow.yaml
+  #           needs_container: true
+  #         - os: linux
+  #           client_mode: go
+  #           scenario: tests/scenarios/key-management.yaml
+  #           needs_container: false
+  #         - os: windows
+  #           client_mode: go
+  #           scenario: tests/scenarios/import-and-run.yaml
+  #           needs_container: true
+  #         - os: windows
+  #           client_mode: go
+  #           scenario: tests/scenarios/inbox-ping-pong.yaml
+  #           needs_container: true
+  #         - os: windows
+  #           client_mode: go
+  #           scenario: tests/scenarios/messaging-core.yaml
+  #           needs_container: false
+  #         - os: windows
+  #           client_mode: go
+  #           scenario: tests/scenarios/break-nextflow.yaml
+  #           needs_container: true
+  #         - os: windows
+  #           client_mode: go
+  #           scenario: tests/scenarios/key-management.yaml
+  #           needs_container: false
   #
   #   steps:
   #     - uses: actions/checkout@v4
   #
+  #     - name: Setup Podman Hyper-V (Windows)
+  #       if: matrix.os == 'windows' && matrix.needs_container == true
+  #       shell: pwsh
+  #       run: |
+  #         # ... Windows Podman setup ...
+  #
   #     - name: Setup workspace dependencies
+  #       shell: bash
   #       run: |
   #         chmod +x scripts/setup-workspace.sh
   #         ./scripts/setup-workspace.sh
@@ -119,6 +168,7 @@ jobs:
   #
   #     - name: Install uv
   #       uses: astral-sh/setup-uv@v3
+  #
   #     - name: Install protoc
   #       uses: arduino/setup-protoc@v2
   #       with:
@@ -129,7 +179,9 @@ jobs:
   #       with:
   #         go-version-file: syftbox/go.mod
   #
-  #     - name: Install Nextflow
+  #     - name: Install Nextflow (Unix)
+  #       if: matrix.os != 'windows'
+  #       shell: bash
   #       run: |
   #         curl -fsSL https://get.nextflow.io | bash
   #         sudo mv nextflow /usr/local/bin/
@@ -139,20 +191,38 @@ jobs:
   #     - name: Build BioVault CLI
   #       run: cd cli && cargo build --release
   #
-  #     - name: Run scenario
+  #     - name: Run scenario (Unix)
+  #       if: matrix.os != 'windows'
+  #       shell: bash
   #       run: ./test-scenario.sh --client-mode ${{ matrix.client_mode }} ${{ matrix.scenario }}
+  #
+  #     - name: Run scenario (Windows Hyper-V)
+  #       if: matrix.os == 'windows' && matrix.needs_container == true
+  #       shell: pwsh
+  #       env:
+  #         CONTAINERS_MACHINE_PROVIDER: hyperv
+  #         BIOVAULT_CONTAINER_RUNTIME: podman
+  #         BIOVAULT_HYPERV_MOUNT: "1"
+  #       run: .\win.ps1 ./test-scenario.sh --client-mode ${{ matrix.client_mode }} ${{ matrix.scenario }}
+  #
+  #     - name: Run scenario (Windows)
+  #       if: matrix.os == 'windows' && matrix.needs_container != true
+  #       shell: pwsh
+  #       run: .\win.ps1 ./test-scenario.sh --client-mode ${{ matrix.client_mode }} ${{ matrix.scenario }}
   #
   #     - name: Show logs on failure
   #       if: failure()
+  #       shell: bash
   #       run: |
   #         echo "=== Sandbox Directory Structure ==="
-  #         find sandbox -type d -maxdepth 2 2>/dev/null || true
+  #         find sandbox -type d -maxdepth 3 2>/dev/null || true
   #         echo ""
   #         echo "=== Client Logs ==="
   #         find sandbox -name "*.log" -exec echo "--- {} ---" \; -exec cat {} \; 2>/dev/null || true
   #
   #     - name: Cleanup devstack
   #       if: always()
+  #       shell: bash
   #       run: |
   #         chmod +x ./tests/scripts/devstack.sh
   #         ./tests/scripts/devstack.sh --stop --reset || true

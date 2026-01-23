@@ -8,7 +8,6 @@ use anyhow::{Context, Result};
 use clap::Subcommand;
 use colored::Colorize;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 
 #[derive(Subcommand)]
 pub enum NetworkCommands {
@@ -101,13 +100,7 @@ fn scan_datasets(
     let datasites_dir = data_dir.join("datasites");
 
     // Resolve vault path for trusted contacts
-    let vault_path = std::env::var_os("SYC_VAULT")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            dirs::home_dir()
-                .map(|h| h.join(".syc"))
-                .unwrap_or_else(|| PathBuf::from(".syc"))
-        });
+    let vault_path = crate::config::resolve_syc_vault_path()?;
     let bundles_dir = vault_path.join("bundles");
 
     let mut datasets = Vec::new();
@@ -354,13 +347,7 @@ fn show_status(config: &Config, json_output: bool) -> Result<()> {
     let data_dir = config.get_syftbox_data_dir()?;
     let datasites_dir = data_dir.join("datasites");
 
-    let vault_path = std::env::var_os("SYC_VAULT")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            dirs::home_dir()
-                .map(|h| h.join(".syc"))
-                .unwrap_or_else(|| PathBuf::from(".syc"))
-        });
+    let vault_path = crate::config::resolve_syc_vault_path()?;
     let bundles_dir = vault_path.join("bundles");
 
     let mut datasites_count = 0;

@@ -24,6 +24,7 @@ fn validate_example_name(s: &str) -> Result<String, String> {
 mod tests {
     use super::*;
     use clap::Parser;
+    use std::sync::{Mutex, MutexGuard};
     use tempfile::TempDir;
 
     struct EnvVarGuard {
@@ -49,23 +50,43 @@ mod tests {
         }
     }
 
+    static TEST_ENV_MUTEX: Mutex<()> = Mutex::new(());
+
     struct TestHomeGuard {
         _temp: TempDir,
+        _env_guard: MutexGuard<'static, ()>,
+        _data_guard: EnvVarGuard,
+        _vault_guard: EnvVarGuard,
     }
 
     impl TestHomeGuard {
         fn new() -> Self {
+            let env_guard = TEST_ENV_MUTEX
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             let temp = TempDir::new().unwrap();
             let home = temp.path().join(".biovault");
             std::fs::create_dir_all(&home).unwrap();
             biovault::config::set_test_biovault_home(&home);
-            Self { _temp: temp }
+            let data_dir = temp.path().join("syftbox");
+            std::fs::create_dir_all(&data_dir).unwrap();
+            biovault::config::set_test_syftbox_data_dir(&data_dir);
+            let data_guard = EnvVarGuard::set("SYFTBOX_DATA_DIR", &data_dir.to_string_lossy());
+            let vault_guard =
+                EnvVarGuard::set("SYC_VAULT", &data_dir.join(".syc").to_string_lossy());
+            Self {
+                _temp: temp,
+                _env_guard: env_guard,
+                _data_guard: data_guard,
+                _vault_guard: vault_guard,
+            }
         }
     }
 
     impl Drop for TestHomeGuard {
         fn drop(&mut self) {
             biovault::config::clear_test_biovault_home();
+            biovault::config::clear_test_syftbox_data_dir();
         }
     }
 
@@ -791,8 +812,13 @@ enum FlowCommands {
         name: Option<String>,
 
         #[arg(
+<<<<<<< HEAD
             long = "use-module",
             help = "Module path or module.yaml to add as the first step (non-interactive)"
+=======
+            long = "use-project",
+            help = "Project path or module.yaml to add as the first step (non-interactive)"
+>>>>>>> main
         )]
         uses: Option<String>,
 
@@ -1800,8 +1826,8 @@ async fn async_main_with(cli: Cli) -> Result<()> {
         .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(filter_level)))
         .try_init();
 
-    // Ensure Syft Crypto uses the BioVault-managed vault path by default
-    biovault::config::ensure_syc_vault_env()?;
+    // Require a single explicit Syft Crypto vault path.
+    biovault::config::require_syc_vault_env()?;
 
     // Random version check on startup (10% chance)
     let _ = commands::update::check_and_notify_random().await;
@@ -1858,6 +1884,7 @@ async fn async_main_with(cli: Cli) -> Result<()> {
                     .await?;
                 return Ok(());
             }
+<<<<<<< HEAD
             // Check module template to determine which run system to use
             use std::path::Path;
             let module_path = Path::new(&module_folder);
@@ -1945,6 +1972,21 @@ async fn async_main_with(cli: Cli) -> Result<()> {
                         }
                     } else {
                         // Couldn't parse module.yaml, default to dynamic
+=======
+
+            // Check project template to determine which run system to use
+            use std::path::Path;
+            let project_path = Path::new(&project_folder);
+            let project_yaml_path = biovault::project_spec::resolve_project_spec_path(project_path);
+
+            if project_yaml_path.exists() {
+                // Read module/project spec to check template
+                if let Ok(project) = biovault::project_spec::ProjectSpec::load(&project_yaml_path) {
+                    let template = project.template.as_deref().unwrap_or("default");
+
+                    // Use dynamic run system for dynamic-nextflow template
+                    if template == "dynamic-nextflow" {
+>>>>>>> main
                         commands::run_dynamic::execute_dynamic(
                             &module_folder,
                             args,
@@ -1954,9 +1996,69 @@ async fn async_main_with(cli: Cli) -> Result<()> {
                             commands::run_dynamic::RunSettings::default(),
                         )
                         .await?;
+                    } else {
+                        // Use old run system for legacy templates (snp, sheet, default)
+                        // Parse args in old format: [participant_source, flags...]
+                        let mut participant_source = String::new();
+                        let mut test = false;
+                        let mut download = false;
+                        let mut with_docker = true; // default to true for backward compatibility
+                        let mut work_dir = None;
+                        let mut nextflow_args = Vec::new();
+                        let template_override = None;
+
+                        // Parse args: first arg is participant_source, rest are flags
+                        let mut i = 0;
+                        while i < args.len() {
+                            let arg = &args[i];
+                            if arg.starts_with("--") {
+                                match arg.as_str() {
+                                    "--test" => test = true,
+                                    "--download" => download = true,
+                                    "--with-docker" => with_docker = true,
+                                    "--no-docker" => with_docker = false,
+                                    "--work-dir" => {
+                                        if i + 1 < args.len() {
+                                            work_dir = Some(args[i + 1].clone());
+                                            i += 1;
+                                        }
+                                    }
+                                    _ => {
+                                        // Nextflow args
+                                        nextflow_args.push(arg.clone());
+                                        if !arg.starts_with("--") && i + 1 < args.len() {
+                                            nextflow_args.push(args[i + 1].clone());
+                                            i += 1;
+                                        }
+                                    }
+                                }
+                            } else if participant_source.is_empty() {
+                                participant_source = arg.clone();
+                            }
+                            i += 1;
+                        }
+
+                        commands::run::execute(commands::run::RunParams {
+                            project_folder: project_folder.clone(),
+                            participant_source,
+                            test,
+                            download,
+                            dry_run,
+                            with_docker,
+                            work_dir,
+                            resume,
+                            template: template_override,
+                            results_dir,
+                            nextflow_args,
+                        })
+                        .await?;
                     }
                 } else {
+<<<<<<< HEAD
                     // Couldn't read module.yaml, default to dynamic
+=======
+                    // Couldn't parse module spec, default to dynamic
+>>>>>>> main
                     commands::run_dynamic::execute_dynamic(
                         &module_folder,
                         args,
@@ -2514,7 +2616,15 @@ async fn async_main_with(cli: Cli) -> Result<()> {
             let config = if let Ok(config_json) = std::env::var("BV_SYFTBOXD_CONFIG") {
                 serde_json::from_str(&config_json)?
             } else {
-                biovault::config::Config::load()?
+                match biovault::config::Config::load() {
+                    Ok(config) => config,
+                    Err(biovault::error::Error::NotInitialized) => {
+                        let email = std::env::var("SYFTBOX_EMAIL")
+                            .map_err(|_| biovault::error::Error::NotInitialized)?;
+                        biovault::config::Config::new(email)
+                    }
+                    Err(err) => return Err(err.into()),
+                }
             };
 
             match command {

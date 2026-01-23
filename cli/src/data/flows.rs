@@ -4,7 +4,11 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 use super::BioVaultDb;
+<<<<<<< HEAD:cli/src/data/flows.rs
 use crate::flow_spec::FlowSpec;
+=======
+use crate::pipeline_spec::{resolve_pipeline_spec_path, PipelineSpec};
+>>>>>>> main:cli/src/data/pipelines.rs
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Flow {
@@ -63,6 +67,7 @@ impl BioVaultDb {
             })?
             .collect::<Result<Vec<_>, _>>()?;
 
+<<<<<<< HEAD:cli/src/data/flows.rs
         // Load spec from flow.yaml for each flow
         for flow in &mut flows {
             let yaml_path = PathBuf::from(&flow.flow_path).join("flow.yaml");
@@ -75,6 +80,21 @@ impl BioVaultDb {
                         eprintln!(
                             "Warning: Failed to parse flow.yaml for '{}': {}",
                             flow.name, e
+=======
+        // Load spec from flow.yaml/pipeline.yaml for each pipeline
+        for pipeline in &mut pipelines {
+            let yaml_path =
+                resolve_pipeline_spec_path(PathBuf::from(&pipeline.pipeline_path).as_path());
+            if yaml_path.exists() {
+                match PipelineSpec::load(&yaml_path) {
+                    Ok(spec) => {
+                        pipeline.spec = Some(spec);
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "Warning: Failed to parse flow spec for '{}': {}",
+                            pipeline.name, e
+>>>>>>> main:cli/src/data/pipelines.rs
                         );
                         eprintln!("  Path: {}", yaml_path.display());
                     }
@@ -107,6 +127,7 @@ impl BioVaultDb {
             .optional()?;
 
         // Load spec if found
+<<<<<<< HEAD:cli/src/data/flows.rs
         if let Some(mut f) = flow {
             let yaml_path = PathBuf::from(&f.flow_path).join("flow.yaml");
             if yaml_path.exists() {
@@ -116,6 +137,17 @@ impl BioVaultDb {
                     }
                     Err(e) => {
                         eprintln!("Warning: Failed to parse flow.yaml: {}", e);
+=======
+        if let Some(mut p) = pipeline {
+            let yaml_path = resolve_pipeline_spec_path(PathBuf::from(&p.pipeline_path).as_path());
+            if yaml_path.exists() {
+                match PipelineSpec::load(&yaml_path) {
+                    Ok(spec) => {
+                        p.spec = Some(spec);
+                    }
+                    Err(e) => {
+                        eprintln!("Warning: Failed to parse flow spec: {}", e);
+>>>>>>> main:cli/src/data/pipelines.rs
                         eprintln!("  Path: {}", yaml_path.display());
                     }
                 }

@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
 use std::fs;
@@ -5,6 +6,20 @@ use std::path::Path;
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
+
+use crate::module_spec::ModuleFile;
+use crate::spec_format::{detect_spec_format, SpecFormat};
+
+pub const MODULE_YAML_FILE: &str = "module.yaml";
+pub const PROJECT_YAML_FILE: &str = "project.yaml";
+
+pub fn resolve_project_spec_path(project_root: &Path) -> std::path::PathBuf {
+    let module_path = project_root.join(MODULE_YAML_FILE);
+    if module_path.exists() {
+        return module_path;
+    }
+    project_root.join(PROJECT_YAML_FILE)
+}
 
 macro_rules! wln {
     ($buf:expr) => {
@@ -18,10 +33,22 @@ macro_rules! wln {
 pub const MODULE_API_VERSION: &str = "syftbox.openmined.org/v1alpha1";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+=======
+use anyhow::{anyhow, Context, Result};
+use serde::{Deserialize, Serialize};
+use serde_yaml::Value as YamlValue;
+use std::collections::HashMap;
+
+use crate::project_spec::{InputSpec, OutputSpec, ParameterSpec, ProjectSpec};
+use crate::spec_format::FLOW_API_VERSION;
+
+#[derive(Debug, Serialize, Deserialize)]
+>>>>>>> main
 pub struct ModuleFile {
     #[serde(rename = "apiVersion")]
     pub api_version: String,
     pub kind: String,
+<<<<<<< HEAD
     pub metadata: ModuleFileMetadata,
     pub spec: ModuleFileSpec,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -74,10 +101,46 @@ pub struct ModuleFileSpec {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ModuleRunnerSpec {
+=======
+    pub metadata: ModuleMetadata,
+    pub spec: ModuleSpec,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ModuleMetadata {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authors: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ModuleSpec {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runner: Option<ModuleRunner>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inputs: Option<Vec<ModulePort>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outputs: Option<Vec<ModulePort>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parameters: Option<Vec<ModuleParameter>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assets: Option<Vec<ModuleAsset>>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ModuleRunner {
+>>>>>>> main
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub entrypoint: Option<String>,
+<<<<<<< HEAD
     #[serde(default, skip_serializing_if = "Option::is_none", alias = "template")]
     pub runtime: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -112,12 +175,21 @@ pub struct SyqureRunnerOptions {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ModuleFileInputSpec {
+=======
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ModulePort {
+>>>>>>> main
     pub name: String,
     #[serde(rename = "type")]
     pub raw_type: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+<<<<<<< HEAD
     pub format: Option<ModuleFileFormatSpec>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub optional: Option<bool>,
@@ -227,20 +299,39 @@ pub struct InputSpec {
     pub description: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub format: Option<String>,
+=======
+    pub format: Option<ModuleFormat>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub optional: Option<bool>,
+>>>>>>> main
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mapping: Option<HashMap<String, String>>,
 }
 
+<<<<<<< HEAD
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OutputSpec {
+=======
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ModuleFormat {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mapping: Option<HashMap<String, String>>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ModuleParameter {
+>>>>>>> main
     pub name: String,
     #[serde(rename = "type")]
     pub raw_type: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+<<<<<<< HEAD
     pub format: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
@@ -296,12 +387,59 @@ enum TypeExpr {
 impl ModuleSpec {
     pub fn load(path: &Path) -> Result<Self> {
         let raw = fs::read_to_string(path)
+<<<<<<<< HEAD:cli/src/module_spec.rs
             .with_context(|| format!("Failed to read module spec at {}", path.display()))?;
         let module = ModuleFile::parse_yaml(&raw)
             .with_context(|| format!("Failed to parse module spec at {}", path.display()))?;
         module
             .to_module_spec()
             .with_context(|| format!("Failed to convert module spec at {}", path.display()))
+========
+            .with_context(|| format!("Failed to read project spec at {}", path.display()))?;
+        Self::load_from_str(path, &raw)
+    }
+
+    /// Load from raw bytes (useful when reading from decrypted storage)
+    pub fn load_from_bytes(path: &Path, bytes: &[u8]) -> Result<Self> {
+        let raw = std::str::from_utf8(bytes)
+            .with_context(|| format!("Failed to read project spec at {}", path.display()))?;
+        Self::load_from_str(path, raw)
+    }
+
+    fn load_from_str(path: &Path, raw: &str) -> Result<Self> {
+        match detect_spec_format(path, raw) {
+            SpecFormat::Flow => {
+                return Err(anyhow!(
+                    "Detected Flow spec at {}. ProjectSpec loader does not support Flow.",
+                    path.display()
+                ));
+            }
+            SpecFormat::Module => {
+                let module = ModuleFile::parse_yaml(raw).with_context(|| {
+                    format!("Failed to parse module spec at {}", path.display())
+                })?;
+                return module.to_project_spec().with_context(|| {
+                    format!("Failed to convert module spec at {}", path.display())
+                });
+            }
+            SpecFormat::FlowOverlay => {
+                return Err(anyhow!(
+                    "Detected FlowOverlay spec at {}. ProjectSpec loader expects module.yaml.",
+                    path.display()
+                ));
+            }
+            SpecFormat::LegacyPipeline => {
+                return Err(anyhow!(
+                    "Detected legacy pipeline spec at {}. Expected module.yaml.",
+                    path.display()
+                ));
+            }
+            SpecFormat::LegacyProject | SpecFormat::Unknown => {}
+        }
+        let spec: ProjectSpec = serde_yaml::from_str(raw)
+            .with_context(|| format!("Failed to parse project spec at {}", path.display()))?;
+        Ok(spec)
+>>>>>>>> main:cli/src/project_spec.rs
     }
 }
 
@@ -334,6 +472,7 @@ pub fn scaffold_from_spec(mut spec: ModuleSpec, target_dir: &Path) -> Result<Mod
         .unwrap_or_else(|| "nextflow".to_string());
     spec.runtime = Some(runtime_name);
 
+<<<<<<<< HEAD:cli/src/module_spec.rs
     let module_yaml_path = target_dir.join("module.yaml");
     let workflow_path = target_dir.join(&spec.workflow);
     let assets_dir = target_dir.join("assets");
@@ -341,6 +480,15 @@ pub fn scaffold_from_spec(mut spec: ModuleSpec, target_dir: &Path) -> Result<Mod
     let module = ModuleFile::from_module_spec(&spec);
     let yaml = serde_yaml::to_string(&module).context("Failed to serialize module spec")?;
     fs::write(&module_yaml_path, yaml).context("Failed to write module.yaml")?;
+========
+    let project_yaml_path = target_dir.join(MODULE_YAML_FILE);
+    let workflow_path = target_dir.join(&spec.workflow);
+    let assets_dir = target_dir.join("assets");
+
+    let module = ModuleFile::from_project_spec(&spec);
+    let yaml = serde_yaml::to_string(&module).context("Failed to serialize module spec")?;
+    fs::write(&project_yaml_path, yaml).context("Failed to write module.yaml")?;
+>>>>>>>> main:cli/src/project_spec.rs
 
     if let Some(parent) = workflow_path.parent() {
         fs::create_dir_all(parent)
@@ -1119,6 +1267,14 @@ if __name__ == "__main__":
 "#,
         script_name = script_name
     )
+=======
+    pub default: Option<YamlValue>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ModuleAsset {
+    pub path: String,
+>>>>>>> main
 }
 
 impl ModuleFile {
@@ -1128,6 +1284,7 @@ impl ModuleFile {
         Ok(module)
     }
 
+<<<<<<< HEAD
     pub fn from_module_spec(spec: &ModuleSpec) -> Self {
         let authors = if spec.author.trim().is_empty() {
             Vec::new()
@@ -1279,10 +1436,38 @@ impl ModuleFile {
                 advanced: None,
             })
             .collect();
+=======
+    pub fn to_project_spec(&self) -> Result<ProjectSpec> {
+        if self.kind != "Module" {
+            return Err(anyhow!("Expected Module kind, got '{}'", self.kind));
+        }
+
+        let author = self
+            .metadata
+            .authors
+            .as_ref()
+            .and_then(|authors| authors.first().cloned())
+            .or_else(|| self.metadata.author.clone())
+            .unwrap_or_else(|| "unknown".to_string());
+
+        let workflow = self
+            .spec
+            .runner
+            .as_ref()
+            .and_then(|runner| runner.entrypoint.clone())
+            .unwrap_or_else(|| "workflow.nf".to_string());
+
+        let template = self
+            .spec
+            .runner
+            .as_ref()
+            .and_then(|runner| runner.template.clone());
+>>>>>>> main
 
         let assets = self
             .spec
             .assets
+<<<<<<< HEAD
             .clone()
             .unwrap_or_default()
             .into_iter()
@@ -1298,10 +1483,87 @@ impl ModuleFile {
             version: Some(self.metadata.version.clone()),
             datasites: None,
             env: runner.env.clone(),
+=======
+            .as_ref()
+            .map(|assets| assets.iter().map(|asset| asset.path.clone()).collect())
+            .unwrap_or_default();
+
+        let parameters = self
+            .spec
+            .parameters
+            .as_ref()
+            .map(|params| {
+                params
+                    .iter()
+                    .map(|param| ParameterSpec {
+                        name: param.name.clone(),
+                        raw_type: param.raw_type.clone(),
+                        description: param.description.clone(),
+                        default: param.default.clone(),
+                        choices: None,
+                        advanced: None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let inputs = self
+            .spec
+            .inputs
+            .as_ref()
+            .map(|inputs| {
+                inputs
+                    .iter()
+                    .map(|input| InputSpec {
+                        name: input.name.clone(),
+                        raw_type: normalize_optional_type(&input.raw_type, input.optional),
+                        description: input.description.clone(),
+                        format: input.format.as_ref().and_then(|format| format.kind.clone()),
+                        path: input.path.clone(),
+                        mapping: input.mapping.clone().or_else(|| {
+                            input
+                                .format
+                                .as_ref()
+                                .and_then(|format| format.mapping.clone())
+                        }),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let outputs = self
+            .spec
+            .outputs
+            .as_ref()
+            .map(|outputs| {
+                outputs
+                    .iter()
+                    .map(|output| OutputSpec {
+                        name: output.name.clone(),
+                        raw_type: normalize_optional_type(&output.raw_type, output.optional),
+                        description: output.description.clone(),
+                        format: output
+                            .format
+                            .as_ref()
+                            .and_then(|format| format.kind.clone()),
+                        path: output.path.clone(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        Ok(ProjectSpec {
+            name: self.metadata.name.clone(),
+            author,
+            workflow,
+            template,
+            version: self.metadata.version.clone(),
+>>>>>>> main
             assets,
             parameters,
             inputs,
             outputs,
+<<<<<<< HEAD
             steps: Vec::new(),
             runner: Some(runner),
         })
@@ -1382,12 +1644,123 @@ pub fn scaffold_blank_module(
         updated_spec.assets = vec![script_filename.to_string()];
 
         // Update module.yaml with assets
+<<<<<<<< HEAD:cli/src/module_spec.rs
         let module_yaml_path = target_dir.join("module.yaml");
         let module = ModuleFile::from_module_spec(&updated_spec);
         let yaml =
             serde_yaml::to_string(&module).context("Failed to serialize updated module spec")?;
         fs::write(&module_yaml_path, yaml).context("Failed to update module.yaml with assets")?;
+========
+        let project_yaml_path = target_dir.join(MODULE_YAML_FILE);
+        let module = ModuleFile::from_project_spec(&updated_spec);
+        let yaml =
+            serde_yaml::to_string(&module).context("Failed to serialize updated module spec")?;
+        fs::write(&project_yaml_path, yaml).context("Failed to update module.yaml with assets")?;
+>>>>>>>> main:cli/src/project_spec.rs
     }
 
     Ok(updated_spec)
+=======
+        })
+    }
+
+    pub fn from_project_spec(spec: &ProjectSpec) -> ModuleFile {
+        let inputs = spec
+            .inputs
+            .iter()
+            .map(module_port_from_input)
+            .collect::<Vec<_>>();
+        let outputs = spec
+            .outputs
+            .iter()
+            .map(module_port_from_output)
+            .collect::<Vec<_>>();
+        let parameters = spec
+            .parameters
+            .iter()
+            .map(|param| ModuleParameter {
+                name: param.name.clone(),
+                raw_type: param.raw_type.clone(),
+                description: param.description.clone(),
+                default: param.default.clone(),
+            })
+            .collect::<Vec<_>>();
+        let assets = spec
+            .assets
+            .iter()
+            .map(|path| ModuleAsset { path: path.clone() })
+            .collect::<Vec<_>>();
+
+        ModuleFile {
+            api_version: FLOW_API_VERSION.to_string(),
+            kind: "Module".to_string(),
+            metadata: ModuleMetadata {
+                name: spec.name.clone(),
+                version: spec.version.clone().or_else(|| Some("0.1.0".to_string())),
+                description: None,
+                authors: Some(vec![spec.author.clone()]),
+                author: None,
+            },
+            spec: ModuleSpec {
+                runner: Some(ModuleRunner {
+                    kind: Some("nextflow".to_string()),
+                    entrypoint: Some(spec.workflow.clone()),
+                    template: spec.template.clone(),
+                }),
+                inputs: Some(inputs),
+                outputs: Some(outputs),
+                parameters: Some(parameters),
+                assets: Some(assets),
+            },
+        }
+    }
+}
+
+fn normalize_optional_type(raw_type: &str, optional: Option<bool>) -> String {
+    if optional.unwrap_or(false) && !raw_type.ends_with('?') {
+        format!("{}?", raw_type)
+    } else {
+        raw_type.to_string()
+    }
+}
+
+fn module_port_from_input(input: &InputSpec) -> ModulePort {
+    let (raw_type, optional) = split_optional_type(&input.raw_type);
+    ModulePort {
+        name: input.name.clone(),
+        raw_type,
+        description: input.description.clone(),
+        format: input.format.as_ref().map(|kind| ModuleFormat {
+            kind: Some(kind.clone()),
+            mapping: input.mapping.clone(),
+        }),
+        optional,
+        path: input.path.clone(),
+        mapping: None,
+    }
+}
+
+fn module_port_from_output(output: &OutputSpec) -> ModulePort {
+    let (raw_type, optional) = split_optional_type(&output.raw_type);
+    ModulePort {
+        name: output.name.clone(),
+        raw_type,
+        description: output.description.clone(),
+        format: output.format.as_ref().map(|kind| ModuleFormat {
+            kind: Some(kind.clone()),
+            mapping: None,
+        }),
+        optional,
+        path: output.path.clone(),
+        mapping: None,
+    }
+}
+
+fn split_optional_type(raw_type: &str) -> (String, Option<bool>) {
+    if let Some(stripped) = raw_type.strip_suffix('?') {
+        (stripped.to_string(), Some(true))
+    } else {
+        (raw_type.to_string(), None)
+    }
+>>>>>>> main
 }

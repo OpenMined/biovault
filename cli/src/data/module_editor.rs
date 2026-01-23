@@ -4,8 +4,15 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
 
+<<<<<<< HEAD:cli/src/data/module_editor.rs
 use crate::module_spec::{InputSpec, ModuleSpec, OutputSpec, ParameterSpec};
 use crate::types::ModuleYaml;
+=======
+use crate::module_spec::ModuleFile;
+use crate::project_spec::{
+    resolve_project_spec_path, InputSpec, OutputSpec, ParameterSpec, ProjectSpec, MODULE_YAML_FILE,
+};
+>>>>>>> main:cli/src/data/project_editor.rs
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModuleMetadata {
@@ -34,8 +41,13 @@ pub struct ModuleFileNode {
     pub children: Vec<ModuleFileNode>,
 }
 
+<<<<<<< HEAD:cli/src/data/module_editor.rs
 pub fn load_module_metadata(module_root: &Path) -> Result<Option<ModuleMetadata>> {
     let yaml_path = module_root.join("module.yaml");
+=======
+pub fn load_project_metadata(project_root: &Path) -> Result<Option<ProjectMetadata>> {
+    let yaml_path = resolve_project_spec_path(project_root);
+>>>>>>> main:cli/src/data/project_editor.rs
     if !yaml_path.exists() {
         return Ok(None);
     }
@@ -56,8 +68,13 @@ pub fn load_module_metadata(module_root: &Path) -> Result<Option<ModuleMetadata>
     }))
 }
 
+<<<<<<< HEAD:cli/src/data/module_editor.rs
 pub fn save_module_metadata(module_root: &Path, metadata: &ModuleMetadata) -> Result<()> {
     let yaml_path = module_root.join("module.yaml");
+=======
+pub fn save_project_metadata(project_root: &Path, metadata: &ProjectMetadata) -> Result<()> {
+    let yaml_path = project_root.join(MODULE_YAML_FILE);
+>>>>>>> main:cli/src/data/project_editor.rs
     let mut assets: Vec<String> = metadata
         .assets
         .iter()
@@ -88,7 +105,11 @@ pub fn save_module_metadata(module_root: &Path, metadata: &ModuleMetadata) -> Re
         runner: None,
     };
 
+<<<<<<< HEAD:cli/src/data/module_editor.rs
     let module = crate::module_spec::ModuleFile::from_module_spec(&spec);
+=======
+    let module = ModuleFile::from_project_spec(&spec);
+>>>>>>> main:cli/src/data/project_editor.rs
     let yaml_str = serde_yaml::to_string(&module)
         .with_context(|| format!("Failed to serialize {}", yaml_path.display()))?;
     fs::write(&yaml_path, yaml_str)
@@ -97,8 +118,13 @@ pub fn save_module_metadata(module_root: &Path, metadata: &ModuleMetadata) -> Re
     Ok(())
 }
 
+<<<<<<< HEAD:cli/src/data/module_editor.rs
 pub fn module_yaml_hash(module_root: &Path) -> Result<Option<String>> {
     let yaml_path = module_root.join("module.yaml");
+=======
+pub fn project_yaml_hash(project_root: &Path) -> Result<Option<String>> {
+    let yaml_path = resolve_project_spec_path(project_root);
+>>>>>>> main:cli/src/data/project_editor.rs
     if !yaml_path.exists() {
         return Ok(None);
     }
@@ -173,8 +199,13 @@ pub fn build_module_file_tree(module_root: &Path) -> Result<Vec<ModuleFileNode>>
                     is_dir: true,
                     children,
                 });
+<<<<<<< HEAD:cli/src/data/module_editor.rs
             } else if name != "module.yaml" {
                 entries.push(ModuleFileNode {
+=======
+            } else if name != MODULE_YAML_FILE {
+                entries.push(ProjectFileNode {
+>>>>>>> main:cli/src/data/project_editor.rs
                     name,
                     path: relative,
                     is_dir: false,
@@ -257,7 +288,11 @@ mod tests {
         assert_eq!(digest.len(), 64);
 
         // Modify file to ensure hash changes
+<<<<<<< HEAD:cli/src/data/module_editor.rs
         let yaml_path = root.join("module.yaml");
+=======
+        let yaml_path = root.join(MODULE_YAML_FILE);
+>>>>>>> main:cli/src/data/project_editor.rs
         let mut yaml = std::fs::read_to_string(&yaml_path).unwrap();
         yaml.push_str("# comment\n");
         std::fs::write(&yaml_path, yaml).unwrap();
@@ -271,7 +306,11 @@ mod tests {
     fn build_tree_skips_module_yaml() {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
+<<<<<<< HEAD:cli/src/data/module_editor.rs
         fs::write(root.join("module.yaml"), "name: test").unwrap();
+=======
+        fs::write(root.join(MODULE_YAML_FILE), "name: test").unwrap();
+>>>>>>> main:cli/src/data/project_editor.rs
         fs::write(root.join("workflow.nf"), "// workflow").unwrap();
         fs::create_dir_all(root.join("bioscript")).unwrap();
         fs::write(root.join("bioscript/lib.rs"), "").unwrap();

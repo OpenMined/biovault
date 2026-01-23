@@ -1,0 +1,38 @@
+apiVersion: syftbox.openmined.org/v1alpha1
+kind: Module
+metadata:
+  name: pipeline-filter-samples
+  version: 0.1.0
+  authors:
+    - madhava@openmined.org
+spec:
+  runner:
+    kind: nextflow
+    entrypoint: workflow.nf
+    template: dynamic-nextflow
+  assets:
+    - path: filter_samples.py
+  parameters:
+    - name: extension
+      type: String
+      description: File extension to retain (e.g., .txt, .tsv)
+      default: .txt
+  inputs:
+    - name: samplesheet
+      type: File
+      description: Samplesheet CSV listing per-participant file paths
+      format:
+        kind: csv
+    - name: data_dir
+      type: Directory
+      description: Base directory containing files referenced by the samplesheet
+  outputs:
+    - name: filtered_sheet
+      type: File
+      description: Samplesheet filtered to rows matching the extension
+      format:
+        kind: csv
+      path: filtered_samplesheet.csv
+    - name: filtered_data_dir
+      type: Directory
+      description: Forwarded data directory for downstream steps

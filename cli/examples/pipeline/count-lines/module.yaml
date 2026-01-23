@@ -7,11 +7,19 @@ metadata:
     - madhava@openmined.org
 spec:
   runner:
+<<<<<<< HEAD
     template: dynamic-nextflow
     entrypoint: workflow.nf
   assets:
     - path: count_lines.py
   parameters: []
+=======
+    kind: nextflow
+    entrypoint: workflow.nf
+    template: dynamic-nextflow
+  assets:
+    - path: count_lines.py
+>>>>>>> main
   inputs:
     - name: samplesheet
       type: File
@@ -31,3 +39,7 @@ spec:
     - name: data_dir
       type: Directory
       description: Forwarded data directory for downstream steps
+<<<<<<< HEAD
+=======
+  parameters: []
+>>>>>>> main

@@ -1,16 +1,28 @@
 use crate::cli::examples;
 use crate::config;
+<<<<<<< HEAD:cli/src/cli/commands/module_management.rs
 use crate::data::{BioVaultDb, Module, ModuleYaml};
 use crate::error::Result;
 use crate::flow_spec::FlowSpec;
+=======
+use crate::data::{BioVaultDb, Project};
+use crate::error::Result;
+use crate::flow_spec::{FlowFile, FlowModuleSource, FlowUses};
+use crate::module_spec::{ModuleFile, ModuleRunner};
+>>>>>>> main:cli/src/cli/commands/project_management.rs
 use anyhow::Context;
 use colored::Colorize;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 // Standard filenames - can be made configurable in the future
+<<<<<<< HEAD:cli/src/cli/commands/module_management.rs
 const MODULE_YAML_FILE: &str = "module.yaml";
 const FLOW_YAML_FILE: &str = "flow.yaml";
+=======
+const PROJECT_YAML_FILE: &str = "module.yaml";
+const PIPELINE_YAML_FILE: &str = "flow.yaml";
+>>>>>>> main:cli/src/cli/commands/project_management.rs
 
 /// Import a module from URL or register a local module directory
 pub async fn import(
@@ -201,6 +213,7 @@ pub fn create_module_record(
                 .context("Failed to scaffold dynamic-nextflow module")?;
         }
 
+<<<<<<< HEAD:cli/src/cli/commands/module_management.rs
         let yaml_path = module_dir.join(MODULE_YAML_FILE);
         let yaml_str = fs::read_to_string(&yaml_path).context("Failed to read module.yaml")?;
 
@@ -247,10 +260,88 @@ pub fn create_module_record(
             _ => {
                 runner.runtime = Some(template_field.clone());
             }
+=======
+        let yaml_path = project_dir.join(PROJECT_YAML_FILE);
+        let yaml_str = fs::read_to_string(&yaml_path).context("Failed to read module.yaml")?;
+
+        let mut module = ModuleFile::parse_yaml(&yaml_str).context("Invalid module.yaml format")?;
+        module.metadata.name = project_name_owned.clone();
+
+        if !email_trimmed.is_empty() {
+            module.metadata.authors = Some(vec![email_trimmed.clone()]);
+            module.metadata.author = None;
+>>>>>>> main:cli/src/cli/commands/project_management.rs
         }
 
+        if module
+            .metadata
+            .version
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .is_none()
+        {
+            module.metadata.version = Some("0.1.0".to_string());
+        }
+
+        let template_default = example
+            .clone()
+            .unwrap_or_else(|| "dynamic-nextflow".to_string());
+
+        let runner = module.spec.runner.get_or_insert(ModuleRunner {
+            kind: Some("nextflow".to_string()),
+            entrypoint: Some("workflow.nf".to_string()),
+            template: Some(template_default.clone()),
+        });
+
+        if runner
+            .entrypoint
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .is_none()
+        {
+            runner.entrypoint = Some("workflow.nf".to_string());
+        }
+
+        if runner
+            .template
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .is_none()
+        {
+            runner.template = Some(template_default.clone());
+        }
+
+        let author_field = module
+            .metadata
+            .authors
+            .as_ref()
+            .and_then(|authors| authors.first().cloned())
+            .or_else(|| module.metadata.author.clone())
+            .unwrap_or_else(|| "unknown".to_string());
+
+        let workflow_field = runner
+            .entrypoint
+            .clone()
+            .unwrap_or_else(|| "workflow.nf".to_string());
+        let template_field = runner
+            .template
+            .clone()
+            .unwrap_or_else(|| "default".to_string());
+        let version_field = module
+            .metadata
+            .version
+            .clone()
+            .unwrap_or_else(|| "0.1.0".to_string());
+
         let updated_yaml =
+<<<<<<< HEAD:cli/src/cli/commands/module_management.rs
             serde_yaml::to_string(&module_file).context("Failed to serialize module.yaml")?;
+=======
+            serde_yaml::to_string(&module).context("Failed to serialize module.yaml")?;
+>>>>>>> main:cli/src/cli/commands/project_management.rs
         fs::write(&yaml_path, updated_yaml).context("Failed to update module.yaml")?;
 
         db.register_module(
@@ -304,20 +395,34 @@ async fn import_from_url(
     let yaml_content = download_file(&raw_url).await?;
     let yaml_str = String::from_utf8(yaml_content).context("Invalid UTF-8 in module.yaml")?;
 
+<<<<<<< HEAD:cli/src/cli/commands/module_management.rs
     // Parse module.yaml
     let module_yaml = ModuleYaml::from_str(&yaml_str).context("Failed to parse module.yaml")?;
 
     let module_name = name_override.unwrap_or(module_yaml.name.clone());
+=======
+    let module_info = module_info_from_str(&yaml_str).context("Failed to parse module.yaml")?;
+
+    let project_name = name_override.unwrap_or_else(|| module_info.name.clone());
+>>>>>>> main:cli/src/cli/commands/project_management.rs
 
     // Create module directory path (including version to allow multiple versions)
     let biovault_home = config::get_biovault_home()?;
+<<<<<<< HEAD:cli/src/cli/commands/module_management.rs
     let modules_dir = biovault_home.join("modules");
     fs::create_dir_all(&modules_dir)?;
     let dir_name = format!("{}-{}", module_name, module_yaml.version);
     let module_dir = modules_dir.join(&dir_name);
+=======
+    let projects_dir = biovault_home.join("projects");
+    fs::create_dir_all(&projects_dir)?;
+    let dir_name = format!("{}-{}", project_name, module_info.version);
+    let project_dir = projects_dir.join(&dir_name);
+>>>>>>> main:cli/src/cli/commands/project_management.rs
 
     // Check if module already exists in DB (with this exact version)
     if !overwrite {
+<<<<<<< HEAD:cli/src/cli/commands/module_management.rs
         let identifier = format!("{}@{}", module_name, module_yaml.version);
         if let Some(mut existing) = db.get_module(&identifier)? {
             // Module with this version exists in DB - check if files are valid
@@ -328,6 +433,18 @@ async fn import_from_url(
                 // Valid module exists - check if path needs updating to new convention
                 let expected_dir_name = format!("{}-{}", module_name, module_yaml.version);
                 let expected_path = modules_dir.join(&expected_dir_name);
+=======
+        let identifier = format!("{}@{}", project_name, module_info.version);
+        if let Some(mut existing) = db.get_project(&identifier)? {
+            // Project with this version exists in DB - check if files are valid
+            let existing_path = PathBuf::from(&existing.project_path);
+            let existing_yaml = existing_path.join(PROJECT_YAML_FILE);
+
+            if existing_yaml.exists() && existing_path.is_dir() {
+                // Valid project exists - check if path needs updating to new convention
+                let expected_dir_name = format!("{}-{}", project_name, module_info.version);
+                let expected_path = projects_dir.join(&expected_dir_name);
+>>>>>>> main:cli/src/cli/commands/project_management.rs
 
                 if existing_path != expected_path && !existing_path.ends_with(&expected_dir_name) {
                     // Path is in old format (without version) - migrate to new format
@@ -353,12 +470,21 @@ async fn import_from_url(
                     }
 
                     // Update DB with new path
+<<<<<<< HEAD:cli/src/cli/commands/module_management.rs
                     db.update_module(
                         &module_name,
                         &module_yaml.version,
                         &module_yaml.author,
                         &module_yaml.workflow,
                         &module_yaml.template,
+=======
+                    db.update_project(
+                        &project_name,
+                        &module_info.version,
+                        &module_info.author,
+                        &module_info.workflow,
+                        &module_info.template,
+>>>>>>> main:cli/src/cli/commands/project_management.rs
                         &expected_path,
                     )?;
 
@@ -369,9 +495,15 @@ async fn import_from_url(
                 // Reuse existing valid module (idempotent)
                 if !quiet {
                     println!(
+<<<<<<< HEAD:cli/src/cli/commands/module_management.rs
                         "   ℹ️  Module '{}' version {} already registered, reusing (id: {})",
                         module_name.dimmed(),
                         module_yaml.version.dimmed(),
+=======
+                        "   ℹ️  Project '{}' version {} already registered, reusing (id: {})",
+                        project_name.dimmed(),
+                        module_info.version.dimmed(),
+>>>>>>> main:cli/src/cli/commands/project_management.rs
                         existing.id
                     );
                 }
@@ -380,9 +512,15 @@ async fn import_from_url(
                 // Module DB record exists but files are missing/invalid - clean it up
                 if !quiet {
                     println!(
+<<<<<<< HEAD:cli/src/cli/commands/module_management.rs
                         "   🧹 Cleaning up orphaned module record for '{}@{}'",
                         module_name.dimmed(),
                         module_yaml.version.dimmed()
+=======
+                        "   🧹 Cleaning up orphaned project record for '{}@{}'",
+                        project_name.dimmed(),
+                        module_info.version.dimmed()
+>>>>>>> main:cli/src/cli/commands/project_management.rs
                     );
                 }
                 db.delete_module(&identifier)?;
@@ -410,7 +548,11 @@ async fn import_from_url(
     fs::create_dir_all(&module_dir)?;
 
     // Save module.yaml
+<<<<<<< HEAD:cli/src/cli/commands/module_management.rs
     let yaml_path = module_dir.join(MODULE_YAML_FILE);
+=======
+    let yaml_path = project_dir.join(PROJECT_YAML_FILE);
+>>>>>>> main:cli/src/cli/commands/project_management.rs
     fs::write(&yaml_path, yaml_str)?;
 
     if !quiet {
@@ -423,6 +565,7 @@ async fn import_from_url(
         .map(|(base, _)| base)
         .ok_or_else(|| anyhow::anyhow!("Invalid URL format"))?;
 
+<<<<<<< HEAD:cli/src/cli/commands/module_management.rs
     let workflow_url = format!("{}/{}", base_url, module_yaml.workflow);
 
     if !quiet {
@@ -450,13 +593,44 @@ async fn import_from_url(
 
         for asset in &module_yaml.assets {
             let asset_url = format!("{}/{}", assets_url, asset);
+=======
+    let workflow_url = format!("{}/{}", base_url, module_info.workflow);
+
+    if !quiet {
+        println!("📄 Downloading {}...", module_info.workflow);
+    }
+
+    let workflow_content = download_file(&workflow_url).await?;
+    let workflow_path = project_dir.join(&module_info.workflow);
+    if let Some(parent) = workflow_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&workflow_path, workflow_content)?;
+
+    if !quiet {
+        println!("✓ Saved {}", module_info.workflow);
+    }
+
+    // Download assets
+    if !module_info.assets.is_empty() {
+        let assets_dir = project_dir.join("assets");
+        fs::create_dir_all(&assets_dir)?;
+
+        if !quiet {
+            println!("📦 Downloading {} assets...", module_info.assets.len());
+        }
+
+        for asset in &module_info.assets {
+            let asset_rel = asset.strip_prefix("assets/").unwrap_or(asset);
+            let asset_url = format!("{}/assets/{}", base_url, asset_rel);
+>>>>>>> main:cli/src/cli/commands/project_management.rs
 
             if !quiet {
                 println!("  - {}", asset);
             }
 
             let asset_content = download_file(&asset_url).await?;
-            let asset_path = assets_dir.join(asset);
+            let asset_path = assets_dir.join(asset_rel);
 
             // Create parent directories if asset has a path
             if let Some(parent) = asset_path.parent() {
@@ -474,6 +648,7 @@ async fn import_from_url(
     // Register in database
     if overwrite {
         // Check if this exact version exists
+<<<<<<< HEAD:cli/src/cli/commands/module_management.rs
         let identifier = format!("{}@{}", module_name, module_yaml.version);
         if db.get_module(&identifier)?.is_some() {
             db.update_module(
@@ -502,6 +677,36 @@ async fn import_from_url(
             &module_yaml.workflow,
             &module_yaml.template,
             &module_dir,
+=======
+        let identifier = format!("{}@{}", project_name, module_info.version);
+        if db.get_project(&identifier)?.is_some() {
+            db.update_project(
+                &project_name,
+                &module_info.version,
+                &module_info.author,
+                &module_info.workflow,
+                &module_info.template,
+                &project_dir,
+            )?;
+        } else {
+            db.register_project(
+                &project_name,
+                &module_info.version,
+                &module_info.author,
+                &module_info.workflow,
+                &module_info.template,
+                &project_dir,
+            )?;
+        }
+    } else {
+        db.register_project(
+            &project_name,
+            &module_info.version,
+            &module_info.author,
+            &module_info.workflow,
+            &module_info.template,
+            &project_dir,
+>>>>>>> main:cli/src/cli/commands/project_management.rs
         )?;
     }
 
@@ -512,7 +717,146 @@ async fn import_from_url(
     Ok(module)
 }
 
+<<<<<<< HEAD:cli/src/cli/commands/module_management.rs
 /// Copy a local module to the managed directory (~/.biovault/modules/)
+=======
+struct ModuleInfo {
+    name: String,
+    version: String,
+    author: String,
+    workflow: String,
+    template: String,
+    assets: Vec<String>,
+}
+
+fn module_info_from_str(raw: &str) -> Result<ModuleInfo> {
+    let module = ModuleFile::parse_yaml(raw)?;
+    let spec = module.to_project_spec()?;
+    Ok(ModuleInfo {
+        name: spec.name,
+        version: spec.version.unwrap_or_else(|| "0.1.0".to_string()),
+        author: spec.author,
+        workflow: spec.workflow,
+        template: spec.template.unwrap_or_else(|| "default".to_string()),
+        assets: spec.assets,
+    })
+}
+
+enum ModuleImportSource {
+    Local { module_dir: PathBuf },
+    Url { url: String },
+}
+
+impl ModuleImportSource {
+    fn cache_key(&self) -> String {
+        match self {
+            ModuleImportSource::Local { module_dir } => module_dir
+                .canonicalize()
+                .unwrap_or_else(|_| module_dir.clone())
+                .to_string_lossy()
+                .to_string(),
+            ModuleImportSource::Url { url } => url.clone(),
+        }
+    }
+}
+
+fn resolve_module_source(
+    source: &FlowModuleSource,
+    dependency_context: &DependencyContext,
+    module_hint: &str,
+    step_id: &str,
+    db: &BioVaultDb,
+    quiet: bool,
+) -> Result<Option<ModuleImportSource>> {
+    use colored::Colorize;
+
+    if let Some(url) = source.url.as_deref() {
+        return Ok(Some(ModuleImportSource::Url {
+            url: ensure_module_yaml_url(url),
+        }));
+    }
+
+    if let Some(path) = source.path.as_deref() {
+        return match dependency_context {
+            DependencyContext::GitHub { base_url } => {
+                let trimmed = path.trim_start_matches('/');
+                let url = ensure_module_yaml_url(&format!("{}/{}", base_url, trimmed));
+                Ok(Some(ModuleImportSource::Url { url }))
+            }
+            DependencyContext::Local { base_path } => {
+                let path_buf = if Path::new(path).is_absolute() {
+                    if !quiet {
+                        println!(
+                            "   {} Step '{}' uses absolute path (keeping as-is)",
+                            "ℹ️ ".cyan(),
+                            step_id.dimmed()
+                        );
+                    }
+                    return Ok(None);
+                } else {
+                    base_path.join(path)
+                };
+
+                let module_yaml_path = if path_buf.is_dir() {
+                    path_buf.join(PROJECT_YAML_FILE)
+                } else if path_buf
+                    .extension()
+                    .map(|e| e == "yaml" || e == "yml")
+                    .unwrap_or(false)
+                {
+                    path_buf.clone()
+                } else {
+                    path_buf.join(PROJECT_YAML_FILE)
+                };
+
+                if module_yaml_path.exists() {
+                    let module_dir = if path_buf.is_dir() {
+                        path_buf
+                    } else {
+                        module_yaml_path.parent().unwrap_or(base_path).to_path_buf()
+                    };
+                    return Ok(Some(ModuleImportSource::Local { module_dir }));
+                }
+
+                if db.get_project(module_hint).ok().flatten().is_some() {
+                    if !quiet {
+                        println!(
+                            "   {} Step '{}' uses registered name '{}' (keeping as-is)",
+                            "ℹ️ ".cyan(),
+                            step_id.dimmed(),
+                            module_hint
+                        );
+                    }
+                    return Ok(None);
+                }
+
+                Err(anyhow::anyhow!("Cannot resolve module source for '{}'", module_hint).into())
+            }
+        };
+    }
+
+    if let Some(reference) = source.reference.as_deref() {
+        if reference.starts_with("http://") || reference.starts_with("https://") {
+            return Ok(Some(ModuleImportSource::Url {
+                url: ensure_module_yaml_url(reference),
+            }));
+        }
+    }
+
+    Ok(None)
+}
+
+fn ensure_module_yaml_url(raw: &str) -> String {
+    let trimmed = raw.trim_end_matches('/');
+    if trimmed.ends_with(".yaml") || trimmed.ends_with(".yml") {
+        trimmed.to_string()
+    } else {
+        format!("{}/module.yaml", trimmed)
+    }
+}
+
+/// Copy a local project to the managed directory (~/.biovault/projects/)
+>>>>>>> main:cli/src/cli/commands/project_management.rs
 /// This mirrors the behavior of import_from_url but copies from local filesystem
 async fn copy_local_module_to_managed(
     db: &BioVaultDb,
@@ -533,7 +877,11 @@ async fn copy_local_module_to_managed(
     }
 
     // Look for module.yaml
+<<<<<<< HEAD:cli/src/cli/commands/module_management.rs
     let yaml_path = source_path.join(MODULE_YAML_FILE);
+=======
+    let yaml_path = source_path.join(PROJECT_YAML_FILE);
+>>>>>>> main:cli/src/cli/commands/project_management.rs
     if !yaml_path.exists() {
         return Err(anyhow::anyhow!(
             "No module.yaml found in directory: {}",
@@ -542,32 +890,58 @@ async fn copy_local_module_to_managed(
         .into());
     }
 
+<<<<<<< HEAD:cli/src/cli/commands/module_management.rs
     // Read and parse module.yaml
     let yaml_str = fs::read_to_string(&yaml_path)?;
     let module_yaml = ModuleYaml::from_str(&yaml_str)?;
 
     let module_name = module_yaml.name.clone();
+=======
+    let yaml_str = fs::read_to_string(&yaml_path)?;
+    let module_info = module_info_from_str(&yaml_str)?;
+
+    let project_name = module_info.name.clone();
+>>>>>>> main:cli/src/cli/commands/project_management.rs
 
     // Create module directory in managed location (like import_from_url does)
     let biovault_home = config::get_biovault_home()?;
+<<<<<<< HEAD:cli/src/cli/commands/module_management.rs
     let modules_dir = biovault_home.join("modules");
     fs::create_dir_all(&modules_dir)?;
     let dir_name = format!("{}-{}", module_name, module_yaml.version);
     let module_dir = modules_dir.join(&dir_name);
+=======
+    let projects_dir = biovault_home.join("projects");
+    fs::create_dir_all(&projects_dir)?;
+    let dir_name = format!("{}-{}", project_name, module_info.version);
+    let project_dir = projects_dir.join(&dir_name);
+>>>>>>> main:cli/src/cli/commands/project_management.rs
 
     // Check if module already exists in DB (with this exact version)
     if !overwrite {
+<<<<<<< HEAD:cli/src/cli/commands/module_management.rs
         let identifier = format!("{}@{}", module_name, module_yaml.version);
         if let Some(existing) = db.get_module(&identifier)? {
             let existing_path = PathBuf::from(&existing.module_path);
             let existing_yaml = existing_path.join(MODULE_YAML_FILE);
+=======
+        let identifier = format!("{}@{}", project_name, module_info.version);
+        if let Some(existing) = db.get_project(&identifier)? {
+            let existing_path = PathBuf::from(&existing.project_path);
+            let existing_yaml = existing_path.join(PROJECT_YAML_FILE);
+>>>>>>> main:cli/src/cli/commands/project_management.rs
 
             if existing_yaml.exists() && existing_path.is_dir() {
                 // Valid module exists - reuse it (idempotent)
                 if !quiet {
                     println!(
+<<<<<<< HEAD:cli/src/cli/commands/module_management.rs
                         "   ℹ️  Module '{}' version {} already imported, reusing (id: {})",
                         module_name, module_yaml.version, existing.id
+=======
+                        "   ℹ️  Project '{}' version {} already imported, reusing (id: {})",
+                        project_name, module_info.version, existing.id
+>>>>>>> main:cli/src/cli/commands/project_management.rs
                     );
                 }
                 return Ok(existing);
@@ -575,8 +949,13 @@ async fn copy_local_module_to_managed(
                 // Module DB record exists but files are missing/invalid - clean it up
                 if !quiet {
                     println!(
+<<<<<<< HEAD:cli/src/cli/commands/module_management.rs
                         "   🧹 Cleaning up orphaned module record for '{}@{}'",
                         module_name, module_yaml.version
+=======
+                        "   🧹 Cleaning up orphaned project record for '{}@{}'",
+                        project_name, module_info.version
+>>>>>>> main:cli/src/cli/commands/project_management.rs
                     );
                 }
                 db.delete_module(&identifier)?;
@@ -603,7 +982,11 @@ async fn copy_local_module_to_managed(
     fs::create_dir_all(&module_dir)?;
 
     // Copy module.yaml
+<<<<<<< HEAD:cli/src/cli/commands/module_management.rs
     let dest_yaml_path = module_dir.join(MODULE_YAML_FILE);
+=======
+    let dest_yaml_path = project_dir.join(PROJECT_YAML_FILE);
+>>>>>>> main:cli/src/cli/commands/project_management.rs
     fs::copy(&yaml_path, &dest_yaml_path)?;
 
     if !quiet {
@@ -611,24 +994,39 @@ async fn copy_local_module_to_managed(
     }
 
     // Copy workflow file
+<<<<<<< HEAD:cli/src/cli/commands/module_management.rs
     let workflow_source = source_path.join(&module_yaml.workflow);
     if workflow_source.exists() {
         let workflow_dest = module_dir.join(&module_yaml.workflow);
+=======
+    let workflow_source = source_path.join(&module_info.workflow);
+    if workflow_source.exists() {
+        let workflow_dest = project_dir.join(&module_info.workflow);
+>>>>>>> main:cli/src/cli/commands/project_management.rs
         if let Some(parent) = workflow_dest.parent() {
             fs::create_dir_all(parent)?;
         }
         fs::copy(&workflow_source, &workflow_dest)?;
         if !quiet {
+<<<<<<< HEAD:cli/src/cli/commands/module_management.rs
             println!("✓ Copied {}", module_yaml.workflow);
+=======
+            println!("✓ Copied {}", module_info.workflow);
+>>>>>>> main:cli/src/cli/commands/project_management.rs
         }
     } else if !quiet {
         println!(
             "⚠️  Warning: workflow file '{}' not found in source",
+<<<<<<< HEAD:cli/src/cli/commands/module_management.rs
             module_yaml.workflow
+=======
+            module_info.workflow
+>>>>>>> main:cli/src/cli/commands/project_management.rs
         );
     }
 
     // Copy assets
+<<<<<<< HEAD:cli/src/cli/commands/module_management.rs
     if !module_yaml.assets.is_empty() {
         let assets_dir = module_dir.join("assets");
         fs::create_dir_all(&assets_dir)?;
@@ -639,8 +1037,21 @@ async fn copy_local_module_to_managed(
 
         for asset in &module_yaml.assets {
             let asset_source = source_path.join("assets").join(asset);
+=======
+    if !module_info.assets.is_empty() {
+        let assets_dir = project_dir.join("assets");
+        fs::create_dir_all(&assets_dir)?;
+
+        if !quiet {
+            println!("📦 Copying {} assets...", module_info.assets.len());
+        }
+
+        for asset in &module_info.assets {
+            let asset_rel = asset.strip_prefix("assets/").unwrap_or(asset);
+            let asset_source = source_path.join("assets").join(asset_rel);
+>>>>>>> main:cli/src/cli/commands/project_management.rs
             if asset_source.exists() {
-                let asset_dest = assets_dir.join(asset);
+                let asset_dest = assets_dir.join(asset_rel);
 
                 // Create parent directories if asset has a path
                 if let Some(parent) = asset_dest.parent() {
@@ -664,6 +1075,7 @@ async fn copy_local_module_to_managed(
 
     // Register in database
     if overwrite {
+<<<<<<< HEAD:cli/src/cli/commands/module_management.rs
         let identifier = format!("{}@{}", module_name, module_yaml.version);
         if db.get_module(&identifier)?.is_some() {
             db.update_module(
@@ -692,6 +1104,36 @@ async fn copy_local_module_to_managed(
             &module_yaml.workflow,
             &module_yaml.template,
             &module_dir,
+=======
+        let identifier = format!("{}@{}", project_name, module_info.version);
+        if db.get_project(&identifier)?.is_some() {
+            db.update_project(
+                &project_name,
+                &module_info.version,
+                &module_info.author,
+                &module_info.workflow,
+                &module_info.template,
+                &project_dir,
+            )?;
+        } else {
+            db.register_project(
+                &project_name,
+                &module_info.version,
+                &module_info.author,
+                &module_info.workflow,
+                &module_info.template,
+                &project_dir,
+            )?;
+        }
+    } else {
+        db.register_project(
+            &project_name,
+            &module_info.version,
+            &module_info.author,
+            &module_info.workflow,
+            &module_info.template,
+            &project_dir,
+>>>>>>> main:cli/src/cli/commands/project_management.rs
         )?;
     }
 
@@ -719,11 +1161,19 @@ fn import_from_local(
     }
 
     // Look for module.yaml
+<<<<<<< HEAD:cli/src/cli/commands/module_management.rs
     let yaml_path = module_path.join(MODULE_YAML_FILE);
     if !yaml_path.exists() {
         return Err(anyhow::anyhow!(
             "No module.yaml found in directory: {}",
             module_path.display()
+=======
+    let yaml_path = project_path.join(PROJECT_YAML_FILE);
+    if !yaml_path.exists() {
+        return Err(anyhow::anyhow!(
+            "No module.yaml found in directory: {}",
+            project_path.display()
+>>>>>>> main:cli/src/cli/commands/project_management.rs
         )
         .into());
     }
@@ -732,11 +1182,18 @@ fn import_from_local(
         println!("📁 Registering local module: {}", path.cyan());
     }
 
+<<<<<<< HEAD:cli/src/cli/commands/module_management.rs
     // Parse module.yaml
     let yaml_str = fs::read_to_string(&yaml_path)?;
     let module_yaml = ModuleYaml::from_str(&yaml_str)?;
 
     let module_name = name_override.unwrap_or(module_yaml.name.clone());
+=======
+    let yaml_str = fs::read_to_string(&yaml_path)?;
+    let module_info = module_info_from_str(&yaml_str)?;
+
+    let project_name = name_override.unwrap_or_else(|| module_info.name.clone());
+>>>>>>> main:cli/src/cli/commands/project_management.rs
 
     // Check if module already exists in DB
     if !overwrite {
@@ -771,6 +1228,7 @@ fn import_from_local(
 
     // Register in database (using original path, not copied)
     if overwrite {
+<<<<<<< HEAD:cli/src/cli/commands/module_management.rs
         let identifier = format!("{}@{}", module_name, module_yaml.version);
         if db.get_module(&identifier)?.is_some() {
             db.update_module(
@@ -799,6 +1257,36 @@ fn import_from_local(
             &module_yaml.workflow,
             &module_yaml.template,
             &module_path,
+=======
+        let identifier = format!("{}@{}", project_name, module_info.version);
+        if db.get_project(&identifier)?.is_some() {
+            db.update_project(
+                &project_name,
+                &module_info.version,
+                &module_info.author,
+                &module_info.workflow,
+                &module_info.template,
+                &project_path,
+            )?;
+        } else {
+            db.register_project(
+                &project_name,
+                &module_info.version,
+                &module_info.author,
+                &module_info.workflow,
+                &module_info.template,
+                &project_path,
+            )?;
+        }
+    } else {
+        db.register_project(
+            &project_name,
+            &module_info.version,
+            &module_info.author,
+            &module_info.workflow,
+            &module_info.template,
+            &project_path,
+>>>>>>> main:cli/src/cli/commands/project_management.rs
         )?;
     }
 
@@ -884,7 +1372,11 @@ pub fn show(identifier: String, format: Option<String>) -> Result<()> {
     println!();
 
     // Show module.yaml contents
+<<<<<<< HEAD:cli/src/cli/commands/module_management.rs
     let yaml_path = Path::new(&module.module_path).join(MODULE_YAML_FILE);
+=======
+    let yaml_path = Path::new(&project.project_path).join(PROJECT_YAML_FILE);
+>>>>>>> main:cli/src/cli/commands/project_management.rs
     if yaml_path.exists() {
         println!("📄 module.yaml:");
         println!("{}", "─".repeat(80));
@@ -946,8 +1438,13 @@ pub enum DependencyContext {
 /// rewriting the flow spec to use registered module names.
 ///
 /// Returns `true` if any dependencies were imported and the spec was updated.
+<<<<<<< HEAD:cli/src/cli/commands/module_management.rs
 pub async fn resolve_flow_dependencies(
     spec: &mut FlowSpec,
+=======
+pub async fn resolve_pipeline_dependencies(
+    flow: &mut FlowFile,
+>>>>>>> main:cli/src/cli/commands/project_management.rs
     dependency_context: &DependencyContext,
     flow_yaml_path: &Path,
     overwrite: bool,
@@ -958,7 +1455,7 @@ pub async fn resolve_flow_dependencies(
     let db = BioVaultDb::new()?;
     let mut any_rewritten = false;
 
-    if spec.steps.is_empty() {
+    if flow.spec.steps.is_empty() {
         return Ok(false);
     }
 
@@ -966,52 +1463,86 @@ pub async fn resolve_flow_dependencies(
         println!(
             "\n{} Importing dependencies ({} steps):",
             "📦".cyan(),
-            spec.steps.len()
+            flow.spec.steps.len()
         );
     }
 
-    // Collect step updates to avoid borrow checker issues
-    let mut step_updates: Vec<(usize, String)> = Vec::new();
+    let mut step_updates: Vec<(usize, String, Option<String>)> = Vec::new();
+    let mut imported_by_key: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    let mut imported_by_source: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
 
-    for (index, step) in spec.steps.iter().enumerate() {
-        if let Some(uses) = &step.uses {
-            // Skip absolute local paths
-            if uses.starts_with('/') {
+    for (index, step) in flow.spec.steps.iter().enumerate() {
+        let (module_key, module_ref) = match &step.uses {
+            FlowUses::Name(name) => {
+                let module_ref = flow
+                    .spec
+                    .modules
+                    .as_ref()
+                    .and_then(|modules| modules.get(name))
+                    .cloned();
+                if module_ref.is_none() {
+                    if !quiet {
+                        println!(
+                            "   {} Step '{}' uses registered name '{}' (keeping as-is)",
+                            "ℹ️ ".cyan(),
+                            step.id.dimmed(),
+                            name
+                        );
+                    }
+                    continue;
+                }
+                (Some(name.clone()), module_ref)
+            }
+            FlowUses::Ref(module_ref) => (None, Some(module_ref.clone())),
+        };
+
+        let module_ref = match module_ref {
+            Some(module_ref) => module_ref,
+            None => continue,
+        };
+
+        let source = match module_ref.source.as_ref() {
+            Some(source) => source,
+            None => {
                 if !quiet {
                     println!(
-                        "   {} Step '{}' uses absolute path (keeping as-is)",
+                        "   {} Step '{}' uses registered name (keeping as-is)",
                         "ℹ️ ".cyan(),
                         step.id.dimmed()
                     );
                 }
                 continue;
             }
+        };
 
-            // Skip if already a simple name (already registered)
-            // BUT: in Local context, ALWAYS try to resolve as path first
-            let should_skip_as_registered = match dependency_context {
-                DependencyContext::GitHub { .. } => {
-                    // In GitHub context, no slashes + not http = registered name
-                    !uses.contains('/') && !uses.starts_with("http")
-                }
-                DependencyContext::Local { .. } => {
-                    // In Local context, never skip - always try to resolve as path first
-                    // This handles cases like "apol1-classifier" which could be a relative path
-                    false // Don't skip - let path resolution logic below handle it
-                }
-            };
+        if let Some(key) = module_key.as_ref() {
+            if let Some(imported_name) = imported_by_key.get(key) {
+                step_updates.push((index, imported_name.clone(), module_key.clone()));
+                any_rewritten = true;
+                continue;
+            }
+        }
 
-            if should_skip_as_registered {
+        let resolved_source = match resolve_module_source(
+            source,
+            dependency_context,
+            module_key.as_deref().unwrap_or(step.id.as_str()),
+            &step.id,
+            &db,
+            quiet,
+        ) {
+            Ok(source) => source,
+            Err(e) => {
                 if !quiet {
-                    println!(
-                        "   {} Step '{}' already uses name (keeping as-is)",
-                        "ℹ️ ".cyan(),
-                        step.id.dimmed()
-                    );
+                    println!("{}: {}", "⚠️  failed".yellow(), e.to_string().dimmed());
                 }
                 continue;
             }
+        };
 
+<<<<<<< HEAD:cli/src/cli/commands/module_management.rs
             // Resolve module reference based on context
             let (should_use_local, local_path_opt, url_opt) =
                 if uses.starts_with("http://") || uses.starts_with("https://") {
@@ -1081,8 +1612,24 @@ pub async fn resolve_flow_dependencies(
 
             if !quiet {
                 print!("   {} {} ", "•".cyan(), step.id.bold());
-            }
+=======
+        let resolved_source = match resolved_source {
+            Some(source) => source,
+            None => continue,
+        };
 
+        let source_key = resolved_source.cache_key();
+        if let Some(imported_name) = imported_by_source.get(&source_key) {
+            step_updates.push((index, imported_name.clone(), module_key.clone()));
+            any_rewritten = true;
+            if let Some(key) = module_key.as_ref() {
+                imported_by_key.insert(key.clone(), imported_name.clone());
+>>>>>>> main:cli/src/cli/commands/project_management.rs
+            }
+            continue;
+        }
+
+<<<<<<< HEAD:cli/src/cli/commands/module_management.rs
             // Import the module (registers in DB automatically)
             // Smart resolution: check if already registered first, then copy if needed
             let import_result = if should_use_local {
@@ -1136,23 +1683,33 @@ pub async fn resolve_flow_dependencies(
                         uses
                     )
                     .into());
+=======
+        if !quiet {
+            print!("   {} {} ", "•".cyan(), step.id.bold());
+        }
+
+        let import_result = match resolved_source {
+            ModuleImportSource::Local { module_dir } => {
+                copy_local_project_to_managed(&db, &module_dir, overwrite, true).await
+            }
+            ModuleImportSource::Url { url } => {
+                import_from_url(&db, &url, None, overwrite, true).await
+            }
+        };
+
+        match import_result {
+            Ok(project) => {
+                if !quiet {
+                    println!("{} → {}", "✓ imported".green(), project.name.green());
+>>>>>>> main:cli/src/cli/commands/project_management.rs
                 }
-            } else if let Some(url) = url_opt {
-                import_from_url(&db, &url, None, overwrite, true)
-                    .await
-                    .map(|p| (p, false))
-            } else {
-                // Fallback: try URL import as last resort for local context
-                if let DependencyContext::Local { base_path: _ } = dependency_context {
-                    // Could try to convert local path to URL, but this is unusual
-                    return Err(anyhow::anyhow!("Cannot resolve dependency '{}': local path doesn't exist and no URL available", uses).into());
-                } else {
-                    return Err(anyhow::anyhow!(
-                        "Cannot resolve dependency '{}': no valid source",
-                        uses
-                    )
-                    .into());
+                step_updates.push((index, project.name.clone(), module_key.clone()));
+                any_rewritten = true;
+                imported_by_source.insert(source_key, project.name.clone());
+                if let Some(key) = module_key.as_ref() {
+                    imported_by_key.insert(key.clone(), project.name.clone());
                 }
+<<<<<<< HEAD:cli/src/cli/commands/module_management.rs
             };
 
             match import_result {
@@ -1169,11 +1726,18 @@ pub async fn resolve_flow_dependencies(
                         println!("{}: {}", "⚠️  failed".yellow(), e.to_string().dimmed());
                     }
                     // Continue to next step - don't fail entire import
+=======
+            }
+            Err(e) => {
+                if !quiet {
+                    println!("{}: {}", "⚠️  failed".yellow(), e.to_string().dimmed());
+>>>>>>> main:cli/src/cli/commands/project_management.rs
                 }
             }
         }
     }
 
+<<<<<<< HEAD:cli/src/cli/commands/module_management.rs
     // Apply step updates now that we're done iterating
     for (index, module_name) in step_updates {
         if let Some(updated_step) = spec.steps.get_mut(index) {
@@ -1184,6 +1748,25 @@ pub async fn resolve_flow_dependencies(
     // Always save the spec (with description preserved) after dependency resolution
     // This ensures description is preserved even if dependencies weren't rewritten
     spec.save(flow_yaml_path)
+=======
+    for (index, project_name, _) in &step_updates {
+        if let Some(updated_step) = flow.spec.steps.get_mut(*index) {
+            updated_step.uses = FlowUses::Name(project_name.clone());
+        }
+    }
+
+    if let Some(modules) = flow.spec.modules.as_mut() {
+        for (_, _, module_key) in step_updates {
+            if let Some(key) = module_key {
+                if let Some(module_ref) = modules.get_mut(&key) {
+                    module_ref.source = None;
+                }
+            }
+        }
+    }
+
+    flow.save(flow_yaml_path)
+>>>>>>> main:cli/src/cli/commands/project_management.rs
         .context("Failed to save flow.yaml with description")?;
 
     if any_rewritten && !quiet {
@@ -1197,12 +1780,19 @@ pub async fn resolve_flow_dependencies(
 }
 
 /// Import a flow from URL with all its step dependencies
+<<<<<<< HEAD:cli/src/cli/commands/module_management.rs
 pub async fn import_flow_with_deps(
+=======
+pub async fn import_pipeline_with_deps(
+>>>>>>> main:cli/src/cli/commands/project_management.rs
     url: &str,
     name_override: Option<String>,
     overwrite: bool,
 ) -> Result<String> {
+<<<<<<< HEAD:cli/src/cli/commands/module_management.rs
     use crate::flow_spec::FlowSpec;
+=======
+>>>>>>> main:cli/src/cli/commands/project_management.rs
     use colored::Colorize;
 
     // Convert GitHub URL to raw URL
@@ -1216,6 +1806,7 @@ pub async fn import_flow_with_deps(
     let yaml_content = download_file(&raw_url).await?;
     let yaml_str = String::from_utf8(yaml_content).context("Invalid UTF-8 in flow.yaml")?;
 
+<<<<<<< HEAD:cli/src/cli/commands/module_management.rs
     // Parse flow spec
     let mut spec: FlowSpec =
         serde_yaml::from_str(&yaml_str).context("Failed to parse flow.yaml")?;
@@ -1224,6 +1815,17 @@ pub async fn import_flow_with_deps(
 
     println!("{} Flow: {}", "📦".cyan(), flow_name.bold());
     println!("   Steps: {}", spec.steps.len());
+=======
+    let mut flow = FlowFile::parse_yaml(&yaml_str).context("Failed to parse flow.yaml")?;
+    if flow.kind != "Flow" {
+        return Err(anyhow::anyhow!("Expected Flow kind but found '{}'", flow.kind).into());
+    }
+
+    let pipeline_name = name_override.unwrap_or_else(|| flow.metadata.name.clone());
+
+    println!("{} Pipeline: {}", "📦".cyan(), pipeline_name.bold());
+    println!("   Steps: {}", flow.spec.steps.len());
+>>>>>>> main:cli/src/cli/commands/project_management.rs
 
     // Create flow directory
     let biovault_home = crate::config::get_biovault_home()?;
@@ -1248,20 +1850,32 @@ pub async fn import_flow_with_deps(
 
     let flow_yaml_path = flow_dir.join(FLOW_YAML_FILE);
 
+<<<<<<< HEAD:cli/src/cli/commands/module_management.rs
     // Extract base URL for resolving relative module paths
     let base_url = if let Some(idx) = url.rfind('/') {
         url[..idx].to_string()
+=======
+    // Extract base URL for resolving relative project paths
+    let base_url = if let Some((base, _)) = raw_url.rsplit_once('/') {
+        base.to_string()
+>>>>>>> main:cli/src/cli/commands/project_management.rs
     } else {
-        url.to_string()
+        raw_url.clone()
     };
 
+<<<<<<< HEAD:cli/src/cli/commands/module_management.rs
     // Import each step's module and rewrite YAML to use registered names
     resolve_flow_dependencies(
         &mut spec,
+=======
+    // Import each step's project and rewrite YAML to use registered names
+    resolve_pipeline_dependencies(
+        &mut flow,
+>>>>>>> main:cli/src/cli/commands/project_management.rs
         &DependencyContext::GitHub { base_url },
         &flow_yaml_path,
         overwrite,
-        false, // quiet = false for CLI output
+        false,
     )
     .await?;
 
@@ -1345,11 +1959,30 @@ mod tests {
         fs::create_dir_all(&module_dir).unwrap();
 
         let yaml_content = r#"
+<<<<<<< HEAD:cli/src/cli/commands/module_management.rs
 name: test-module
 author: test@example.com
 workflow: workflow.nf
 template: default
 assets: []
+=======
+apiVersion: syftbox.openmined.org/v1alpha1
+kind: Module
+metadata:
+  name: test-project
+  version: 0.1.0
+  authors:
+    - test@example.com
+spec:
+  runner:
+    kind: nextflow
+    entrypoint: workflow.nf
+    template: default
+  assets: []
+  inputs: []
+  outputs: []
+  parameters: []
+>>>>>>> main:cli/src/cli/commands/project_management.rs
 "#;
         fs::write(module_dir.join(MODULE_YAML_FILE), yaml_content).unwrap();
         fs::write(module_dir.join("workflow.nf"), "// workflow").unwrap();

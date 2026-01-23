@@ -1,6 +1,13 @@
 use crate::cli::examples;
 use crate::error::Result;
+<<<<<<< HEAD:cli/src/cli/commands/module.rs
 use crate::module_spec::{self, InputSpec, ModuleSpec, OutputSpec, ParameterSpec};
+=======
+use crate::project_spec::{
+    self, resolve_project_spec_path, InputSpec, OutputSpec, ParameterSpec, ProjectSpec,
+    MODULE_YAML_FILE,
+};
+>>>>>>> main:cli/src/cli/commands/project.rs
 use crate::types::InboxSubmission;
 use colored::Colorize;
 use dialoguer::{theme::ColorfulTheme, Confirm, Input, MultiSelect, Select};
@@ -10,6 +17,12 @@ use std::fs;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+fn command<S: AsRef<std::ffi::OsStr>>(program: S) -> Command {
+    let mut cmd = Command::new(program);
+    super::configure_child_process(&mut cmd);
+    cmd
+}
 use walkdir::WalkDir;
 
 trait DialoguerResultExt<T> {
@@ -55,11 +68,19 @@ pub fn view(path: Option<String>) -> Result<()> {
         )));
     }
 
+<<<<<<< HEAD:cli/src/cli/commands/module.rs
     let spec_path = module_path.join("module.yaml");
     if !spec_path.exists() {
         return Err(crate::error::Error::Anyhow(anyhow::anyhow!(
             "module.yaml not found in {}",
             module_dir
+=======
+    let spec_path = resolve_project_spec_path(project_path);
+    if !spec_path.exists() {
+        return Err(crate::error::Error::Anyhow(anyhow::anyhow!(
+            "module.yaml not found in {}",
+            project_dir
+>>>>>>> main:cli/src/cli/commands/project.rs
         )));
     }
 
@@ -141,8 +162,13 @@ pub async fn create(
             .map_err(crate::error::Error::Anyhow)?;
 
         // Load the generated spec to display summary
+<<<<<<< HEAD:cli/src/cli/commands/module.rs
         let spec_path = module_path.join("module.yaml");
         let spec = ModuleSpec::load(&spec_path)?;
+=======
+        let spec_path = resolve_project_spec_path(project_path);
+        let spec = ProjectSpec::load(&spec_path)?;
+>>>>>>> main:cli/src/cli/commands/project.rs
         println!("   (from example '{}')", example_name);
         print_module_summary(&spec, &module_folder);
     } else {
@@ -167,7 +193,11 @@ pub async fn create(
         // Load prepopulated inputs/outputs for flow composition
         // --output_from: new module's inputs FROM other module's outputs
         let prepopulated_inputs = if let Some(ref output_from_path) = output_from {
+<<<<<<< HEAD:cli/src/cli/commands/module.rs
             let output_from_spec_path = Path::new(output_from_path).join("module.yaml");
+=======
+            let output_from_spec_path = resolve_project_spec_path(Path::new(output_from_path));
+>>>>>>> main:cli/src/cli/commands/project.rs
             if !output_from_spec_path.exists() {
                 return Err(crate::error::Error::Anyhow(anyhow::anyhow!(
                     "Cannot load --output_from: module.yaml not found in {}",
@@ -182,7 +212,11 @@ pub async fn create(
 
         // --input_to: new module's outputs TO other module's inputs
         let prepopulated_outputs = if let Some(ref input_to_path) = input_to {
+<<<<<<< HEAD:cli/src/cli/commands/module.rs
             let input_to_spec_path = Path::new(input_to_path).join("module.yaml");
+=======
+            let input_to_spec_path = resolve_project_spec_path(Path::new(input_to_path));
+>>>>>>> main:cli/src/cli/commands/project.rs
             if !input_to_spec_path.exists() {
                 return Err(crate::error::Error::Anyhow(anyhow::anyhow!(
                     "Cannot load --input_to: module.yaml not found in {}",
@@ -336,7 +370,11 @@ fn print_module_summary(spec: &ModuleSpec, folder: &str) {
 
     // File TOC
     println!("📁 Files:");
+<<<<<<< HEAD:cli/src/cli/commands/module.rs
     println!("   ├─ module.yaml");
+=======
+    println!("   ├─ {}", MODULE_YAML_FILE);
+>>>>>>> main:cli/src/cli/commands/project.rs
     println!("   ├─ workflow.nf");
     if spec.assets.is_empty() {
         println!("   └─ assets/ (empty)");
@@ -425,7 +463,11 @@ fn print_module_view(spec: &ModuleSpec, folder: &str) {
 
     // File TOC
     println!("📁 Files:");
+<<<<<<< HEAD:cli/src/cli/commands/module.rs
     println!("   ├─ module.yaml");
+=======
+    println!("   ├─ {}", MODULE_YAML_FILE);
+>>>>>>> main:cli/src/cli/commands/project.rs
     println!("   ├─ workflow.nf");
     if spec.assets.is_empty() {
         println!("   └─ assets/ (empty)");
@@ -1682,7 +1724,7 @@ async fn test_submission(
 
             if download {
                 println!("📥 Downloading sample data for {}...", participant);
-                Command::new("bv")
+                command("bv")
                     .args(["sample-data", "fetch", participant])
                     .status()
                     .map_err(|e| anyhow::anyhow!("Failed to download sample data: {}", e))?;
@@ -1698,7 +1740,7 @@ async fn test_submission(
         println!("   Input: {}", mock_data_path.display());
         println!("   Output: {}", output_dir.display());
 
-        let status = Command::new("nextflow")
+        let status = command("nextflow")
             .arg("run")
             .arg(&workflow_file)
             .arg("--input")
@@ -1875,7 +1917,11 @@ status: {}
         std::fs::write(sub_dir.join("workflow.nf"), b"wf").unwrap();
         std::fs::write(sub_dir.join("assets/nested/file.txt"), b"x").unwrap();
         // The path stored in tuple points to a yaml file inside the submission dir
+<<<<<<< HEAD:cli/src/cli/commands/module.rs
         let path = sub_dir.join("module.yaml");
+=======
+        let path = sub_dir.join(MODULE_YAML_FILE);
+>>>>>>> main:cli/src/cli/commands/project.rs
         std::fs::write(&path, b"name: P\nauthor: A\nstatus: pending\nsyft_url: x\n").unwrap();
         let sub = InboxSubmission {
             name: "P".into(),
@@ -1961,7 +2007,11 @@ status: {}
         .await
         .unwrap();
 
+<<<<<<< HEAD:cli/src/cli/commands/module.rs
         assert!(proj_dir.join("module.yaml").exists());
+=======
+        assert!(proj_dir.join(MODULE_YAML_FILE).exists());
+>>>>>>> main:cli/src/cli/commands/project.rs
         assert!(proj_dir.join("workflow.nf").exists());
         assert!(proj_dir.join("assets").is_dir());
 

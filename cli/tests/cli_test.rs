@@ -7,6 +7,12 @@ use tempfile::TempDir;
 // Use a mutex to ensure HOME modification tests don't run in parallel
 static HOME_MUTEX: Mutex<()> = Mutex::new(());
 
+fn set_syc_env(cmd: &mut Command, temp_dir: &TempDir) {
+    let data_dir = temp_dir.path().join("syftbox");
+    fs::create_dir_all(&data_dir).unwrap();
+    cmd.env("SYFTBOX_DATA_DIR", &data_dir);
+}
+
 #[test]
 fn test_cli_version() {
     // Read version from Cargo.toml to avoid hardcoding
@@ -59,6 +65,7 @@ fn test_init_command() {
     };
 
     let mut cmd = Command::cargo_bin("bv").unwrap();
+    set_syc_env(&mut cmd, &temp_dir);
     // Use our test-specific env var that the init command will respect
     cmd.env("BIOVAULT_TEST_HOME", temp_dir.path());
     // Also set platform-specific home for other commands that might use dirs::home_dir()
@@ -129,6 +136,7 @@ fn test_init_command_existing_config() {
     };
 
     let mut cmd = Command::cargo_bin("bv").unwrap();
+    set_syc_env(&mut cmd, &temp_dir);
     // Use our test-specific env var that the init command will respect
     cmd.env("BIOVAULT_TEST_HOME", temp_dir.path());
     // Also set platform-specific home for other commands that might use dirs::home_dir()
@@ -167,7 +175,9 @@ fn test_init_command_existing_config() {
 
 #[test]
 fn test_info_command() {
+    let temp_dir = TempDir::new().unwrap();
     let mut cmd = Command::cargo_bin("bv").unwrap();
+    set_syc_env(&mut cmd, &temp_dir);
     cmd.arg("info")
         .assert()
         .success()
@@ -181,7 +191,9 @@ fn test_info_command() {
 
 #[test]
 fn test_project_examples_cli() {
+    let temp_dir = TempDir::new().unwrap();
     let mut cmd = Command::cargo_bin("bv").unwrap();
+    set_syc_env(&mut cmd, &temp_dir);
     cmd.arg("project")
         .arg("examples")
         .assert()
@@ -191,7 +203,9 @@ fn test_project_examples_cli() {
 
 #[test]
 fn test_sample_data_list_cli() {
+    let temp_dir = TempDir::new().unwrap();
     let mut cmd = Command::cargo_bin("bv").unwrap();
+    set_syc_env(&mut cmd, &temp_dir);
     cmd.arg("sample-data")
         .arg("list")
         .assert()
@@ -212,6 +226,7 @@ fn test_run_dry_run_cli() {
     }
 
     let tmp = TempDir::new().unwrap();
+    let data_dir = TempDir::new().unwrap();
     // Set explicit BIOVAULT_HOME for templates
     let bv_home = tmp.path().join(".bvhome");
     fs::create_dir_all(bv_home.join("env/dynamic-nextflow")).unwrap();
@@ -232,13 +247,14 @@ fn test_run_dry_run_cli() {
     let proj = tmp.path().join("proj");
     fs::create_dir_all(&proj).unwrap();
     fs::write(
-        proj.join("project.yaml"),
-        "name: p\nauthor: a\nworkflow: workflow.nf\ntemplate: dynamic-nextflow\ninputs:\n  - name: data\n    type: File?\n",
+        proj.join("module.yaml"),
+        "apiVersion: syftbox.openmined.org/v1alpha1\nkind: Module\nmetadata:\n  name: p\n  version: 0.1.0\n  authors:\n    - a\nspec:\n  runner:\n    kind: nextflow\n    entrypoint: workflow.nf\n    template: dynamic-nextflow\n  inputs:\n    - name: data\n      type: File\n      optional: true\n  outputs: []\n  parameters: []\n  assets: []\n",
     )
     .unwrap();
     fs::write(proj.join("workflow.nf"), "workflow USER { }").unwrap();
 
     let mut cmd = Command::cargo_bin("bv").unwrap();
+    set_syc_env(&mut cmd, &data_dir);
     cmd.env("BIOVAULT_HOME", &bv_home)
         .arg("run")
         .arg("--dry-run")
@@ -252,7 +268,9 @@ fn test_run_dry_run_cli() {
 
 #[test]
 fn test_invalid_command() {
+    let temp_dir = TempDir::new().unwrap();
     let mut cmd = Command::cargo_bin("bv").unwrap();
+    set_syc_env(&mut cmd, &temp_dir);
     cmd.arg("invalid-command")
         .assert()
         .failure()
@@ -261,7 +279,9 @@ fn test_invalid_command() {
 
 #[test]
 fn test_init_missing_email() {
+    let temp_dir = TempDir::new().unwrap();
     let mut cmd = Command::cargo_bin("bv").unwrap();
+    set_syc_env(&mut cmd, &temp_dir);
     cmd.arg("init")
         .assert()
         .failure()
