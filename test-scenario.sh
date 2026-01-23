@@ -128,29 +128,53 @@ if [[ "$SCENARIO" == *"syqure"* ]]; then
   SYQURE_BIN="$SYQURE_DIR/target/debug/syqure"
 
   if (( ! USE_DOCKER )); then
-    # Preflight: if no bundle is available for native syqure, fall back to Docker.
+    # Preflight: require a bundle or bundled codon assets for native syqure.
     BUNDLE_OK=0
-  if [[ -n "${SYQURE_BUNDLE_FILE:-}" && -f "${SYQURE_BUNDLE_FILE}" ]]; then
-    BUNDLE_OK=1
-  else
-    if command -v rustc >/dev/null 2>&1; then
-      HOST_TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"
-      if [[ -n "$HOST_TRIPLE" && -f "$SYQURE_DIR/bundles/${HOST_TRIPLE}.tar.zst" ]]; then
+    if [[ -n "${SYQURE_BUNDLE_FILE:-}" && -f "${SYQURE_BUNDLE_FILE}" ]]; then
+      BUNDLE_OK=1
+    else
+      if command -v rustc >/dev/null 2>&1; then
+        HOST_TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"
+        if [[ -n "$HOST_TRIPLE" && -f "$SYQURE_DIR/bundles/${HOST_TRIPLE}.tar.zst" ]]; then
+          BUNDLE_OK=1
+        fi
+      fi
+      if [[ -d "$SYQURE_DIR/bin/macos-arm64/codon" || -d "$SYQURE_DIR/bin/macos-x86_64/codon" || -d "$SYQURE_DIR/bin/linux-x86/codon" || -d "$SYQURE_DIR/bin/linux-arm64/codon" ]]; then
+        BUNDLE_OK=1
+      fi
+      if [[ -d "$ROOT_DIR/../codon/install/lib/codon" ]]; then
         BUNDLE_OK=1
       fi
     fi
-    if [[ -d "$SYQURE_DIR/bin/macos-arm64/codon" || -d "$SYQURE_DIR/bin/macos-x86_64/codon" || -d "$SYQURE_DIR/bin/linux-x86/codon" || -d "$SYQURE_DIR/bin/linux-arm64/codon" ]]; then
-      BUNDLE_OK=1
-    fi
-    if [[ -d "$ROOT_DIR/../codon/install/lib/codon" ]]; then
-      BUNDLE_OK=1
-    fi
-  fi
 
     if (( ! BUNDLE_OK )); then
-      USE_DOCKER=1
-      export BV_SYQURE_USE_DOCKER=1
-      echo "Syqure bundle not found; falling back to Docker. Set SYQURE_BUNDLE_FILE to use native."
+      if [[ -d "$SYQURE_DIR/.git" && -f "$SYQURE_DIR/.gitmodules" ]]; then
+        echo "Syqure bundle/assets missing; initializing submodules..."
+        (cd "$SYQURE_DIR" && git submodule update --init --recursive)
+      fi
+
+      if [[ -x "$SYQURE_DIR/build_libs.sh" ]]; then
+        echo "Building syqure bundle (build_libs.sh)..."
+        (cd "$SYQURE_DIR" && ./build_libs.sh)
+      fi
+
+      # Re-check after attempted build.
+      if [[ -n "${SYQURE_BUNDLE_FILE:-}" && -f "${SYQURE_BUNDLE_FILE}" ]]; then
+        BUNDLE_OK=1
+      else
+        if command -v rustc >/dev/null 2>&1; then
+          HOST_TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"
+          if [[ -n "$HOST_TRIPLE" && -f "$SYQURE_DIR/bundles/${HOST_TRIPLE}.tar.zst" ]]; then
+            BUNDLE_OK=1
+          fi
+        fi
+      fi
+
+      if (( ! BUNDLE_OK )); then
+        echo "Syqure bundle/assets not found. Provide SYQURE_BUNDLE_FILE or build syqure bundles before running." >&2
+        echo "Use --docker to force Docker mode if desired." >&2
+        exit 1
+      fi
     fi
   fi
 
@@ -177,6 +201,30 @@ if [[ "$SCENARIO" == *"syqure"* ]]; then
     else
       echo "Syqure binary not found at $SYQURE_BIN. Use --docker flag for Docker mode." >&2
       exit 1
+    fi
+
+    # Fast sanity check: ensure bundled Codon stdlib/plugins are present.
+    if [[ "${BV_SYQURE_SKIP_PREFLIGHT:-0}" != "1" ]]; then
+      echo "Syqure preflight check..."
+      SYQURE_INFO_OUT="$("$SYQURE_BIN" info 2>/dev/null || true)"
+      if [[ -z "$SYQURE_INFO_OUT" ]]; then
+        echo "Syqure info failed; cannot verify bundle contents." >&2
+        exit 1
+      fi
+      CODON_PATH="$(printf '%s\n' "$SYQURE_INFO_OUT" | sed -n 's/^  Codon path:[[:space:]]*//p' | head -n 1)"
+      if [[ -z "$CODON_PATH" || ! -d "$CODON_PATH" ]]; then
+        echo "Syqure bundle check failed: Codon path not found in info output." >&2
+        exit 1
+      fi
+      if [[ ! -d "$CODON_PATH/stdlib" || -z "$(ls -A "$CODON_PATH/stdlib" 2>/dev/null)" ]]; then
+        echo "Syqure bundle check failed: stdlib missing at $CODON_PATH/stdlib" >&2
+        exit 1
+      fi
+      if [[ ! -d "$CODON_PATH/plugins/sequre" ]]; then
+        echo "Syqure bundle check failed: sequre plugin missing at $CODON_PATH/plugins/sequre" >&2
+        exit 1
+      fi
+      echo "Syqure preflight OK (stdlib + sequre plugin present)."
     fi
   fi
 fi

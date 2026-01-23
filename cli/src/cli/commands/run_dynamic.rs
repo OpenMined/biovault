@@ -2707,6 +2707,16 @@ async fn execute_syqure(
     env_map.insert("SEQURE_LOCAL_EMAIL".to_string(), current_email.clone());
     env_map.insert("SEQURE_FILE_KEEP".to_string(), "1".to_string());
     env_map.insert("SEQURE_FILE_DEBUG".to_string(), "1".to_string());
+    if env::var("SYQURE_BUNDLE_CACHE").is_err() {
+        let cache_dir = PathBuf::from(&datasites_root)
+            .join(".syqure-cache")
+            .join(&run_id)
+            .join(format!("party-{}", party_id));
+        env_map.insert(
+            "SYQURE_BUNDLE_CACHE".to_string(),
+            cache_dir.to_string_lossy().to_string(),
+        );
+    }
 
     for input in &spec.inputs {
         let env_key = format!("BV_INPUT_{}", env_key_suffix(&input.name));
