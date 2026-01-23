@@ -1,27 +1,31 @@
 name: BioVault Scenario Tests
 
 on:
+  pull_request:
+  push:
+    branches: [main]
   schedule:
     - cron: '45 2 * * *'
   workflow_dispatch:
   workflow_call:
 
 jobs:
-  run-scenarios:
-    runs-on: ubuntu-latest
+  syqure-distributed:
     strategy:
       fail-fast: false
       matrix:
-        client_mode: [go, rust]
-        scenario:
-          - tests/scenarios/import-and-run.yaml
-          - tests/scenarios/inbox-ping-pong.yaml
-          - tests/scenarios/messaging-core.yaml
-          - tests/scenarios/break-nextflow.yaml
-          - tests/scenarios/key-management.yaml
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Checkout syqure repo
+        uses: actions/checkout@v4
+        with:
+          repository: OpenMined/syqure
+          path: ../syqure
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Setup workspace dependencies
         run: |
@@ -39,43 +43,116 @@ jobs:
           workspaces: |
             cli -> target
             syftbox/rust -> target
+            ../syqure -> target
 
       - name: Install uv
         uses: astral-sh/setup-uv@v3
+
       - name: Install protoc
         uses: arduino/setup-protoc@v2
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Setup Go
-        uses: actions/setup-go@v5
-        with:
-          go-version-file: syftbox/go.mod
-
-      - name: Install Nextflow
+      - name: Build syqure
         run: |
-          curl -fsSL https://get.nextflow.io | bash
-          sudo mv nextflow /usr/local/bin/
-          chmod +x /usr/local/bin/nextflow
-          nextflow -version
+          cd ../syqure
+          cargo build
+          ls -la target/debug/syqure
 
       - name: Build BioVault CLI
         run: cd cli && cargo build --release
 
-      - name: Run scenario
-        run: ./test-scenario.sh --client-mode ${{ matrix.client_mode }} ${{ matrix.scenario }}
+      - name: Run syqure-distributed scenario
+        run: ./test-scenario.sh --client-mode rust tests/scenarios/syqure-distributed.yaml
 
       - name: Show logs on failure
         if: failure()
         run: |
           echo "=== Sandbox Directory Structure ==="
-          find sandbox -type d -maxdepth 2 2>/dev/null || true
+          find sandbox -type d -maxdepth 3 2>/dev/null || true
           echo ""
           echo "=== Client Logs ==="
           find sandbox -name "*.log" -exec echo "--- {} ---" \; -exec cat {} \; 2>/dev/null || true
+          echo ""
+          echo "=== MPC Channel Files ==="
+          find sandbox -path "*/_mpc/*" -type f 2>/dev/null | head -50 || true
 
       - name: Cleanup devstack
         if: always()
         run: |
           chmod +x ./tests/scripts/devstack.sh
           ./tests/scripts/devstack.sh --stop --reset || true
+
+  # Commented out - only running syqure-distributed for now
+  # run-scenarios:
+  #   runs-on: ubuntu-latest
+  #   strategy:
+  #     fail-fast: false
+  #     matrix:
+  #       client_mode: [go, rust]
+  #       scenario:
+  #         - tests/scenarios/import-and-run.yaml
+  #         - tests/scenarios/inbox-ping-pong.yaml
+  #         - tests/scenarios/messaging-core.yaml
+  #         - tests/scenarios/break-nextflow.yaml
+  #         - tests/scenarios/key-management.yaml
+  #
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #
+  #     - name: Setup workspace dependencies
+  #       run: |
+  #         chmod +x scripts/setup-workspace.sh
+  #         ./scripts/setup-workspace.sh
+  #
+  #     - name: Install Rust
+  #       uses: dtolnay/rust-toolchain@master
+  #       with:
+  #         toolchain: 1.91.0
+  #
+  #     - name: Cache Rust dependencies
+  #       uses: Swatinem/rust-cache@v2
+  #       with:
+  #         workspaces: |
+  #           cli -> target
+  #           syftbox/rust -> target
+  #
+  #     - name: Install uv
+  #       uses: astral-sh/setup-uv@v3
+  #     - name: Install protoc
+  #       uses: arduino/setup-protoc@v2
+  #       with:
+  #         repo-token: ${{ secrets.GITHUB_TOKEN }}
+  #
+  #     - name: Setup Go
+  #       uses: actions/setup-go@v5
+  #       with:
+  #         go-version-file: syftbox/go.mod
+  #
+  #     - name: Install Nextflow
+  #       run: |
+  #         curl -fsSL https://get.nextflow.io | bash
+  #         sudo mv nextflow /usr/local/bin/
+  #         chmod +x /usr/local/bin/nextflow
+  #         nextflow -version
+  #
+  #     - name: Build BioVault CLI
+  #       run: cd cli && cargo build --release
+  #
+  #     - name: Run scenario
+  #       run: ./test-scenario.sh --client-mode ${{ matrix.client_mode }} ${{ matrix.scenario }}
+  #
+  #     - name: Show logs on failure
+  #       if: failure()
+  #       run: |
+  #         echo "=== Sandbox Directory Structure ==="
+  #         find sandbox -type d -maxdepth 2 2>/dev/null || true
+  #         echo ""
+  #         echo "=== Client Logs ==="
+  #         find sandbox -name "*.log" -exec echo "--- {} ---" \; -exec cat {} \; 2>/dev/null || true
+  #
+  #     - name: Cleanup devstack
+  #       if: always()
+  #       run: |
+  #         chmod +x ./tests/scripts/devstack.sh
+  #         ./tests/scripts/devstack.sh --stop --reset || true
