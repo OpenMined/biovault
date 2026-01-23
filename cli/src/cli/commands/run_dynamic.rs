@@ -280,6 +280,7 @@ fn remap_json_paths_for_flat_dir(value: &JsonValue, flat_data_dir: &str) -> Json
     }
 }
 
+#[cfg(target_os = "windows")]
 fn env_var_truthy(name: &str) -> bool {
     match std::env::var(name) {
         Ok(value) => {
@@ -298,11 +299,6 @@ fn env_var_truthy(name: &str) -> bool {
 fn normalize_windows_path_for_compare(path: &Path) -> PathBuf {
     let normalized = normalize_windows_path_str(&path.to_string_lossy());
     PathBuf::from(normalized.to_ascii_lowercase())
-}
-
-#[cfg(not(target_os = "windows"))]
-fn normalize_windows_path_for_compare(path: &Path) -> PathBuf {
-    path.to_path_buf()
 }
 
 /// Return true if `target` is within `base` after normalizing Windows paths.
@@ -1150,8 +1146,12 @@ pub async fn execute_dynamic(
         fs::create_dir_all(&results_path_buf).context("Failed to create results directory")?;
     }
     let results_path_str = results_path_buf.to_string_lossy().to_string();
+    #[cfg(target_os = "windows")]
     let requested_results_path_buf = results_path_buf.clone();
+    #[cfg(target_os = "windows")]
     let mut results_path_for_run = results_path_buf.clone();
+    #[cfg(not(target_os = "windows"))]
+    let results_path_for_run = results_path_buf.clone();
 
     // Check user workflow exists
     let workflow_path = project_path.join(&spec.workflow);
@@ -1418,7 +1418,11 @@ pub async fn execute_dynamic(
 
         // Extract paths from inputs that need to be mounted (must do before rewriting CSVs)
         // This is Windows-specific: extract paths from CSV files and rewrite them for Docker
+        #[cfg(target_os = "windows")]
         let mut inputs_json_value: JsonValue =
+            serde_json::to_value(&inputs_json).context("Failed to convert inputs to JSON value")?;
+        #[cfg(not(target_os = "windows"))]
+        let inputs_json_value: JsonValue =
             serde_json::to_value(&inputs_json).context("Failed to convert inputs to JSON value")?;
 
         #[cfg(target_os = "windows")]
@@ -1574,10 +1578,7 @@ pub async fn execute_dynamic(
         };
 
         #[cfg(not(target_os = "windows"))]
-        let vm_data_dir: Option<String> = None;
-
-        #[cfg(not(target_os = "windows"))]
-        let mut mount_roots: Vec<PathBuf> = Vec::new();
+        let mount_roots: Vec<PathBuf> = Vec::new();
 
         #[cfg(target_os = "windows")]
         if hyperv_host_mount {
