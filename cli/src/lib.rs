@@ -6,9 +6,9 @@ pub mod error;
 pub mod flow_spec;
 pub mod messages;
 pub mod module_spec;
-pub mod types;
 pub mod project_spec;
 pub mod spec_format;
+pub mod types;
 
 #[cfg(feature = "telemetry")]
 pub mod telemetry;

@@ -76,7 +76,7 @@ impl SyftPermissions {
         });
     }
 
-pub fn save(&self, path: &PathBuf) -> anyhow::Result<()> {
+    pub fn save(&self, path: &PathBuf) -> anyhow::Result<()> {
         let yaml = serde_yaml::to_string(self)?;
         std::fs::write(path, yaml)?;
         Ok(())

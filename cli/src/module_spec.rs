@@ -6,7 +6,7 @@ use std::path::Path;
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::project_spec as project_spec;
+use crate::project_spec;
 
 macro_rules! wln {
     ($buf:expr) => {

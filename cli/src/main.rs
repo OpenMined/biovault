@@ -1876,7 +1876,10 @@ async fn async_main_with(cli: Cli) -> Result<()> {
                             .unwrap_or("nextflow");
 
                         // Use dynamic run system for nextflow, shell, and syqure runtimes
-                        if matches!(runtime, "nextflow" | "dynamic-nextflow" | "shell" | "syqure") {
+                        if matches!(
+                            runtime,
+                            "nextflow" | "dynamic-nextflow" | "shell" | "syqure"
+                        ) {
                             commands::run_dynamic::execute_dynamic(
                                 &module_folder,
                                 args,

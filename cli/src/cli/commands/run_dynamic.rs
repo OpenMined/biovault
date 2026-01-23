@@ -12,7 +12,7 @@ use std::ffi::OsStr;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -53,9 +53,7 @@ fn monitor_mpc_channels(
         let mut channels = Vec::new();
 
         for party in party_emails {
-            let channel_path = PathBuf::from(datasites_root)
-                .join(party)
-                .join(file_dir);
+            let channel_path = PathBuf::from(datasites_root).join(party).join(file_dir);
 
             let (file_count, last_modified) = count_mpc_files(&channel_path);
             let last_modified_ago = last_modified.map(|lm| now.saturating_sub(lm));
@@ -1215,12 +1213,26 @@ pub async fn execute_dynamic(
 
     match runtime {
         "shell" => {
-            return execute_shell(&spec, project_path, args, dry_run, results_dir, run_settings)
-                .await;
+            return execute_shell(
+                &spec,
+                project_path,
+                args,
+                dry_run,
+                results_dir,
+                run_settings,
+            )
+            .await;
         }
         "syqure" => {
-            return execute_syqure(&spec, project_path, args, dry_run, results_dir, run_settings)
-                .await;
+            return execute_syqure(
+                &spec,
+                project_path,
+                args,
+                dry_run,
+                results_dir,
+                run_settings,
+            )
+            .await;
         }
         "nextflow" | "dynamic-nextflow" => {
             // Fall through to nextflow execution below
@@ -1275,7 +1287,7 @@ pub async fn execute_dynamic(
     let datasites_override = resolve_datasites_override();
     let template_datasites = if let Some(override_list) = datasites_override {
         override_list
-    } else if spec.datasites.as_ref().map_or(false, |d| !d.is_empty()) {
+    } else if spec.datasites.as_ref().is_some_and(|d| !d.is_empty()) {
         spec.datasites.clone().unwrap_or_default()
     } else {
         Vec::new()
@@ -2594,9 +2606,8 @@ async fn execute_syqure(
 
     let (syqure_binary, use_docker) = resolve_syqure_backend(spec)?;
 
-    let run_id = env::var("BV_RUN_ID").unwrap_or_else(|_| {
-        chrono::Local::now().format("%Y%m%d%H%M%S").to_string()
-    });
+    let run_id = env::var("BV_RUN_ID")
+        .unwrap_or_else(|_| chrono::Local::now().format("%Y%m%d%H%M%S").to_string());
 
     let datasites_root = env::var("BV_DATASITES_ROOT")
         .or_else(|_| env::var("SYFTBOX_DATA_DIR").map(|dir| format!("{}/datasites", dir)))
@@ -2615,11 +2626,9 @@ async fn execute_syqure(
 
     let entrypoint_path = module_path.join(&entrypoint);
     if !entrypoint_path.exists() {
-        return Err(anyhow::anyhow!(
-            "Syqure entrypoint not found: {}",
-            entrypoint_path.display()
-        )
-        .into());
+        return Err(
+            anyhow::anyhow!("Syqure entrypoint not found: {}", entrypoint_path.display()).into(),
+        );
     }
 
     let poll_ms = spec
@@ -2743,14 +2752,20 @@ async fn execute_syqure(
 
     if dry_run {
         println!("\n📋 [DRY RUN] Syqure execution plan:");
-        println!("  Backend: {}", if use_docker { "docker" } else { "native" });
+        println!(
+            "  Backend: {}",
+            if use_docker { "docker" } else { "native" }
+        );
         println!("  Binary/Image: {}", syqure_binary);
         println!("  Entrypoint: {}", entrypoint_path.display());
         println!("  Party ID: {}", party_id);
         println!("  Party count: {}", party_count);
         println!("  Run ID: {}", run_id);
         println!("\n  Environment:");
-        for (k, v) in env_map.iter().filter(|(k, _)| k.starts_with("SEQURE_") || k.starts_with("BV_")) {
+        for (k, v) in env_map
+            .iter()
+            .filter(|(k, _)| k.starts_with("SEQURE_") || k.starts_with("BV_"))
+        {
             println!("    {}={}", k, v);
         }
         return Ok(());
@@ -2770,12 +2785,7 @@ async fn execute_syqure(
             &docker_platform,
         )?;
     } else {
-        execute_syqure_native(
-            &syqure_binary,
-            &entrypoint_path,
-            party_id,
-            &env_map,
-        )?;
+        execute_syqure_native(&syqure_binary, &entrypoint_path, party_id, &env_map)?;
     }
 
     println!("\n✅ Syqure execution completed successfully!");
@@ -2789,9 +2799,7 @@ fn resolve_syqure_backend(spec: &ModuleSpec) -> Result<(String, bool)> {
         .map(|v| v == "1" || v.to_lowercase() == "true")
         .unwrap_or(false);
 
-    let force_docker_spec = syqure_opts
-        .and_then(|s| s.use_docker)
-        .unwrap_or(false);
+    let force_docker_spec = syqure_opts.and_then(|s| s.use_docker).unwrap_or(false);
 
     let is_windows = cfg!(target_os = "windows");
     let use_docker = force_docker_env || force_docker_spec || is_windows;
@@ -2848,7 +2856,9 @@ fn resolve_syqure_backend(spec: &ModuleSpec) -> Result<(String, bool)> {
 
     if let Ok(which_output) = Command::new("which").arg("syqure").output() {
         if which_output.status.success() {
-            let path = String::from_utf8_lossy(&which_output.stdout).trim().to_string();
+            let path = String::from_utf8_lossy(&which_output.stdout)
+                .trim()
+                .to_string();
             if !path.is_empty() && Path::new(&path).exists() {
                 return Ok((path, false));
             }
@@ -2883,13 +2893,19 @@ fn execute_syqure_native(
     println!("\n▶️  Executing syqure...");
     println!("  {}", display_cmd.dimmed());
 
-    let datasites_root = env_map.get("SEQURE_DATASITES_ROOT").cloned().unwrap_or_default();
+    let datasites_root = env_map
+        .get("SEQURE_DATASITES_ROOT")
+        .cloned()
+        .unwrap_or_default();
     let file_dir = env_map.get("SEQURE_FILE_DIR").cloned().unwrap_or_default();
     let party_emails: Vec<String> = env_map
         .get("SEQURE_PARTY_EMAILS")
         .map(|s| s.split(',').map(|e| e.to_string()).collect())
         .unwrap_or_default();
-    let local_email = env_map.get("SEQURE_LOCAL_EMAIL").cloned().unwrap_or_default();
+    let local_email = env_map
+        .get("SEQURE_LOCAL_EMAIL")
+        .cloned()
+        .unwrap_or_default();
 
     let stop_flag = Arc::new(AtomicBool::new(false));
     let stop_flag_clone = stop_flag.clone();
@@ -2935,11 +2951,7 @@ fn execute_syqure_native(
     let _ = monitor_handle.join();
 
     if !status.success() {
-        return Err(anyhow::anyhow!(
-            "Syqure exited with code: {:?}",
-            status.code()
-        )
-        .into());
+        return Err(anyhow::anyhow!("Syqure exited with code: {:?}", status.code()).into());
     }
 
     Ok(())
@@ -2973,13 +2985,9 @@ fn execute_syqure_docker(
     let results_in_container = "/results";
 
     let shared_datasites_root = env::var("BV_SHARED_DATASITES_ROOT").ok();
-    let effective_datasites_mount = shared_datasites_root
-        .as_deref()
-        .unwrap_or(datasites_root);
+    let effective_datasites_mount = shared_datasites_root.as_deref().unwrap_or(datasites_root);
 
-    let entrypoint_rel = entrypoint
-        .strip_prefix(module_path)
-        .unwrap_or(entrypoint);
+    let entrypoint_rel = entrypoint.strip_prefix(module_path).unwrap_or(entrypoint);
     let container_entrypoint = format!("/workspace/project/{}", entrypoint_rel.display());
 
     let results_root = env_map
@@ -3029,10 +3037,18 @@ fn execute_syqure_docker(
         }
     }
 
-    cmd.args(["-v", &format!("{}:/workspace/project", module_path_abs.display())]);
-    cmd.args(["-v", &format!("{}:{}", effective_datasites_mount, datasites_in_container)]);
-    cmd.args(["-v", &format!("{}:{}", results_root.display(), results_in_container)]);
-
+    cmd.args([
+        "-v",
+        &format!("{}:/workspace/project", module_path_abs.display()),
+    ]);
+    cmd.args([
+        "-v",
+        &format!("{}:{}", effective_datasites_mount, datasites_in_container),
+    ]);
+    cmd.args([
+        "-v",
+        &format!("{}:{}", results_root.display(), results_in_container),
+    ]);
 
     cmd.arg(image);
     cmd.arg("syqure");
@@ -3271,10 +3287,7 @@ fn build_inputs_json(
     Ok(inputs_json)
 }
 
-fn build_params_json(
-    spec: &ModuleSpec,
-    parsed: &ParsedArgs,
-) -> Result<HashMap<String, JsonValue>> {
+fn build_params_json(spec: &ModuleSpec, parsed: &ParsedArgs) -> Result<HashMap<String, JsonValue>> {
     let mut params_json = HashMap::new();
 
     for param_spec in &spec.parameters {

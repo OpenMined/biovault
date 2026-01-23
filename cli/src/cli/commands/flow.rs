@@ -206,7 +206,7 @@ fn append_progress(
         .create(true)
         .append(true)
         .open(&log_file)?;
-    writeln!(file, "{}", log_entry.to_string())?;
+    writeln!(file, "{}", log_entry)?;
     Ok(())
 }
 
@@ -245,10 +245,7 @@ async fn wait_for_step_completion(
                     match step_progress.status.as_str() {
                         "completed" => {
                             if verbose {
-                                println!(
-                                    "✓  {} completed step '{}'",
-                                    source_datasite, step_id
-                                );
+                                println!("✓  {} completed step '{}'", source_datasite, step_id);
                             }
                             return Ok(());
                         }
@@ -535,34 +532,14 @@ pub async fn run_flow(
         if run_all_targets {
             // In sandbox mode with run_all, use first datasite's folder
             let all_datasites = resolve_all_datasites_from_spec(&spec, &resolved_inputs);
-            if let Some(first) = all_datasites.first() {
-                Some(
-                    root.join(first)
+            all_datasites.first().map(|first| root.join(first)
                         .join("datasites")
                         .join(first)
-                        .join("shared"),
-                )
-            } else {
-                None
-            }
-        } else if let Some(ref ds) = current_datasite {
-            // In sandbox mode with specific datasite, write to OUR OWN folder
-            Some(
-                root.join(ds)
-                    .join("datasites")
-                    .join(ds)
-                    .join("shared"),
-            )
-        } else {
-            None
-        }
+                        .join("shared"))
+        } else { current_datasite.as_ref().map(|ds| root.join(ds).join("datasites").join(ds).join("shared")) }
     } else if let Some(ref ds) = current_datasite {
         // In distributed mode, write to OUR OWN shared folder
-        if let Some(ref data_dir) = syftbox_data_dir {
-            Some(data_dir.join("datasites").join(ds).join("shared"))
-        } else {
-            None
-        }
+        syftbox_data_dir.as_ref().map(|data_dir| data_dir.join("datasites").join(ds).join("shared"))
     } else {
         None
     };
@@ -570,23 +547,41 @@ pub async fn run_flow(
     // For reading other parties' progress, we need to know where to look
     // In sandbox mode: read directly from source_datasite's own folder (no sync needed for tests)
     // In normal mode: use syftbox_data_dir/datasites/source_datasite/shared (synced via SyftBox)
-    let get_progress_read_base = |_reader_datasite: &str, source_datasite: &str| -> Option<PathBuf> {
-        if let Some(ref root) = sandbox_root {
-            // In sandbox mode, read directly from the source's own shared folder
-            // This bypasses the need for SyftBox sync in test environments
-            let path = root.join(source_datasite).join("datasites").join(source_datasite).join("shared");
-            eprintln!("DEBUG get_progress_read_base: sandbox_root={:?}, source={}, path={}", root, source_datasite, path.display());
-            Some(path)
-        } else if let Some(ref data_dir) = syftbox_data_dir {
-            // In normal mode, syftbox syncs files to our local view
-            let path = data_dir.join("datasites").join(source_datasite).join("shared");
-            eprintln!("DEBUG get_progress_read_base: syftbox_data_dir={:?}, source={}, path={}", data_dir, source_datasite, path.display());
-            Some(path)
-        } else {
-            eprintln!("DEBUG get_progress_read_base: no sandbox_root or syftbox_data_dir");
-            None
-        }
-    };
+    let get_progress_read_base =
+        |_reader_datasite: &str, source_datasite: &str| -> Option<PathBuf> {
+            if let Some(ref root) = sandbox_root {
+                // In sandbox mode, read directly from the source's own shared folder
+                // This bypasses the need for SyftBox sync in test environments
+                let path = root
+                    .join(source_datasite)
+                    .join("datasites")
+                    .join(source_datasite)
+                    .join("shared");
+                eprintln!(
+                    "DEBUG get_progress_read_base: sandbox_root={:?}, source={}, path={}",
+                    root,
+                    source_datasite,
+                    path.display()
+                );
+                Some(path)
+            } else if let Some(ref data_dir) = syftbox_data_dir {
+                // In normal mode, syftbox syncs files to our local view
+                let path = data_dir
+                    .join("datasites")
+                    .join(source_datasite)
+                    .join("shared");
+                eprintln!(
+                    "DEBUG get_progress_read_base: syftbox_data_dir={:?}, source={}, path={}",
+                    data_dir,
+                    source_datasite,
+                    path.display()
+                );
+                Some(path)
+            } else {
+                eprintln!("DEBUG get_progress_read_base: no sandbox_root or syftbox_data_dir");
+                None
+            }
+        };
 
     // Initialize progress tracking for this datasite (if we have a current datasite)
     let mut flow_progress: Option<FlowProgress> = if !run_all_targets {
@@ -648,10 +643,7 @@ pub async fn run_flow(
                 })?
             };
 
-            println!(
-                "\n🤝 Setting up coordination for {}",
-                datasite_key.bold()
-            );
+            println!("\n🤝 Setting up coordination for {}", datasite_key.bold());
 
             // Create coordination folder and permissions
             let url_template = coordination.url_template();
@@ -696,8 +688,7 @@ pub async fn run_flow(
 
         println!(
             "\n🔐 Setting up MPC channels (topology: {}, {} parties)",
-            mpc.topology,
-            party_count
+            mpc.topology, party_count
         );
 
         // Generate channels based on topology
@@ -754,10 +745,7 @@ pub async fn run_flow(
 
                 println!(
                     "  📡 {}@{} → {} (channel: {})",
-                    my_party_index,
-                    datasite_key,
-                    receiver_datasite,
-                    channel_name
+                    my_party_index, datasite_key, receiver_datasite, channel_name
                 );
 
                 let permission_spec = FlowPermissionSpec {
@@ -877,11 +865,15 @@ pub async fn run_flow(
             let all_datasites = resolve_all_datasites_from_spec(&spec, &resolved_inputs);
             for target in run_targets {
                 let datasite_key = target.clone().unwrap_or_else(|| "local".to_string());
-                let target_data_dir = if let (Some(ref root), Some(ref site)) = (&sandbox_root, &target) {
+                let target_data_dir = if let (Some(ref root), Some(ref site)) =
+                    (&sandbox_root, &target)
+                {
                     root.join(site)
                 } else {
                     syftbox_data_dir.clone().ok_or_else(|| {
-                        anyhow!("Permissions step requires SYFTBOX_DATA_DIR or BIOVAULT_SANDBOX_ROOT")
+                        anyhow!(
+                            "Permissions step requires SYFTBOX_DATA_DIR or BIOVAULT_SANDBOX_ROOT"
+                        )
                     })?
                 };
 
@@ -908,9 +900,7 @@ pub async fn run_flow(
             // Determine targets from coordination spec or fall back to step runs_on targets
             let coord_targets: Vec<String> = if let Some(ref targets) = coordination.targets {
                 match targets {
-                    crate::flow_spec::FlowRunTargets::One(s) if s == "all" => {
-                        all_datasites.clone()
-                    }
+                    crate::flow_spec::FlowRunTargets::One(s) if s == "all" => all_datasites.clone(),
                     crate::flow_spec::FlowRunTargets::One(s) => vec![s.clone()],
                     crate::flow_spec::FlowRunTargets::Many(v) => v.clone(),
                     crate::flow_spec::FlowRunTargets::Selector(sel) => sel.include.clone(),
@@ -935,11 +925,15 @@ pub async fn run_flow(
 
             for target in coord_run_targets {
                 let datasite_key = target.clone().unwrap_or_else(|| "local".to_string());
-                let target_data_dir = if let (Some(ref root), Some(ref site)) = (&sandbox_root, &target) {
+                let target_data_dir = if let (Some(ref root), Some(ref site)) =
+                    (&sandbox_root, &target)
+                {
                     root.join(site)
                 } else {
                     syftbox_data_dir.clone().ok_or_else(|| {
-                        anyhow!("Coordination step requires SYFTBOX_DATA_DIR or BIOVAULT_SANDBOX_ROOT")
+                        anyhow!(
+                            "Coordination step requires SYFTBOX_DATA_DIR or BIOVAULT_SANDBOX_ROOT"
+                        )
                     })?
                 };
 
@@ -989,7 +983,8 @@ pub async fn run_flow(
             let all_datasites = resolve_all_datasites_from_spec(&spec, &resolved_inputs);
 
             // Build groups map for target resolution
-            let mut groups: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
+            let mut groups: std::collections::BTreeMap<String, Vec<String>> =
+                std::collections::BTreeMap::new();
             groups.insert("all".to_string(), all_datasites.clone());
             if let Some(first) = all_datasites.first() {
                 groups.insert("aggregator".to_string(), vec![first.clone()]);
@@ -1005,9 +1000,9 @@ pub async fn run_flow(
                     crate::flow_spec::FlowRunTargets::One(s) => {
                         // Check if it's a group name
                         groups.get(s).cloned().unwrap_or_else(|| vec![s.clone()])
-                    },
+                    }
                     crate::flow_spec::FlowRunTargets::Many(v) => v.clone(),
-                    crate::flow_spec::FlowRunTargets::Selector(sel) => sel.include.clone()
+                    crate::flow_spec::FlowRunTargets::Selector(sel) => sel.include.clone(),
                 }
             } else {
                 // Default to all datasites if not specified
@@ -1034,7 +1029,10 @@ pub async fn run_flow(
                 println!("   ✓ No other targets to wait for (only self)");
             } else {
                 for target in &targets_to_wait {
-                    println!("   • Waiting for {} to complete '{}'...", target, wait_for_step);
+                    println!(
+                        "   • Waiting for {} to complete '{}'...",
+                        target, wait_for_step
+                    );
                 }
 
                 // Wait for each target to complete the specified step
@@ -1056,12 +1054,17 @@ pub async fn run_flow(
                                 "Barrier '{}': Cannot determine progress path for {}",
                                 step.id,
                                 target
-                            ).into());
+                            )
+                            .into());
                         }
                     }
                 }
 
-                println!("   ✓ All {} target(s) completed step '{}'", barrier_targets.len(), wait_for_step);
+                println!(
+                    "   ✓ All {} target(s) completed step '{}'",
+                    barrier_targets.len(),
+                    wait_for_step
+                );
             }
 
             // Update progress for this barrier step
@@ -1079,7 +1082,10 @@ pub async fn run_flow(
                         &run_id,
                         "barrier_completed",
                         Some(&step.id),
-                        &format!("Barrier {} completed (waited for {})", step.id, wait_for_step),
+                        &format!(
+                            "Barrier {} completed (waited for {})",
+                            step.id, wait_for_step
+                        ),
                     ) {
                         if verbose_progress {
                             println!("⚠️  Could not append barrier progress: {}", e);
@@ -1111,8 +1117,8 @@ pub async fn run_flow(
                         if binding.starts_with("step.") {
                             let parts: Vec<&str> = binding.split('.').collect();
                             // Handle both outputs and share namespaces
-                            let is_valid_namespace = parts.len() >= 4
-                                && (parts[2] == "outputs" || parts[2] == "share");
+                            let is_valid_namespace =
+                                parts.len() >= 4 && (parts[2] == "outputs" || parts[2] == "share");
                             // Check if this is a url_list binding (needs all sites)
                             let is_url_list = parts.len() >= 5
                                 && matches!(parts[4], "url_list" | "manifest" | "all" | "paths");
@@ -1150,7 +1156,9 @@ pub async fn run_flow(
                                         if Some(site.as_str()) != current_datasite {
                                             // Look in the current datasite's synced view of the source datasite's folder
                                             if let Some(reader) = current_datasite {
-                                                if let Some(read_base) = get_progress_read_base(reader, site) {
+                                                if let Some(read_base) =
+                                                    get_progress_read_base(reader, site)
+                                                {
                                                     // Wait for this datasite to complete the source step
                                                     wait_for_step_completion(
                                                         &read_base,
@@ -1188,10 +1196,7 @@ pub async fn run_flow(
                                     for path in &paths_to_wait {
                                         if !path.exists() {
                                             if verbose_progress {
-                                                println!(
-                                                    "⏳ Waiting for file: {}",
-                                                    path.display()
-                                                );
+                                                println!("⏳ Waiting for file: {}", path.display());
                                             }
                                             wait_for_path(path, await_timeout_secs).await?;
                                             if verbose_progress {
@@ -1380,7 +1385,10 @@ pub async fn run_flow(
                 let (event, msg) = match &step_result {
                     Ok(_) => {
                         progress.mark_step_completed(&step.id);
-                        ("step_completed", format!("Step {} completed successfully", step_label))
+                        (
+                            "step_completed",
+                            format!("Step {} completed successfully", step_label),
+                        )
                     }
                     Err(e) => {
                         progress.mark_step_failed(&step.id, &e.to_string());
@@ -2249,7 +2257,8 @@ fn resolve_binding(
 
     if binding.starts_with("step.") {
         let parts: Vec<&str> = binding.split('.').collect();
-        let wants_manifest = parts.len() == 5 && matches!(parts[4], "url_list" | "manifest" | "all" | "paths");
+        let wants_manifest =
+            parts.len() == 5 && matches!(parts[4], "url_list" | "manifest" | "all" | "paths");
         let valid_namespace = parts.len() >= 3 && matches!(parts[2], "outputs" | "share");
         if (parts.len() != 4 && !wants_manifest) || !valid_namespace {
             return Err(anyhow!(
@@ -2575,15 +2584,12 @@ fn resolve_share_location(
 
     // Require syft:// URL scheme
     if !rendered.starts_with("syft://") {
-        return Err(anyhow!(
-            "Share URL must use syft:// scheme, got: {}",
-            rendered
-        ).into());
+        return Err(anyhow!("Share URL must use syft:// scheme, got: {}", rendered).into());
     }
 
     // Parse and validate using SDK
-    let parsed = SyftURL::parse(&rendered)
-        .with_context(|| format!("Invalid share URL: {}", rendered))?;
+    let parsed =
+        SyftURL::parse(&rendered).with_context(|| format!("Invalid share URL: {}", rendered))?;
 
     // Validate no path traversal
     validate_no_path_traversal(&parsed.path)?;
@@ -2669,18 +2675,28 @@ fn execute_permissions_step(
         validate_no_path_traversal(&parsed.path)?;
 
         // Build local path from syft URL components
-        let full_path = target_data_dir.join("datasites").join(&parsed.email).join(&parsed.path);
+        let full_path = target_data_dir
+            .join("datasites")
+            .join(&parsed.email)
+            .join(&parsed.path);
 
-        std::fs::create_dir_all(&full_path)
-            .with_context(|| format!("Failed to create permissions directory: {}", full_path.display()))?;
+        std::fs::create_dir_all(&full_path).with_context(|| {
+            format!(
+                "Failed to create permissions directory: {}",
+                full_path.display()
+            )
+        })?;
 
         let rules: Vec<PermissionRule> = perm_spec
             .rules
             .iter()
             .map(|rule| {
-                let read = expand_permission_patterns(&rule.access.read, all_datasites, current_datasite);
-                let write = expand_permission_patterns(&rule.access.write, all_datasites, current_datasite);
-                let admin = expand_permission_patterns(&rule.access.admin, all_datasites, current_datasite);
+                let read =
+                    expand_permission_patterns(&rule.access.read, all_datasites, current_datasite);
+                let write =
+                    expand_permission_patterns(&rule.access.write, all_datasites, current_datasite);
+                let admin =
+                    expand_permission_patterns(&rule.access.admin, all_datasites, current_datasite);
                 PermissionRule {
                     pattern: rule.pattern.clone(),
                     access: AccessControl {
@@ -2694,8 +2710,8 @@ fn execute_permissions_step(
 
         let permissions = SyftPermissions { rules };
         let perms_path = full_path.join("syft.pub.yaml");
-        let yaml = serde_yaml::to_string(&permissions)
-            .context("Failed to serialize permissions")?;
+        let yaml =
+            serde_yaml::to_string(&permissions).context("Failed to serialize permissions")?;
         std::fs::write(&perms_path, yaml)
             .with_context(|| format!("Failed to write {}", perms_path.display()))?;
 
@@ -3450,7 +3466,8 @@ fn validate_internal(
                 if step_spec.permissions.is_empty() && step_spec.barrier.is_none() {
                     unresolved_steps.push(UnresolvedStep {
                         step_id: step_spec.id.clone(),
-                        reason: "Module not specified (provide via --module or edit flow)".to_string(),
+                        reason: "Module not specified (provide via --module or edit flow)"
+                            .to_string(),
                     });
                 }
             }

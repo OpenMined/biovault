@@ -301,7 +301,6 @@ pub struct FlowMpcSpec {
     /// Default: "{from}_to_{to}"
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pattern: Option<String>,
-
     // TODO: Custom channel definitions for non-standard topologies
     // #[serde(default, skip_serializing_if = "Vec::is_empty")]
     // pub channels: Vec<FlowMpcChannel>,
@@ -411,12 +410,12 @@ impl ConditionalInput {
             // Object with value/only/without
             YamlValue::Mapping(map) => {
                 let value = map
-                    .get(&YamlValue::String("value".to_string()))
+                    .get(YamlValue::String("value".to_string()))
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string())?;
 
                 let only = map
-                    .get(&YamlValue::String("only".to_string()))
+                    .get(YamlValue::String("only".to_string()))
                     .and_then(|v| match v {
                         YamlValue::String(s) => Some(vec![s.clone()]),
                         YamlValue::Sequence(seq) => {
@@ -434,7 +433,7 @@ impl ConditionalInput {
                     });
 
                 let without = map
-                    .get(&YamlValue::String("without".to_string()))
+                    .get(YamlValue::String("without".to_string()))
                     .and_then(|v| match v {
                         YamlValue::String(s) => Some(vec![s.clone()]),
                         YamlValue::Sequence(seq) => {
@@ -464,7 +463,11 @@ impl ConditionalInput {
     /// Check if this input applies to the given target
     /// target_name: the datasite name (e.g., "aggregator@sandbox.local")
     /// groups: map of group names to datasite lists (e.g., "clients" -> ["client1@...", "client2@..."])
-    pub fn applies_to(&self, target_name: &str, groups: &std::collections::BTreeMap<String, Vec<String>>) -> bool {
+    pub fn applies_to(
+        &self,
+        target_name: &str,
+        groups: &std::collections::BTreeMap<String, Vec<String>>,
+    ) -> bool {
         // Check "only" constraint
         if let Some(ref only_list) = self.only {
             let matches = only_list.iter().any(|pattern| {
