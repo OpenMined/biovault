@@ -12,7 +12,8 @@ pub struct ModuleMetadata {
     pub name: String,
     pub author: String,
     pub workflow: String,
-    pub template: Option<String>,
+    #[serde(alias = "template")]
+    pub runtime: Option<String>,
     #[serde(default)]
     pub version: Option<String>,
     pub assets: Vec<String>,
@@ -46,7 +47,7 @@ pub fn load_module_metadata(module_root: &Path) -> Result<Option<ModuleMetadata>
         name: spec.name,
         author: spec.author,
         workflow: spec.workflow,
-        template: spec.template,
+        runtime: spec.runtime,
         version: Some(spec.version.unwrap_or_else(|| "1.0.0".to_string())),
         assets: spec.assets,
         parameters: spec.parameters,
@@ -70,7 +71,7 @@ pub fn save_module_metadata(module_root: &Path, metadata: &ModuleMetadata) -> Re
         author: metadata.author.clone(),
         workflow: metadata.workflow.clone(),
         description: None,
-        template: metadata.template.clone(),
+        runtime: metadata.runtime.clone(),
         version: Some(
             metadata
                 .version
@@ -84,6 +85,7 @@ pub fn save_module_metadata(module_root: &Path, metadata: &ModuleMetadata) -> Re
         inputs: metadata.inputs.clone(),
         outputs: metadata.outputs.clone(),
         steps: Vec::new(),
+        runner: None,
     };
 
     let module = crate::module_spec::ModuleFile::from_module_spec(&spec);

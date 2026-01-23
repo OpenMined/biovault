@@ -246,7 +246,7 @@ pub async fn create(
                 author: author_default.clone(),
                 workflow: "workflow.nf".to_string(),
                 description: None,
-                template: Some("dynamic-nextflow".to_string()),
+                runtime: Some("nextflow".to_string()),
                 version: Some("0.1.0".to_string()),
                 datasites: None,
                 env: Default::default(),
@@ -255,6 +255,7 @@ pub async fn create(
                 inputs: fallback_inputs,
                 outputs: fallback_outputs,
                 steps: Vec::new(),
+                runner: None,
             };
             module_spec::scaffold_from_spec(fallback, module_path)?
         };
@@ -880,7 +881,7 @@ fn run_module_spec_wizard(
         author,
         workflow,
         description: None,
-        template: Some("dynamic-nextflow".to_string()),
+        runtime: Some("nextflow".to_string()),
         version,
         datasites: None,
         env: Default::default(),
@@ -889,6 +890,7 @@ fn run_module_spec_wizard(
         inputs,
         outputs,
         steps: Vec::new(),
+        runner: None,
     })
 }
 

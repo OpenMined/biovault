@@ -143,6 +143,31 @@ dependencies:
         skip: true
         skip_reason: "Manual install required. Download from https://github.com/OpenMined/syftbox/releases"
 
+  - name: syqure
+    check_running: false
+    optional: true
+    install_instructions: |
+      Native: Build from source at https://github.com/madhavajay/syqure
+      Docker: docker pull ghcr.io/madhavajay/syqure-cli:latest
+    description: Secure multi-party computation runtime for privacy-preserving analytics
+    website: https://github.com/madhavajay/syqure
+    environments:
+      macos:
+        install_commands:
+          - echo "Build syqure from source or set SEQURE_NATIVE_BIN environment variable"
+        verify_command: syqure --version
+      ubuntu:
+        install_commands:
+          - echo "Build syqure from source or set SEQURE_NATIVE_BIN environment variable"
+        verify_command: syqure --version
+      arch:
+        install_commands:
+          - echo "Build syqure from source or set SEQURE_NATIVE_BIN environment variable"
+        verify_command: syqure --version
+      windows:
+        skip: true
+        skip_reason: "Use Docker container: docker pull ghcr.io/madhavajay/syqure-cli:latest"
+
   - name: uv
     check_running: false
     install_instructions: |

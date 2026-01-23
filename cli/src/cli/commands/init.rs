@@ -148,6 +148,7 @@ pub async fn execute(email: Option<&str>, quiet: bool) -> Result<()> {
             agent_bridge_http_port: None,
             agent_bridge_token: None,
             agent_bridge_blocklist: None,
+            syqure: None,
         };
 
         config.save(&config_file)?;

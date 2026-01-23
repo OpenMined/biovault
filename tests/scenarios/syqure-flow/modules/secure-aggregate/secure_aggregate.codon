@@ -40,7 +40,15 @@ def main():
     data = load_json(os.getenv("SEQURE_INPUT_COUNTS", ""))
     n = len(data)
     if n == 0:
-        n = int(os.getenv("SEQURE_ARRAY_LENGTH", "0"))
+        # Try reading array_length from file (SEQURE_INPUT_ARRAY_LENGTH points to a file)
+        array_length_file = os.getenv("SEQURE_INPUT_ARRAY_LENGTH", "")
+        if array_length_file:
+            try:
+                n = int(open(array_length_file).read().strip())
+            except:
+                pass
+        if n == 0:
+            n = int(os.getenv("SEQURE_ARRAY_LENGTH", "0"))
 
     if n == 0:
         print(f"ERROR: CP{m.pid} has no data and no array_length - check flow configuration")
@@ -67,7 +75,7 @@ def main():
         print(f"CP{m.pid}: i={i} revealed={revealed}")
         result.append(revealed)
 
-    save_json(os.getenv("SEQURE_OUTPUT_AGGREGATED", "out.json"), result)
+    save_json(os.getenv("SEQURE_OUTPUT_AGGREGATED_COUNTS", "out.json"), result)
     m.done()
 
 

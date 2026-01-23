@@ -21,6 +21,7 @@ Options:
   --sandbox DIR        Sandbox root (default: ./sandbox)
   --rust-client-bin P  Path to Rust client binary (optional)
   --skip-rust-build    Do not build Rust client (requires binary exists)
+  --docker             Force Docker mode for syqure runtime
   -h, --help           Show this message
 
 Examples:
@@ -28,6 +29,7 @@ Examples:
   ./test-scenario.sh --client-mode go tests/scenarios/inbox-ping-pong.yaml
   ./test-scenario.sh --sandbox sandbox-rs tests/scenarios/inbox-ping-pong.yaml
   ./test-scenario.sh --client-mode embedded tests/scenarios/inbox-ping-pong.yaml
+  ./test-scenario.sh --docker tests/scenarios/syqure-distributed.yaml
 EOF
 }
 
@@ -35,6 +37,7 @@ CLIENT_MODE="rust"
 SANDBOX_DIR=""
 RUST_CLIENT_BIN=""
 SKIP_RUST_BUILD=0
+USE_DOCKER=0
 SCENARIO=""
 
 while [[ $# -gt 0 ]]; do
@@ -56,6 +59,9 @@ while [[ $# -gt 0 ]]; do
       ;;
     --skip-rust-build)
       SKIP_RUST_BUILD=1
+      ;;
+    --docker)
+      USE_DOCKER=1
       ;;
     -h|--help)
       usage
@@ -108,6 +114,35 @@ fi
 if [[ "${CLIENT_MODE}" == "embedded" ]]; then
   # Ensure BioVault-hosted SyftBox runs in embedded mode when started by devstack.sh.
   export BV_SYFTBOX_BACKEND=embedded
+fi
+
+# Syqure runtime setup
+SYQURE_DIR="$ROOT_DIR/../syqure"
+SYQURE_BIN="$SYQURE_DIR/target/debug/syqure"
+if (( USE_DOCKER )); then
+  export BV_SYQURE_USE_DOCKER=1
+  echo "Syqure mode: Docker"
+else
+  # Native mode - build syqure if needed
+  if [[ ! -x "$SYQURE_BIN" ]]; then
+    if [[ -d "$SYQURE_DIR" ]]; then
+      echo "Building syqure native binary..."
+      (cd "$SYQURE_DIR" && cargo build) || {
+        echo "Failed to build syqure. Use --docker flag for Docker mode." >&2
+        exit 1
+      }
+    else
+      echo "Syqure directory not found at $SYQURE_DIR. Use --docker flag for Docker mode." >&2
+      exit 1
+    fi
+  fi
+  if [[ -x "$SYQURE_BIN" ]]; then
+    export SEQURE_NATIVE_BIN="$SYQURE_BIN"
+    echo "Syqure mode: Native ($SYQURE_BIN)"
+  else
+    echo "Syqure binary not found at $SYQURE_BIN. Use --docker flag for Docker mode." >&2
+    exit 1
+  fi
 fi
 
 if python3 -c 'import yaml' >/dev/null 2>&1; then

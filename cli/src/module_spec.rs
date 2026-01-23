@@ -78,14 +78,36 @@ pub struct ModuleRunnerSpec {
     pub kind: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub entrypoint: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub template: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none", alias = "template")]
+    pub runtime: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub syqure: Option<SyqureRunnerOptions>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SyqureRunnerOptions {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub docker_image: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub use_docker: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub analyze: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skip_mhe_setup: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub poll_ms: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -159,8 +181,8 @@ pub struct ModuleSpec {
     pub workflow: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub template: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none", alias = "template")]
+    pub runtime: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -177,6 +199,8 @@ pub struct ModuleSpec {
     pub outputs: Vec<OutputSpec>,
     #[serde(default)]
     pub steps: Vec<ModuleStepSpec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runner: Option<ModuleRunnerSpec>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -304,11 +328,11 @@ pub fn scaffold_from_spec(mut spec: ModuleSpec, target_dir: &Path) -> Result<Mod
         bail!("Spec 'workflow' field cannot be empty");
     }
 
-    let template_name = spec
-        .template
+    let runtime_name = spec
+        .runtime
         .clone()
-        .unwrap_or_else(|| "dynamic-nextflow".to_string());
-    spec.template = Some(template_name);
+        .unwrap_or_else(|| "nextflow".to_string());
+    spec.runtime = Some(runtime_name);
 
     let module_yaml_path = target_dir.join("module.yaml");
     let workflow_path = target_dir.join(&spec.workflow);
@@ -1116,10 +1140,11 @@ impl ModuleFile {
         let runner = ModuleRunnerSpec {
             kind: Some(infer_runner_kind(spec)),
             entrypoint: Some(spec.workflow.clone()),
-            template: spec.template.clone(),
+            runtime: spec.runtime.clone(),
             image: None,
             command: None,
             env: spec.env.clone(),
+            syqure: None,
         };
 
         let inputs = spec
@@ -1269,23 +1294,26 @@ impl ModuleFile {
             author,
             workflow,
             description: self.metadata.description.clone(),
-            template: runner.template,
+            runtime: runner.runtime.clone(),
             version: Some(self.metadata.version.clone()),
             datasites: None,
-            env: runner.env,
+            env: runner.env.clone(),
             assets,
             parameters,
             inputs,
             outputs,
             steps: Vec::new(),
+            runner: Some(runner),
         })
     }
 }
 
 fn infer_runner_kind(spec: &ModuleSpec) -> String {
-    if let Some(template) = &spec.template {
-        if template == "shell" {
-            return "shell".to_string();
+    if let Some(runtime) = &spec.runtime {
+        match runtime.as_str() {
+            "shell" => return "shell".to_string(),
+            "syqure" => return "syqure".to_string(),
+            _ => {}
         }
     }
     if spec.workflow.ends_with(".py") {

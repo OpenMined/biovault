@@ -422,6 +422,7 @@ fn load_or_create_config(email: &str) -> Result<(Config, PathBuf)> {
                 agent_bridge_http_port: None,
                 agent_bridge_token: None,
                 agent_bridge_blocklist: None,
+                syqure: None,
             };
             config.save(&config_path)?;
             Ok((config, config_path))

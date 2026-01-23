@@ -52,10 +52,10 @@ impl ModuleYaml {
             .entrypoint
             .clone()
             .unwrap_or_else(|| "workflow.nf".to_string());
-        let template = runner
-            .template
+        let runtime = runner
+            .runtime
             .clone()
-            .unwrap_or_else(|| "dynamic-nextflow".to_string());
+            .unwrap_or_else(|| "nextflow".to_string());
         let assets = module
             .spec
             .assets
@@ -69,7 +69,7 @@ impl ModuleYaml {
             version: module.metadata.version,
             author,
             workflow,
-            template,
+            template: runtime,
             assets,
         }
     }

@@ -160,6 +160,7 @@ pub async fn execute(ignore_warning: bool) -> Result<()> {
                 agent_bridge_http_port: None,
                 agent_bridge_token: None,
                 agent_bridge_blocklist: None,
+                syqure: None,
             }
         }
     };

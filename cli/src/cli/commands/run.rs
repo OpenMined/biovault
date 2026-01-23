@@ -37,8 +37,8 @@ struct ModuleConfig {
     name: String,
     author: String,
     workflow: String,
-    #[serde(default)]
-    template: Option<String>,
+    #[serde(default, alias = "template")]
+    runtime: Option<String>,
     #[serde(default, deserialize_with = "deserialize_string_or_vec")]
     assets: Vec<String>,
     #[serde(default)]
@@ -54,7 +54,7 @@ impl ModuleConfig {
                 .entrypoint
                 .clone()
                 .unwrap_or_else(|| "workflow.nf".to_string());
-            let template = runner.template.clone();
+            let runtime = runner.runtime.clone();
             let assets = module
                 .spec
                 .assets
@@ -66,7 +66,7 @@ impl ModuleConfig {
                 name: module.metadata.name,
                 author,
                 workflow,
-                template,
+                runtime,
                 assets,
                 participants: Vec::new(),
             });
@@ -1282,7 +1282,7 @@ async fn execute_sheet_workflow(params: &RunParams, config: &ModuleConfig) -> an
     // Get BioVault environment directory
     let biovault_home = crate::config::get_biovault_home()?;
     let template_name = config
-        .template
+        .runtime
         .clone()
         .unwrap_or_else(|| "sheet".to_string());
     let env_dir = biovault_home.join("env").join(&template_name);
@@ -1486,7 +1486,7 @@ pub async fn execute(params: RunParams) -> anyhow::Result<()> {
 
     // Check if this is a sheet template module
     let is_sheet_template = config
-        .template
+        .runtime
         .as_ref()
         .map(|t| t == "sheet")
         .unwrap_or(false);
@@ -1513,7 +1513,7 @@ pub async fn execute(params: RunParams) -> anyhow::Result<()> {
     // Priority: CLI flag > module.yaml > default
     let template_name = params
         .template
-        .or(config.template.clone())
+        .or(config.runtime.clone())
         .unwrap_or_else(|| "default".to_string());
 
     // Get BioVault environment directory
@@ -1773,7 +1773,7 @@ participants:
         assert_eq!(config.name, "test_module");
         assert_eq!(config.author, "test@example.com");
         assert_eq!(config.workflow, "test.nf");
-        assert_eq!(config.template, Some("test_template".to_string()));
+        assert_eq!(config.runtime, Some("test_template".to_string()));
         assert_eq!(config.assets, vec!["test_asset"]);
         assert_eq!(config.participants, vec!["p1", "p2"]);
     }
@@ -1888,7 +1888,7 @@ workflow: main.nf
         assert_eq!(config.name, "minimal");
         assert_eq!(config.author, "user@example.com");
         assert_eq!(config.workflow, "main.nf");
-        assert!(config.template.is_none());
+        assert!(config.runtime.is_none());
         assert!(config.assets.is_empty());
         assert!(config.participants.is_empty());
     }
