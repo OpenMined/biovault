@@ -49,6 +49,7 @@ SKIP_SYNC_CHECK=0
 SKIP_KEYS=0
 SKIP_CLIENT_DAEMONS=0
 EMBEDDED_MODE=0
+ALLOW_PUBLIC_SUBS=0
 RAW_CLIENTS=()
 CLIENT_MODE=""
 CLIENT_MODE_EXPLICIT=0
@@ -329,6 +330,10 @@ configure_syftbox_clients() {
       return 0
       ;;
     rust|mixed)
+      # Rust client defaults to blocking remote sync without subscriptions.
+      # For devstack tests, allow public paths and skip the built-in sync probe.
+      SKIP_SYNC_CHECK=1
+      ALLOW_PUBLIC_SUBS=1
       ;;
     *)
       echo "Invalid --client-mode: $mode (expected go|rust|mixed|embedded)" >&2
@@ -392,6 +397,39 @@ start_syftboxd() {
       "$BV_BIN" syftboxd start </dev/null >/dev/null 2>&1
     ) || true
   done
+}
+
+write_public_subscriptions() {
+  local email="$1"
+  local sub_path="$SANDBOX_DIR/$email/.data/syft.sub.yaml"
+  mkdir -p "$(dirname "$sub_path")"
+  cat >"$sub_path" <<'EOF'
+version: 1
+defaults:
+  action: block
+rules:
+  - action: allow
+    datasite: "*"
+    path: "public/crypto/did.json"
+  - action: allow
+    datasite: "*"
+    path: "public/biovault/datasets/*.yaml"
+  - action: allow
+    datasite: "*"
+    path: "app_data/biovault/*.yaml"
+  - action: allow
+    datasite: "*"
+    path: "**/syft.pub.yaml"
+  - action: allow
+    datasite: "*"
+    path: "**/*.request"
+  - action: allow
+    datasite: "*"
+    path: "**/*.response"
+  - action: allow
+    datasite: "*"
+    path: "shared/biovault/**"
+EOF
 }
 
 start_stack() {
@@ -478,6 +516,12 @@ PY
 
   if (( EMBEDDED_MODE )); then
     start_syftboxd
+  fi
+
+  if (( ALLOW_PUBLIC_SUBS )); then
+    for email in "${CLIENTS[@]}"; do
+      write_public_subscriptions "$email"
+    done
   fi
 
   echo ""

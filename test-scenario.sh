@@ -130,19 +130,22 @@ if [[ "$SCENARIO" == *"syqure"* ]]; then
   if (( ! USE_DOCKER )); then
     # Preflight: if no bundle is available for native syqure, fall back to Docker.
     BUNDLE_OK=0
-    if [[ -n "${SYQURE_BUNDLE_FILE:-}" && -f "${SYQURE_BUNDLE_FILE}" ]]; then
-      BUNDLE_OK=1
-    else
-      if command -v rustc >/dev/null 2>&1; then
-        HOST_TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"
-        if [[ -n "$HOST_TRIPLE" && -f "$SYQURE_DIR/bundles/${HOST_TRIPLE}.tar.zst" ]]; then
-          BUNDLE_OK=1
-        fi
-      fi
-      if [[ -d "$ROOT_DIR/../codon/install/lib/codon" ]]; then
+  if [[ -n "${SYQURE_BUNDLE_FILE:-}" && -f "${SYQURE_BUNDLE_FILE}" ]]; then
+    BUNDLE_OK=1
+  else
+    if command -v rustc >/dev/null 2>&1; then
+      HOST_TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"
+      if [[ -n "$HOST_TRIPLE" && -f "$SYQURE_DIR/bundles/${HOST_TRIPLE}.tar.zst" ]]; then
         BUNDLE_OK=1
       fi
     fi
+    if [[ -d "$SYQURE_DIR/bin/macos-arm64/codon" || -d "$SYQURE_DIR/bin/macos-x86_64/codon" || -d "$SYQURE_DIR/bin/linux-x86/codon" || -d "$SYQURE_DIR/bin/linux-arm64/codon" ]]; then
+      BUNDLE_OK=1
+    fi
+    if [[ -d "$ROOT_DIR/../codon/install/lib/codon" ]]; then
+      BUNDLE_OK=1
+    fi
+  fi
 
     if (( ! BUNDLE_OK )); then
       USE_DOCKER=1
