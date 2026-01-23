@@ -23,15 +23,17 @@ fn append_desktop_log(message: &str) {
 use crate::data::BioVaultDb;
 use crate::error::Result;
 use crate::pipeline_spec::{
-    value_to_string, PipelineInputSpec, PipelineSpec, PipelineSqlStoreSpec, PipelineStepSpec,
-    PipelineStoreSpec,
+    value_to_string, PipelineInputSpec, PipelineShareSpec, PipelineSpec, PipelineSqlStoreSpec,
+    PipelineStepSpec, PipelineStoreSpec,
 };
 use crate::project_spec::{
     resolve_project_spec_path, InputSpec, OutputSpec, ProjectSpec, MODULE_YAML_FILE,
     PROJECT_YAML_FILE,
 };
+use crate::types::{AccessControl, PermissionRule, SyftPermissions};
 use anyhow::{anyhow, Context};
 use chrono::Utc;
+use crate::cli::syft_url::SyftURL;
 use colored::Colorize;
 use csv::ReaderBuilder;
 use dialoguer::{theme::ColorfulTheme, Confirm, Input, Select};
@@ -126,8 +128,12 @@ pub async fn create(
             id: step_id_value,
             uses: Some(reference),
             where_exec: None,
+            foreach: None,
+            runs_on: None,
+            order: None,
             with: with_map,
             publish: publish_map,
+            share: BTreeMap::new(),
             store: BTreeMap::new(),
         });
 
@@ -246,7 +252,8 @@ pub async fn run_pipeline(
         }
     }
 
-    let mut step_outputs: HashMap<String, HashMap<String, String>> = HashMap::new();
+    let mut step_outputs: HashMap<String, HashMap<String, HashMap<String, String>>> = HashMap::new();
+    let mut step_output_order: HashMap<String, Vec<String>> = HashMap::new();
 
     let requested_results_dir = explicit_results_dir.or(results_dir_override);
 
@@ -263,135 +270,300 @@ pub async fn run_pipeline(
         fs::create_dir_all(&base_results_dir).await?;
     }
 
+    let current_datasite = resolve_current_datasite();
+    let run_all_targets = env::var("BIOVAULT_PIPELINE_RUN_ALL")
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false);
+    let syftbox_data_dir = crate::config::Config::load()
+        .ok()
+        .and_then(|cfg| cfg.get_syftbox_data_dir().ok());
+
     for step in &spec.steps {
         let project = resolve_project(step, pipeline_dir, db.as_ref())?
             .ok_or_else(|| anyhow!("Step '{}' has no project to run", step.id))?;
 
         let project_root = project.root.to_string_lossy().to_string();
         let project_spec = &project.spec;
-
-        let mut step_args = Vec::new();
-
-        for input in &project_spec.inputs {
-            let binding = step
-                .with
-                .get(&input.name)
-                .and_then(value_to_string)
-                .ok_or_else(|| {
-                    anyhow!(
-                        "Step '{}' is missing a binding for input '{}'",
-                        step.id,
-                        input.name
-                    )
-                })?;
-
-            let override_key = (step.id.clone(), input.name.clone());
-            let resolved_binding = step_overrides
-                .get(&override_key)
-                .cloned()
-                .unwrap_or(binding);
-
-            let resolved_value = resolve_binding(
-                &resolved_binding,
-                &input.raw_type,
-                &spec.inputs,
-                &resolved_inputs,
-                &step_outputs,
-                &step.id,
-            )?;
-
-            step_args.push(format!("--{}", input.name));
-            step_args.push(resolved_value);
+        let step_targets = resolve_step_targets(step);
+        if !step_targets.is_empty() {
+            step_output_order.insert(step.id.clone(), step_targets.clone());
+        }
+        if !step.share.is_empty() && step_targets.is_empty() {
+            return Err(anyhow!(
+                "Step '{}' declares shares but has no runs_on/foreach targets",
+                step.id
+            )
+            .into());
         }
 
-        for param in &project_spec.parameters {
-            let override_key = (step.id.clone(), param.name.clone());
-            if let Some(value) = step_overrides.get(&override_key) {
-                step_args.push("--set".to_string());
-                step_args.push(format!("params.{}={}", param.name, value));
+        let run_targets =
+            resolve_run_targets(&step_targets, current_datasite.as_deref(), run_all_targets);
+
+        let mut share_locations_by_target: HashMap<String, HashMap<String, ShareLocation>> =
+            HashMap::new();
+        if !step.share.is_empty() {
+            let data_dir = syftbox_data_dir.as_ref().ok_or_else(|| {
+                anyhow!(
+                    "Step '{}' requires SYFTBOX_DATA_DIR to resolve shared paths",
+                    step.id
+                )
+            })?;
+            for (share_name, share_spec) in &step.share {
+                for target in &step_targets {
+                    let share_location = resolve_share_location(
+                        &share_spec.path,
+                        target,
+                        &step_targets,
+                        &run_id,
+                        data_dir,
+                    )?;
+                    share_locations_by_target
+                        .entry(target.clone())
+                        .or_insert_with(HashMap::new)
+                        .insert(share_name.clone(), share_location);
+                }
             }
         }
 
-        if !nextflow_passthrough.is_empty() {
-            step_args.extend(nextflow_passthrough.clone());
+        if matches!(step.order.as_deref(), Some("parallel")) && run_targets.len() > 1 {
+            println!(
+                "⚠️  Step '{}' requested parallel execution; running sequentially.",
+                step.id
+            );
         }
 
-        let step_results_dir = base_results_dir.join(&step.id);
-        let step_results_dir_str = step_results_dir.to_string_lossy().to_string();
-
-        println!(
-            "\n▶️  Running step {} using project {}",
-            step.id.bold(),
-            project_root
-        );
-
-        append_desktop_log(&format!(
-            "[Pipeline] Running step {} with args: {:?}",
-            step.id, step_args
-        ));
-        run_dynamic::execute_dynamic(
-            &project_root,
-            step_args.clone(),
-            dry_run,
-            resume,
-            Some(step_results_dir_str.clone()),
-            run_dynamic::RunSettings::default(),
-        )
-        .await?;
-
-        append_desktop_log(&format!("[Pipeline] Completed step {}", step.id));
-
-        let mut outputs = HashMap::new();
-        for output in &project_spec.outputs {
-            let path = output
-                .path
-                .as_ref()
-                .map(|p| step_results_dir.join(p))
-                .unwrap_or_else(|| step_results_dir.join(&output.name));
-            outputs.insert(output.name.clone(), path.to_string_lossy().to_string());
-        }
-
-        // Ensure publish aliases reference concrete paths
-        for alias in step.publish.keys() {
-            if let Some(path) = outputs.get(alias) {
-                outputs.insert(alias.clone(), path.clone());
+        if run_targets.is_empty() {
+            if !share_locations_by_target.is_empty() {
+                let step_entry = step_outputs
+                    .entry(step.id.clone())
+                    .or_insert_with(HashMap::new);
+                for (target, share_outputs) in &share_locations_by_target {
+                    let outputs = step_entry
+                        .entry(target.clone())
+                        .or_insert_with(HashMap::new);
+                    for (name, location) in share_outputs {
+                        outputs
+                            .entry(name.clone())
+                            .or_insert_with(|| location.syft_url.clone());
+                    }
+                }
             }
+            continue;
         }
 
-        step_outputs.insert(step.id.clone(), outputs);
+        for target in run_targets {
+            let current_datasite = target.as_deref();
+            let mut step_args = Vec::new();
 
-        if !step.store.is_empty() {
-            let db_conn = db
-                .as_mut()
-                .ok_or_else(|| anyhow!("BioVault database not available for store operations"))?;
-            let step_outputs_ref = step_outputs.get(&step.id).unwrap();
-            for (store_name, store_spec) in &step.store {
-                match store_spec {
-                    PipelineStoreSpec::Sql(sql) => {
-                        if let Some(url) = parse_sql_destination(sql.target.as_deref())? {
-                            return Err(anyhow!(
-                                "SQL store '{}' destination '{}' not supported yet (only built-in biovault is available)",
-                                store_name,
-                                url
-                            )
-                            .into());
-                        }
-                        let source_path = step_outputs_ref.get(&sql.source).ok_or_else(|| {
+            for input in &project_spec.inputs {
+                let binding = step
+                    .with
+                    .get(&input.name)
+                    .and_then(value_to_string)
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "Step '{}' is missing a binding for input '{}'",
+                            step.id,
+                            input.name
+                        )
+                    })?;
+
+                let override_key = (step.id.clone(), input.name.clone());
+                let resolved_binding = step_overrides
+                    .get(&override_key)
+                    .cloned()
+                    .unwrap_or(binding);
+
+                let resolved_value = resolve_binding(
+                    &resolved_binding,
+                    &input.raw_type,
+                    &spec.inputs,
+                    &resolved_inputs,
+                    &step_outputs,
+                    &step.id,
+                    current_datasite,
+                    &base_results_dir,
+                    &step_output_order,
+                    syftbox_data_dir.as_ref(),
+                )?;
+
+                step_args.push(format!("--{}", input.name));
+                step_args.push(resolved_value);
+            }
+
+            for param in &project_spec.parameters {
+                let override_key = (step.id.clone(), param.name.clone());
+                if let Some(value) = step_overrides.get(&override_key) {
+                    step_args.push("--set".to_string());
+                    step_args.push(format!("params.{}={}", param.name, value));
+                }
+            }
+
+            if !nextflow_passthrough.is_empty() {
+                step_args.extend(nextflow_passthrough.clone());
+            }
+
+            let step_results_dir = if let Some(site) = &target {
+                base_results_dir.join(&step.id).join(sanitize_identifier(site))
+            } else {
+                base_results_dir.join(&step.id)
+            };
+            let step_results_dir_str = step_results_dir.to_string_lossy().to_string();
+
+            let previous_override = env::var("BIOVAULT_DATASITE_OVERRIDE").ok();
+            let previous_datasites_override = env::var("BIOVAULT_DATASITES_OVERRIDE").ok();
+            match &target {
+                Some(site) => env::set_var("BIOVAULT_DATASITE_OVERRIDE", site),
+                None => env::remove_var("BIOVAULT_DATASITE_OVERRIDE"),
+            }
+            if step_targets.is_empty() {
+                env::remove_var("BIOVAULT_DATASITES_OVERRIDE");
+            } else {
+                env::set_var("BIOVAULT_DATASITES_OVERRIDE", step_targets.join(","));
+            }
+
+            let step_label = match &target {
+                Some(site) => format!("{}@{}", step.id, site),
+                None => step.id.clone(),
+            };
+            println!(
+                "\n▶️  Running step {} using project {}",
+                step_label.bold(),
+                project_root
+            );
+
+            append_desktop_log(&format!(
+                "[Pipeline] Running step {} with args: {:?}",
+                step_label, step_args
+            ));
+            run_dynamic::execute_dynamic(
+                &project_root,
+                step_args.clone(),
+                dry_run,
+                resume,
+                Some(step_results_dir_str.clone()),
+                run_dynamic::RunSettings::default(),
+            )
+            .await?;
+
+            append_desktop_log(&format!("[Pipeline] Completed step {}", step_label));
+
+            match previous_override {
+                Some(prev) => env::set_var("BIOVAULT_DATASITE_OVERRIDE", prev),
+                None => env::remove_var("BIOVAULT_DATASITE_OVERRIDE"),
+            }
+            match previous_datasites_override {
+                Some(prev) => env::set_var("BIOVAULT_DATASITES_OVERRIDE", prev),
+                None => env::remove_var("BIOVAULT_DATASITES_OVERRIDE"),
+            }
+
+            let mut outputs = HashMap::new();
+            for output in &project_spec.outputs {
+                let path = output
+                    .path
+                    .as_ref()
+                    .map(|p| step_results_dir.join(p))
+                    .unwrap_or_else(|| step_results_dir.join(&output.name));
+                outputs.insert(output.name.clone(), path.to_string_lossy().to_string());
+            }
+
+            // Ensure publish aliases reference concrete paths
+            for alias in step.publish.keys() {
+                if let Some(path) = outputs.get(alias) {
+                    outputs.insert(alias.clone(), path.clone());
+                }
+            }
+
+            let datasite_key = target.unwrap_or_default();
+            if let Some(shared_outputs) = share_locations_by_target.get(&datasite_key) {
+                for (name, location) in shared_outputs {
+                    outputs.insert(name.clone(), location.syft_url.clone());
+                }
+            }
+
+            if !step.share.is_empty() && !datasite_key.is_empty() && !dry_run {
+                for (share_name, share_spec) in &step.share {
+                    let share_location = share_locations_by_target
+                        .get(&datasite_key)
+                        .and_then(|paths| paths.get(share_name))
+                        .ok_or_else(|| {
                             anyhow!(
-                                "Store '{}' in step '{}' references unknown output '{}'",
-                                store_name,
+                                "Shared output '{}' not resolved for step '{}' datasite '{}'",
+                                share_name,
                                 step.id,
-                                sql.source
+                                datasite_key
                             )
                         })?;
-                        store_sql_output(
-                            db_conn,
-                            store_name,
-                            sql,
-                            Path::new(source_path),
-                            &run_id,
-                        )?;
+                    let source_path = outputs.get(&share_spec.source).ok_or_else(|| {
+                        anyhow!(
+                            "Shared output '{}' references unknown source '{}' in step '{}'",
+                            share_name,
+                            share_spec.source,
+                            step.id
+                        )
+                    })?;
+                    create_shared_file(
+                        Path::new(source_path),
+                        &share_location.local_path,
+                        share_spec,
+                        &step_targets,
+                    )?;
+                }
+            }
+
+            step_outputs
+                .entry(step.id.clone())
+                .or_insert_with(HashMap::new)
+                .insert(datasite_key, outputs.clone());
+
+            if !step.store.is_empty() {
+                let db_conn = db.as_mut().ok_or_else(|| {
+                    anyhow!("BioVault database not available for store operations")
+                })?;
+                for (store_name, store_spec) in &step.store {
+                    match store_spec {
+                        PipelineStoreSpec::Sql(sql) => {
+                            if let Some(url) = parse_sql_destination(sql.target.as_deref())? {
+                                return Err(anyhow!(
+                                    "SQL store '{}' destination '{}' not supported yet (only built-in biovault is available)",
+                                    store_name,
+                                    url
+                                )
+                                .into());
+                            }
+                            let source_path = outputs.get(&sql.source).ok_or_else(|| {
+                                anyhow!(
+                                    "Store '{}' in step '{}' references unknown output '{}'",
+                                    store_name,
+                                    step.id,
+                                    sql.source
+                                )
+                            })?;
+                            store_sql_output(
+                                db_conn,
+                                store_name,
+                                sql,
+                                Path::new(source_path),
+                                &run_id,
+                            )?;
+                        }
                     }
+                }
+            }
+        }
+
+        if !share_locations_by_target.is_empty() {
+            let step_entry = step_outputs
+                .entry(step.id.clone())
+                .or_insert_with(HashMap::new);
+            for (target, share_outputs) in &share_locations_by_target {
+                let outputs = step_entry
+                    .entry(target.clone())
+                    .or_insert_with(HashMap::new);
+                for (name, location) in share_outputs {
+                    outputs
+                        .entry(name.clone())
+                        .or_insert_with(|| location.syft_url.clone());
                 }
             }
         }
@@ -552,8 +724,12 @@ impl<'a> PipelineWizard<'a> {
             id: step_id,
             uses: project_choice.uses_value(),
             where_exec: None,
+            foreach: None,
+            runs_on: None,
+            order: None,
             with: with_map,
             publish: publish_map,
+            share: BTreeMap::new(),
             store: BTreeMap::new(),
         };
 
@@ -913,6 +1089,15 @@ fn is_type_placeholder(binding: &str, expected: &str) -> bool {
     crate::project_spec::types_compatible(trimmed, expected)
 }
 
+fn normalize_manifest_binding(value: &str) -> (String, bool) {
+    for suffix in [".manifest", ".all", ".paths"] {
+        if let Some(base) = value.strip_suffix(suffix) {
+            return (base.to_string(), true);
+        }
+    }
+    (value.to_string(), false)
+}
+
 fn parse_typed_literal(value: &str) -> Option<(String, String)> {
     let trimmed = value.trim();
     let open = trimmed.find('(')?;
@@ -1023,13 +1208,32 @@ fn parse_override_pair(
     Ok(())
 }
 
+fn resolve_syft_path(value: &str, syftbox_data_dir: Option<&PathBuf>) -> Result<String> {
+    if !value.starts_with("syft://") {
+        return Ok(value.to_string());
+    }
+    let data_dir = syftbox_data_dir.ok_or_else(|| {
+        anyhow!("SYFTBOX_DATA_DIR is required to resolve syft:// outputs")
+    })?;
+    let parsed = SyftURL::parse(value)?;
+    let path = data_dir
+        .join("datasites")
+        .join(parsed.email)
+        .join(parsed.path);
+    Ok(path.to_string_lossy().to_string())
+}
+
 fn resolve_binding(
     binding: &str,
     expected_type: &str,
     pipeline_inputs: &BTreeMap<String, PipelineInputSpec>,
     resolved_inputs: &HashMap<String, String>,
-    step_outputs: &HashMap<String, HashMap<String, String>>,
+    step_outputs: &HashMap<String, HashMap<String, HashMap<String, String>>>,
     current_step_id: &str,
+    current_datasite: Option<&str>,
+    results_dir: &Path,
+    step_output_order: &HashMap<String, Vec<String>>,
+    syftbox_data_dir: Option<&PathBuf>,
 ) -> Result<String> {
     if let Some(input_name) = binding.strip_prefix("inputs.") {
         if let Some(value) = resolved_inputs.get(input_name) {
@@ -1054,31 +1258,101 @@ fn resolve_binding(
 
     if binding.starts_with("step.") {
         let parts: Vec<&str> = binding.split('.').collect();
-        if parts.len() != 4 || parts[2] != "outputs" {
+        let wants_manifest = parts.len() == 5
+            && matches!(parts[4], "manifest" | "all" | "paths");
+        if (parts.len() != 4 && !wants_manifest) || parts[2] != "outputs" {
             return Err(anyhow!(
-                "Invalid step output reference '{}' in step '{}'. Expected format step.<id>.outputs.<name>",
-                binding, current_step_id
+                "Invalid step output reference '{}' in step '{}'. Expected format step.<id>.outputs.<name> or step.<id>.outputs.<name>.manifest",
+                binding,
+                current_step_id
             )
             .into());
         }
         let source_step = parts[1];
         let output_name = parts[3];
-        let outputs = step_outputs.get(source_step).ok_or_else(|| {
+        let outputs_by_site = step_outputs.get(source_step).ok_or_else(|| {
             anyhow!(
                 "Step '{}' references outputs from step '{}' which has not run yet",
                 current_step_id,
                 source_step
             )
         })?;
-        let value = outputs.get(output_name).ok_or_else(|| {
-            anyhow!(
+
+        if !wants_manifest {
+            if let Some(site) = current_datasite {
+                if let Some(outputs) = outputs_by_site.get(site) {
+                    if let Some(value) = outputs.get(output_name) {
+                        return resolve_syft_path(value, syftbox_data_dir);
+                    }
+                }
+            }
+
+            if outputs_by_site.len() == 1 {
+                if let Some(outputs) = outputs_by_site.values().next() {
+                    if let Some(value) = outputs.get(output_name) {
+                        return resolve_syft_path(value, syftbox_data_dir);
+                    }
+                }
+            }
+        }
+
+        if outputs_by_site.is_empty() {
+            return Err(anyhow!(
                 "Step '{}' output '{}' not found when referenced from step '{}'",
                 source_step,
                 output_name,
                 current_step_id
             )
+            .into());
+        }
+
+        let manifest_dir = results_dir.join("manifests").join(source_step);
+        let manifest_path = manifest_dir.join(format!("{}_paths.txt", output_name));
+        std::fs::create_dir_all(&manifest_dir).with_context(|| {
+            format!(
+                "Failed to create manifest directory {}",
+                manifest_dir.display()
+            )
         })?;
-        return Ok(value.clone());
+
+        let mut ordered_sites = step_output_order
+            .get(source_step)
+            .cloned()
+            .unwrap_or_default();
+        if ordered_sites.is_empty() {
+            ordered_sites = outputs_by_site.keys().cloned().collect();
+            ordered_sites.sort();
+        }
+
+        let mut lines = Vec::new();
+        for site in ordered_sites {
+            if let Some(outputs) = outputs_by_site.get(&site) {
+                if let Some(value) = outputs.get(output_name) {
+                    let resolved = resolve_syft_path(value, syftbox_data_dir)?;
+                    lines.push(format!("{}\t{}", site, resolved));
+                }
+            }
+        }
+
+        if lines.is_empty() {
+            return Err(anyhow!(
+                "Step '{}' output '{}' not found when referenced from step '{}'",
+                source_step,
+                output_name,
+                current_step_id
+            )
+            .into());
+        }
+
+        std::fs::write(&manifest_path, lines.join("\n")).with_context(|| {
+            format!(
+                "Failed to write manifest for step '{}' output '{}' to {}",
+                source_step,
+                output_name,
+                manifest_path.display()
+            )
+        })?;
+        return Ok(manifest_path.to_string_lossy().to_string());
     }
 
     if is_type_placeholder(binding, expected_type) {
@@ -1138,6 +1412,179 @@ fn sanitize_identifier(name: &str) -> String {
         trimmed = format!("{}_{}", DEFAULT_TABLE_FALLBACK, trimmed);
     }
     trimmed
+}
+
+fn resolve_step_targets(step: &PipelineStepSpec) -> Vec<String> {
+    if let Some(runs_on) = &step.runs_on {
+        return runs_on.as_vec();
+    }
+    step.foreach.clone().unwrap_or_default()
+}
+
+fn resolve_run_targets(
+    step_targets: &[String],
+    current_datasite: Option<&str>,
+    run_all: bool,
+) -> Vec<Option<String>> {
+    if step_targets.is_empty() {
+        return vec![None];
+    }
+    if run_all || current_datasite.is_none() {
+        return step_targets.iter().cloned().map(Some).collect();
+    }
+    let current = current_datasite.unwrap();
+    if step_targets.iter().any(|site| site == current) {
+        vec![Some(current.to_string())]
+    } else {
+        Vec::new()
+    }
+}
+
+fn resolve_current_datasite() -> Option<String> {
+    if let Ok(env_override) = env::var("BIOVAULT_DATASITE_OVERRIDE") {
+        if !env_override.trim().is_empty() {
+            return Some(env_override.trim().to_string());
+        }
+    }
+    if let Ok(cfg) = crate::config::Config::load() {
+        if !cfg.email.trim().is_empty() {
+            return Some(cfg.email);
+        }
+    }
+    if let Ok(env_email) = env::var("SYFTBOX_EMAIL") {
+        if !env_email.trim().is_empty() {
+            return Some(env_email.trim().to_string());
+        }
+    }
+    if let Ok(env_email) = env::var("BIOVAULT_DATASITE") {
+        if !env_email.trim().is_empty() {
+            return Some(env_email.trim().to_string());
+        }
+    }
+    None
+}
+
+fn render_pipeline_template(template: &str, current: &str, datasites: &[String], run_id: &str) -> String {
+    let mut rendered = template.to_string();
+    rendered = rendered.replace("{current_datasite}", current);
+    if let Some(index) = datasites.iter().position(|site| site == current) {
+        rendered = rendered.replace("{datasites.index}", &index.to_string());
+        rendered = rendered.replace("{datasite.index}", &index.to_string());
+    }
+    rendered = rendered.replace("{datasites}", &datasites.join(","));
+    rendered.replace("{run_id}", run_id)
+}
+
+struct ShareLocation {
+    local_path: PathBuf,
+    syft_url: String,
+}
+
+fn resolve_share_location(
+    template: &str,
+    current: &str,
+    datasites: &[String],
+    run_id: &str,
+    data_dir: &Path,
+) -> Result<ShareLocation> {
+    let rendered = render_pipeline_template(template, current, datasites, run_id);
+    if rendered.starts_with("syft://") {
+        let parsed = SyftURL::parse(&rendered)?;
+        let local_path = data_dir
+            .join("datasites")
+            .join(parsed.email)
+            .join(parsed.path);
+        return Ok(ShareLocation {
+            local_path,
+            syft_url: rendered,
+        });
+    }
+
+    let path = PathBuf::from(&rendered);
+    if path.is_absolute() {
+        let datasite_root = data_dir.join("datasites").join(current);
+        let relative = path.strip_prefix(&datasite_root).map_err(|_| {
+            anyhow!(
+                "Shared path '{}' must be under '{}' or use a syft:// URL",
+                path.display(),
+                datasite_root.display()
+            )
+        })?;
+        let rel_str = relative.to_string_lossy().trim_start_matches('/').to_string();
+        let local_path = path.clone();
+        return Ok(ShareLocation {
+            local_path,
+            syft_url: format!("syft://{}/{}", current, rel_str),
+        });
+    }
+
+    let rel_str = rendered.trim_start_matches('/').to_string();
+    let local_path = data_dir
+        .join("datasites")
+        .join(current)
+        .join(&rendered);
+    Ok(ShareLocation {
+        local_path,
+        syft_url: format!("syft://{}/{}", current, rel_str),
+    })
+}
+
+fn dedupe_emails(values: &[String]) -> Vec<String> {
+    let mut set = HashSet::new();
+    let mut out = Vec::new();
+    for value in values {
+        let trimmed = value.trim();
+        if trimmed.is_empty() || !set.insert(trimmed.to_string()) {
+            continue;
+        }
+        out.push(trimmed.to_string());
+    }
+    out
+}
+
+fn create_shared_file(
+    source_path: &Path,
+    shared_path: &Path,
+    share_spec: &PipelineShareSpec,
+    step_targets: &[String],
+) -> Result<()> {
+    let read = if share_spec.read.is_empty() {
+        step_targets.to_vec()
+    } else {
+        share_spec.read.clone()
+    };
+    let read = dedupe_emails(&read);
+    let write = if share_spec.write.is_empty() {
+        read.clone()
+    } else {
+        dedupe_emails(&share_spec.write)
+    };
+    let admin = dedupe_emails(&share_spec.admin);
+
+    if let Some(parent) = shared_path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create shared directory {}", parent.display()))?;
+        let permissions = SyftPermissions {
+            rules: vec![PermissionRule {
+                pattern: "**".to_string(),
+                access: AccessControl { read, write, admin },
+            }],
+        };
+        let perms_path = parent.join("syft.pub.yaml");
+        let yaml = serde_yaml::to_string(&permissions)
+            .context("Failed to serialize share permissions")?;
+        std::fs::write(&perms_path, yaml)
+            .with_context(|| format!("Failed to write {}", perms_path.display()))?;
+    }
+
+    std::fs::copy(source_path, shared_path).with_context(|| {
+        format!(
+            "Failed to copy {} -> {}",
+            source_path.display(),
+            shared_path.display()
+        )
+    })?;
+    Ok(())
 }
 
 fn detect_table_name(store_name: &str, spec: &PipelineSqlStoreSpec, run_id: &str) -> String {
@@ -1555,11 +2002,18 @@ fn validate_internal(
                     let binding_str = raw_binding.as_ref().and_then(value_to_string);
 
                     if let Some(binding_value) = &binding_str {
-                        if let Some((producer_step, output)) = available.get(binding_value) {
-                            if !types_compatible(&input.raw_type, &output.raw_type) {
+                        let (binding_key, binding_is_manifest) =
+                            normalize_manifest_binding(binding_value);
+                        if let Some((producer_step, output)) = available.get(&binding_key) {
+                            let actual_type = if binding_is_manifest {
+                                "File"
+                            } else {
+                                output.raw_type.as_str()
+                            };
+                            if !types_compatible(&input.raw_type, actual_type) {
                                 let msg = format!(
                                     "Type mismatch: expected {} but found {} from step {}",
-                                    input.raw_type, output.raw_type, producer_step
+                                    input.raw_type, actual_type, producer_step
                                 );
                                 errors.push(msg.clone());
                                 bindings.push(BindingStatus {
@@ -1567,7 +2021,7 @@ fn validate_internal(
                                     input: input.name.clone(),
                                     binding: Some(binding_value.clone()),
                                     expected: input.raw_type.clone(),
-                                    actual: Some(output.raw_type.clone()),
+                                    actual: Some(actual_type.to_string()),
                                     state: BindingState::Error,
                                     message: Some(msg),
                                 });
@@ -1579,7 +2033,7 @@ fn validate_internal(
                                 input: input.name.clone(),
                                 binding: Some(binding_value.clone()),
                                 expected: input.raw_type.clone(),
-                                actual: Some(output.raw_type.clone()),
+                                actual: Some(actual_type.to_string()),
                                 state: BindingState::Ok,
                                 message: None,
                             });
@@ -1753,6 +2207,23 @@ fn validate_internal(
                     let key = format!("step.{}.outputs.{}", resolved_step.step_id, output.name);
                     available.insert(key, (resolved_step.step_id.clone(), output.clone()));
                 }
+                for (share_name, share_spec) in &step_spec.share {
+                    let Some(source_output) = project_spec
+                        .outputs
+                        .iter()
+                        .find(|output| output.name == share_spec.source)
+                    else {
+                        errors.push(format!(
+                            "Share '{}' in step '{}' references unknown output '{}'",
+                            share_name, step_spec.id, share_spec.source
+                        ));
+                        continue;
+                    };
+                    let mut shared_output = source_output.clone();
+                    shared_output.name = share_name.clone();
+                    let key = format!("step.{}.outputs.{}", resolved_step.step_id, share_name);
+                    available.insert(key, (resolved_step.step_id.clone(), shared_output));
+                }
 
                 let mut known_outputs: HashSet<String> = project_spec
                     .outputs
@@ -1761,6 +2232,9 @@ fn validate_internal(
                     .collect();
                 for alias in step_spec.publish.keys() {
                     known_outputs.insert(alias.clone());
+                }
+                for share_name in step_spec.share.keys() {
+                    known_outputs.insert(share_name.clone());
                 }
                 for (store_name, store_spec) in &step_spec.store {
                     match store_spec {
