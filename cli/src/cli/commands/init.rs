@@ -340,12 +340,12 @@ pub async fn execute(email: Option<&str>, quiet: bool) -> Result<()> {
             }
         }
 
-        // Create projects and runs directories
-        let projects_dir = biovault_dir.join("projects");
-        if !projects_dir.exists() {
-            fs::create_dir_all(&projects_dir)?;
-            info!("Created projects directory: {:?}", projects_dir);
-            println!("✓ Created projects directory: {}", projects_dir.display());
+        // Create modules and runs directories
+        let modules_dir = biovault_dir.join("modules");
+        if !modules_dir.exists() {
+            fs::create_dir_all(&modules_dir)?;
+            info!("Created modules directory: {:?}", modules_dir);
+            println!("✓ Created modules directory: {}", modules_dir.display());
         }
 
         let runs_dir = biovault_dir.join("runs");

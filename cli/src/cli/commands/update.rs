@@ -351,7 +351,7 @@ mod tests {
             ),
             ("/home/user/target/debug/biovault", InstallMethod::Cargo),
             (
-                "C:\\project\\target\\release\\biovault.exe",
+                "C:\\module\\target\\release\\biovault.exe",
                 InstallMethod::Cargo,
             ),
             ("/usr/local/bin/biovault", InstallMethod::Binary),

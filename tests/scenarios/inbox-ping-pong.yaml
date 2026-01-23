@@ -34,7 +34,7 @@ steps:
         datasites/client1@sandbox.local/public/crypto/did.json \
         --expected-identity client1@sandbox.local
 
-  - name: Client1 submits count-lines project to client2
+  - name: Client1 submits count-lines module to client2
     datasite: client1@sandbox.local
     run: |
       rm -rf count-lines
@@ -45,9 +45,9 @@ steps:
         --non-interactive \
         --force
 
-  - name: Wait for project files to sync
+  - name: Wait for module files to sync
     datasite: client2@sandbox.local
-    wait_for: datasites/client1@sandbox.local/shared/biovault/submissions/*/project.yaml
+    wait_for: datasites/client1@sandbox.local/shared/biovault/submissions/*/module.yaml
     timeout: 30
 
   - name: Client2 syncs inbox
@@ -61,25 +61,25 @@ steps:
       {{workspace}}/cli/target/release/bv inbox --plain --json
     capture: inbox_json
 
-  - name: Extract project message ID
+  - name: Extract module message ID
     datasite: client2@sandbox.local
     run: |
-      jq -r '.messages[] | select(.message_type.Project != null) | .id' <<< '{{inbox_json}}' | head -n 1
-    capture: project_msg
+      jq -r '.messages[] | select(.message_type.Module != null) | .id' <<< '{{inbox_json}}' | head -n 1
+    capture: module_msg
 
-  - name: Client2 processes project (test mode, approve)
+  - name: Client2 processes module (test mode, approve)
     datasite: client2@sandbox.local
     run: |
-      {{workspace}}/cli/target/release/bv message process "{{project_msg}}" \
+      {{workspace}}/cli/target/release/bv message process "{{module_msg}}" \
         --test \
         --participant ALL \
         --approve \
         --non-interactive
 
-  - name: Assert Client2 has project file shadows
+  - name: Assert Client2 has module file shadows
     datasite: client2@sandbox.local
     run: |
-      test -f "$(find unencrypted -name "project.yaml" -path "*/client1@sandbox.local/shared/biovault/submissions/*" | head -n 1)"
+      test -f "$(find unencrypted -name "module.yaml" -path "*/client1@sandbox.local/shared/biovault/submissions/*" | head -n 1)"
       test -f "$(find unencrypted -name "workflow.nf" -path "*/client1@sandbox.local/shared/biovault/submissions/*" | head -n 1)"
 
   - name: Assert no encrypted files in Client2 shadow folder
@@ -163,8 +163,8 @@ steps:
     datasite: client1@sandbox.local
     run: |
       SUBDIR=$(ls datasites/client1@sandbox.local/shared/biovault/submissions | tail -n 1)
-      # Project file shadows (write shadows)
-      test -f "unencrypted/client1@sandbox.local/shared/biovault/submissions/${SUBDIR}/project.yaml"
+      # Module file shadows (write shadows)
+      test -f "unencrypted/client1@sandbox.local/shared/biovault/submissions/${SUBDIR}/module.yaml"
       test -f "unencrypted/client1@sandbox.local/shared/biovault/submissions/${SUBDIR}/workflow.nf"
       # Results shadow (read shadow)
       test -f "unencrypted/client1@sandbox.local/shared/biovault/submissions/${SUBDIR}/results/ALL/line_counts.csv"

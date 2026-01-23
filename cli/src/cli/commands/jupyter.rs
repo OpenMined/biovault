@@ -175,10 +175,10 @@ fn output_indicates_windows_file_lock(output: &std::process::Output) -> bool {
         || combined.contains("being used by another process")
 }
 
-fn best_effort_stop_jupyter_for_project(project_dir: &Path) {
+fn best_effort_stop_jupyter_for_module(module_dir: &Path) {
     // Try DB PID first (may be a wrapper PID), then runtime jpserver PID(s).
     if let Ok(db) = BioVaultDb::new() {
-        if let Ok(canonical) = project_dir.canonicalize() {
+        if let Ok(canonical) = module_dir.canonicalize() {
             if let Ok(Some(env)) = db.get_dev_env(canonical.to_string_lossy().as_ref()) {
                 if let Some(pid) = env.jupyter_pid {
                     let _ = terminate_pid(pid);
@@ -187,8 +187,8 @@ fn best_effort_stop_jupyter_for_project(project_dir: &Path) {
         }
     }
 
-    let runtime_dir = project_dir.join(".jupyter-runtime");
-    for pid in find_project_runtime_pids(&runtime_dir) {
+    let runtime_dir = module_dir.join(".jupyter-runtime");
+    for pid in find_module_runtime_pids(&runtime_dir) {
         let _ = terminate_pid(pid);
     }
 }
@@ -233,8 +233,8 @@ fn is_macos_intel() -> bool {
     cfg!(target_os = "macos") && cfg!(target_arch = "x86_64")
 }
 
-fn ensure_virtualenv(project_dir: &Path, python_version: &str, uv_bin: &str) -> Result<()> {
-    let venv_path = project_dir.join(".venv");
+fn ensure_virtualenv(module_dir: &Path, python_version: &str, uv_bin: &str) -> Result<()> {
+    let venv_path = module_dir.join(".venv");
     let capture_output = std::env::var_os("BIOVAULT_DESKTOP_LOG_FILE").is_some();
 
     // Version of biovault-beaver from PyPI - auto-detected from submodule at compile time
@@ -262,7 +262,7 @@ fn ensure_virtualenv(project_dir: &Path, python_version: &str, uv_bin: &str) -> 
         if capture_output {
             let mut cmd = Command::new(uv_bin);
             cmd.args(["venv", "--python", python_version, ".venv"]);
-            cmd.current_dir(project_dir);
+            cmd.current_dir(module_dir);
             hide_console_window(&mut cmd);
             let output = cmd.output()?;
             if !output.status.success() {
@@ -276,7 +276,7 @@ fn ensure_virtualenv(project_dir: &Path, python_version: &str, uv_bin: &str) -> 
         } else {
             let mut cmd = Command::new(uv_bin);
             cmd.args(["venv", "--python", python_version, ".venv"]);
-            cmd.current_dir(project_dir);
+            cmd.current_dir(module_dir);
             hide_console_window(&mut cmd);
             let status = cmd.status()?;
             if !status.success() {
@@ -314,7 +314,7 @@ fn ensure_virtualenv(project_dir: &Path, python_version: &str, uv_bin: &str) -> 
                 "cleon",
                 &beaver_pkg,
             ]);
-            cmd.current_dir(project_dir);
+            cmd.current_dir(module_dir);
             hide_console_window(&mut cmd);
             let output = cmd.output()?;
 
@@ -322,7 +322,7 @@ fn ensure_virtualenv(project_dir: &Path, python_version: &str, uv_bin: &str) -> 
                 if cfg!(windows) && output_indicates_windows_file_lock(&output) {
                     // Windows often locks entrypoint exes (like .venv/Scripts/jupyter.exe) while Jupyter is running.
                     // Try a best-effort stop and retry once.
-                    best_effort_stop_jupyter_for_project(project_dir);
+                    best_effort_stop_jupyter_for_module(module_dir);
                     std::thread::sleep(Duration::from_millis(500));
 
                     let mut cmd = Command::new(uv_bin);
@@ -335,7 +335,7 @@ fn ensure_virtualenv(project_dir: &Path, python_version: &str, uv_bin: &str) -> 
                         "cleon",
                         &beaver_pkg,
                     ]);
-                    cmd.current_dir(project_dir);
+                    cmd.current_dir(module_dir);
                     hide_console_window(&mut cmd);
                     let retry = cmd.output()?;
 
@@ -369,7 +369,7 @@ fn ensure_virtualenv(project_dir: &Path, python_version: &str, uv_bin: &str) -> 
                 "cleon",
                 &beaver_pkg,
             ]);
-            cmd.current_dir(project_dir);
+            cmd.current_dir(module_dir);
             hide_console_window(&mut cmd);
             let status = cmd.status()?;
 
@@ -382,11 +382,11 @@ fn ensure_virtualenv(project_dir: &Path, python_version: &str, uv_bin: &str) -> 
         }
     }
 
-    // Path structure: project_dir is BIOVAULT_HOME/sessions/<session_id>
+    // Path structure: module_dir is BIOVAULT_HOME/sessions/<session_id>
     // BIOVAULT_HOME is like: workspace3/biovault/sandbox/client1@sandbox.local
     // biovault submodule root is at BIOVAULT_HOME/../.. (e.g., workspace3/biovault)
-    // So from project_dir (BIOVAULT_HOME/sessions/<id>): 4 levels up
-    let biovault_root = project_dir.join("..").join("..").join("..").join("..");
+    // So from module_dir (BIOVAULT_HOME/sessions/<id>): 4 levels up
+    let biovault_root = module_dir.join("..").join("..").join("..").join("..");
 
     // DEV MODE: If local source exists, install editable versions on top of PyPI packages
     // This allows developers to test local changes while maintaining compatibility
@@ -432,7 +432,7 @@ fn ensure_virtualenv(project_dir: &Path, python_version: &str, uv_bin: &str) -> 
                     "syftbox-sdk",
                     "syftbox-sdk",
                 ]);
-                cmd.current_dir(project_dir);
+                cmd.current_dir(module_dir);
                 hide_console_window(&mut cmd);
                 let status = cmd.status()?;
 
@@ -457,7 +457,7 @@ fn ensure_virtualenv(project_dir: &Path, python_version: &str, uv_bin: &str) -> 
                         "-e",
                         syftbox_canonical.to_str().unwrap_or("."),
                     ]);
-                    cmd.current_dir(project_dir);
+                    cmd.current_dir(module_dir);
                     hide_console_window(&mut cmd);
                     let _ = cmd.status();
                 }
@@ -474,7 +474,7 @@ fn ensure_virtualenv(project_dir: &Path, python_version: &str, uv_bin: &str) -> 
                     "-e",
                     syftbox_canonical.to_str().unwrap_or("."),
                 ]);
-                cmd.current_dir(project_dir);
+                cmd.current_dir(module_dir);
                 hide_console_window(&mut cmd);
                 let status = cmd.status()?;
 
@@ -504,7 +504,7 @@ fn ensure_virtualenv(project_dir: &Path, python_version: &str, uv_bin: &str) -> 
                 "-e",
                 &beaver_with_extras,
             ]);
-            cmd.current_dir(project_dir);
+            cmd.current_dir(module_dir);
             hide_console_window(&mut cmd);
             let status = cmd.status()?;
 
@@ -535,7 +535,7 @@ fn ensure_virtualenv(project_dir: &Path, python_version: &str, uv_bin: &str) -> 
                 "--force-reinstall",
                 PYFORY_MACOS_INTEL_WHEEL,
             ]);
-            cmd.current_dir(project_dir);
+            cmd.current_dir(module_dir);
             hide_console_window(&mut cmd);
             let output = cmd.output()?;
             if !output.status.success() {
@@ -555,7 +555,7 @@ fn ensure_virtualenv(project_dir: &Path, python_version: &str, uv_bin: &str) -> 
                 "--force-reinstall",
                 PYFORY_MACOS_INTEL_WHEEL,
             ]);
-            cmd.current_dir(project_dir);
+            cmd.current_dir(module_dir);
             hide_console_window(&mut cmd);
             let status = cmd.status()?;
             if !status.success() {
@@ -685,7 +685,7 @@ fn parse_runtime_file(path: &Path) -> Option<(JupyterRuntimeInfo, Option<i32>)> 
     Some((JupyterRuntimeInfo { port, url, token }, pid))
 }
 
-fn find_project_runtime_pids(runtime_dir: &Path) -> Vec<i32> {
+fn find_module_runtime_pids(runtime_dir: &Path) -> Vec<i32> {
     if !runtime_dir.exists() {
         return Vec::new();
     }
@@ -839,49 +839,45 @@ async fn wait_for_server_ready(port: i32) -> Result<()> {
     Err(anyhow!("Timed out waiting for Jupyter to start on port {}", port).into())
 }
 
-pub async fn start(project_path: &str, python_version: &str) -> Result<()> {
+pub async fn start(module_path: &str, python_version: &str) -> Result<()> {
     let uv_bin = resolve_uv_path()?;
 
-    // Check if project_path is a number (list index)
-    let project_dir = if let Ok(index) = project_path.parse::<usize>() {
+    // Check if module_path is a number (list index)
+    let module_dir = if let Ok(index) = module_path.parse::<usize>() {
         if index == 0 {
-            return Err(anyhow!("Project index must be >= 1").into());
+            return Err(anyhow!("Module index must be >= 1").into());
         }
 
-        let projects = get_projects_with_venvs()?;
+        let modules = get_modules_with_venvs()?;
 
-        if projects.is_empty() {
-            return Err(anyhow!("No projects with virtualenvs found. Run 'bv jupyter list' to see available projects.").into());
+        if modules.is_empty() {
+            return Err(anyhow!("No modules with virtualenvs found. Run 'bv jupyter list' to see available modules.").into());
         }
 
-        if index > projects.len() {
+        if index > modules.len() {
             return Err(anyhow!(
-                "Project index {} out of range. Only {} project(s) available.",
+                "Module index {} out of range. Only {} module(s) available.",
                 index,
-                projects.len()
+                modules.len()
             )
             .into());
         }
 
-        projects[index - 1].clone()
+        modules[index - 1].clone()
     } else {
-        PathBuf::from(project_path)
+        PathBuf::from(module_path)
     };
 
-    if !project_dir.exists() {
-        return Err(anyhow!(
-            "Project directory does not exist: {}",
-            project_dir.display()
-        )
-        .into());
+    if !module_dir.exists() {
+        return Err(anyhow!("Module directory does not exist: {}", module_dir.display()).into());
     }
 
-    let venv_path = project_dir.join(".venv");
+    let venv_path = module_dir.join(".venv");
 
     let db = BioVaultDb::new()?;
 
-    // Check if Jupyter is already running for this project
-    let canonical_path = project_dir.canonicalize()?;
+    // Check if Jupyter is already running for this module
+    let canonical_path = module_dir.canonicalize()?;
     if let Some(env) = db.get_dev_env(canonical_path.to_str().unwrap())? {
         if let Some(pid) = env.jupyter_pid {
             // Check if process is still alive
@@ -896,25 +892,25 @@ pub async fn start(project_path: &str, python_version: &str) -> Result<()> {
                 } else {
                     println!("   Access at: <unknown>");
                 }
-                println!("   Use 'bv jupyter stop' with project path or index to stop it first");
+                println!("   Use 'bv jupyter stop' with module path or index to stop it first");
                 return Ok(());
             } else {
                 // Clear stale session info
-                db.update_jupyter_session(&project_dir, None, None, None, None)?;
+                db.update_jupyter_session(&module_dir, None, None, None, None)?;
             }
         }
     }
 
-    ensure_virtualenv(&project_dir, python_version, &uv_bin)?;
+    ensure_virtualenv(&module_dir, python_version, &uv_bin)?;
 
     // Register/update in database
-    db.register_dev_env(&project_dir, python_version, "jupyter", true)?;
+    db.register_dev_env(&module_dir, python_version, "jupyter", true)?;
 
     // Launch Jupyter Lab
     let chosen_port = find_available_port();
 
     // Isolate Jupyter runtime files per session to avoid cross-instance detection
-    let runtime_dir = project_dir.join(".jupyter-runtime");
+    let runtime_dir = module_dir.join(".jupyter-runtime");
     let _ = fs::create_dir_all(&runtime_dir);
     std::env::set_var("JUPYTER_RUNTIME_DIR", &runtime_dir);
     // Also point XDG_RUNTIME_DIR to keep jpserver files local (macOS/Linux)
@@ -935,7 +931,7 @@ pub async fn start(project_path: &str, python_version: &str) -> Result<()> {
     {
         return Err(anyhow!(
             "Jupyter not found in virtualenv. Try: bv jupyter reset {}",
-            project_path
+            module_path
         )
         .into());
     }
@@ -967,7 +963,7 @@ pub async fn start(project_path: &str, python_version: &str) -> Result<()> {
 
     let mut cmd = Command::new(&uv_bin);
     cmd.args(&args)
-        .current_dir(&project_dir)
+        .current_dir(&module_dir)
         .env("JUPYTER_RUNTIME_DIR", &runtime_dir)
         .env("XDG_RUNTIME_DIR", &runtime_dir)
         // Ensure the runner's Python environment doesn't bleed into uv/venv processes.
@@ -1085,7 +1081,7 @@ pub async fn start(project_path: &str, python_version: &str) -> Result<()> {
     let store_token = runtime_info.token.clone().filter(|t| !t.is_empty());
 
     db.update_jupyter_session(
-        &project_dir,
+        &module_dir,
         runtime_info.port,
         Some(pid as i32),
         url_with_token.as_deref(),
@@ -1135,47 +1131,47 @@ pub async fn start(project_path: &str, python_version: &str) -> Result<()> {
     Ok(())
 }
 
-pub async fn stop(project_path: &str) -> Result<()> {
-    // Check if project_path is a number (list index)
-    let project_dir = if let Ok(index) = project_path.parse::<usize>() {
+pub async fn stop(module_path: &str) -> Result<()> {
+    // Check if module_path is a number (list index)
+    let module_dir = if let Ok(index) = module_path.parse::<usize>() {
         if index == 0 {
-            return Err(anyhow!("Project index must be >= 1").into());
+            return Err(anyhow!("Module index must be >= 1").into());
         }
 
-        let projects = get_projects_with_venvs()?;
+        let modules = get_modules_with_venvs()?;
 
-        if projects.is_empty() {
-            return Err(anyhow!("No projects with virtualenvs found. Run 'bv jupyter list' to see available projects.").into());
+        if modules.is_empty() {
+            return Err(anyhow!("No modules with virtualenvs found. Run 'bv jupyter list' to see available modules.").into());
         }
 
-        if index > projects.len() {
+        if index > modules.len() {
             return Err(anyhow!(
-                "Project index {} out of range. Only {} project(s) available.",
+                "Module index {} out of range. Only {} module(s) available.",
                 index,
-                projects.len()
+                modules.len()
             )
             .into());
         }
 
-        projects[index - 1].clone()
+        modules[index - 1].clone()
     } else {
-        PathBuf::from(project_path)
+        PathBuf::from(module_path)
     };
 
-    let venv_path = project_dir.join(".venv");
+    let venv_path = module_dir.join(".venv");
 
     if !venv_path.exists() {
         println!(
             "⚠️  Virtualenv not found for {}. Nothing to stop.",
-            project_dir.display()
+            module_dir.display()
         );
     }
 
     // Get PID from database and kill the process directly
     let db = BioVaultDb::new()?;
-    let canonical_path = project_dir
+    let canonical_path = module_dir
         .canonicalize()
-        .unwrap_or_else(|_| project_dir.clone());
+        .unwrap_or_else(|_| module_dir.clone());
     let env_info = db.get_dev_env(canonical_path.to_str().unwrap_or(""))?;
 
     let mut stopped = false;
@@ -1191,8 +1187,8 @@ pub async fn stop(project_path: &str) -> Result<()> {
     }
 
     // Also stop the actual Jupyter ServerApp PID from jpserver runtime files (Windows frequently locks jupyter.exe).
-    let runtime_dir = project_dir.join(".jupyter-runtime");
-    extra_pids.extend(find_project_runtime_pids(&runtime_dir));
+    let runtime_dir = module_dir.join(".jupyter-runtime");
+    extra_pids.extend(find_module_runtime_pids(&runtime_dir));
     for pid in extra_pids {
         if is_pid_alive(pid) {
             println!("🛑 Stopping Jupyter runtime PID: {}...", pid);
@@ -1207,42 +1203,42 @@ pub async fn stop(project_path: &str) -> Result<()> {
     }
 
     // Clear session info from database
-    db.update_jupyter_session(&project_dir, None, None, None, None)?;
+    db.update_jupyter_session(&module_dir, None, None, None, None)?;
 
     Ok(())
 }
 
-pub async fn reset(project_path: &str, python_version: &str) -> Result<()> {
-    // Check if project_path is a number (list index)
-    let project_dir = if let Ok(index) = project_path.parse::<usize>() {
+pub async fn reset(module_path: &str, python_version: &str) -> Result<()> {
+    // Check if module_path is a number (list index)
+    let module_dir = if let Ok(index) = module_path.parse::<usize>() {
         if index == 0 {
-            return Err(anyhow!("Project index must be >= 1").into());
+            return Err(anyhow!("Module index must be >= 1").into());
         }
 
-        let projects = get_projects_with_venvs()?;
+        let modules = get_modules_with_venvs()?;
 
-        if projects.is_empty() {
-            return Err(anyhow!("No projects with virtualenvs found. Run 'bv jupyter list' to see available projects.").into());
+        if modules.is_empty() {
+            return Err(anyhow!("No modules with virtualenvs found. Run 'bv jupyter list' to see available modules.").into());
         }
 
-        if index > projects.len() {
+        if index > modules.len() {
             return Err(anyhow!(
-                "Project index {} out of range. Only {} project(s) available.",
+                "Module index {} out of range. Only {} module(s) available.",
                 index,
-                projects.len()
+                modules.len()
             )
             .into());
         }
 
-        projects[index - 1].clone()
+        modules[index - 1].clone()
     } else {
-        PathBuf::from(project_path)
+        PathBuf::from(module_path)
     };
 
-    let venv_path = project_dir.join(".venv");
+    let venv_path = module_dir.join(".venv");
 
     // Stop Jupyter if running
-    if let Some(path_str) = project_dir.to_str() {
+    if let Some(path_str) = module_dir.to_str() {
         stop(path_str).await?;
     }
 
@@ -1255,17 +1251,17 @@ pub async fn reset(project_path: &str, python_version: &str) -> Result<()> {
 
     // Delete from database
     let db = BioVaultDb::new()?;
-    if let Ok(canonical_path) = project_dir.canonicalize() {
+    if let Ok(canonical_path) = module_dir.canonicalize() {
         let _ = db.delete_dev_env(canonical_path.to_str().unwrap());
     }
 
     // Create fresh venv without launching Jupyter
     println!("🔄 Creating fresh virtualenv...");
     let uv_bin = resolve_uv_path()?;
-    ensure_virtualenv(&project_dir, python_version, &uv_bin)?;
+    ensure_virtualenv(&module_dir, python_version, &uv_bin)?;
 
-    db.register_dev_env(&project_dir, python_version, "jupyter", true)?;
-    db.update_jupyter_session(&project_dir, None, None, None, None)?;
+    db.register_dev_env(&module_dir, python_version, "jupyter", true)?;
+    db.update_jupyter_session(&module_dir, None, None, None, None)?;
 
     println!("✅ Virtualenv rebuilt. Jupyter server is stopped.");
     Ok(())
@@ -1317,14 +1313,14 @@ pub async fn status() -> Result<()> {
     Ok(())
 }
 
-fn get_projects_with_venvs() -> Result<Vec<PathBuf>> {
+fn get_modules_with_venvs() -> Result<Vec<PathBuf>> {
     let db = BioVaultDb::new()?;
     let envs = db.list_dev_envs()?;
 
-    let projects: Vec<PathBuf> = envs
+    let modules: Vec<PathBuf> = envs
         .iter()
         .filter_map(|env| {
-            let path = PathBuf::from(&env.project_path);
+            let path = PathBuf::from(&env.module_path);
             if path.exists() {
                 Some(path)
             } else {
@@ -1333,20 +1329,20 @@ fn get_projects_with_venvs() -> Result<Vec<PathBuf>> {
         })
         .collect();
 
-    Ok(projects)
+    Ok(modules)
 }
 
 pub async fn list() -> Result<()> {
-    println!("📁 Projects with Jupyter virtualenvs:");
+    println!("📁 Modules with Jupyter virtualenvs:");
 
-    let projects = get_projects_with_venvs()?;
+    let modules = get_modules_with_venvs()?;
 
-    if projects.is_empty() {
-        println!("   No projects with virtualenvs found");
-        println!("\n💡 Tip: Run 'bv jupyter start <project-path>' to create one");
+    if modules.is_empty() {
+        println!("   No modules with virtualenvs found");
+        println!("\n💡 Tip: Run 'bv jupyter start <module-path>' to create one");
     } else {
-        for (i, project) in projects.iter().enumerate() {
-            println!("   {}. {}", i + 1, project.display());
+        for (i, module) in modules.iter().enumerate() {
+            println!("   {}. {}", i + 1, module.display());
         }
     }
 
@@ -1402,15 +1398,15 @@ mod tests {
     async fn test_start_and_reset() {
         let _env = TestEnv::new();
         let tmp = TempDir::new().unwrap();
-        let project_path = tmp.path().to_str().unwrap();
+        let module_path = tmp.path().to_str().unwrap();
 
-        let result = start(project_path, "3.12").await;
+        let result = start(module_path, "3.12").await;
         assert!(result.is_ok());
 
         let venv_path = tmp.path().join(".venv");
         assert!(venv_path.exists());
 
-        let result = reset(project_path, "3.12").await;
+        let result = reset(module_path, "3.12").await;
         assert!(result.is_ok());
     }
 }

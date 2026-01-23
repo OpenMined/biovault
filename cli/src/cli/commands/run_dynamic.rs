@@ -1,7 +1,7 @@
 use super::run::execute_with_logging;
-use crate::data::project_yaml_hash;
+use crate::data::module_yaml_hash;
 use crate::error::Result;
-use crate::project_spec::{ProjectSpec, ProjectStepSpec};
+use crate::module_spec::{ModuleSpec, ModuleStepSpec};
 use anyhow::Context;
 use chrono::Local;
 use colored::Colorize;
@@ -436,7 +436,7 @@ fn rewrite_input_csvs_for_docker(value: &JsonValue) -> Result<()> {
             if is_windows_path(s) && s.to_lowercase().ends_with(".csv") {
                 let path = Path::new(s);
                 if path.exists() && path.is_file() {
-                    append_desktop_log(&format!("[Pipeline] Rewriting CSV: {}", s));
+                    append_desktop_log(&format!("[Flow] Rewriting CSV: {}", s));
                     rewrite_csv_with_docker_paths(path)?;
                 }
             }
@@ -527,7 +527,7 @@ fn resolve_docker_config_path() -> Option<String> {
 
 fn apply_docker_config_arg(cmd: &mut Command) {
     if let Some(config) = resolve_docker_config_path() {
-        append_desktop_log(&format!("[Pipeline] Using Docker config: {}", config));
+        append_desktop_log(&format!("[Flow] Using Docker config: {}", config));
         cmd.arg("--config").arg(config);
     }
 }
@@ -536,7 +536,7 @@ fn apply_docker_config_arg(cmd: &mut Command) {
 #[cfg(target_os = "windows")]
 fn pull_docker_image_if_needed(docker_bin: &str, image: &str) -> Result<()> {
     append_desktop_log(&format!(
-        "[Pipeline] Checking if image {} is available...",
+        "[Flow] Checking if image {} is available...",
         image
     ));
 
@@ -558,14 +558,14 @@ fn pull_docker_image_if_needed(docker_bin: &str, image: &str) -> Result<()> {
 
     if check_cmd.status().map(|s| s.success()).unwrap_or(false) {
         append_desktop_log(&format!(
-            "[Pipeline] Image {} is already available locally",
+            "[Flow] Image {} is already available locally",
             image
         ));
         return Ok(());
     }
 
     // Pull the image
-    append_desktop_log(&format!("[Pipeline] Pulling image {}...", image));
+    append_desktop_log(&format!("[Flow] Pulling image {}...", image));
     println!("📦 Pulling Docker image: {}", image);
 
     let mut pull_cmd = Command::new(docker_bin);
@@ -581,11 +581,11 @@ fn pull_docker_image_if_needed(docker_bin: &str, image: &str) -> Result<()> {
     let status = pull_cmd.status().context("Failed to execute docker pull")?;
 
     if !status.success() {
-        append_desktop_log(&format!("[Pipeline] Failed to pull image {}", image));
+        append_desktop_log(&format!("[Flow] Failed to pull image {}", image));
         return Err(anyhow::anyhow!("Failed to pull Docker image: {}", image).into());
     }
 
-    append_desktop_log(&format!("[Pipeline] Successfully pulled image {}", image));
+    append_desktop_log(&format!("[Flow] Successfully pulled image {}", image));
     Ok(())
 }
 
@@ -616,7 +616,7 @@ fn ensure_nextflow_runner_image(docker_bin: &str) -> Result<&'static str> {
 
     if check_cmd.status().map(|s| s.success()).unwrap_or(false) {
         append_desktop_log(&format!(
-            "[Pipeline] Using Nextflow runner image: {}",
+            "[Flow] Using Nextflow runner image: {}",
             NEXTFLOW_RUNNER_IMAGE
         ));
         return Ok(NEXTFLOW_RUNNER_IMAGE);
@@ -624,14 +624,14 @@ fn ensure_nextflow_runner_image(docker_bin: &str) -> Result<&'static str> {
 
     // Pull the pre-built image from GitHub Container Registry
     append_desktop_log(&format!(
-        "[Pipeline] Pulling Nextflow runner image from {}",
+        "[Flow] Pulling Nextflow runner image from {}",
         NEXTFLOW_RUNNER_IMAGE
     ));
 
     pull_docker_image_if_needed(docker_bin, NEXTFLOW_RUNNER_IMAGE)?;
 
     append_desktop_log(&format!(
-        "[Pipeline] Nextflow runner image {} ready",
+        "[Flow] Nextflow runner image {} ready",
         NEXTFLOW_RUNNER_IMAGE
     ));
     Ok(NEXTFLOW_RUNNER_IMAGE)
@@ -722,51 +722,43 @@ fn check_docker_running(docker_bin: &str) -> Result<()> {
 }
 
 pub async fn execute_dynamic(
-    project_folder: &str,
+    module_folder: &str,
     args: Vec<String>,
     dry_run: bool,
     resume: bool,
     results_dir: Option<String>,
     run_settings: RunSettings,
 ) -> Result<()> {
-    let project_path = Path::new(project_folder);
-    if !project_path.exists() {
-        return Err(anyhow::anyhow!("Project folder does not exist: {}", project_folder).into());
+    let module_path = Path::new(module_folder);
+    if !module_path.exists() {
+        return Err(anyhow::anyhow!("Module folder does not exist: {}", module_folder).into());
     }
-    let project_abs = project_path
+    let module_abs = module_path
         .canonicalize()
-        .context("Failed to resolve project path")?;
+        .context("Failed to resolve module path")?;
 
-    let nextflow_log_path = project_path.join(".nextflow.log");
+    let nextflow_log_path = module_path.join(".nextflow.log");
     fs::remove_file(&nextflow_log_path).ok();
 
-    let spec_path = project_path.join("project.yaml");
+    let spec_path = module_path.join("module.yaml");
     if !spec_path.exists() {
         return Err(anyhow::anyhow!(
-            "project.yaml not found in {}. Use 'bv project create' first.",
-            project_folder
+            "module.yaml not found in {}. Use 'bv module create' first.",
+            module_folder
         )
         .into());
     }
 
-    let spec = ProjectSpec::load(&spec_path)?;
+    let spec = ModuleSpec::load(&spec_path)?;
     let template = spec.template.as_deref().unwrap_or("dynamic-nextflow");
 
     if template == "shell" {
-        return execute_shell(
-            &spec,
-            project_path,
-            args,
-            dry_run,
-            results_dir,
-            run_settings,
-        )
-        .await;
+        return execute_shell(&spec, module_path, args, dry_run, results_dir, run_settings).await;
     }
 
     if template != "dynamic-nextflow" {
         return Err(anyhow::anyhow!(
-            "This project uses template '{}'. Only 'dynamic-nextflow' or 'shell' are supported by the new run system.",
+            "This module uses template '{}'. Only 'dynamic-nextflow' or 'shell' are supported by the new run system.",
             template
         )
         .into());
@@ -774,17 +766,17 @@ pub async fn execute_dynamic(
 
     let current_datasite = resolve_current_datasite();
 
-    println!("🚀 Running project: {}", spec.name.bold());
+    println!("🚀 Running module: {}", spec.name.bold());
 
     let parsed_args = parse_cli_args(&args)?;
     let nextflow_args = parsed_args.passthrough.clone();
 
     validate_no_clashes(&spec, &parsed_args)?;
 
-    let inputs_json = build_inputs_json(&spec, &parsed_args, project_path)?;
+    let inputs_json = build_inputs_json(&spec, &parsed_args, module_path)?;
     let mut params_json = build_params_json(&spec, &parsed_args)?;
 
-    let assets_dir_path = project_path.join("assets");
+    let assets_dir_path = module_path.join("assets");
     let assets_dir_abs = assets_dir_path
         .canonicalize()
         .unwrap_or_else(|_| assets_dir_path.clone());
@@ -797,7 +789,7 @@ pub async fn execute_dynamic(
     let results_path_buf = if Path::new(results_path).is_absolute() {
         PathBuf::from(results_path)
     } else {
-        project_path.join(results_path)
+        module_path.join(results_path)
     };
     if !dry_run {
         fs::create_dir_all(&results_path_buf).context("Failed to create results directory")?;
@@ -821,13 +813,13 @@ pub async fn execute_dynamic(
         &spec.env,
         &BTreeMap::new(),
         &context,
-        project_path,
+        module_path,
         &results_path_buf,
         "workflow",
     );
 
     // Check user workflow exists
-    let workflow_path = project_path.join(&spec.workflow);
+    let workflow_path = module_path.join(&spec.workflow);
     if !workflow_path.exists() {
         return Err(anyhow::anyhow!(
             "Workflow file not found: {}. Expected at: {}",
@@ -876,12 +868,12 @@ pub async fn execute_dynamic(
             .context("Failed to resolve workflow path")?
     };
 
-    let project_spec_abs = if use_docker {
+    let module_spec_abs = if use_docker {
         spec_path.clone()
     } else {
         spec_path
             .canonicalize()
-            .context("Failed to resolve project spec path")?
+            .context("Failed to resolve module spec path")?
     };
 
     let inputs_json_str =
@@ -898,17 +890,17 @@ pub async fn execute_dynamic(
     // Check Docker availability (required for both Windows Docker execution and workflow containers)
     // Skip Docker checks in dry-run mode
     if !dry_run && (run_settings.require_docker || use_docker) {
-        append_desktop_log("[Pipeline] Checking Docker availability...");
+        append_desktop_log("[Flow] Checking Docker availability...");
         if let Err(err) = check_docker_running(&docker_bin) {
-            append_desktop_log(&format!("[Pipeline] Docker check failed: {}", err));
+            append_desktop_log(&format!("[Flow] Docker check failed: {}", err));
             return Err(err);
         }
-        append_desktop_log("[Pipeline] Docker is running (docker info succeeded)");
+        append_desktop_log("[Flow] Docker is running (docker info succeeded)");
     }
 
     // Build command - use Docker on Windows, native Nextflow elsewhere
     let mut cmd = if use_docker {
-        append_desktop_log("[Pipeline] Using Docker to run Nextflow (Windows mode)");
+        append_desktop_log("[Flow] Using Docker to run Nextflow (Windows mode)");
 
         // Build/get Nextflow runner image with modern Docker CLI
         // Skip image pulling in dry-run mode - use placeholder
@@ -920,10 +912,10 @@ pub async fn execute_dynamic(
 
         // Convert all paths to Docker-compatible format
         let docker_biovault_home = windows_path_to_docker(&biovault_home_abs);
-        let docker_project_path = windows_path_to_docker(&project_abs);
+        let docker_module_path = windows_path_to_docker(&module_abs);
         let docker_template = windows_path_to_docker(&template_abs);
         let docker_workflow = windows_path_to_docker(&workflow_abs);
-        let docker_project_spec = windows_path_to_docker(&project_spec_abs);
+        let docker_module_spec = windows_path_to_docker(&module_spec_abs);
         let docker_log_path = windows_path_to_docker(&nextflow_log_path);
         let results_abs = results_path_buf
             .canonicalize()
@@ -944,11 +936,9 @@ pub async fn execute_dynamic(
             // Rewrite CSV files to convert Windows paths to Docker-compatible paths
             // Skip in dry-run mode since this modifies files
             if !dry_run {
-                append_desktop_log(
-                    "[Pipeline] Rewriting CSV files with Docker-compatible paths...",
-                );
+                append_desktop_log("[Flow] Rewriting CSV files with Docker-compatible paths...");
                 append_desktop_log(&format!(
-                    "[Pipeline] inputs_json: {}",
+                    "[Flow] inputs_json: {}",
                     serde_json::to_string(&inputs_json_value).unwrap_or_default()
                 ));
                 rewrite_input_csvs_for_docker(&inputs_json_value)?;
@@ -960,26 +950,23 @@ pub async fn execute_dynamic(
         #[cfg(not(target_os = "windows"))]
         let mount_roots: Vec<PathBuf> = Vec::new();
 
-        append_desktop_log("[Pipeline] Docker path mappings:");
+        append_desktop_log("[Flow] Docker path mappings:");
         append_desktop_log(&format!(
             "  biovault_home: {} -> {}",
             biovault_home_abs.display(),
             docker_biovault_home
         ));
         append_desktop_log(&format!(
-            "  project_path: {} -> {}",
-            project_abs.display(),
-            docker_project_path
+            "  module_path: {} -> {}",
+            module_abs.display(),
+            docker_module_path
         ));
         append_desktop_log(&format!(
             "  template: {} -> {}",
             template_abs.display(),
             docker_template
         ));
-        append_desktop_log(&format!(
-            "[Pipeline] Additional data mounts: {:?}",
-            mount_roots
-        ));
+        append_desktop_log(&format!("[Flow] Additional data mounts: {:?}", mount_roots));
 
         let mut docker_cmd = Command::new(&docker_bin);
         super::configure_child_process(&mut docker_cmd);
@@ -1006,19 +993,19 @@ pub async fn execute_dynamic(
                 windows_path_to_docker(&biovault_home),
                 docker_biovault_home
             ))
-            // Mount the project path (may be same as above, Docker handles duplicates)
+            // Mount the module path (may be same as above, Docker handles duplicates)
             .arg("-v")
             .arg(format!(
                 "{}:{}",
-                windows_path_to_docker(project_path),
-                docker_project_path
+                windows_path_to_docker(module_path),
+                docker_module_path
             ));
 
         // Mount additional data directories discovered from inputs
         for mount_path in &mount_roots {
             let docker_mount = windows_path_to_docker(mount_path);
             append_desktop_log(&format!(
-                "[Pipeline] Adding mount: {} -> {}",
+                "[Flow] Adding mount: {} -> {}",
                 mount_path.display(),
                 docker_mount
             ));
@@ -1030,7 +1017,7 @@ pub async fn execute_dynamic(
         docker_cmd
             // Set working directory
             .arg("-w")
-            .arg(&docker_project_path)
+            .arg(&docker_module_path)
             // Use Nextflow runner image with modern Docker CLI
             .arg(nextflow_image)
             // Nextflow command (container entrypoint is bash, not nextflow)
@@ -1062,8 +1049,8 @@ pub async fn execute_dynamic(
         docker_cmd
             .arg("--work_flow_file")
             .arg(&docker_workflow)
-            .arg("--project_spec")
-            .arg(&docker_project_spec)
+            .arg("--module_spec")
+            .arg(&docker_module_spec)
             .arg("--inputs_json")
             .arg(docker_inputs_json_str)
             .arg("--params_json")
@@ -1075,24 +1062,24 @@ pub async fn execute_dynamic(
     } else {
         // Native Nextflow execution (macOS, Linux)
         append_desktop_log(&format!(
-            "[Pipeline] Using native nextflow binary: {}",
+            "[Flow] Using native nextflow binary: {}",
             nextflow_bin
         ));
 
         // Log original PATH from environment
         if let Some(original_path) = std::env::var_os("PATH") {
             append_desktop_log(&format!(
-                "[Pipeline] Original PATH from environment: {}",
+                "[Flow] Original PATH from environment: {}",
                 original_path.to_string_lossy()
             ));
         } else {
-            append_desktop_log("[Pipeline] WARNING: No PATH environment variable found!");
+            append_desktop_log("[Flow] WARNING: No PATH environment variable found!");
         }
 
         let mut native_cmd = Command::new(&nextflow_bin);
         super::configure_child_process(&mut native_cmd);
 
-        append_desktop_log("[Pipeline] Preferred binary paths:");
+        append_desktop_log("[Flow] Preferred binary paths:");
         for binary in ["nextflow", "java", "docker"] {
             if let Some(path) = resolve_binary_path(config.as_ref(), binary) {
                 append_desktop_log(&format!("  {} = {}", binary, path));
@@ -1103,14 +1090,12 @@ pub async fn execute_dynamic(
 
         if let Some(path_env) = build_augmented_path(config.as_ref()) {
             append_desktop_log(&format!(
-                "[Pipeline] Final augmented PATH for nextflow: {}",
+                "[Flow] Final augmented PATH for nextflow: {}",
                 path_env
             ));
             native_cmd.env("PATH", path_env);
         } else {
-            append_desktop_log(
-                "[Pipeline] WARNING: Could not build augmented PATH, using system PATH",
-            );
+            append_desktop_log("[Flow] WARNING: Could not build augmented PATH, using system PATH");
         }
 
         native_cmd.arg("-log").arg(&nextflow_log_path);
@@ -1128,8 +1113,8 @@ pub async fn execute_dynamic(
         native_cmd
             .arg("--work_flow_file")
             .arg(&workflow_abs)
-            .arg("--project_spec")
-            .arg(&project_spec_abs)
+            .arg("--module_spec")
+            .arg(&module_spec_abs)
             .arg("--inputs_json")
             .arg(inputs_json_str)
             .arg("--params_json")
@@ -1150,7 +1135,7 @@ pub async fn execute_dynamic(
         println!("\n🔍 Dry run - would execute:");
         println!("  {}", display_cmd.dimmed());
         append_desktop_log(&format!(
-            "[Pipeline] (dry-run) Nextflow command: {}",
+            "[Flow] (dry-run) Nextflow command: {}",
             display_cmd
         ));
         return Ok(());
@@ -1158,21 +1143,21 @@ pub async fn execute_dynamic(
 
     println!("\n▶️  Executing Nextflow...\n");
     println!("  {}", display_cmd.dimmed());
-    append_desktop_log(&format!("[Pipeline] Nextflow command: {}", display_cmd));
+    append_desktop_log(&format!("[Flow] Nextflow command: {}", display_cmd));
 
-    cmd.current_dir(project_path);
-    let work_dir = project_path.join("work");
+    cmd.current_dir(module_path);
+    let work_dir = module_path.join("work");
     let status = execute_with_logging(
         cmd,
         Some(nextflow_log_path),
         Some(work_dir),
-        Some(project_path.to_path_buf()),
+        Some(module_path.to_path_buf()),
     )
     .context("Failed to execute nextflow")?;
 
     if !status.success() {
         append_desktop_log(&format!(
-            "[Pipeline] Nextflow exited with status: {:?}",
+            "[Flow] Nextflow exited with status: {:?}",
             status.code()
         ));
         return Err(
@@ -1181,7 +1166,7 @@ pub async fn execute_dynamic(
     }
 
     println!("\n✅ Workflow completed successfully!");
-    append_desktop_log("[Pipeline] Workflow completed successfully!");
+    append_desktop_log("[Flow] Workflow completed successfully!");
     Ok(())
 }
 
@@ -1264,7 +1249,7 @@ fn build_shell_env(
     spec_env: &BTreeMap<String, String>,
     step_env: &BTreeMap<String, String>,
     ctx: &DatasiteContext,
-    project_path: &Path,
+    module_path: &Path,
     results_path: &Path,
     step_id: &str,
 ) -> BTreeMap<String, String> {
@@ -1285,8 +1270,8 @@ fn build_shell_env(
     }
 
     rendered.insert(
-        "BV_PROJECT_DIR".to_string(),
-        project_path.to_string_lossy().to_string(),
+        "BV_MODULE_DIR".to_string(),
+        module_path.to_string_lossy().to_string(),
     );
     rendered.insert(
         "BV_RESULTS_DIR".to_string(),
@@ -1294,7 +1279,7 @@ fn build_shell_env(
     );
     rendered.insert(
         "BV_ASSETS_DIR".to_string(),
-        project_path.join("assets").to_string_lossy().to_string(),
+        module_path.join("assets").to_string_lossy().to_string(),
     );
     rendered.insert("BV_STEP_ID".to_string(), step_id.to_string());
     rendered.insert("BV_DATASITES".to_string(), ctx.datasites.join(","));
@@ -1316,8 +1301,8 @@ fn shell_passthrough_args(args: &[String]) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn default_shell_step(spec: &ProjectSpec) -> ProjectStepSpec {
-    ProjectStepSpec {
+fn default_shell_step(spec: &ModuleSpec) -> ModuleStepSpec {
+    ModuleStepSpec {
         id: "run".to_string(),
         foreach: spec.datasites.clone(),
         order: None,
@@ -1328,14 +1313,14 @@ fn default_shell_step(spec: &ProjectSpec) -> ProjectStepSpec {
 }
 
 async fn execute_shell(
-    spec: &ProjectSpec,
-    project_path: &Path,
+    spec: &ModuleSpec,
+    module_path: &Path,
     args: Vec<String>,
     dry_run: bool,
     results_dir: Option<String>,
     _run_settings: RunSettings,
 ) -> Result<()> {
-    let workflow_path = project_path.join(&spec.workflow);
+    let workflow_path = module_path.join(&spec.workflow);
     if !workflow_path.exists() {
         return Err(anyhow::anyhow!("Workflow file not found: {}", workflow_path.display()).into());
     }
@@ -1345,10 +1330,10 @@ async fn execute_shell(
         if path.is_absolute() {
             path
         } else {
-            project_path.join(dir)
+            module_path.join(dir)
         }
     } else {
-        project_path.join("results")
+        module_path.join("results")
     };
     if !dry_run {
         fs::create_dir_all(&results_path)?;
@@ -1357,7 +1342,7 @@ async fn execute_shell(
     let current_datasite = resolve_current_datasite();
     if spec.datasites.is_some() && current_datasite.is_none() {
         return Err(anyhow::anyhow!(
-            "datasites specified in project.yaml but current datasite could not be determined"
+            "datasites specified in module.yaml but current datasite could not be determined"
         )
         .into());
     }
@@ -1416,13 +1401,28 @@ async fn execute_shell(
             &spec.env,
             &step.env,
             &ctx,
-            project_path,
+            module_path,
             &results_path,
             &step.id,
         );
         if !env_map.contains_key("BV_RUN_ID") {
-            if let Ok(Some(hash)) = project_yaml_hash(project_path) {
-                env_map.insert("BV_RUN_ID".to_string(), hash);
+            // Check process environment first (set by flow runner), fallback to module hash
+            if let Ok(run_id) = env::var("BV_RUN_ID") {
+                if !run_id.trim().is_empty() {
+                    env_map.insert("BV_RUN_ID".to_string(), run_id);
+                }
+            }
+            if !env_map.contains_key("BV_RUN_ID") {
+                if let Ok(Some(hash)) = module_yaml_hash(module_path) {
+                    env_map.insert("BV_RUN_ID".to_string(), hash);
+                }
+            }
+        }
+        if !env_map.contains_key("BV_FLOW_NAME") {
+            if let Ok(flow_name) = env::var("BV_FLOW_NAME") {
+                if !flow_name.trim().is_empty() {
+                    env_map.insert("BV_FLOW_NAME".to_string(), flow_name);
+                }
             }
         }
         if let Ok(cfg) = crate::config::Config::load() {
@@ -1443,14 +1443,21 @@ async fn execute_shell(
         };
         for input in input_specs {
             let env_key = format!("BV_INPUT_{}", env_key_suffix(&input.name));
+            let is_file_type = input.raw_type == "File";
             if let Some(arg) = parsed_args.inputs.get(&input.name) {
                 let rendered_value = render_template(&arg.value, &ctx);
-                let input_path = if Path::new(&rendered_value).is_absolute() {
-                    PathBuf::from(rendered_value)
+                // Only resolve as path for File types, pass String values directly
+                let final_value = if is_file_type {
+                    let input_path = if Path::new(&rendered_value).is_absolute() {
+                        PathBuf::from(rendered_value)
+                    } else {
+                        module_path.join(rendered_value)
+                    };
+                    input_path.to_string_lossy().to_string()
                 } else {
-                    project_path.join(rendered_value)
+                    rendered_value
                 };
-                env_map.insert(env_key, input_path.to_string_lossy().to_string());
+                env_map.insert(env_key, final_value);
                 continue;
             }
             if let Some(path_template) = input.path.as_deref() {
@@ -1458,7 +1465,7 @@ async fn execute_shell(
                 let input_path = if Path::new(&rendered_path).is_absolute() {
                     PathBuf::from(rendered_path)
                 } else {
-                    project_path.join(rendered_path)
+                    module_path.join(rendered_path)
                 };
                 env_map
                     .entry(env_key)
@@ -1487,7 +1494,7 @@ async fn execute_shell(
         if !passthrough_args.is_empty() {
             cmd.args(&passthrough_args);
         }
-        cmd.current_dir(project_path);
+        cmd.current_dir(module_path);
         for (key, value) in &env_map {
             cmd.env(key, value);
         }
@@ -1651,7 +1658,7 @@ fn parse_cli_args(args: &[String]) -> Result<ParsedArgs> {
     })
 }
 
-fn validate_no_clashes(spec: &ProjectSpec, parsed: &ParsedArgs) -> Result<()> {
+fn validate_no_clashes(spec: &ModuleSpec, parsed: &ParsedArgs) -> Result<()> {
     let input_names: Vec<&str> = spec.inputs.iter().map(|i| i.name.as_str()).collect();
     let output_names: Vec<&str> = spec.outputs.iter().map(|o| o.name.as_str()).collect();
 
@@ -1688,9 +1695,9 @@ fn validate_no_clashes(spec: &ProjectSpec, parsed: &ParsedArgs) -> Result<()> {
 }
 
 fn build_inputs_json(
-    spec: &ProjectSpec,
+    spec: &ModuleSpec,
     parsed: &ParsedArgs,
-    _project_path: &Path,
+    _module_path: &Path,
 ) -> Result<HashMap<String, JsonValue>> {
     let mut inputs_json = HashMap::new();
 
@@ -1729,10 +1736,7 @@ fn build_inputs_json(
     Ok(inputs_json)
 }
 
-fn build_params_json(
-    spec: &ProjectSpec,
-    parsed: &ParsedArgs,
-) -> Result<HashMap<String, JsonValue>> {
+fn build_params_json(spec: &ModuleSpec, parsed: &ParsedArgs) -> Result<HashMap<String, JsonValue>> {
     let mut params_json = HashMap::new();
 
     for param_spec in &spec.parameters {
@@ -1806,11 +1810,11 @@ docker.runOptions = '-u $(id -u):$(id -g)'
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::project_spec::{InputSpec, ProjectSpec};
+    use crate::module_spec::{InputSpec, ModuleSpec};
     use tempfile::TempDir;
 
-    fn sample_project_spec() -> ProjectSpec {
-        ProjectSpec {
+    fn sample_module_spec() -> ModuleSpec {
+        ModuleSpec {
             name: "test".to_string(),
             author: "author".to_string(),
             workflow: "workflow.nf".to_string(),
@@ -1873,8 +1877,8 @@ mod tests {
             passthrough: Vec::new(),
         };
 
-        let project_spec = sample_project_spec();
-        let inputs = build_inputs_json(&project_spec, &parsed, tmp.path()).unwrap();
+        let module_spec = sample_module_spec();
+        let inputs = build_inputs_json(&module_spec, &parsed, tmp.path()).unwrap();
 
         let sheet_entry = inputs.get("samplesheet").expect("samplesheet entry");
         assert_eq!(sheet_entry["type"], json!("File"));

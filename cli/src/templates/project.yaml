@@ -1,4 +1,0 @@
-name: {project_name}
-author: {email}
-workflow: workflow.nf
-assets: []

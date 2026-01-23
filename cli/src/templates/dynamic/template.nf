@@ -39,7 +39,7 @@ def __bvNormalizeNextflow(rawConfig) {
 
 params.results_dir = params.results_dir ?: 'results'
 params.work_flow_file = params.work_flow_file ?: 'workflow.nf'
-params.project_spec = params.project_spec ?: null
+params.module_spec = params.module_spec ?: null
 params.inputs_json = params.inputs_json ?: null
 params.params_json = params.params_json ?: null
 if (!params.containsKey('assets_dir')) {
@@ -61,8 +61,8 @@ def workflowPath = params.work_flow_file.startsWith('/') ? params.work_flow_file
 include { USER } from "${workflowPath}"
 
 workflow {
-    if (!params.project_spec) {
-        throw new IllegalArgumentException("dynamic template requires --project_spec path")
+    if (!params.module_spec) {
+        throw new IllegalArgumentException("dynamic template requires --module_spec path")
     }
     if (!params.inputs_json) {
         throw new IllegalArgumentException("dynamic template requires --inputs_json payload")
@@ -72,11 +72,13 @@ workflow {
     }
 
     def yamlSlurper = new YamlSlurper()
-    def specFile = new File(params.project_spec)
+    def specFile = new File(params.module_spec)
     if (!specFile.exists()) {
-        throw new IllegalArgumentException("Project spec not found at: ${specFile}")
+        throw new IllegalArgumentException("Module spec not found at: ${specFile}")
     }
     def spec = yamlSlurper.parse(specFile) ?: [:]
+    def moduleSpec = spec.spec ?: spec
+    def specName = spec.metadata?.name ?: spec.name
     def inputsPayload = new groovy.json.JsonSlurper().parseText(params.inputs_json ?: '{}')
     def paramsPayload = new groovy.json.JsonSlurper().parseText(params.params_json ?: '{}')
 
@@ -122,7 +124,7 @@ workflow {
         println "[bv] Input '${name}': type=${meta.type}, format=${meta.format}, path=${meta.path}"
     }
 
-    def specInputs = (spec.inputs ?: []) as List
+    def specInputs = (moduleSpec.inputs ?: []) as List
     def boundInputs = specInputs.collect { specInput ->
         def name = specInput.name
         def meta = inputsMap[name]
@@ -140,7 +142,7 @@ workflow {
             *(boundInputs.collect { it[1] })
         )
     } catch (Throwable t) {
-        println "[bv] ERROR: Workflow '${spec.name ?: 'unknown'}' failed - ${t.message}"
+        println "[bv] ERROR: Workflow '${specName ?: 'unknown'}' failed - ${t.message}"
         throw t
     }
 }

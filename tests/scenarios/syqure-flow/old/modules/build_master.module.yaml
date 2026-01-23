@@ -1,0 +1,21 @@
+apiVersion: syftbox.openmined.org/v1alpha1
+kind: Module
+metadata:
+  name: build_master
+  version: 0.1.0
+  description: Combine rsids from all clients into a sorted master list.
+spec:
+  runner:
+    kind: shell
+    template: shell
+    entrypoint: build_master.sh
+  inputs:
+    - name: rsids_manifest
+      type: File
+      format: { kind: txt }
+      description: Manifest file listing paths to all rsids.txt files
+  outputs:
+    - name: master_list
+      type: File
+      format: { kind: txt }
+      path: master_list.txt

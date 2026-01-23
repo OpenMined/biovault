@@ -1,0 +1,6 @@
+name: share-kitchen-sink
+author: madhava@openmined.org
+workflow: workflow.sh
+template: shell
+version: 0.1.0
+description: Kitchen-sink share test for multi-datasite pipelines.

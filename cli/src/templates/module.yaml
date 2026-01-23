@@ -1,0 +1,16 @@
+apiVersion: syftbox.openmined.org/v1alpha1
+kind: Module
+metadata:
+  name: {project_name}
+  version: 0.1.0
+  authors:
+    - {email}
+spec:
+  runner:
+    kind: nextflow
+    template: dynamic-nextflow
+    entrypoint: workflow.nf
+  inputs: []
+  outputs: []
+  parameters: []
+  assets: []

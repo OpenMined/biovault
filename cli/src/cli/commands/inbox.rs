@@ -134,7 +134,7 @@ pub struct ListFilters {
     pub sent: bool,
     pub all: bool,
     pub unread: bool,
-    pub projects: bool,
+    pub modules: bool,
     pub message_type: Option<String>,
     pub from: Option<String>,
     pub search: Option<String>,
@@ -153,8 +153,8 @@ pub fn list(config: &Config, filters: ListFilters) -> Result<()> {
         db.list_sent_messages(Some(100))?
     } else if filters.unread {
         db.list_unread_messages()?
-    } else if filters.projects {
-        db.list_messages_by_type("project", Some(100))?
+    } else if filters.modules {
+        db.list_messages_by_type("module", Some(100))?
     } else if let Some(ref search_term) = filters.search {
         db.search_messages(search_term, Some(100))?
     } else if let Some(ref msg_type) = filters.message_type {
@@ -201,7 +201,7 @@ pub fn list(config: &Config, filters: ListFilters) -> Result<()> {
 
         let type_icon = match &msg.message_type {
             MessageType::Text => "✉️",
-            MessageType::Project { .. } => "📦",
+            MessageType::Module { .. } => "📦",
             MessageType::Request { .. } => "🔔",
         };
 
@@ -272,7 +272,7 @@ async fn interactive_impl(
             "sent" => db.list_sent_messages(Some(200))?,
             "all" => db.list_messages(Some(200))?,
             "unread" => db.list_unread_messages()?,
-            "projects" => db.list_messages_by_type("project", Some(200))?,
+            "modules" => db.list_messages_by_type("module", Some(200))?,
             _ => db.list_inbox_messages(Some(200))?,
         };
         // In test mode, just verify we can load messages
@@ -293,7 +293,7 @@ async fn interactive_impl(
             "sent" => db.list_sent_messages(Some(200))?,
             "all" => db.list_messages(Some(200))?,
             "unread" => db.list_unread_messages()?,
-            "projects" => db.list_messages_by_type("project", Some(200))?,
+            "modules" => db.list_messages_by_type("module", Some(200))?,
             _ => db.list_inbox_messages(Some(200))?,
         };
 
@@ -411,7 +411,7 @@ async fn interactive_impl(
             }
             Key::Char('?') | Key::Char('h') | Key::Char('H') => {
                 print!("\x1B[2J\x1B[1;1H");
-                println!("Shortcuts:\n  ? / h : Help\n  n     : New Message\n  s     : Sync Messages\n  v     : Change View (menu)\n  q / Esc: Quit\n  1..5  : Tabs (Inbox, Sent, All, Unread, Projects)\n\nArrows to move, Enter to open.");
+                println!("Shortcuts:\n  ? / h : Help\n  n     : New Message\n  s     : Sync Messages\n  v     : Change View (menu)\n  q / Esc: Quit\n  1..5  : Tabs (Inbox, Sent, All, Unread, Modules)\n\nArrows to move, Enter to open.");
                 println!("\nPress any key to return...");
                 let _ = read_key();
             }
@@ -438,8 +438,8 @@ async fn interactive_impl(
             }
             Key::Char('v') | Key::Char('V') => {
                 disable_raw_mode_cmd()?;
-                let views = ["inbox", "sent", "all", "unread", "projects"];
-                let view_names = ["Inbox", "Sent", "All Messages", "Unread", "Projects"];
+                let views = ["inbox", "sent", "all", "unread", "modules"];
+                let view_names = ["Inbox", "Sent", "All Messages", "Unread", "Modules"];
                 println!("\nSelect view:");
                 let view_selection = Select::with_theme(&ColorfulTheme::default())
                     .with_prompt("Choose a view")
@@ -469,7 +469,7 @@ async fn interactive_impl(
                 selected = 0;
             }
             Key::Char('5') => {
-                current_view = "projects".to_string();
+                current_view = "modules".to_string();
                 selected = 0;
             }
             Key::Up => {
@@ -507,8 +507,8 @@ async fn message_actions(
     msg: &crate::messages::Message,
 ) -> Result<bool> {
     let mut actions = vec!["Read", "Reply", "Delete", "Mark as Read/Unread"];
-    // If project message addressed to this user, add triage actions inline
-    if let crate::messages::MessageType::Project { .. } = msg.message_type {
+    // If module message addressed to this user, add triage actions inline
+    if let crate::messages::MessageType::Module { .. } = msg.message_type {
         if msg.to == config.email {
             actions.push("Run on test data");
             actions.push("Run on real data");
@@ -591,10 +591,10 @@ async fn message_actions(
         }
         // Dispatch dynamic actions if present
         Some(idx) => {
-            use super::messages::{perform_project_action, ProjectAction};
+            use super::messages::{perform_module_action, ModuleAction};
             if let Some(i) = idx_run_test {
                 if idx == i {
-                    perform_project_action(config, &msg.id, ProjectAction::RunTest).await?;
+                    perform_module_action(config, &msg.id, ModuleAction::RunTest).await?;
                     println!("\nPress Enter to continue...");
                     let mut input = String::new();
                     io::stdin().read_line(&mut input)?;
@@ -603,7 +603,7 @@ async fn message_actions(
             }
             if let Some(i) = idx_run_real {
                 if idx == i {
-                    perform_project_action(config, &msg.id, ProjectAction::RunReal).await?;
+                    perform_module_action(config, &msg.id, ModuleAction::RunReal).await?;
                     println!("\nPress Enter to continue...");
                     let mut input = String::new();
                     io::stdin().read_line(&mut input)?;
@@ -612,7 +612,7 @@ async fn message_actions(
             }
             if let Some(i) = idx_reject {
                 if idx == i {
-                    perform_project_action(config, &msg.id, ProjectAction::Reject).await?;
+                    perform_module_action(config, &msg.id, ModuleAction::Reject).await?;
                     println!("\nPress Enter to continue...");
                     let mut input = String::new();
                     io::stdin().read_line(&mut input)?;
@@ -621,7 +621,7 @@ async fn message_actions(
             }
             if let Some(i) = idx_review {
                 if idx == i {
-                    perform_project_action(config, &msg.id, ProjectAction::Review).await?;
+                    perform_module_action(config, &msg.id, ModuleAction::Review).await?;
                     println!("\nPress Enter to continue...");
                     let mut input = String::new();
                     io::stdin().read_line(&mut input)?;
@@ -630,7 +630,7 @@ async fn message_actions(
             }
             if let Some(i) = idx_approve {
                 if idx == i {
-                    perform_project_action(config, &msg.id, ProjectAction::Approve).await?;
+                    perform_module_action(config, &msg.id, ModuleAction::Approve).await?;
                     println!("\nPress Enter to continue...");
                     let mut input = String::new();
                     io::stdin().read_line(&mut input)?;
@@ -716,7 +716,7 @@ mod tests {
             sent: false,
             all: false,
             unread: false,
-            projects: false,
+            modules: false,
             message_type: None,
             from: None,
             search: None,
@@ -725,7 +725,7 @@ mod tests {
         assert!(!filters.sent);
         assert!(!filters.all);
         assert!(!filters.unread);
-        assert!(!filters.projects);
+        assert!(!filters.modules);
         assert!(filters.message_type.is_none());
         assert!(filters.from.is_none());
         assert!(filters.search.is_none());
@@ -758,8 +758,8 @@ mod tests {
             sent: true,
             all: false,
             unread: true,
-            projects: false,
-            message_type: Some("project".to_string()),
+            modules: false,
+            message_type: Some("module".to_string()),
             from: Some("test@example.com".to_string()),
             search: Some("search term".to_string()),
             json: false,
@@ -767,8 +767,8 @@ mod tests {
         assert!(filters.sent);
         assert!(!filters.all);
         assert!(filters.unread);
-        assert!(!filters.projects);
-        assert_eq!(filters.message_type, Some("project".to_string()));
+        assert!(!filters.modules);
+        assert_eq!(filters.message_type, Some("module".to_string()));
         assert_eq!(filters.from, Some("test@example.com".to_string()));
         assert_eq!(filters.search, Some("search term".to_string()));
     }
@@ -795,7 +795,7 @@ mod tests {
             sent: true,
             all: false,
             unread: false,
-            projects: false,
+            modules: false,
             message_type: None,
             from: None,
             search: None,
@@ -811,7 +811,7 @@ mod tests {
             sent: false,
             all: false,
             unread: false,
-            projects: false,
+            modules: false,
             message_type: None,
             from: None,
             search: Some("test query".to_string()),
@@ -826,7 +826,7 @@ mod tests {
             sent: false,
             all: false,
             unread: false,
-            projects: false,
+            modules: false,
             message_type: Some("request".to_string()),
             from: None,
             search: None,
@@ -841,7 +841,7 @@ mod tests {
             sent: false,
             all: false,
             unread: false,
-            projects: false,
+            modules: false,
             message_type: None,
             from: Some("user@example.com".to_string()),
             search: None,
@@ -851,18 +851,18 @@ mod tests {
     }
 
     #[test]
-    fn test_list_filters_projects_filter() {
+    fn test_list_filters_modules_filter() {
         let filters = ListFilters {
             sent: false,
             all: false,
             unread: false,
-            projects: true,
+            modules: true,
             message_type: None,
             from: None,
             search: None,
             json: false,
         };
-        assert!(filters.projects);
+        assert!(filters.modules);
         assert!(!filters.sent);
     }
 
@@ -872,7 +872,7 @@ mod tests {
             sent: false,
             all: false,
             unread: true,
-            projects: false,
+            modules: false,
             message_type: None,
             from: None,
             search: None,
@@ -888,7 +888,7 @@ mod tests {
             sent: false,
             all: true,
             unread: false,
-            projects: false,
+            modules: false,
             message_type: None,
             from: None,
             search: None,
@@ -904,7 +904,7 @@ mod tests {
             sent: true,
             all: false,
             unread: true,
-            projects: false,
+            modules: false,
             message_type: Some("system".to_string()),
             from: Some("admin@test.com".to_string()),
             search: Some("important".to_string()),
@@ -992,8 +992,8 @@ mod tests {
             sent: true,
             all: false,
             unread: true,
-            projects: false,
-            message_type: Some("project".to_string()),
+            modules: false,
+            message_type: Some("module".to_string()),
             from: Some("alice".to_string()),
             search: Some("test".to_string()),
             json: false,
@@ -1002,8 +1002,8 @@ mod tests {
         assert!(filters.sent);
         assert!(!filters.all);
         assert!(filters.unread);
-        assert!(!filters.projects);
-        assert_eq!(filters.message_type, Some("project".to_string()));
+        assert!(!filters.modules);
+        assert_eq!(filters.message_type, Some("module".to_string()));
         assert_eq!(filters.from, Some("alice".to_string()));
         assert_eq!(filters.search, Some("test".to_string()));
     }
@@ -1016,7 +1016,7 @@ mod tests {
             sent: false,
             all: false,
             unread: false,
-            projects: false,
+            modules: false,
             message_type: None,
             from: None,
             search: None,
@@ -1026,7 +1026,7 @@ mod tests {
     }
 
     #[test]
-    fn list_filters_sent_unread_projects_search_from() {
+    fn list_filters_sent_unread_modules_search_from() {
         use crate::cli::commands::messages::get_message_db_path;
         use crate::messages::{Message, MessageStatus, MessageType};
 
@@ -1054,14 +1054,14 @@ mod tests {
         m2.subject = Some("greetings".into());
         db.insert_message(&m2).unwrap();
 
-        // Project-type message (counted in projects filter)
+        // Module-type message (counted in modules filter)
         let mut m3 = Message::new(
             "bob@example.com".into(),
             "me@example.com".into(),
             "proj body".into(),
         );
-        m3.message_type = MessageType::Project {
-            project_name: "P".into(),
+        m3.message_type = MessageType::Module {
+            module_name: "P".into(),
             submission_id: "S".into(),
             files_hash: None,
         };
@@ -1075,7 +1075,7 @@ mod tests {
                 sent: true,
                 all: false,
                 unread: false,
-                projects: false,
+                modules: false,
                 message_type: None,
                 from: None,
                 search: None,
@@ -1090,7 +1090,7 @@ mod tests {
                 sent: false,
                 all: false,
                 unread: true,
-                projects: false,
+                modules: false,
                 message_type: None,
                 from: None,
                 search: None,
@@ -1098,14 +1098,14 @@ mod tests {
             },
         )
         .unwrap();
-        // projects filter
+        // modules filter
         list(
             &cfg,
             ListFilters {
                 sent: false,
                 all: false,
                 unread: false,
-                projects: true,
+                modules: true,
                 message_type: None,
                 from: None,
                 search: None,
@@ -1120,8 +1120,8 @@ mod tests {
                 sent: false,
                 all: false,
                 unread: false,
-                projects: false,
-                message_type: Some("project".into()),
+                modules: false,
+                message_type: Some("module".into()),
                 from: None,
                 search: None,
                 json: false,
@@ -1135,7 +1135,7 @@ mod tests {
                 sent: false,
                 all: false,
                 unread: false,
-                projects: false,
+                modules: false,
                 message_type: None,
                 from: None,
                 search: Some("greet".into()),
@@ -1150,7 +1150,7 @@ mod tests {
                 sent: false,
                 all: true,
                 unread: false,
-                projects: false,
+                modules: false,
                 message_type: None,
                 from: Some("alice".into()),
                 search: None,
@@ -1198,10 +1198,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_interactive_impl_test_mode_projects() {
+    async fn test_interactive_impl_test_mode_modules() {
         let tmp = tempfile::TempDir::new().unwrap();
         let cfg = test_config(tmp.path());
-        interactive_impl(&cfg, Some("projects".into()), true)
+        interactive_impl(&cfg, Some("modules".into()), true)
             .await
             .unwrap();
     }
@@ -1269,7 +1269,7 @@ mod tests {
             sent: false,
             all: false,
             unread: false,
-            projects: false,
+            modules: false,
             message_type: None,
             from: None,
             search: None,
@@ -1373,7 +1373,7 @@ mod tests {
                 sent: false,
                 all: true,
                 unread: false,
-                projects: false,
+                modules: false,
                 message_type: None,
                 from: None,
                 search: None,
@@ -1397,10 +1397,10 @@ mod tests {
         let msg1 = Message::new("a@test.com".into(), "b@test.com".into(), "text".into());
         db.insert_message(&msg1).unwrap();
 
-        // Project message
+        // Module message
         let mut msg2 = Message::new("c@test.com".into(), "d@test.com".into(), "proj".into());
-        msg2.message_type = MessageType::Project {
-            project_name: "TestProject".into(),
+        msg2.message_type = MessageType::Module {
+            module_name: "TestModule".into(),
             submission_id: "sub123".into(),
             files_hash: Some("hash123".into()),
         };
@@ -1421,7 +1421,7 @@ mod tests {
                 sent: false,
                 all: true,
                 unread: false,
-                projects: false,
+                modules: false,
                 message_type: None,
                 from: None,
                 search: None,
@@ -1453,7 +1453,7 @@ mod tests {
                 sent: false,
                 all: true,
                 unread: false,
-                projects: false,
+                modules: false,
                 message_type: None,
                 from: None,
                 search: None,
@@ -1483,7 +1483,7 @@ mod tests {
                 sent: false,
                 all: true,
                 unread: false,
-                projects: false,
+                modules: false,
                 message_type: None,
                 from: None,
                 search: None,
@@ -1514,7 +1514,7 @@ mod tests {
                 sent: false,
                 all: true,
                 unread: false,
-                projects: false,
+                modules: false,
                 message_type: None,
                 from: None,
                 search: None,
@@ -1561,7 +1561,7 @@ mod tests {
                 sent: false,
                 all: true,
                 unread: false,
-                projects: false,
+                modules: false,
                 message_type: None,
                 from: Some("alice".into()),
                 search: None,

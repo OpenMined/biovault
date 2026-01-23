@@ -1,0 +1,24 @@
+apiVersion: syftbox.openmined.org/v1alpha1
+kind: Module
+metadata:
+  name: align-counts
+  version: 0.1.0
+spec:
+  runner:
+    template: shell
+    entrypoint: run.sh
+  assets:
+    - path: run.sh
+    - path: align_counts.py
+  inputs:
+    - name: master_list
+      type: File
+      format: { kind: txt }
+    - name: counts
+      type: File
+      format: { kind: json }
+  outputs:
+    - name: counts_array
+      type: File
+      format: { kind: json }
+      path: counts_array.json

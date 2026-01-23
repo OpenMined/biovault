@@ -807,7 +807,7 @@ fn dataset_shape_hint(manifest: &DatasetManifest) -> Option<String> {
         .shape
         .as_deref()
         .or_else(|| manifest.extra.get("shape").and_then(|value| value.as_str()))?;
-    if crate::project_spec::validate_type_expr(shape).is_ok() {
+    if crate::module_spec::validate_type_expr(shape).is_ok() {
         Some(shape.to_string())
     } else {
         None
