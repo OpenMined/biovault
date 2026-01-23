@@ -91,7 +91,7 @@ pub struct ModuleYaml {
     pub datasites: Option<Vec<String>>,
     pub participants: Option<Vec<String>>,
     pub workflow: String,
-    pub template: Option<String>,
+    pub runtime: Option<String>,
     pub assets: Option<Vec<String>>,
     pub parameters: Option<Vec<ParameterSpec>>,
     pub inputs: Option<Vec<InputSpec>>,
@@ -150,11 +150,11 @@ impl ModuleYaml {
             .as_ref()
             .and_then(|runner| runner.entrypoint.clone())
             .unwrap_or_else(|| "workflow.nf".to_string());
-        let template = module
+        let runtime = module
             .spec
             .runner
             .as_ref()
-            .and_then(|runner| runner.template.clone());
+            .and_then(|runner| runner.runtime.clone());
         let assets = module
             .spec
             .assets
@@ -196,7 +196,7 @@ impl ModuleYaml {
             datasites,
             participants,
             workflow,
-            template,
+            runtime,
             assets,
             parameters,
             inputs,
@@ -256,10 +256,11 @@ impl ModuleYaml {
                 runner: Some(ModuleRunnerSpec {
                     kind: None,
                     entrypoint: Some(self.workflow.clone()),
-                    template: self.template.clone(),
+                    runtime: self.runtime.clone(),
                     image: None,
                     command: None,
                     env: BTreeMap::new(),
+                    syqure: None,
                 }),
                 inputs,
                 outputs,
@@ -518,7 +519,7 @@ mod tests {
             datasites: Some(vec!["x@y".into()]),
             participants: Some(vec!["P1".into()]),
             workflow: "wf".into(),
-            template: None,
+            runtime: None,
             assets: Some(vec!["a".into()]),
             parameters: None,
             inputs: None,

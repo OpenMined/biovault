@@ -1868,15 +1868,15 @@ async fn async_main_with(cli: Cli) -> Result<()> {
                 if let Ok(content) = std::fs::read_to_string(&module_yaml_path) {
                     use biovault::module_spec::ModuleFile;
                     if let Ok(module) = ModuleFile::parse_yaml(&content) {
-                        let template = module
+                        let runtime = module
                             .spec
                             .runner
                             .as_ref()
-                            .and_then(|runner| runner.template.as_deref())
-                            .unwrap_or("default");
+                            .and_then(|runner| runner.runtime.as_deref())
+                            .unwrap_or("nextflow");
 
-                        // Use dynamic run system for dynamic-nextflow template
-                        if template == "dynamic-nextflow" || template == "shell" {
+                        // Use dynamic run system for nextflow, shell, and syqure runtimes
+                        if matches!(runtime, "nextflow" | "dynamic-nextflow" | "shell" | "syqure") {
                             commands::run_dynamic::execute_dynamic(
                                 &module_folder,
                                 args,

@@ -185,7 +185,7 @@ pub fn create_module_record(
                 author: author_placeholder,
                 workflow: "workflow.nf".to_string(),
                 description: None,
-                template: Some("dynamic-nextflow".to_string()),
+                runtime: Some("nextflow".to_string()),
                 version: Some("1.0.0".to_string()),
                 datasites: None,
                 env: Default::default(),
@@ -194,6 +194,7 @@ pub fn create_module_record(
                 inputs: vec![],
                 outputs: vec![],
                 steps: Vec::new(),
+                runner: None,
             };
 
             module_spec::scaffold_from_spec(minimal_spec, &module_dir)
@@ -239,12 +240,12 @@ pub fn create_module_record(
                 runner.entrypoint = Some(workflow_field.clone());
             }
         }
-        match runner.template.as_deref().map(str::trim) {
+        match runner.runtime.as_deref().map(str::trim) {
             Some(existing) if !existing.is_empty() => {
                 template_field = existing.to_string();
             }
             _ => {
-                runner.template = Some(template_field.clone());
+                runner.runtime = Some(template_field.clone());
             }
         }
 

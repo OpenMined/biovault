@@ -130,6 +130,8 @@ pub struct Config {
     pub agent_bridge_token: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub agent_bridge_blocklist: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub syqure: Option<SyqureConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -144,6 +146,18 @@ pub struct BinaryPaths {
     pub syftbox: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub uv: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub syqure: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SyqureConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub binary: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub docker_image: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub use_docker: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -210,6 +224,7 @@ impl Config {
             agent_bridge_http_port: None,
             agent_bridge_token: None,
             agent_bridge_blocklist: None,
+            syqure: None,
         }
     }
 

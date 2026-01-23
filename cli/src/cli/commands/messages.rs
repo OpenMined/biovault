@@ -647,8 +647,8 @@ pub async fn process_module_message(
     let module_spec_path = dest.join("module.yaml");
     let spec = ModuleSpec::load(&module_spec_path)?;
 
-    match spec.template.as_deref() {
-        Some("dynamic-nextflow") => {
+    match spec.runtime.as_deref() {
+        Some("nextflow") | Some("dynamic-nextflow") => {
             return process_dynamic_module_message(
                 config,
                 &msg,

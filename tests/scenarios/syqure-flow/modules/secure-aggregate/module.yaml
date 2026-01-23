@@ -5,17 +5,10 @@ metadata:
   version: 0.1.0
   description: Secure multi-party aggregation using Syqure MPC
 spec:
-  # Future: native syqure runner
-  # runner:
-  #   kind: syqure
-  #   entrypoint: secure_aggregate.codon
-
-  # Current: bash wrapper invoking syqure binary
   runner:
-    template: shell
-    entrypoint: run.sh
+    runtime: syqure
+    entrypoint: secure_aggregate.codon
   assets:
-    - path: run.sh
     - path: secure_aggregate.codon
   inputs:
     - name: counts
@@ -25,12 +18,6 @@ spec:
     - name: array_length
       type: String
       description: Number of elements to aggregate (from build_master)
-    - name: party_id
-      type: String
-      description: MPC party ID (0=aggregator, 1=client1, 2=client2)
-    - name: party_emails
-      type: String
-      description: Comma-separated list of party emails
   outputs:
     - name: aggregated_counts
       type: File

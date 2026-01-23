@@ -86,23 +86,7 @@ spec:
       assets:
         - path: run.sh
 
-    # Old non-MPC aggregation (kept for reference)
-    # aggregate_counts:
-    #   source:
-    #     kind: local
-    #     path: ./modules/aggregate-counts
-    #   allow_dirty: true
-    #   interface:
-    #     inputs:
-    #       - name: counts_manifest
-    #         type: File
-    #     outputs:
-    #       - name: aggregated_counts
-    #         type: File
-    #   assets:
-    #     - path: run.sh
-
-    # Secure MPC aggregation using Syqure
+    # Secure MPC aggregation using Syqure runtime
     secure_aggregate:
       source:
         kind: local
@@ -114,15 +98,10 @@ spec:
             type: File
           - name: array_length
             type: String
-          - name: party_id
-            type: String
-          - name: party_emails
-            type: String
         outputs:
           - name: aggregated_counts
             type: File
       assets:
-        - path: run.sh
         - path: secure_aggregate.codon
 
   steps:
@@ -174,6 +153,7 @@ spec:
         timeout: 300
 
     # Secure MPC aggregation - runs on ALL parties simultaneously
+    # The syqure runtime auto-injects party_id and party_emails from BV_DATASITE_INDEX and BV_DATASITES
     - id: secure_aggregate
       uses: secure_aggregate
       run:
@@ -186,8 +166,6 @@ spec:
         array_length:
           value: step.build_master.outputs.count
           only: aggregator
-        party_id: "{datasite.index}"
-        party_emails: "{datasites}"
       share:
         # All parties share their result for transparency/verification
         result_shared:
