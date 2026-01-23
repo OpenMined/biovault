@@ -1,11 +1,12 @@
 use crate::config::{get_biovault_home, is_syftbox_env, Config};
 use crate::syftbox::syc;
 use crate::Result;
+use anyhow::Context;
 use dialoguer::{theme::ColorfulTheme, Confirm, Input, Select};
 use std::env;
 use std::fs;
 use std::io::IsTerminal;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tracing::info;
 
 const PLACEHOLDER_EMAIL: &str = "setup@pending";
@@ -236,6 +237,9 @@ pub async fn execute(email: Option<&str>, quiet: bool) -> Result<()> {
 
         match config.get_syftbox_data_dir() {
             Ok(data_root) => {
+                if let Err(err) = ensure_default_syft_subscriptions(&data_root) {
+                    eprintln!("⚠️  Unable to write default SyftBox subscriptions: {err}");
+                }
                 match syc::provision_local_identity(&config.email, &data_root, Some(&syc_vault)) {
                     Ok(outcome) => {
                         if outcome.generated {
@@ -536,4 +540,44 @@ mod tests {
 
         crate::config::clear_test_biovault_home();
     }
+}
+
+fn ensure_default_syft_subscriptions(data_root: &Path) -> Result<()> {
+    let sub_path = data_root.join(".data").join("syft.sub.yaml");
+    if sub_path.exists() {
+        return Ok(());
+    }
+    if let Some(parent) = sub_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create {}", parent.display()))?;
+    }
+    let contents = r#"version: 1
+defaults:
+  action: block
+rules:
+  - action: allow
+    datasite: "*"
+    path: "public/crypto/did.json"
+  - action: allow
+    datasite: "*"
+    path: "public/biovault/datasets/*.yaml"
+  - action: allow
+    datasite: "*"
+    path: "app_data/biovault/*.yaml"
+  - action: allow
+    datasite: "*"
+    path: "**/syft.pub.yaml"
+  - action: allow
+    datasite: "*"
+    path: "**/*.request"
+  - action: allow
+    datasite: "*"
+    path: "**/*.response"
+  - action: allow
+    datasite: "*"
+    path: "shared/biovault/**"
+"#;
+    fs::write(&sub_path, contents)
+        .with_context(|| format!("Failed to write {}", sub_path.display()))?;
+    Ok(())
 }
