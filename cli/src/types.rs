@@ -1,4 +1,6 @@
+use crate::project_spec::{InputSpec, OutputSpec};
 use serde::{Deserialize, Serialize};
+use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -20,29 +22,89 @@ pub struct AccessControl {
 }
 
 impl SyftPermissions {
+    /// Create permissions with global read access for a single datasite
     pub fn new_for_datasite(datasite_email: &str) -> Self {
         SyftPermissions {
-            rules: vec![
-                // Global read for the recipient datasite
-                PermissionRule {
-                    pattern: "**".to_string(),
-                    access: AccessControl {
-                        read: vec![datasite_email.to_string()],
-                        write: vec![],
-                        admin: vec![],
-                    },
+            rules: vec![PermissionRule {
+                pattern: "**".to_string(),
+                access: AccessControl {
+                    read: vec![datasite_email.to_string()],
+                    write: vec![],
+                    admin: vec![],
                 },
-                // Allow recipient to write results back into this submission
-                PermissionRule {
-                    pattern: "results/**/*".to_string(),
-                    access: AccessControl {
-                        read: vec![datasite_email.to_string()],
-                        write: vec![datasite_email.to_string()],
-                        admin: vec![],
-                    },
-                },
-            ],
+            }],
         }
+    }
+
+    /// Create permissions with global read access for multiple datasites
+    pub fn new_for_datasites(datasites: &[String]) -> Self {
+        let mut set = BTreeSet::new();
+        for datasite in datasites {
+            let trimmed = datasite.trim();
+            if !trimmed.is_empty() {
+                set.insert(trimmed.to_string());
+            }
+        }
+        let read: Vec<String> = set.into_iter().collect();
+        SyftPermissions {
+            rules: vec![PermissionRule {
+                pattern: "**".to_string(),
+                access: AccessControl {
+                    read,
+                    write: vec![],
+                    admin: vec![],
+                },
+            }],
+        }
+    }
+
+    /// Add a permission rule for a specific pattern with read/write access for given datasites
+    pub fn add_rule(&mut self, pattern: &str, read: Vec<String>, write: Vec<String>) {
+        self.rules.push(PermissionRule {
+            pattern: pattern.to_string(),
+            access: AccessControl {
+                read,
+                write,
+                admin: vec![],
+            },
+        });
+    }
+
+pub fn save(&self, path: &PathBuf) -> anyhow::Result<()> {
+        let yaml = serde_yaml::to_string(self)?;
+        std::fs::write(path, yaml)?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectYaml {
+    pub name: String,
+    pub author: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub datasites: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub participants: Option<Vec<String>>,
+    pub workflow: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub template: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assets: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inputs: Option<Vec<InputSpec>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outputs: Option<Vec<OutputSpec>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub b3_hashes: Option<HashMap<String, String>>,
+    #[serde(flatten, default)]
+    pub extra: HashMap<String, serde_yaml::Value>,
+}
+
+impl ProjectYaml {
+    pub fn from_file(path: &PathBuf) -> anyhow::Result<Self> {
+        let content = std::fs::read_to_string(path)?;
+        let project: ProjectYaml = serde_yaml::from_str(&content)?;
+        Ok(project)
     }
 
     pub fn save(&self, path: &PathBuf) -> anyhow::Result<()> {
@@ -83,11 +145,38 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let p = tmp.path().join("perm.yaml");
         let perms = SyftPermissions::new_for_datasite("user@example.com");
-        assert_eq!(perms.rules.len(), 2);
+        assert_eq!(perms.rules.len(), 1);
         perms.save(&p).unwrap();
         let read_back: SyftPermissions =
             serde_yaml::from_str(&fs::read_to_string(&p).unwrap()).unwrap();
-        assert_eq!(read_back.rules.len(), 2);
+        assert_eq!(read_back.rules.len(), 1);
+    }
+
+    #[test]
+    fn project_yaml_round_trip_and_error() {
+        let tmp = TempDir::new().unwrap();
+        let p = tmp.path().join("project.yaml");
+        let proj = ProjectYaml {
+            name: "N".into(),
+            author: "A".into(),
+            datasites: Some(vec!["x@y".into()]),
+            participants: Some(vec!["P1".into()]),
+            workflow: "wf".into(),
+            template: None,
+            assets: Some(vec!["a".into()]),
+            inputs: None,
+            outputs: None,
+            b3_hashes: None,
+            extra: HashMap::new(),
+        };
+        proj.save(&p).unwrap();
+        let loaded = ProjectYaml::from_file(&p).unwrap();
+        assert_eq!(loaded.name, "N");
+        assert_eq!(loaded.workflow, "wf");
+
+        let bad = tmp.path().join("bad.yaml");
+        fs::write(&bad, "not: [valid").unwrap();
+        assert!(ProjectYaml::from_file(&bad).is_err());
     }
 
     #[test]

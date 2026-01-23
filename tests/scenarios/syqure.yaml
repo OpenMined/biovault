@@ -1,5 +1,13 @@
-# Syqure file-transport demo (3 parties via Docker)
-# Run with: ./test-scenario.sh tests/scenarios/syqure.yaml
+# Syqure file-transport demo (3 parties via native binary or Docker)
+# Run with:
+#   ./test-scenario.sh tests/scenarios/syqure.yaml   # Direct path (native syqure + rust client)
+#   ./test-scenario.sh --syqure                      # Native mode (default)
+#   ./test-scenario.sh --syqure-docker               # Docker mode
+#   SEQURE_MODE=docker ./test-scenario.sh tests/scenarios/syqure.yaml  # Docker via env
+#   ./test-scenario.sh --client-mode go tests/scenarios/syqure.yaml    # Go client
+#
+# Native mode expects a syqure binary at SEQURE_NATIVE_BIN or in ../syqure/target.
+# Note: {{workspace}} points to biovault dir; syqure is at {{workspace}}/../syqure
 
 setup:
   server:
@@ -11,6 +19,69 @@ steps:
       date +%Y%m%d%H%M%S
     capture: run_id
 
+  - name: Display Syqure mode
+    run: |
+      MODE="${SEQURE_MODE:-native}"
+      echo "=== Syqure Scenario ==="
+      echo "  Mode: $MODE"
+      if [[ "$MODE" == "native" ]]; then
+        echo "  Binary: ${SEQURE_NATIVE_BIN:-auto-detect from ../syqure/target}"
+      else
+        echo "  Using Docker containers"
+      fi
+      echo "======================="
+
+  - name: Resolve Syqure binary for analyze
+    run: |
+      set -euo pipefail
+      BIN="${SEQURE_NATIVE_BIN:-{{workspace}}/../syqure/target/release/syqure}"
+      if [[ ! -x "$BIN" ]]; then
+        BIN="{{workspace}}/../syqure/target/debug/syqure"
+      fi
+      if [[ ! -x "$BIN" ]]; then
+        echo "Syqure binary not found for analyze. Skipping analysis." >&2
+        exit 0
+      fi
+      echo "$BIN"
+    capture: syqure_analyze_bin
+
+  - name: Analyze Syqure program
+    run: |
+      set -euo pipefail
+      BIN="{{syqure_analyze_bin}}"
+      if [[ -z "$BIN" || ! -x "$BIN" ]]; then
+        echo "Skipping analysis (no binary)"
+        exit 0
+      fi
+      EXAMPLE="{{workspace}}/../syqure/example/two_party_sum_tcp.codon"
+      if [[ ! -f "$EXAMPLE" ]]; then
+        echo "Example file not found: $EXAMPLE" >&2
+        exit 0
+      fi
+
+      echo "=== Syqure Program Analysis ==="
+      ANALYSIS=$("$BIN" analyze "$EXAMPLE" --json 2>/dev/null || echo '{}')
+
+      # Extract and display key metrics
+      TOTAL_SECONDS=$(echo "$ANALYSIS" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('estimate',{}).get('total_seconds', 'N/A'))" 2>/dev/null || echo "N/A")
+      CAN_SKIP_MHE=$(echo "$ANALYSIS" | python3 -c "import sys,json; d=json.load(sys.stdin); print('yes' if d.get('runtime',{}).get('can_skip_mhe') else 'no')" 2>/dev/null || echo "unknown")
+      JIT_SECONDS=$(echo "$ANALYSIS" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('estimate',{}).get('jit_seconds', 'N/A'))" 2>/dev/null || echo "N/A")
+      MPC_SECONDS=$(echo "$ANALYSIS" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('estimate',{}).get('mpc_seconds', 'N/A'))" 2>/dev/null || echo "N/A")
+
+      echo "  Estimated total time: ${TOTAL_SECONDS}s"
+      echo "  JIT compile time:     ${JIT_SECONDS}s"
+      echo "  MPC compute time:     ${MPC_SECONDS}s"
+      echo "  Can skip MHE:         ${CAN_SKIP_MHE}"
+
+      if [[ "$CAN_SKIP_MHE" == "yes" ]]; then
+        echo "  → MHE setup not required (MPC-only program)"
+      fi
+      echo "==============================="
+
+      # Output can_skip_mhe for downstream use
+      echo "$CAN_SKIP_MHE"
+    capture: can_skip_mhe
+
   - name: Wait for client2 public key to sync
     datasite: client1@sandbox.local
     wait_for: datasites/client2@sandbox.local/public/crypto/did.json
@@ -20,6 +91,13 @@ steps:
     datasite: client1@sandbox.local
     wait_for: datasites/aggregator@sandbox.local/public/crypto/did.json
     timeout: 30
+
+  - name: Ensure datasites roots exist
+    run: |
+      set -euo pipefail
+      mkdir -p "{{sandbox}}/aggregator@sandbox.local/datasites"
+      mkdir -p "{{sandbox}}/client1@sandbox.local/datasites"
+      mkdir -p "{{sandbox}}/client2@sandbox.local/datasites"
 
   - name: Prepare Syqure shared folders + permissions
     run: |
@@ -134,16 +212,11 @@ steps:
 
   - name: Start aggregator (CP0) container
     run: |
-      docker rm -f syqure-aggregator syqure-client1 syqure-client2 >/dev/null 2>&1 || true
-      SEQURE_FILE_KEEP=1 SEQURE_FILE_DEBUG=1 {{workspace}}/tests/scripts/run_syqure_party.sh \
-        --pid 0 \
-        --email aggregator@sandbox.local \
-        --run-id {{run_id}} \
-        --party-emails aggregator@sandbox.local,client1@sandbox.local,client2@sandbox.local \
-        --datasites-root "{{sandbox}}/aggregator@sandbox.local/datasites" \
-        --image syqure-cli-files \
-        --platform linux/amd64 \
-        --name syqure-aggregator-{{run_id}}
+      if [[ "${SEQURE_MODE:-native}" != "docker" ]]; then
+        exit 0
+      fi
+      docker rm -f syqure-aggregator syqure-client1 syqure-client2 syqure-aggregator-{{run_id}} syqure-client1-{{run_id}} syqure-client2-{{run_id}} >/dev/null 2>&1 || true
+      SEQURE_FILE_KEEP=1 SEQURE_FILE_DEBUG=1 {{workspace}}/tests/scripts/run_syqure_party.sh --pid 0 --email aggregator@sandbox.local --run-id {{run_id}} --party-emails aggregator@sandbox.local,client1@sandbox.local,client2@sandbox.local --datasites-root "{{sandbox}}/aggregator@sandbox.local/datasites" --image syqure-cli-files --platform linux/amd64 --name syqure-aggregator-{{run_id}}
 
   - name: Capture Syqure start time (ms)
     run: |
@@ -153,33 +226,152 @@ steps:
       PY
     capture: run_start_ms
 
+  - name: Resolve Syqure native binary
+    run: |
+      set -euo pipefail
+      if [[ "${SEQURE_MODE:-native}" != "native" ]]; then
+        exit 0
+      fi
+      BIN="${SEQURE_NATIVE_BIN:-{{workspace}}/../syqure/target/release/syqure}"
+      if [[ ! -x "$BIN" ]]; then
+        BIN="{{workspace}}/../syqure/target/debug/syqure"
+      fi
+      if [[ ! -x "$BIN" ]]; then
+        echo "Syqure native binary not found. Set SEQURE_NATIVE_BIN or build with: (cd {{workspace}}/../syqure && cargo build -p syqure)" >&2
+        exit 1
+      fi
+      echo "$BIN"
+    capture: syqure_bin
+
+  - name: Run Syqure native parties
+    run: |
+      set -euo pipefail
+      if [[ "${SEQURE_MODE:-native}" != "native" ]]; then
+        exit 0
+      fi
+      RUN_ID="{{run_id}}"
+      BIN="{{syqure_bin}}"
+      if [[ -z "$BIN" ]]; then
+        echo "Syqure native binary not resolved (syqure_bin empty)." >&2
+        exit 1
+      fi
+      EXAMPLE="{{workspace}}/../syqure/example/two_party_sum_tcp.codon"
+      if [[ ! -f "$EXAMPLE" ]]; then
+        echo "Syqure example not found: $EXAMPLE" >&2
+        exit 1
+      fi
+
+      LOG_DIR="{{sandbox}}/syqure-native-logs/${RUN_ID}"
+      mkdir -p "$LOG_DIR"
+
+      PARTY_EMAILS="aggregator@sandbox.local,client1@sandbox.local,client2@sandbox.local"
+      CP_COUNT=3
+
+      # Check if we can skip MHE setup (from analyze step)
+      SKIP_MHE_FLAG=""
+      if [[ "{{can_skip_mhe}}" == "yes" ]]; then
+        SKIP_MHE_FLAG="--skip-mhe-setup"
+        echo "Using --skip-mhe-setup (MPC-only program)"
+      fi
+
+      pids=()
+      run_party() {
+        local pid="$1"
+        local datasites_root="$2"
+        local log_path="$3"
+        SEQURE_TRANSPORT=file \
+          SEQURE_FILE_DIR="shared/syqure/${RUN_ID}" \
+          SEQURE_FILE_POLL_MS=50 \
+          SEQURE_CP_COUNT="$CP_COUNT" \
+          SEQURE_PARTY_EMAILS="$PARTY_EMAILS" \
+          SEQURE_DATASITES_ROOT="$datasites_root" \
+          SEQURE_FILE_KEEP=1 \
+          SEQURE_FILE_DEBUG=1 \
+          "$BIN" $SKIP_MHE_FLAG "$EXAMPLE" -- "$pid" >"$log_path" 2>&1 &
+        pids+=("$!")
+      }
+
+      run_party 0 "{{sandbox}}/aggregator@sandbox.local/datasites" "$LOG_DIR/agg.log"
+      run_party 1 "{{sandbox}}/client1@sandbox.local/datasites" "$LOG_DIR/cp1.log"
+      run_party 2 "{{sandbox}}/client2@sandbox.local/datasites" "$LOG_DIR/cp2.log"
+
+      status=0
+      for pid in "${pids[@]}"; do
+        if ! wait "$pid"; then
+          status=1
+        fi
+      done
+
+      echo "Syqure native logs: $LOG_DIR"
+      exit "$status"
+
   - name: Start client1 (CP1) container
     run: |
-      SEQURE_FILE_KEEP=1 SEQURE_FILE_DEBUG=1 {{workspace}}/tests/scripts/run_syqure_party.sh \
-        --pid 1 \
-        --email client1@sandbox.local \
-        --run-id {{run_id}} \
-        --party-emails aggregator@sandbox.local,client1@sandbox.local,client2@sandbox.local \
-        --datasites-root "{{sandbox}}/client1@sandbox.local/datasites" \
-        --image syqure-cli-files \
-        --platform linux/amd64 \
-        --name syqure-client1-{{run_id}}
+      if [[ "${SEQURE_MODE:-native}" != "docker" ]]; then
+        exit 0
+      fi
+      SEQURE_FILE_KEEP=1 SEQURE_FILE_DEBUG=1 {{workspace}}/tests/scripts/run_syqure_party.sh --pid 1 --email client1@sandbox.local --run-id {{run_id}} --party-emails aggregator@sandbox.local,client1@sandbox.local,client2@sandbox.local --datasites-root "{{sandbox}}/client1@sandbox.local/datasites" --image syqure-cli-files --platform linux/amd64 --name syqure-client1-{{run_id}}
 
   - name: Start client2 (CP2) container
     run: |
-      SEQURE_FILE_KEEP=1 SEQURE_FILE_DEBUG=1 {{workspace}}/tests/scripts/run_syqure_party.sh \
-        --pid 2 \
-        --email client2@sandbox.local \
-        --run-id {{run_id}} \
-        --party-emails aggregator@sandbox.local,client1@sandbox.local,client2@sandbox.local \
-        --datasites-root "{{sandbox}}/client2@sandbox.local/datasites" \
-        --image syqure-cli-files \
-        --platform linux/amd64 \
-        --name syqure-client2-{{run_id}}
+      if [[ "${SEQURE_MODE:-native}" != "docker" ]]; then
+        exit 0
+      fi
+      SEQURE_FILE_KEEP=1 SEQURE_FILE_DEBUG=1 {{workspace}}/tests/scripts/run_syqure_party.sh --pid 2 --email client2@sandbox.local --run-id {{run_id}} --party-emails aggregator@sandbox.local,client1@sandbox.local,client2@sandbox.local --datasites-root "{{sandbox}}/client2@sandbox.local/datasites" --image syqure-cli-files --platform linux/amd64 --name syqure-client2-{{run_id}}
 
-  - name: Wait for Syqure containers to finish
+  - name: Wait for Syqure containers to finish (streaming logs)
     run: |
-      docker wait syqure-aggregator-{{run_id}} syqure-client1-{{run_id}} syqure-client2-{{run_id}}
+      set -euo pipefail
+      if [[ "${SEQURE_MODE:-native}" != "docker" ]]; then
+        exit 0
+      fi
+      RUN_ID="{{run_id}}"
+
+      # Start tailing docker logs for all containers in background
+      docker logs -f syqure-aggregator-${RUN_ID} 2>&1 | sed 's/^/[agg] /' &
+      pid_agg=$!
+      docker logs -f syqure-client1-${RUN_ID} 2>&1 | sed 's/^/[cp1] /' &
+      pid_c1=$!
+      docker logs -f syqure-client2-${RUN_ID} 2>&1 | sed 's/^/[cp2] /' &
+      pid_c2=$!
+
+      # Wait for containers to exit
+      docker wait syqure-aggregator-${RUN_ID} syqure-client1-${RUN_ID} syqure-client2-${RUN_ID}
+
+      # Give logs a moment to flush, then kill tailers
+      sleep 0.5
+      kill $pid_agg $pid_c1 $pid_c2 2>/dev/null || true
+
+  - name: Show Syqure container logs
+    run: |
+      set -euo pipefail
+      if [[ "${SEQURE_MODE:-native}" != "docker" ]]; then
+        exit 0
+      fi
+      echo "=== syqure-aggregator-{{run_id}} ==="
+      docker logs --tail 200 syqure-aggregator-{{run_id}}
+      echo "=== syqure-client1-{{run_id}} ==="
+      docker logs --tail 200 syqure-client1-{{run_id}}
+      echo "=== syqure-client2-{{run_id}} ==="
+      docker logs --tail 200 syqure-client2-{{run_id}}
+
+  - name: Show file transport logs
+    run: |
+      set -euo pipefail
+      RUN_ID="{{run_id}}"
+      for label in agg c1 c2; do
+        case "$label" in
+          agg) path="{{sandbox}}/aggregator@sandbox.local/datasites/aggregator@sandbox.local/shared/syqure/${RUN_ID}/file_transport.log" ;;
+          c1) path="{{sandbox}}/client1@sandbox.local/datasites/client1@sandbox.local/shared/syqure/${RUN_ID}/file_transport.log" ;;
+          c2) path="{{sandbox}}/client2@sandbox.local/datasites/client2@sandbox.local/shared/syqure/${RUN_ID}/file_transport.log" ;;
+        esac
+        if [[ -f "$path" ]]; then
+          echo "=== ${label} file_transport.log (tail) ==="
+          tail -n 200 "$path"
+        else
+          echo "=== ${label} file_transport.log missing ==="
+        fi
+      done
 
   - name: Report Syqure duration
     run: |
@@ -192,14 +384,41 @@ steps:
 
   - name: Check CP1 output
     run: |
-      docker logs syqure-client1-{{run_id}}
+      set -euo pipefail
+      RUN_ID="{{run_id}}"
+      MODE="${SEQURE_MODE:-native}"
+      if [[ "$MODE" == "native" ]]; then
+        LOG="{{sandbox}}/syqure-native-logs/${RUN_ID}/cp1.log"
+        if [[ ! -f "$LOG" ]]; then
+          echo "Missing native log: $LOG" >&2
+          exit 1
+        fi
+        cat "$LOG"
+      else
+        docker logs syqure-client1-{{run_id}}
+      fi
     expect: "sum = 14"
 
   - name: Check CP2 output
     run: |
-      docker logs syqure-client2-{{run_id}}
+      set -euo pipefail
+      RUN_ID="{{run_id}}"
+      MODE="${SEQURE_MODE:-native}"
+      if [[ "$MODE" == "native" ]]; then
+        LOG="{{sandbox}}/syqure-native-logs/${RUN_ID}/cp2.log"
+        if [[ ! -f "$LOG" ]]; then
+          echo "Missing native log: $LOG" >&2
+          exit 1
+        fi
+        cat "$LOG"
+      else
+        docker logs syqure-client2-{{run_id}}
+      fi
     expect: "sum = 14"
 
   - name: Cleanup Syqure containers
     run: |
+      if [[ "${SEQURE_MODE:-native}" != "docker" ]]; then
+        exit 0
+      fi
       docker rm -f syqure-aggregator-{{run_id}} syqure-client1-{{run_id}} syqure-client2-{{run_id}} >/dev/null 2>&1 || true

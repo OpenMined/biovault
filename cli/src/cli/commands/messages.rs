@@ -652,16 +652,22 @@ pub async fn process_project_message(
         ProjectSpec::load(&project_spec_path)?
     };
 
-    if spec.template.as_deref() == Some("dynamic-nextflow") {
-        return process_dynamic_project_message(
-            config,
-            &msg,
-            &dest,
-            participant.clone(),
-            test,
-            approve,
-        )
-        .await;
+    match spec.template.as_deref() {
+        Some("dynamic-nextflow") => {
+            return process_dynamic_project_message(
+                config,
+                &msg,
+                &dest,
+                participant.clone(),
+                test,
+                approve,
+            )
+            .await;
+        }
+        Some("shell") => {
+            return process_shell_project_message(config, &msg, &dest, test, approve).await;
+        }
+        _ => {}
     }
 
     // Determine participant source
@@ -1135,6 +1141,45 @@ async fn run_project_real(config: &Config, msg: &Message) -> anyhow::Result<()> 
     if results_dir.exists() {
         copy_dir_recursive(config, &results_dir, &dest_results)?;
     }
+    Ok(())
+}
+
+async fn process_shell_project_message(
+    config: &Config,
+    msg: &Message,
+    dest: &Path,
+    test: bool,
+    approve: bool,
+) -> anyhow::Result<()> {
+    let run_dir = prepare_run_directory(config, dest, &msg.id)?;
+    let results_dir = if test { "results-test" } else { "results-real" };
+
+    run_dynamic::execute_dynamic(
+        run_dir.to_string_lossy().as_ref(),
+        Vec::new(),
+        false,
+        false,
+        Some(results_dir.to_string()),
+        run_dynamic::RunSettings::default(),
+    )
+    .await?;
+
+    let source_results = run_dir.join(results_dir);
+    let dest_results = dest.join(results_dir);
+    if source_results.exists() {
+        copy_dir_recursive(config, &source_results, &dest_results)?;
+    }
+
+    println!("✓ Project processed successfully (shell template)");
+    if dest_results.exists() {
+        println!("Results saved to: {}", dest_results.display());
+    }
+
+    if approve {
+        approve_project_non_interactive(config, msg, test).await?;
+        println!("✓ Project approved and results sent to sender");
+    }
+
     Ok(())
 }
 

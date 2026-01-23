@@ -1,4 +1,5 @@
 use super::run::execute_with_logging;
+use crate::data::project_yaml_hash;
 use crate::error::Result;
 use crate::project_spec::{ProjectSpec, ProjectStepSpec};
 use anyhow::Context;
@@ -1174,8 +1175,7 @@ pub async fn execute_dynamic(
     } else {
         Vec::new()
     };
-    let datasite_index =
-        resolve_datasite_index(&template_datasites, current_datasite.as_deref());
+    let datasite_index = resolve_datasite_index(&template_datasites, current_datasite.as_deref());
     let context = DatasiteContext {
         datasites: template_datasites,
         current: current_datasite.clone(),
@@ -2256,11 +2256,7 @@ async fn execute_shell(
 ) -> Result<()> {
     let workflow_path = project_path.join(&spec.workflow);
     if !workflow_path.exists() {
-        return Err(anyhow::anyhow!(
-            "Workflow file not found: {}",
-            workflow_path.display()
-        )
-        .into());
+        return Err(anyhow::anyhow!("Workflow file not found: {}", workflow_path.display()).into());
     }
 
     let results_path = PathBuf::from(results_dir.unwrap_or_else(|| "results".to_string()));
@@ -2331,6 +2327,41 @@ async fn execute_shell(
             &results_path,
             &step.id,
         );
+        if !env_map.contains_key("BV_RUN_ID") {
+            if let Ok(Some(hash)) = project_yaml_hash(project_path) {
+                env_map.insert("BV_RUN_ID".to_string(), hash);
+            }
+        }
+        if let Ok(cfg) = crate::config::Config::load() {
+            if let Ok(data_dir) = cfg.get_syftbox_data_dir() {
+                env_map
+                    .entry("BV_SYFTBOX_DATA_DIR".to_string())
+                    .or_insert_with(|| data_dir.to_string_lossy().to_string());
+                let datasites_root = data_dir.join("datasites");
+                env_map
+                    .entry("BV_DATASITES_ROOT".to_string())
+                    .or_insert_with(|| datasites_root.to_string_lossy().to_string());
+            }
+        }
+        let input_specs = if step.inputs.is_empty() {
+            &spec.inputs
+        } else {
+            &step.inputs
+        };
+        for input in input_specs {
+            if let Some(path_template) = input.path.as_deref() {
+                let rendered_path = render_template(path_template, &ctx);
+                let input_path = if Path::new(&rendered_path).is_absolute() {
+                    PathBuf::from(rendered_path)
+                } else {
+                    project_path.join(rendered_path)
+                };
+                let env_key = format!("BV_INPUT_{}", env_key_suffix(&input.name));
+                env_map
+                    .entry(env_key)
+                    .or_insert_with(|| input_path.to_string_lossy().to_string());
+            }
+        }
         for output in &step.outputs {
             let raw_path = output.path.as_deref().unwrap_or(&output.name);
             let rendered_path = render_template(raw_path, &ctx);
@@ -2364,11 +2395,9 @@ async fn execute_shell(
         println!("  {}", display_cmd.dimmed());
         let status = cmd.status().context("Failed to execute shell workflow")?;
         if !status.success() {
-            return Err(anyhow::anyhow!(
-                "Shell workflow exited with code: {:?}",
-                status.code()
-            )
-            .into());
+            return Err(
+                anyhow::anyhow!("Shell workflow exited with code: {:?}", status.code()).into(),
+            );
         }
     }
 

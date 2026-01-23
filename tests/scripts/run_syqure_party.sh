@@ -72,6 +72,27 @@ if [[ -z "$CONTAINER_NAME" ]]; then
   CONTAINER_NAME="syqure-${safe_email}-${RUN_ID}"
 fi
 
+mkdir -p "$DATASITES_ROOT"
+docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+
+waited=0
+while [[ ! -d "$DATASITES_ROOT" && $waited -lt 50 ]]; do
+  sleep 0.1
+  waited=$((waited + 1))
+done
+
+DATASITES_ROOT_IN_CONTAINER="/datasites"
+MOUNT_SPEC="-v ${DATASITES_ROOT}:${DATASITES_ROOT_IN_CONTAINER}"
+if ! docker run --rm ${MOUNT_SPEC} alpine:3.19 sh -c 'test -d /datasites' >/dev/null 2>&1; then
+  parent_dir="$(dirname "$DATASITES_ROOT")"
+  if [[ ! -d "$parent_dir" ]]; then
+    echo "Datasites parent directory not found: $parent_dir" >&2
+    exit 1
+  fi
+  DATASITES_ROOT_IN_CONTAINER="/datasites-root/datasites"
+  MOUNT_SPEC="-v ${parent_dir}:/datasites-root"
+fi
+
 if [[ "$PROGRAM_PATH" == /workspace/example/* ]]; then
   rel="${PROGRAM_PATH#/workspace/example/}"
   if [ ! -f "${EXAMPLE_DIR}/${rel}" ]; then
@@ -80,15 +101,39 @@ if [[ "$PROGRAM_PATH" == /workspace/example/* ]]; then
   fi
 fi
 
+if [[ -n "$FILE_DEBUG" ]]; then
+  log_path="${DATASITES_ROOT_IN_CONTAINER}/${EMAIL}/shared/syqure/${RUN_ID}/file_transport.log"
+  docker run -d --name "$CONTAINER_NAME" --platform "$PLATFORM" \
+    -e "SEQURE_TRANSPORT=${TRANSPORT}" \
+    -e "SEQURE_FILE_DIR=shared/syqure/${RUN_ID}" \
+    -e "SEQURE_FILE_POLL_MS=${POLL_MS}" \
+    -e "SEQURE_CP_COUNT=${CP_COUNT}" \
+    -e "SEQURE_PARTY_EMAILS=${PARTY_EMAILS}" \
+    -e "SEQURE_DATASITES_ROOT=${DATASITES_ROOT_IN_CONTAINER}" \
+    -e "SEQURE_LOCAL_EMAIL=${EMAIL}" \
+    ${FILE_KEEP:+-e "SEQURE_FILE_KEEP=${FILE_KEEP}"} \
+    ${FILE_DEBUG:+-e "SEQURE_FILE_DEBUG=${FILE_DEBUG}"} \
+    -v "${EXAMPLE_DIR}:/workspace/example:ro" \
+    ${MOUNT_SPEC} \
+    "$IMAGE_NAME" sh -c "syqure \"$PROGRAM_PATH\" -- \"$PID\" & pid=\$!; \
+      log=\"${log_path}\"; \
+      i=0; while [ \$i -lt 300 ]; do [ -f \"\$log\" ] && break; sleep 0.2; i=\$((i+1)); done; \
+      if [ -f \"\$log\" ]; then tail -n 50 -F \"\$log\" & tpid=\$!; fi; \
+      wait \$pid; status=\$?; \
+      if [ -n \"\${tpid:-}\" ]; then kill \$tpid 2>/dev/null || true; fi; \
+      exit \$status"
+  exit $?
+fi
+
 docker run -d --name "$CONTAINER_NAME" --platform "$PLATFORM" \
   -e "SEQURE_TRANSPORT=${TRANSPORT}" \
   -e "SEQURE_FILE_DIR=shared/syqure/${RUN_ID}" \
   -e "SEQURE_FILE_POLL_MS=${POLL_MS}" \
   -e "SEQURE_CP_COUNT=${CP_COUNT}" \
   -e "SEQURE_PARTY_EMAILS=${PARTY_EMAILS}" \
-  -e "SEQURE_DATASITES_ROOT=/datasites" \
+  -e "SEQURE_DATASITES_ROOT=${DATASITES_ROOT_IN_CONTAINER}" \
   ${FILE_KEEP:+-e "SEQURE_FILE_KEEP=${FILE_KEEP}"} \
   ${FILE_DEBUG:+-e "SEQURE_FILE_DEBUG=${FILE_DEBUG}"} \
   -v "${EXAMPLE_DIR}:/workspace/example:ro" \
-  -v "${DATASITES_ROOT}:/datasites" \
+  ${MOUNT_SPEC} \
   "$IMAGE_NAME" syqure "$PROGRAM_PATH" -- "$PID"

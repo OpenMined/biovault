@@ -9,7 +9,7 @@ use crate::spec_format::{detect_spec_format, SpecFormat};
 use crate::syftbox::storage::{SyftBoxStorage, WritePolicy};
 #[cfg(test)]
 use crate::syftbox::SyftBoxApp;
-use crate::types::SyftPermissions;
+use crate::types::{ProjectYaml, SyftPermissions};
 use anyhow::Context;
 use chrono::Local;
 use dialoguer::{Confirm, Editor};
@@ -18,7 +18,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde_json::json;
 use serde_yaml;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
@@ -84,7 +84,7 @@ pub async fn submit(
     let project_yaml_path = resolve_project_spec_path(&project_dir);
     if !project_yaml_path.exists() {
         return Err(Error::from(anyhow::anyhow!(
-            "module.yaml not found in: {}",
+            "project spec not found in: {}",
             project_dir.display()
         )));
     }
@@ -98,14 +98,58 @@ pub async fn submit(
     })?;
     let module_name = module.metadata.name.clone();
 
-    let participants = participant_url.map(|url| vec![url]);
+    let project_content = fs::read_to_string(&project_yaml_path).with_context(|| {
+        format!(
+            "Failed to read project spec from {}",
+            project_yaml_path.display()
+        )
+    })?;
+    let spec_format = detect_spec_format(&project_yaml_path, &project_content);
+
+    let mut project_yaml: Option<ProjectYaml> = None;
+    if spec_format == SpecFormat::LegacyProject {
+        let mut project = ProjectYaml::from_file(&project_yaml_path)?;
+        // Override security-sensitive fields
+        project.author = config.email.clone();
+        let mut datasites = project.datasites.clone().unwrap_or_default();
+        if datasites.is_empty() {
+            datasites.push(datasite_email.clone());
+        } else if !datasites.contains(&datasite_email) {
+            datasites.push(datasite_email.clone());
+        }
+        project.datasites = Some(datasites);
+
+        // Handle participants from destination URL
+        if let Some(ref url) = participant_url {
+            project.participants = Some(vec![url.clone()]);
+        }
+
+        project_yaml = Some(project);
+    }
+
+    let participants = project_yaml
+        .as_ref()
+        .and_then(|project| project.participants.clone())
+        .or_else(|| participant_url.map(|url| vec![url]));
+
+    let workflow_name = project_yaml
+        .as_ref()
+        .map(|project| project.workflow.clone())
+        .or_else(|| {
+            module
+                .spec
+                .runner
+                .as_ref()
+                .and_then(|runner| runner.entrypoint.clone())
+        })
+        .unwrap_or_else(|| "workflow.nf".to_string());
 
     // Hash workflow file
-    let workflow_path = project_dir.join(&project.workflow);
+    let workflow_path = project_dir.join(&workflow_name);
     if !workflow_path.exists() {
         return Err(Error::from(anyhow::anyhow!(
             "Workflow file '{}' not found in project directory",
-            project.workflow
+            workflow_name
         )));
     }
     let workflow_hash = hash_file(&workflow_path)?;
@@ -116,7 +160,7 @@ pub async fn submit(
     let mut b3_hashes = HashMap::new();
 
     // Add workflow hash
-    b3_hashes.insert(project.workflow.clone(), workflow_hash.clone());
+    b3_hashes.insert(workflow_name.clone(), workflow_hash.clone());
 
     if assets_dir.exists() && assets_dir.is_dir() {
         for entry in WalkDir::new(&assets_dir)
@@ -144,6 +188,13 @@ pub async fn submit(
             let file_hash = hash_file(path)?;
             b3_hashes.insert(relative_path, file_hash);
         }
+    }
+
+    if let Some(project) = project_yaml.as_mut() {
+        if project.assets.as_ref().map_or(true, |a| a.is_empty()) {
+            project.assets = Some(asset_files.clone());
+        }
+        project.b3_hashes = Some(b3_hashes.clone());
     }
 
     module.spec.assets = if asset_files.is_empty() {
@@ -227,6 +278,14 @@ pub async fn submit(
                     println!("   Location: {}", submission_path.display());
                     println!("   Hash: {}", short_hash);
                 }
+            } else {
+                // Project has changed
+                if !force {
+                    println!("⚠️  A submission exists with the same name but different content.");
+                    println!("   Existing: {}", submission_path.display());
+                    println!("   Use --force to create a new version.");
+                    return Ok(());
+                }
 
                 return send_project_message(
                     &config,
@@ -266,6 +325,8 @@ pub async fn submit(
             &config,
             &storage,
             &module,
+            project_yaml.as_ref(),
+            &workflow_name,
             &asset_files,
             &b3_hashes,
             participants.as_ref(),
@@ -284,6 +345,8 @@ pub async fn submit(
         &config,
         &storage,
         &module,
+        project_yaml.as_ref(),
+        &workflow_name,
         &asset_files,
         &b3_hashes,
         participants.as_ref(),
@@ -376,13 +439,13 @@ fn write_yaml_to_storage<T: Serialize>(
     storage: &SyftBoxStorage,
     path: &Path,
     value: &T,
-    recipient: Option<&str>,
+    recipients: Option<Vec<String>>,
     overwrite: bool,
 ) -> Result<()> {
     let yaml = serde_yaml::to_string(value)?;
-    let policy = if let Some(identity) = recipient {
+    let policy = if let Some(recipients) = recipients {
         WritePolicy::Envelope {
-            recipients: vec![identity.to_string()],
+            recipients,
             hint: path
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned()),
@@ -394,11 +457,36 @@ fn write_yaml_to_storage<T: Serialize>(
     Ok(())
 }
 
+fn dedupe_recipients(mut recipients: Vec<String>) -> Vec<String> {
+    let mut set = BTreeSet::new();
+    for recipient in recipients.drain(..) {
+        let trimmed = recipient.trim();
+        if !trimmed.is_empty() {
+            set.insert(trimmed.to_string());
+        }
+    }
+    set.into_iter().collect()
+}
+
+fn recipients_from_permissions(
+    storage: &SyftBoxStorage,
+    permissions_path: &Path,
+    sender: &str,
+) -> Result<Vec<String>> {
+    let permissions: SyftPermissions = read_yaml_from_storage(storage, permissions_path)?;
+    let mut recipients = vec![sender.to_string()];
+    for rule in permissions.rules {
+        recipients.extend(rule.access.read);
+        recipients.extend(rule.access.write);
+    }
+    Ok(dedupe_recipients(recipients))
+}
+
 fn copy_project_files(
     src: &Path,
     dest: &Path,
     storage: &SyftBoxStorage,
-    recipient: &str,
+    recipients: &[String],
     workflow_name: &str,
 ) -> Result<()> {
     storage.ensure_dir(dest)?;
@@ -408,7 +496,7 @@ fn copy_project_files(
     let workflow_bytes = fs::read(&src_workflow)
         .with_context(|| format!("Failed to read {} from project", workflow_name))?;
     let workflow_policy = WritePolicy::Envelope {
-        recipients: vec![recipient.to_string()],
+        recipients: recipients.to_vec(),
         hint: Some(workflow_name.to_string()),
     };
     storage.write_with_shadow(&dest_workflow, &workflow_bytes, workflow_policy, true)?;
@@ -440,7 +528,7 @@ fn copy_project_files(
                     .and_then(|p| p.to_str())
                     .map(|s| format!("assets/{s}"));
                 let asset_policy = WritePolicy::Envelope {
-                    recipients: vec![recipient.to_string()],
+                    recipients: recipients.to_vec(),
                     hint,
                 };
                 storage.write_with_shadow(&dest_path, &bytes, asset_policy, true)?;
@@ -456,6 +544,8 @@ fn create_and_submit_project(
     config: &Config,
     storage: &SyftBoxStorage,
     module: &ModuleFile,
+    project_yaml: Option<&ProjectYaml>,
+    workflow_name: &str,
     asset_files: &[String],
     b3_hashes: &HashMap<String, String>,
     participants: Option<&Vec<String>>,
@@ -470,13 +560,21 @@ fn create_and_submit_project(
     // Create submission directory
     storage.ensure_dir(submission_path)?;
 
+    let share_datasites = project_yaml
+        .and_then(|project| project.datasites.clone())
+        .unwrap_or_else(|| vec![datasite_email.to_string()]);
+    let share_datasites = dedupe_recipients(share_datasites);
+    let mut recipients = share_datasites.clone();
+    recipients.push(config.email.clone());
+    let recipients = dedupe_recipients(recipients);
+
     // Copy project files
     copy_project_files(
         project_dir,
         submission_path,
         storage,
-        datasite_email,
-        &project.workflow,
+        &recipients,
+        workflow_name,
     )?;
 
     // Save module.yaml
@@ -485,18 +583,34 @@ fn create_and_submit_project(
         storage,
         &project_yaml_path,
         &module,
-        Some(datasite_email),
+        Some(recipients.clone()),
         true,
     )?;
+
+    if let Some(project) = project_yaml {
+        let legacy_project_path = submission_path.join("project.yaml");
+        write_yaml_to_storage(
+            storage,
+            &legacy_project_path,
+            project,
+            Some(recipients.clone()),
+            true,
+        )?;
+    }
 
     let record = SubmissionRecord {
         files_hash: project_hash.to_string(),
     };
     let record_path = submission_path.join(SUBMISSION_RECORD_FILE);
-    write_yaml_to_storage(storage, &record_path, &record, Some(datasite_email), true)?;
+    write_yaml_to_storage(storage, &record_path, &record, Some(recipients), true)?;
 
     // Create permissions file
-    let permissions = SyftPermissions::new_for_datasite(datasite_email);
+    let mut permissions = SyftPermissions::new_for_datasites(&share_datasites);
+    permissions.add_rule(
+        "results/**/*",
+        share_datasites.clone(),
+        share_datasites.clone(),
+    );
     let permissions_path = submission_path.join("syft.pub.yaml");
     write_yaml_to_storage(storage, &permissions_path, &permissions, None, true)?;
 
@@ -642,6 +756,7 @@ fn send_project_message(
     Ok(())
 }
 
+#[allow(dead_code)]
 fn update_permissions_for_new_recipient(
     storage: &SyftBoxStorage,
     permissions_path: &Path,
@@ -761,8 +876,9 @@ mod tests {
         fs::write(src.join("workflow.nf"), b"wf").unwrap();
         fs::write(src.join("assets/nested/file.bin"), b"x").unwrap();
         let storage = SyftBoxStorage::new(tmp.path());
+        let recipients = vec!["peer@example.com".to_string()];
 
-        copy_project_files(&src, &dest, &storage, "peer@example.com", "workflow.nf").unwrap();
+        copy_project_files(&src, &dest, &storage, &recipients, "workflow.nf").unwrap();
 
         assert!(dest.join("workflow.nf").exists());
         assert!(dest.join("assets/nested/file.bin").exists());
@@ -773,7 +889,7 @@ mod tests {
         fs::write(src2.join("workflow.nf"), b"wf").unwrap();
         let dest2 = tmp.path().join("datasites/dest2");
         fs::create_dir_all(&dest2).unwrap();
-        copy_project_files(&src2, &dest2, &storage, "peer@example.com", "workflow.nf").unwrap();
+        copy_project_files(&src2, &dest2, &storage, &recipients, "workflow.nf").unwrap();
     }
 
     #[test]
@@ -818,7 +934,8 @@ mod tests {
         // No workflow.nf file
 
         let storage = SyftBoxStorage::new(tmp.path());
-        let result = copy_project_files(&src, &dest, &storage, "peer@example.com", "workflow.nf");
+        let recipients = vec!["peer@example.com".to_string()];
+        let result = copy_project_files(&src, &dest, &storage, &recipients, "workflow.nf");
         assert!(result.is_err());
     }
 
@@ -846,7 +963,8 @@ mod tests {
         }
 
         let storage = SyftBoxStorage::new(tmp.path());
-        let result = copy_project_files(&src, &dest, &storage, "peer@example.com", "workflow.nf");
+        let recipients = vec!["peer@example.com".to_string()];
+        let result = copy_project_files(&src, &dest, &storage, &recipients, "workflow.nf");
         assert!(result.is_ok());
         assert!(dest.join("workflow.nf").exists());
     }
@@ -863,7 +981,8 @@ mod tests {
         fs::write(src.join("assets/a/b/c/d/deep.txt"), b"deep").unwrap();
 
         let storage = SyftBoxStorage::new(tmp.path());
-        copy_project_files(&src, &dest, &storage, "peer@example.com", "workflow.nf").unwrap();
+        let recipients = vec!["peer@example.com".to_string()];
+        copy_project_files(&src, &dest, &storage, &recipients, "workflow.nf").unwrap();
 
         assert!(dest.join("workflow.nf").exists());
         assert!(dest.join("assets/a/b/c/d/deep.txt").exists());
@@ -888,7 +1007,8 @@ mod tests {
         fs::write(src.join("assets/data.csv"), asset_content).unwrap();
 
         let storage = SyftBoxStorage::new(tmp.path());
-        copy_project_files(&src, &dest, &storage, "peer@example.com", "workflow.nf").unwrap();
+        let recipients = vec!["peer@example.com".to_string()];
+        copy_project_files(&src, &dest, &storage, &recipients, "workflow.nf").unwrap();
 
         let copied_workflow = fs::read(dest.join("workflow.nf")).unwrap();
         let copied_asset = fs::read(dest.join("assets/data.csv")).unwrap();
@@ -909,7 +1029,12 @@ mod tests {
         let datasites_dir = tmp.path().join("datasites");
         fs::create_dir_all(&datasites_dir).unwrap();
         let path = datasites_dir.join("syft.pub.yaml");
-        let original = SyftPermissions::new_for_datasite("original@example.com");
+        let mut original = SyftPermissions::new_for_datasite("original@example.com");
+        original.add_rule(
+            "results/**/*",
+            vec!["original@example.com".to_string()],
+            vec!["original@example.com".to_string()],
+        );
         original.save(&path.to_path_buf()).unwrap();
 
         let storage = SyftBoxStorage::new(tmp.path());

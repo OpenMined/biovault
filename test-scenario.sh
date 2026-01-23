@@ -17,7 +17,7 @@ usage() {
 Usage: ./test-scenario.sh [options] <scenario.yaml>
 
 Options:
-  --client-mode MODE   SyftBox client: go|rust|mixed|embedded (default: go)
+  --client-mode MODE   SyftBox client: go|rust|mixed|embedded (default: rust)
   --sandbox DIR        Sandbox root (default: ./sandbox)
   --rust-client-bin P  Path to Rust client binary (optional)
   --skip-rust-build    Do not build Rust client (requires binary exists)
@@ -25,13 +25,13 @@ Options:
 
 Examples:
   ./test-scenario.sh tests/scenarios/inbox-ping-pong.yaml
-  ./test-scenario.sh --client-mode rust tests/scenarios/inbox-ping-pong.yaml
-  ./test-scenario.sh --client-mode rust --sandbox sandbox-rs tests/scenarios/inbox-ping-pong.yaml
+  ./test-scenario.sh --client-mode go tests/scenarios/inbox-ping-pong.yaml
+  ./test-scenario.sh --sandbox sandbox-rs tests/scenarios/inbox-ping-pong.yaml
   ./test-scenario.sh --client-mode embedded tests/scenarios/inbox-ping-pong.yaml
 EOF
 }
 
-CLIENT_MODE="go"
+CLIENT_MODE="rust"
 SANDBOX_DIR=""
 RUST_CLIENT_BIN=""
 SKIP_RUST_BUILD=0

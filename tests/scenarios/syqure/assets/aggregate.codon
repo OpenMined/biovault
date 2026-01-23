@@ -1,0 +1,41 @@
+import os
+
+from sequre import mpc, sequre, Sharetensor as ST
+
+
+@sequre
+def secure_add(mpc, a, b):
+    return a + b
+
+
+mpc = mpc()
+print(f"I am Party: {mpc.pid}")
+
+# Only CP1 and CP2 supply real inputs; CP0 is aggregator/dealer.
+input_path = os.getenv("BV_INPUT_MY_VAL", default=f"{mpc.pid}.txt")
+try:
+    with open(input_path, "r") as fh:
+        my_val = int(fh.read().strip())
+except Exception:
+    my_val = 0
+
+a = ST.enc(
+    mpc, my_val if mpc.pid == 1 else 0, source_pid=1, modulus=mpc.default_mpc_modulus
+)
+b = ST.enc(
+    mpc, my_val if mpc.pid == 2 else 0, source_pid=2, modulus=mpc.default_mpc_modulus
+)
+
+total = secure_add(mpc, a, b)
+
+result = total.reveal(mpc)
+output_path = os.getenv("BV_OUTPUT_AGGREGATE_RESULT", default=f"{mpc.pid}_out.txt")
+try:
+    with open(output_path, "w") as fh:
+        fh.write(str(result))
+except Exception:
+    print("Failed to get result")
+    pass
+
+if mpc.pid == 0:
+    print(f"CP0 (aggregator): sum = {result}")
