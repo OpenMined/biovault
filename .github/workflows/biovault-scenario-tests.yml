@@ -66,15 +66,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Sync workspace via repo manifest
-        shell: bash
-        run: |
-          git config --global url."https://github.com/".insteadOf "git@github.com:"
-          curl -fsSL https://storage.googleapis.com/git-repo-downloads/repo > /usr/local/bin/repo
-          chmod +x /usr/local/bin/repo
-          repo init -u https://github.com/${{ github.repository }} -m manifest.xml --depth=1
-          repo sync -j4
-
       - name: Setup Podman Hyper-V (Windows)
         if: matrix.os == 'windows' && matrix.needs_container == true
         shell: pwsh
@@ -235,15 +226,6 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-
-      - name: Sync workspace via repo manifest
-        shell: bash
-        run: |
-          git config --global url."https://github.com/".insteadOf "git@github.com:"
-          curl -fsSL https://storage.googleapis.com/git-repo-downloads/repo > /usr/local/bin/repo
-          chmod +x /usr/local/bin/repo
-          repo init -u https://github.com/${{ github.repository }} -m manifest.xml --depth=1
-          repo sync -j4
 
       - name: Setup workspace dependencies
         shell: bash
