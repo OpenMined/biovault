@@ -23,7 +23,7 @@ jobs:
         include:
           # Linux-only while CI is unstable (easy to re-enable below).
           - os: linux
-            client_mode: go
+            client_mode: rust
             scenario: tests/scenarios/inbox-ping-pong.yaml
             needs_container: true
           # - os: linux
@@ -65,6 +65,15 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Sync workspace via repo manifest
+        shell: bash
+        run: |
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+          curl -fsSL https://storage.googleapis.com/git-repo-downloads/repo > /usr/local/bin/repo
+          chmod +x /usr/local/bin/repo
+          repo init -u https://github.com/${{ github.repository }} -m manifest.xml --depth=1
+          repo sync -j4
 
       - name: Setup Podman Hyper-V (Windows)
         if: matrix.os == 'windows' && matrix.needs_container == true
@@ -227,12 +236,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Checkout syqure repo
-        uses: actions/checkout@v4
-        with:
-          repository: OpenMined/syqure
-          path: syqure
-          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Sync workspace via repo manifest
+        shell: bash
+        run: |
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+          curl -fsSL https://storage.googleapis.com/git-repo-downloads/repo > /usr/local/bin/repo
+          chmod +x /usr/local/bin/repo
+          repo init -u https://github.com/${{ github.repository }} -m manifest.xml --depth=1
+          repo sync -j4
 
       - name: Setup workspace dependencies
         shell: bash
