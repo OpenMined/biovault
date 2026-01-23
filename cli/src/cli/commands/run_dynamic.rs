@@ -2047,7 +2047,7 @@ pub async fn execute_dynamic(
         docker_cmd
             .arg("--work_flow_file")
             .arg(&docker_workflow)
-            .arg("--project_spec")
+            .arg("--module_spec")
             .arg(&docker_project_spec)
             .arg("--inputs_json")
             .arg(docker_inputs_json_str)
@@ -2128,7 +2128,7 @@ pub async fn execute_dynamic(
         native_cmd
             .arg("--work_flow_file")
             .arg(&workflow_abs)
-            .arg("--project_spec")
+            .arg("--module_spec")
             .arg(&project_spec_abs)
             .arg("--inputs_json")
             .arg(inputs_json_str)

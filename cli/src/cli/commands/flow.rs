@@ -532,14 +532,22 @@ pub async fn run_flow(
         if run_all_targets {
             // In sandbox mode with run_all, use first datasite's folder
             let all_datasites = resolve_all_datasites_from_spec(&spec, &resolved_inputs);
-            all_datasites.first().map(|first| root.join(first)
-                        .join("datasites")
-                        .join(first)
-                        .join("shared"))
-        } else { current_datasite.as_ref().map(|ds| root.join(ds).join("datasites").join(ds).join("shared")) }
+            all_datasites.first().map(|first| {
+                root.join(first)
+                    .join("datasites")
+                    .join(first)
+                    .join("shared")
+            })
+        } else {
+            current_datasite
+                .as_ref()
+                .map(|ds| root.join(ds).join("datasites").join(ds).join("shared"))
+        }
     } else if let Some(ref ds) = current_datasite {
         // In distributed mode, write to OUR OWN shared folder
-        syftbox_data_dir.as_ref().map(|data_dir| data_dir.join("datasites").join(ds).join("shared"))
+        syftbox_data_dir
+            .as_ref()
+            .map(|data_dir| data_dir.join("datasites").join(ds).join("shared"))
     } else {
         None
     };
@@ -865,17 +873,16 @@ pub async fn run_flow(
             let all_datasites = resolve_all_datasites_from_spec(&spec, &resolved_inputs);
             for target in run_targets {
                 let datasite_key = target.clone().unwrap_or_else(|| "local".to_string());
-                let target_data_dir = if let (Some(ref root), Some(ref site)) =
-                    (&sandbox_root, &target)
-                {
-                    root.join(site)
-                } else {
-                    syftbox_data_dir.clone().ok_or_else(|| {
-                        anyhow!(
+                let target_data_dir =
+                    if let (Some(ref root), Some(ref site)) = (&sandbox_root, &target) {
+                        root.join(site)
+                    } else {
+                        syftbox_data_dir.clone().ok_or_else(|| {
+                            anyhow!(
                             "Permissions step requires SYFTBOX_DATA_DIR or BIOVAULT_SANDBOX_ROOT"
                         )
-                    })?
-                };
+                        })?
+                    };
 
                 let step_label = format!("{}@{}", step.id, datasite_key);
                 println!("\n🔐 Creating permissions for step {}", step_label.bold());
@@ -925,17 +932,16 @@ pub async fn run_flow(
 
             for target in coord_run_targets {
                 let datasite_key = target.clone().unwrap_or_else(|| "local".to_string());
-                let target_data_dir = if let (Some(ref root), Some(ref site)) =
-                    (&sandbox_root, &target)
-                {
-                    root.join(site)
-                } else {
-                    syftbox_data_dir.clone().ok_or_else(|| {
-                        anyhow!(
+                let target_data_dir =
+                    if let (Some(ref root), Some(ref site)) = (&sandbox_root, &target) {
+                        root.join(site)
+                    } else {
+                        syftbox_data_dir.clone().ok_or_else(|| {
+                            anyhow!(
                             "Coordination step requires SYFTBOX_DATA_DIR or BIOVAULT_SANDBOX_ROOT"
                         )
-                    })?
-                };
+                        })?
+                    };
 
                 let step_label = format!("{}@{}", step.id, datasite_key);
                 println!("\n🤝 Setting up coordination for {}", step_label.bold());

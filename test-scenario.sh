@@ -116,32 +116,65 @@ if [[ "${CLIENT_MODE}" == "embedded" ]]; then
   export BV_SYFTBOX_BACKEND=embedded
 fi
 
-# Syqure runtime setup
-SYQURE_DIR="$ROOT_DIR/../syqure"
-SYQURE_BIN="$SYQURE_DIR/target/debug/syqure"
-if (( USE_DOCKER )); then
-  export BV_SYQURE_USE_DOCKER=1
-  echo "Syqure mode: Docker"
-else
-  # Native mode - build syqure if needed
-  if [[ ! -x "$SYQURE_BIN" ]]; then
-    if [[ -d "$SYQURE_DIR" ]]; then
-      echo "Building syqure native binary..."
-      (cd "$SYQURE_DIR" && cargo build) || {
-        echo "Failed to build syqure. Use --docker flag for Docker mode." >&2
-        exit 1
-      }
+# Syqure runtime setup (only when scenario needs it)
+if [[ "$SCENARIO" == *"syqure"* ]]; then
+  if [[ -n "${BV_SYQURE_DIR:-}" ]]; then
+    SYQURE_DIR="$BV_SYQURE_DIR"
+  elif [[ -d "$ROOT_DIR/../syqure" ]]; then
+    SYQURE_DIR="$ROOT_DIR/../syqure"
+  else
+    SYQURE_DIR="$ROOT_DIR/syqure"
+  fi
+  SYQURE_BIN="$SYQURE_DIR/target/debug/syqure"
+
+  if (( ! USE_DOCKER )); then
+    # Preflight: if no bundle is available for native syqure, fall back to Docker.
+    BUNDLE_OK=0
+    if [[ -n "${SYQURE_BUNDLE_FILE:-}" && -f "${SYQURE_BUNDLE_FILE}" ]]; then
+      BUNDLE_OK=1
     else
-      echo "Syqure directory not found at $SYQURE_DIR. Use --docker flag for Docker mode." >&2
-      exit 1
+      if command -v rustc >/dev/null 2>&1; then
+        HOST_TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"
+        if [[ -n "$HOST_TRIPLE" && -f "$SYQURE_DIR/bundles/${HOST_TRIPLE}.tar.zst" ]]; then
+          BUNDLE_OK=1
+        fi
+      fi
+      if [[ -d "$ROOT_DIR/../codon/install/lib/codon" ]]; then
+        BUNDLE_OK=1
+      fi
+    fi
+
+    if (( ! BUNDLE_OK )); then
+      USE_DOCKER=1
+      export BV_SYQURE_USE_DOCKER=1
+      echo "Syqure bundle not found; falling back to Docker. Set SYQURE_BUNDLE_FILE to use native."
     fi
   fi
-  if [[ -x "$SYQURE_BIN" ]]; then
-    export SEQURE_NATIVE_BIN="$SYQURE_BIN"
-    echo "Syqure mode: Native ($SYQURE_BIN)"
+
+  if (( USE_DOCKER )); then
+    export BV_SYQURE_USE_DOCKER=1
+    echo "Syqure mode: Docker"
   else
-    echo "Syqure binary not found at $SYQURE_BIN. Use --docker flag for Docker mode." >&2
-    exit 1
+    # Native mode - build syqure if needed
+    if [[ ! -x "$SYQURE_BIN" ]]; then
+      if [[ -d "$SYQURE_DIR" ]]; then
+        echo "Building syqure native binary..."
+        (cd "$SYQURE_DIR" && cargo build) || {
+          echo "Failed to build syqure. Use --docker flag for Docker mode." >&2
+          exit 1
+        }
+      else
+        echo "Syqure directory not found at $SYQURE_DIR. Use --docker flag for Docker mode." >&2
+        exit 1
+      fi
+    fi
+    if [[ -x "$SYQURE_BIN" ]]; then
+      export SEQURE_NATIVE_BIN="$SYQURE_BIN"
+      echo "Syqure mode: Native ($SYQURE_BIN)"
+    else
+      echo "Syqure binary not found at $SYQURE_BIN. Use --docker flag for Docker mode." >&2
+      exit 1
+    fi
   fi
 fi
 

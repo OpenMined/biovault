@@ -432,23 +432,23 @@ impl ConditionalInput {
                         _ => None,
                     });
 
-                let without = map
-                    .get(YamlValue::String("without".to_string()))
-                    .and_then(|v| match v {
-                        YamlValue::String(s) => Some(vec![s.clone()]),
-                        YamlValue::Sequence(seq) => {
-                            let items: Vec<String> = seq
-                                .iter()
-                                .filter_map(|item| item.as_str().map(|s| s.to_string()))
-                                .collect();
-                            if items.is_empty() {
-                                None
-                            } else {
-                                Some(items)
+                let without =
+                    map.get(YamlValue::String("without".to_string()))
+                        .and_then(|v| match v {
+                            YamlValue::String(s) => Some(vec![s.clone()]),
+                            YamlValue::Sequence(seq) => {
+                                let items: Vec<String> = seq
+                                    .iter()
+                                    .filter_map(|item| item.as_str().map(|s| s.to_string()))
+                                    .collect();
+                                if items.is_empty() {
+                                    None
+                                } else {
+                                    Some(items)
+                                }
                             }
-                        }
-                        _ => None,
-                    });
+                            _ => None,
+                        });
 
                 Some(ConditionalInput {
                     value,
