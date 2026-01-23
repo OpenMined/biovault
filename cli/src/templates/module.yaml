@@ -8,9 +8,9 @@ metadata:
 spec:
   runner:
     kind: nextflow
-    entrypoint: workflow.nf
     template: dynamic-nextflow
-  assets: []
+    entrypoint: workflow.nf
   inputs: []
   outputs: []
   parameters: []
+  assets: []

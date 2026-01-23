@@ -577,33 +577,32 @@ impl MessageDb {
                     .filter(|m| matches!(m.status, MessageStatus::Received))
                     .count();
 
-                let has_project = thread_messages.iter().any(|m| {
-                    matches!(m.message_type, crate::messages::MessageType::Project { .. })
-                });
+                let has_module = thread_messages
+                    .iter()
+                    .any(|m| matches!(m.message_type, crate::messages::MessageType::Module { .. }));
 
-                let project_name = thread_messages.iter().find_map(|m| {
-                    if let crate::messages::MessageType::Project { project_name, .. } =
+                let module_name = thread_messages.iter().find_map(|m| {
+                    if let crate::messages::MessageType::Module { module_name, .. } =
                         &m.message_type
                     {
-                        if !project_name.trim().is_empty() {
-                            return Some(project_name.clone());
+                        if !module_name.trim().is_empty() {
+                            return Some(module_name.clone());
                         }
                     }
 
                     m.metadata.as_ref().and_then(|meta| {
-                        if let Some(name) = meta.get("project_name").and_then(|v| v.as_str()) {
+                        if let Some(name) = meta.get("module_name").and_then(|v| v.as_str()) {
                             if !name.trim().is_empty() {
                                 return Some(name.to_string());
                             }
                         }
-                        if let Some(project) = meta.get("project") {
-                            if let Some(name) = project.get("name").and_then(|v| v.as_str()) {
+                        if let Some(module) = meta.get("module") {
+                            if let Some(name) = module.get("name").and_then(|v| v.as_str()) {
                                 if !name.trim().is_empty() {
                                     return Some(name.to_string());
                                 }
                             }
-                            if let Some(name) = project.get("project_name").and_then(|v| v.as_str())
-                            {
+                            if let Some(name) = module.get("module_name").and_then(|v| v.as_str()) {
                                 if !name.trim().is_empty() {
                                     return Some(name.to_string());
                                 }
@@ -623,8 +622,8 @@ impl MessageDb {
                     last_message_status: last_message.status.clone(),
                     unread_count,
                     total_messages: thread_messages.len(),
-                    has_project,
-                    project_name,
+                    has_module,
+                    module_name,
                 });
             }
         }
@@ -902,8 +901,8 @@ impl MessageDb {
         use crate::messages::MessageType;
         match s {
             "text" => Ok(MessageType::Text),
-            "project" => Ok(MessageType::Project {
-                project_name: String::new(),
+            "module" => Ok(MessageType::Module {
+                module_name: String::new(),
                 submission_id: String::new(),
                 files_hash: None,
             }),
@@ -1331,8 +1330,8 @@ mod tests {
         let db = new_db(&tmp);
 
         let mut p = Message::new("a@x".into(), "b@y".into(), "p".into());
-        p.message_type = crate::messages::MessageType::Project {
-            project_name: "n".into(),
+        p.message_type = crate::messages::MessageType::Module {
+            module_name: "n".into(),
             submission_id: "s".into(),
             files_hash: None,
         };
@@ -1345,9 +1344,9 @@ mod tests {
         };
         db.insert_message(&r).unwrap();
 
-        let projects = db.list_messages_by_type("project", None).unwrap();
-        assert_eq!(projects.len(), 1);
-        assert_eq!(projects[0].id, p.id);
+        let modules = db.list_messages_by_type("module", None).unwrap();
+        assert_eq!(modules.len(), 1);
+        assert_eq!(modules[0].id, p.id);
 
         let requests = db.list_messages_by_type("request", None).unwrap();
         assert_eq!(requests.len(), 1);
@@ -1371,18 +1370,18 @@ mod tests {
         outbound.status = MessageStatus::Sent;
         db.insert_message(&outbound).unwrap();
 
-        let mut project_msg =
-            Message::reply_to(&inbound, "me@example.com".into(), "project details".into());
-        project_msg.status = MessageStatus::Sent;
-        project_msg.message_type = crate::messages::MessageType::Project {
-            project_name: "Genome Study".into(),
+        let mut module_msg =
+            Message::reply_to(&inbound, "me@example.com".into(), "module details".into());
+        module_msg.status = MessageStatus::Sent;
+        module_msg.message_type = crate::messages::MessageType::Module {
+            module_name: "Genome Study".into(),
             submission_id: "sub123".into(),
             files_hash: None,
         };
-        project_msg.metadata = Some(serde_json::json!({
-            "project": { "name": "Genome Study" }
+        module_msg.metadata = Some(serde_json::json!({
+            "module": { "name": "Genome Study" }
         }));
-        db.insert_message(&project_msg).unwrap();
+        db.insert_message(&module_msg).unwrap();
 
         let mut outbound_only = Message::new(
             "me@example.com".into(),
@@ -1401,8 +1400,8 @@ mod tests {
             .participants
             .contains(&"alice@example.com".to_string()));
         assert!(summary.participants.contains(&"me@example.com".to_string()));
-        assert!(summary.has_project);
-        assert_eq!(summary.project_name.as_deref(), Some("Genome Study"));
+        assert!(summary.has_module);
+        assert_eq!(summary.module_name.as_deref(), Some("Genome Study"));
 
         let sent_threads = db.list_thread_summaries(ThreadFilter::Sent, None).unwrap();
         assert_eq!(sent_threads.len(), 2);

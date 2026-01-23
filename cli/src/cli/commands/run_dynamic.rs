@@ -1,7 +1,7 @@
 use super::run::execute_with_logging;
-use crate::data::project_yaml_hash;
+use crate::data::module_yaml_hash;
 use crate::error::Result;
-use crate::project_spec::{ProjectSpec, ProjectStepSpec};
+use crate::module_spec::{ModuleSpec, ModuleStepSpec};
 use anyhow::Context;
 use chrono::Local;
 use colored::Colorize;
@@ -1110,7 +1110,7 @@ pub async fn execute_dynamic(
         .into());
     }
 
-    let spec = ProjectSpec::load(&spec_path)?;
+    let spec = ModuleSpec::load(&spec_path)?;
     let template = spec.template.as_deref().unwrap_or("dynamic-nextflow");
 
     if template == "shell" {
@@ -2265,8 +2265,8 @@ fn shell_passthrough_args(args: &[String]) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn default_shell_step(spec: &ProjectSpec) -> ProjectStepSpec {
-    ProjectStepSpec {
+fn default_shell_step(spec: &ModuleSpec) -> ModuleStepSpec {
+    ModuleStepSpec {
         id: "run".to_string(),
         foreach: spec.datasites.clone(),
         order: None,
@@ -2277,7 +2277,7 @@ fn default_shell_step(spec: &ProjectSpec) -> ProjectStepSpec {
 }
 
 async fn execute_shell(
-    spec: &ProjectSpec,
+    spec: &ModuleSpec,
     project_path: &Path,
     args: Vec<String>,
     dry_run: bool,
@@ -2370,7 +2370,7 @@ async fn execute_shell(
             &step.id,
         );
         if !env_map.contains_key("BV_RUN_ID") {
-            if let Ok(Some(hash)) = project_yaml_hash(project_path) {
+            if let Ok(Some(hash)) = module_yaml_hash(project_path) {
                 env_map.insert("BV_RUN_ID".to_string(), hash);
             }
         }
@@ -2600,7 +2600,7 @@ fn parse_cli_args(args: &[String]) -> Result<ParsedArgs> {
     })
 }
 
-fn validate_no_clashes(spec: &ProjectSpec, parsed: &ParsedArgs) -> Result<()> {
+fn validate_no_clashes(spec: &ModuleSpec, parsed: &ParsedArgs) -> Result<()> {
     let input_names: Vec<&str> = spec.inputs.iter().map(|i| i.name.as_str()).collect();
     let output_names: Vec<&str> = spec.outputs.iter().map(|o| o.name.as_str()).collect();
 
@@ -2637,7 +2637,7 @@ fn validate_no_clashes(spec: &ProjectSpec, parsed: &ParsedArgs) -> Result<()> {
 }
 
 fn build_inputs_json(
-    spec: &ProjectSpec,
+    spec: &ModuleSpec,
     parsed: &ParsedArgs,
     _project_path: &Path,
 ) -> Result<HashMap<String, JsonValue>> {
@@ -2679,7 +2679,7 @@ fn build_inputs_json(
 }
 
 fn build_params_json(
-    spec: &ProjectSpec,
+    spec: &ModuleSpec,
     parsed: &ParsedArgs,
 ) -> Result<HashMap<String, JsonValue>> {
     let mut params_json = HashMap::new();
@@ -3171,11 +3171,11 @@ fn install_dynamic_template(biovault_home: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::project_spec::{InputSpec, ProjectSpec};
+    use crate::module_spec::{InputSpec, ModuleSpec};
     use tempfile::TempDir;
 
-    fn sample_project_spec() -> ProjectSpec {
-        ProjectSpec {
+    fn sample_project_spec() -> ModuleSpec {
+        ModuleSpec {
             name: "test".to_string(),
             author: "author".to_string(),
             workflow: "workflow.nf".to_string(),

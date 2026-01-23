@@ -1,0 +1,24 @@
+apiVersion: syftbox.openmined.org/v1alpha1
+kind: Module
+metadata:
+  name: build-master
+  version: 0.1.0
+spec:
+  runner:
+    template: shell
+    entrypoint: run.sh
+  assets:
+    - path: run.sh
+    - path: build_master.py
+  inputs:
+    - name: rsids_manifest
+      type: File
+      format: { kind: txt }
+  outputs:
+    - name: master_list
+      type: File
+      format: { kind: txt }
+      path: master_list.txt
+    - name: count
+      type: String
+      path: count.txt

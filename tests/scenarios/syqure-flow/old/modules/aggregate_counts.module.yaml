@@ -1,0 +1,20 @@
+apiVersion: syftbox.openmined.org/v1alpha1
+kind: Module
+metadata:
+  name: aggregate_counts
+  version: 0.1.0
+  description: Sum aligned count arrays from all clients.
+spec:
+  runner:
+    kind: python
+    entrypoint: aggregate_counts.py
+  inputs:
+    - name: counts_manifest
+      type: File
+      format: { kind: txt }
+      description: Manifest file listing paths to all counts_array.json files
+  outputs:
+    - name: aggregated
+      type: File
+      format: { kind: json }
+      path: aggregated_counts.json

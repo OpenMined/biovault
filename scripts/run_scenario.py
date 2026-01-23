@@ -2,14 +2,16 @@
 """Simple YAML-driven scenario runner for sandbox datasites."""
 
 import argparse
+import hashlib
 import json
 import os
 import subprocess
 import shutil
 import sys
 import threading
+import time
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 ROOT = Path(__file__).resolve().parent.parent
 _SANDBOX_ENV = os.environ.get("SANDBOX_DIR") or os.environ.get("SCENARIO_SANDBOX_DIR")
@@ -354,6 +356,22 @@ def minimal_yaml_load(text: str, path: Path) -> Dict[str, Any]:
     return node
 
 
+def generate_run_id(scenario_name: str, datasites: Optional[List[str]] = None) -> str:
+    """
+    Generate a unique run_id for distributed flow coordination.
+
+    Uses hash of scenario name + datasites + current minute for:
+    - Uniqueness per scenario
+    - Determinism within the same minute (so parallel processes get the same id)
+    - Time-based uniqueness across runs
+    """
+    time_bucket = int(time.time() // 60)
+    datasites_str = ",".join(sorted(datasites)) if datasites else ""
+    key = f"{scenario_name}:{datasites_str}:{time_bucket}"
+    h = hashlib.sha256(key.encode()).hexdigest()[:12]
+    return f"{time_bucket}-{h}"
+
+
 def replace_vars(command: str, variables: Dict[str, str]) -> str:
     result = command
     for key, value in variables.items():
@@ -400,11 +418,10 @@ def run_shell(
     command: str,
     datasite: Optional[str],
     variables: Dict[str, str],
-    capture_output: bool = False,
+    capture: bool = False,
 ) -> subprocess.CompletedProcess:
-    use_bash = os.name == "nt"
     shell_vars = variables
-    if use_bash:
+    if datasite and os.name == "nt":
         shell_vars = dict(variables)
         shell_vars["workspace"] = to_msys_path(variables.get("workspace", ""))
         shell_vars["sandbox"] = to_msys_path(variables.get("sandbox", ""))
@@ -412,23 +429,11 @@ def run_shell(
     env = os.environ.copy()
     env["WORKSPACE_ROOT"] = str(ROOT)
     env["SCENARIO_DATASITE"] = datasite or ""
+    env["BIOVAULT_SANDBOX_ROOT"] = str(SANDBOX_ROOT)
+    env.setdefault("BIOVAULT_FLOW_AWAIT_TIMEOUT", "15")  # Fast fail for testing
     java_home = JAVA_HOME_OVERRIDE
     user_path = env.get("SCENARIO_USER_PATH")
 
-    # On Windows, ensure uv-managed Python is on PATH for bash subprocesses
-    if os.name == "nt":
-        uv_python = Path(os.environ.get("APPDATA", "")) / "uv" / "python"
-        if uv_python.exists():
-            for pydir in sorted(uv_python.glob("cpython-3.11*"), reverse=True):
-                if pydir.is_dir():
-                    uv_python_path = to_msys_path(str(pydir))
-                    if user_path:
-                        user_path = f"{uv_python_path}:{user_path}"
-                    else:
-                        user_path = uv_python_path
-                    break
-
-    # Build the command args and cwd
     if datasite:
         client_dir = SANDBOX_ROOT / datasite
         if not client_dir.is_dir():
@@ -439,19 +444,19 @@ def run_shell(
         if not config_path.exists():
             raise SystemExit(f"Missing SyftBox config for {datasite}: {config_path}")
 
-        env.update(
-            {
-                "HOME": str(client_dir),
-                "SYFTBOX_EMAIL": datasite,
-                "SYFTBOX_DATA_DIR": str(data_dir),
-                "SYFTBOX_CONFIG_PATH": str(config_path),
-            }
-        )
+        # Set BioVault/SyftBox env vars - do NOT set HOME to avoid macOS cache pollution
         config_yaml = client_dir / "config.yaml"
         if config_yaml.exists():
             env["BIOVAULT_HOME"] = str(client_dir)
         else:
             env["BIOVAULT_HOME"] = str(client_dir / ".biovault")
+        env.update(
+            {
+                "SYFTBOX_EMAIL": datasite,
+                "SYFTBOX_DATA_DIR": str(data_dir),
+                "SYFTBOX_CONFIG_PATH": str(config_path),
+            }
+        )
         if java_home:
             env["JAVA_HOME"] = java_home
             env["JAVA_CMD"] = str(Path(java_home) / "bin" / "java")
@@ -464,12 +469,15 @@ def run_shell(
 
         bash_cmd = resolve_bash()
         env = ensure_shims(env)
-        # On Windows, don't use -l (login shell) as it resets PATH from profile files,
-        # losing the Python and other tool paths we've set up.
-        bash_flags = "-c" if os.name == "nt" else "-lc"
-        cmd_args = bash_cmd + [bash_flags, expanded]
-        cwd = client_dir
-        use_shell = False
+        result = subprocess.run(
+            bash_cmd + ["-lc", expanded],
+            cwd=client_dir,
+            env=env,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+        )
     else:
         if java_home:
             env["JAVA_HOME"] = java_home
@@ -477,68 +485,19 @@ def run_shell(
         env.setdefault("NXF_DISABLE_JAVA_VERSION_CHECK", "true")
         env.setdefault("NXF_IGNORE_JAVA_VERSION", "true")
         env.setdefault("NXF_OPTS", "-Dnxf.java.check=false")
-        if user_path:
-            env["PATH"] = user_path
-        if use_bash:
-            bash_cmd = resolve_bash()
-            env = ensure_shims(env)
-            # On Windows, don't use -l (login shell) as it resets PATH from profile files
-            bash_flags = "-c" if os.name == "nt" else "-lc"
-            cmd_args = bash_cmd + [bash_flags, expanded]
-            cwd = ROOT
-            use_shell = False
-        else:
-            cmd_args = expanded
-            cwd = ROOT
-            use_shell = True
+        result = subprocess.run(
+            expanded,
+            cwd=ROOT,
+            env=env,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            shell=True,
+            capture_output=True,
+        )
 
-    # Stream output in real-time instead of capturing
-    print(f"[run] {expanded}", flush=True)
-    stdout_lines: list[str] = []
-    stderr_lines: list[str] = []
-
-    process = subprocess.Popen(
-        cmd_args,
-        cwd=cwd,
-        env=env,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        shell=use_shell,
-    )
-
-    # Read stdout and stderr in real-time using threads
-    def read_stream(stream, lines_list, output_stream):
-        for line in iter(stream.readline, ''):
-            if line:
-                lines_list.append(line)
-                try:
-                    output_stream.write(line)
-                    output_stream.flush()
-                except UnicodeEncodeError:
-                    output_stream.buffer.write(line.encode("utf-8", errors="replace"))
-                    output_stream.flush()
-        stream.close()
-
-    stdout_thread = threading.Thread(target=read_stream, args=(process.stdout, stdout_lines, sys.stdout))
-    stderr_thread = threading.Thread(target=read_stream, args=(process.stderr, stderr_lines, sys.stderr))
-
-    stdout_thread.start()
-    stderr_thread.start()
-
-    process.wait()
-    stdout_thread.join()
-    stderr_thread.join()
-
-    # Create a CompletedProcess-like result for compatibility
-    result = subprocess.CompletedProcess(
-        args=cmd_args,
-        returncode=process.returncode,
-        stdout=''.join(stdout_lines),
-        stderr=''.join(stderr_lines),
-    )
+    write_stream(sys.stdout, result.stdout)
+    write_stream(sys.stderr, result.stderr)
     if result.returncode != 0:
         raise SystemExit(f"Command failed (exit {result.returncode}): {expanded}")
     return result
@@ -551,14 +510,142 @@ def execute_commands(commands: Any, variables: Dict[str, str]):
         run_shell(cmd, None, variables)
 
 
+# Track background processes
+_background_processes: List[subprocess.Popen] = []
+_background_threads: List[threading.Thread] = []
+
+
+def run_shell_background(
+    command: str,
+    datasite: Optional[str],
+    variables: Dict[str, str],
+    name: str = "background",
+) -> subprocess.Popen:
+    """Run a shell command in the background, returning the process handle."""
+    shell_vars = variables
+    if datasite and os.name == "nt":
+        shell_vars = dict(variables)
+        shell_vars["workspace"] = to_msys_path(variables.get("workspace", ""))
+        shell_vars["sandbox"] = to_msys_path(variables.get("sandbox", ""))
+    expanded = replace_vars(command, shell_vars)
+    env = os.environ.copy()
+    env["WORKSPACE_ROOT"] = str(ROOT)
+    env["SCENARIO_DATASITE"] = datasite or ""
+    env["BIOVAULT_SANDBOX_ROOT"] = str(SANDBOX_ROOT)
+    env.setdefault("BIOVAULT_FLOW_AWAIT_TIMEOUT", "15")  # Fast fail for testing
+    java_home = JAVA_HOME_OVERRIDE
+    user_path = env.get("SCENARIO_USER_PATH")
+
+    if datasite:
+        client_dir = SANDBOX_ROOT / datasite
+        if not client_dir.is_dir():
+            raise SystemExit(f"Sandbox datasite missing: {client_dir}")
+
+        data_dir = client_dir
+        config_path = client_dir / ".syftbox" / "config.json"
+        if not config_path.exists():
+            raise SystemExit(f"Missing SyftBox config for {datasite}: {config_path}")
+
+        # Set BioVault/SyftBox env vars - do NOT set HOME to avoid macOS cache pollution
+        config_yaml = client_dir / "config.yaml"
+        if config_yaml.exists():
+            env["BIOVAULT_HOME"] = str(client_dir)
+        else:
+            env["BIOVAULT_HOME"] = str(client_dir / ".biovault")
+        env.update(
+            {
+                "SYFTBOX_EMAIL": datasite,
+                "SYFTBOX_DATA_DIR": str(data_dir),
+                "SYFTBOX_CONFIG_PATH": str(config_path),
+            }
+        )
+        if java_home:
+            env["JAVA_HOME"] = java_home
+            env["JAVA_CMD"] = str(Path(java_home) / "bin" / "java")
+        env.setdefault("NXF_DISABLE_JAVA_VERSION_CHECK", "true")
+        env.setdefault("NXF_IGNORE_JAVA_VERSION", "true")
+        env.setdefault("NXF_OPTS", "-Dnxf.java.check=false")
+        if user_path:
+            env["PATH"] = user_path
+
+        bash_cmd = resolve_bash()
+        env = ensure_shims(env)
+        proc = subprocess.Popen(
+            bash_cmd + ["-lc", expanded],
+            cwd=client_dir,
+            env=env,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+    else:
+        if java_home:
+            env["JAVA_HOME"] = java_home
+            env["JAVA_CMD"] = str(Path(java_home) / "bin" / "java")
+        env.setdefault("NXF_DISABLE_JAVA_VERSION_CHECK", "true")
+        env.setdefault("NXF_IGNORE_JAVA_VERSION", "true")
+        env.setdefault("NXF_OPTS", "-Dnxf.java.check=false")
+        proc = subprocess.Popen(
+            expanded,
+            cwd=ROOT,
+            env=env,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            shell=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+
+    # Stream output in a background thread
+    def stream_output():
+        prefix = f"[{name}] " if name else ""
+        for line in proc.stdout:
+            print(f"{prefix}{line}", end="")
+        proc.wait()
+
+    thread = threading.Thread(target=stream_output, daemon=True)
+    thread.start()
+    _background_processes.append(proc)
+    _background_threads.append(thread)
+    return proc
+
+
+def wait_for_background_processes(timeout: int = 300) -> bool:
+    """Wait for all background processes to complete."""
+    start = time.time()
+    all_ok = True
+    for proc in _background_processes:
+        remaining = timeout - (time.time() - start)
+        if remaining <= 0:
+            print("Timeout waiting for background processes")
+            all_ok = False
+            break
+        try:
+            proc.wait(timeout=remaining)
+            if proc.returncode != 0:
+                print(f"Background process exited with code {proc.returncode}")
+                all_ok = False
+        except subprocess.TimeoutExpired:
+            print("Timeout waiting for background process")
+            proc.kill()
+            all_ok = False
+
+    # Wait for output threads to finish
+    for thread in _background_threads:
+        thread.join(timeout=5)
+
+    _background_processes.clear()
+    _background_threads.clear()
+    return all_ok
+
+
 def run_step(step: Dict[str, Any], variables: Dict[str, str]):
-    import time
-    start_ts = time.perf_counter()
     name = step.get("name")
     if name:
         print(f"\n=== {name} ===")
-    else:
-        name = "<unnamed>"
     datasite = step.get("datasite")
     command = step.get("run")
     capture = step.get("capture")
@@ -568,138 +655,197 @@ def run_step(step: Dict[str, Any], variables: Dict[str, str]):
     assert_no_encrypted = step.get("assert_no_encrypted")
     assert_encrypted = step.get("assert_encrypted")
 
-    try:
-        # Handle wait_for syntax
-        if wait_for:
-            import glob
-            expanded = replace_vars(wait_for, variables)
-            wait_for_new = bool(step.get("wait_for_new", False))
+    # Handle wait_for syntax
+    if wait_for:
+        import time
+        import glob
+        expanded = replace_vars(wait_for, variables)
+        wait_for_new = bool(step.get("wait_for_new", False))
 
-            if datasite:
-                # Wait for file in datasite directory
-                client_dir = SANDBOX_ROOT / datasite
-                wait_path = client_dir / expanded
-            else:
-                wait_path = ROOT / expanded
+        if datasite:
+            # Wait for file in datasite directory
+            client_dir = SANDBOX_ROOT / datasite
+            wait_path = client_dir / expanded
+        else:
+            wait_path = ROOT / expanded
 
-            initial_matches: set[str] = set()
-            if wait_for_new and "*" in str(wait_path):
-                initial_matches = set(glob.glob(str(wait_path)))
+        initial_matches: set[str] = set()
+        if wait_for_new and "*" in str(wait_path):
+            initial_matches = set(glob.glob(str(wait_path)))
 
-            for i in range(timeout):
-                # Support glob patterns
-                if '*' in str(wait_path):
-                    matches = set(glob.glob(str(wait_path)))
-                    candidates = sorted(matches - initial_matches) if wait_for_new else sorted(matches)
-                    if candidates:
-                        print(f"OK: Found: {candidates[0]}")
-                        return
-                elif wait_path.exists():
-                    print(f"OK: Found: {wait_path}")
+        for i in range(timeout):
+            # Support glob patterns
+            if '*' in str(wait_path):
+                matches = set(glob.glob(str(wait_path)))
+                candidates = sorted(matches - initial_matches) if wait_for_new else sorted(matches)
+                if candidates:
+                    print(f"OK: Found: {candidates[0]}")
                     return
-                time.sleep(1)
+            elif wait_path.exists():
+                print(f"OK: Found: {wait_path}")
+                return
+            time.sleep(1)
 
-            raise SystemExit(f"Timeout waiting for: {wait_path}")
+        raise SystemExit(f"Timeout waiting for: {wait_path}")
 
-        # Handle assert_no_encrypted: check that files/directory have no SYC1 headers
-        if assert_no_encrypted:
-            import glob
-            expanded = replace_vars(assert_no_encrypted, variables)
+    # Handle assert_no_encrypted: check that files/directory have no SYC1 headers
+    if assert_no_encrypted:
+        import glob
+        expanded = replace_vars(assert_no_encrypted, variables)
 
-            if datasite:
-                client_dir = SANDBOX_ROOT / datasite
-                check_path = client_dir / expanded
-            else:
-                check_path = ROOT / expanded
+        if datasite:
+            client_dir = SANDBOX_ROOT / datasite
+            check_path = client_dir / expanded
+        else:
+            check_path = ROOT / expanded
 
-            # Collect files to check
-            if check_path.is_dir():
-                files_to_check = list(check_path.rglob("*"))
-                files_to_check = [f for f in files_to_check if f.is_file()]
-            elif '*' in str(check_path):
-                files_to_check = [Path(p) for p in glob.glob(str(check_path))]
-            else:
-                files_to_check = [check_path] if check_path.exists() else []
+        # Collect files to check
+        if check_path.is_dir():
+            files_to_check = list(check_path.rglob("*"))
+            files_to_check = [f for f in files_to_check if f.is_file()]
+        elif '*' in str(check_path):
+            files_to_check = [Path(p) for p in glob.glob(str(check_path))]
+        else:
+            files_to_check = [check_path] if check_path.exists() else []
 
-            # Check each file for SYC1 header
-            encrypted_files = []
-            for file_path in files_to_check:
-                try:
-                    with open(file_path, 'rb') as f:
-                        header = f.read(4)
-                        if header == b'SYC1':
-                            encrypted_files.append(file_path)
-                except Exception:
-                    pass  # Skip files we can't read
+        # Check each file for SYC1 header
+        encrypted_files = []
+        for file_path in files_to_check:
+            try:
+                with open(file_path, 'rb') as f:
+                    header = f.read(4)
+                    if header == b'SYC1':
+                        encrypted_files.append(file_path)
+            except Exception:
+                pass  # Skip files we can't read
 
-            if encrypted_files:
-                print(f"ERROR: Found {len(encrypted_files)} encrypted file(s):")
-                for f in encrypted_files:
-                    print(f"  - {f}")
-                raise SystemExit(f"Encrypted files found in: {check_path}")
+        if encrypted_files:
+            print(f"ERROR: Found {len(encrypted_files)} encrypted file(s):")
+            for f in encrypted_files:
+                print(f"  - {f}")
+            raise SystemExit(f"Encrypted files found in: {check_path}")
 
-            print(f"OK: No encrypted files in: {expanded}")
-            return
+        print(f"OK: No encrypted files in: {expanded}")
+        return
 
-        # Handle assert_encrypted: check that files have SYC1 headers
-        if assert_encrypted:
-            import glob
-            expanded = replace_vars(assert_encrypted, variables)
+    # Handle assert_encrypted: check that files have SYC1 headers
+    if assert_encrypted:
+        import glob
+        expanded = replace_vars(assert_encrypted, variables)
 
-            if datasite:
-                client_dir = SANDBOX_ROOT / datasite
-                check_path = client_dir / expanded
-            else:
-                check_path = ROOT / expanded
+        if datasite:
+            client_dir = SANDBOX_ROOT / datasite
+            check_path = client_dir / expanded
+        else:
+            check_path = ROOT / expanded
 
-            # Collect files to check
-            if check_path.is_dir():
-                files_to_check = list(check_path.rglob("*"))
-                files_to_check = [f for f in files_to_check if f.is_file()]
-            elif '*' in str(check_path):
-                files_to_check = [Path(p) for p in glob.glob(str(check_path))]
-            else:
-                files_to_check = [check_path] if check_path.exists() else []
+        # Collect files to check
+        if check_path.is_dir():
+            files_to_check = list(check_path.rglob("*"))
+            files_to_check = [f for f in files_to_check if f.is_file()]
+        elif '*' in str(check_path):
+            files_to_check = [Path(p) for p in glob.glob(str(check_path))]
+        else:
+            files_to_check = [check_path] if check_path.exists() else []
 
-            if not files_to_check:
-                raise SystemExit(f"No files found to check: {check_path}")
+        if not files_to_check:
+            raise SystemExit(f"No files found to check: {check_path}")
 
-            # Check each file for SYC1 header
-            unencrypted_files = []
-            for file_path in files_to_check:
-                try:
-                    with open(file_path, 'rb') as f:
-                        header = f.read(4)
-                        if header != b'SYC1':
-                            unencrypted_files.append(file_path)
-                except Exception:
-                    unencrypted_files.append(file_path)  # Assume unencrypted if can't read
+        # Check each file for SYC1 header
+        unencrypted_files = []
+        for file_path in files_to_check:
+            try:
+                with open(file_path, 'rb') as f:
+                    header = f.read(4)
+                    if header != b'SYC1':
+                        unencrypted_files.append(file_path)
+            except Exception:
+                unencrypted_files.append(file_path)  # Assume unencrypted if can't read
 
-            if unencrypted_files:
-                print(f"ERROR: Found {len(unencrypted_files)} unencrypted file(s):")
-                for f in unencrypted_files:
-                    print(f"  - {f}")
-                raise SystemExit(f"Unencrypted files found in: {check_path}")
+        if unencrypted_files:
+            print(f"ERROR: Found {len(unencrypted_files)} unencrypted file(s):")
+            for f in unencrypted_files:
+                print(f"  - {f}")
+            raise SystemExit(f"Unencrypted files found in: {check_path}")
 
-            print(f"OK: All files encrypted in: {expanded}")
-            return
+        print(f"OK: All files encrypted in: {expanded}")
+        return
 
-        if not command:
-            raise SystemExit("Each step must define a 'run', 'wait_for', 'assert_no_encrypted', or 'assert_encrypted' command.")
+    if not command:
+        raise SystemExit("Each step must define a 'run', 'wait_for', 'assert_no_encrypted', or 'assert_encrypted' command.")
 
-        capture_output = bool(capture or expect)
-        result = run_shell(command, datasite, variables, capture_output=capture_output)
+    # Handle background execution
+    background = step.get("background", False)
+    if background:
+        run_shell_background(command, datasite, variables, name=name or "background")
+        print(f"[started in background]")
+        return
 
-        if expect:
-            if expect not in result.stdout:
-                raise SystemExit(f"Expected substring '{expect}' not found in output.")
+    result = run_shell(command, datasite, variables, capture=bool(capture))
 
-        if capture:
-            variables[capture] = result.stdout.strip()
-            print(f"[captured {capture}]")
-    finally:
-        elapsed = time.perf_counter() - start_ts
-        print(f"[step '{name}' completed in {elapsed:.2f}s]")
+    if expect:
+        if expect not in result.stdout:
+            raise SystemExit(f"Expected substring '{expect}' not found in output.")
+
+    if capture:
+        variables[capture] = result.stdout.strip()
+        print(f"[captured {capture}]")
+
+
+def run_parallel_steps(steps: List[Dict[str, Any]], variables: Dict[str, str], timeout: int = 300):
+    """Run multiple steps in parallel and wait for all to complete."""
+    print(f"\n=== Running {len(steps)} steps in parallel ===")
+
+    # Launch all steps in background
+    for step in steps:
+        name = step.get("name", "parallel")
+        datasite = step.get("datasite")
+        command = step.get("run")
+        if command:
+            print(f"  Starting: {name}")
+            run_shell_background(command, datasite, variables, name=name)
+
+    # Wait for all to complete
+    print(f"\n=== Waiting for {len(steps)} parallel steps to complete ===")
+    if not wait_for_background_processes(timeout=timeout):
+        raise SystemExit("One or more parallel steps failed")
+
+
+def extract_datasites_from_scenario(scenario: Dict[str, Any]) -> List[str]:
+    """Extract datasite list from scenario for run_id generation."""
+    datasites: List[str] = []
+
+    # Check setup.server for --clients argument
+    setup = scenario.get("setup", {})
+    server_cmds = setup.get("server", [])
+    for cmd in server_cmds:
+        if "--clients" in cmd:
+            # Parse --clients client1@...,client2@...,agg@...
+            import re
+            match = re.search(r"--clients\s+([^\s]+)", cmd)
+            if match:
+                clients_str = match.group(1)
+                datasites = [c.strip() for c in clients_str.split(",") if c.strip()]
+                break
+
+    # Check steps for unique datasites
+    if not datasites:
+        steps = scenario.get("steps", [])
+        seen = set()
+        for step in steps:
+            ds = step.get("datasite")
+            if ds and ds not in seen:
+                seen.add(ds)
+                datasites.append(ds)
+            # Also check parallel steps
+            if "parallel" in step:
+                for pstep in step["parallel"]:
+                    pds = pstep.get("datasite")
+                    if pds and pds not in seen:
+                        seen.add(pds)
+                        datasites.append(pds)
+
+    return datasites
 
 
 def main():
@@ -708,9 +854,20 @@ def main():
     args = parser.parse_args()
 
     scenario = load_scenario(args.scenario)
-    variables: Dict[str, str] = {"workspace": str(ROOT), "sandbox": str(SANDBOX_ROOT)}
+
+    # Extract datasites and generate run_id
+    scenario_name = args.scenario.stem
+    datasites = extract_datasites_from_scenario(scenario)
+    run_id = generate_run_id(scenario_name, datasites)
+
+    variables: Dict[str, str] = {
+        "workspace": str(ROOT),
+        "sandbox": str(SANDBOX_ROOT),
+        "run_id": run_id,
+    }
 
     print(f"Using sandbox: {SANDBOX_ROOT}")
+    print(f"Generated run_id: {run_id}")
     requested_client_mode = os.environ.get("BV_DEVSTACK_CLIENT_MODE")
     if requested_client_mode:
         print(f"SyftBox client mode (env BV_DEVSTACK_CLIENT_MODE): {requested_client_mode}")
@@ -728,7 +885,31 @@ def main():
     for step in steps:
         if not isinstance(step, dict):
             raise SystemExit("Each step must be a mapping.")
+
+        # Handle parallel block
+        if "parallel" in step:
+            parallel_steps = step["parallel"]
+            if not isinstance(parallel_steps, list):
+                raise SystemExit("'parallel' must be a list of steps.")
+            timeout = step.get("timeout", 300)
+            run_parallel_steps(parallel_steps, variables, timeout=timeout)
+            continue
+
+        # Handle wait_background step
+        if step.get("wait_background"):
+            timeout = step.get("timeout", 300)
+            print(f"\n=== Waiting for background processes ===")
+            if not wait_for_background_processes(timeout=timeout):
+                raise SystemExit("One or more background processes failed")
+            continue
+
         run_step(step, variables)
+
+    # Wait for any remaining background processes
+    if _background_processes:
+        print(f"\n=== Waiting for remaining background processes ===")
+        if not wait_for_background_processes(timeout=300):
+            raise SystemExit("One or more background processes failed")
 
     print("\nScenario completed successfully.")
 

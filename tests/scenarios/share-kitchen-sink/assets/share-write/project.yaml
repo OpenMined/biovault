@@ -1,0 +1,12 @@
+name: share-write
+author: madhava@openmined.org
+workflow: workflow.sh
+template: shell
+version: 0.1.0
+description: Write a simple hello file for each datasite.
+outputs:
+  - name: hello
+    type: File
+    description: Hello file per datasite
+    format: txt
+    path: "hello_{datasites.index}_{current_datasite}.txt"

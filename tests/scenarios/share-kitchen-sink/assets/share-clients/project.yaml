@@ -1,0 +1,17 @@
+name: share-clients
+author: madhava@openmined.org
+workflow: workflow.sh
+template: shell
+version: 0.1.0
+description: Share per-client hello file with aggregator.
+inputs:
+  - name: hello_file
+    type: File
+    description: Hello file for this datasite
+    format: txt
+outputs:
+  - name: tagged
+    type: File
+    description: Tagged copy of hello file
+    format: txt
+    path: tagged_hello.txt

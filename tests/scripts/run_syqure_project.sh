@@ -20,6 +20,7 @@ AGG_MSG=""
 C1_MSG=""
 C2_MSG=""
 EXPECTED_CONTAINERS=3
+SEQURE_MODE="${SEQURE_MODE:-native}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -38,6 +39,63 @@ if [[ -z "$SANDBOX" || -z "$BV_BIN" || -z "$AGG_MSG" || -z "$C1_MSG" || -z "$C2_
   usage
   exit 1
 fi
+
+detect_syqure_repo() {
+  if [[ -n "${SEQURE_REPO:-}" ]]; then
+    echo "$SEQURE_REPO"
+    return 0
+  fi
+
+  local script_dir biovault_root workspace_root candidate
+  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+  biovault_root="$(cd "$script_dir/../.." && pwd -P)"
+  workspace_root="$(cd "$biovault_root/.." && pwd -P)"
+  candidate="$workspace_root/syqure"
+  if [[ -f "$candidate/Cargo.toml" ]]; then
+    echo "$candidate"
+    return 0
+  fi
+
+  if [[ -n "$BV_BIN" ]]; then
+    local bv_root ws_root
+    bv_root="$(cd "$(dirname "$BV_BIN")/../../.." && pwd -P)"
+    ws_root="$(cd "$bv_root/.." && pwd -P)"
+    candidate="$ws_root/syqure"
+    if [[ -f "$candidate/Cargo.toml" ]]; then
+      echo "$candidate"
+      return 0
+    fi
+  fi
+
+  return 1
+}
+
+ensure_syqure_binary() {
+  local uname_out repo
+
+  uname_out="$(uname -s)"
+  case "$uname_out" in
+    MINGW*|MSYS*|CYGWIN*)
+      export SEQURE_MODE="docker"
+      echo "Windows detected; using SEQURE_MODE=docker" >&2
+      return 0
+      ;;
+  esac
+
+  if [[ "$SEQURE_MODE" == "docker" ]]; then
+    return 0
+  fi
+
+  if ! repo="$(detect_syqure_repo)"; then
+    echo "Syqure repo not found. Set SEQURE_REPO or use SEQURE_MODE=docker." >&2
+    return 1
+  fi
+
+  echo "Building syqure binary in ${repo}" >&2
+  (cd "$repo" && cargo build --release)
+}
+
+ensure_syqure_binary
 
 cleanup_containers() {
   docker rm -f $(docker ps -aq --filter "name=syqure-") >/dev/null 2>&1 || true

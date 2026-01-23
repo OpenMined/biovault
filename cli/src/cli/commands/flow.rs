@@ -20,41 +20,263 @@ fn append_desktop_log(message: &str) {
     }
 }
 
+use crate::cli::syft_url::SyftURL;
 use crate::data::BioVaultDb;
 use crate::error::Result;
-use crate::pipeline_spec::{
-    value_to_string, PipelineInputSpec, PipelineShareSpec, PipelineSpec, PipelineSqlStoreSpec,
-    PipelineStepSpec, PipelineStoreSpec,
+use crate::flow_spec::{
+    value_to_string, ConditionalInput, FlowInputSpec, FlowPermissionAccessSpec,
+    FlowPermissionRuleSpec, FlowPermissionSpec, FlowShareSpec, FlowSpec, FlowSqlStoreSpec,
+    FlowStepSpec, FlowStoreSpec,
 };
-use crate::project_spec::{
-    resolve_project_spec_path, InputSpec, OutputSpec, ProjectSpec, MODULE_YAML_FILE,
-    PROJECT_YAML_FILE,
-};
+use crate::module_spec::{InputSpec, ModuleSpec, OutputSpec};
 use crate::types::{AccessControl, PermissionRule, SyftPermissions};
 use anyhow::{anyhow, Context};
 use chrono::Utc;
-use crate::cli::syft_url::SyftURL;
 use colored::Colorize;
 use csv::ReaderBuilder;
 use dialoguer::{theme::ColorfulTheme, Confirm, Input, Select};
 use rusqlite::params_from_iter;
+use serde::{Deserialize, Serialize};
+use serde_json;
 use serde_yaml::Value as YamlValue;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::env;
 use std::path::{Path, PathBuf};
 use tokio::fs;
+use tokio::time::{sleep, Duration};
 use tracing::instrument;
 
 use super::run_dynamic;
 
 type StepOverrides = HashMap<(String, String), String>;
-type PipelineOverrides = HashMap<String, String>;
-type ParseOverridesResult = (
-    StepOverrides,
-    PipelineOverrides,
-    Option<String>,
-    Vec<String>,
-);
+type FlowOverrides = HashMap<String, String>;
+type ParseOverridesResult = (StepOverrides, FlowOverrides, Option<String>, Vec<String>);
+
+async fn wait_for_path(path: &Path, timeout_secs: u64) -> Result<()> {
+    let start = std::time::Instant::now();
+    let poll_interval = Duration::from_millis(500);
+    let timeout = Duration::from_secs(timeout_secs);
+
+    while start.elapsed() < timeout {
+        if path.exists() {
+            return Ok(());
+        }
+        sleep(poll_interval).await;
+    }
+
+    Err(anyhow!(
+        "Timeout waiting for path to exist: {} (waited {}s)",
+        path.display(),
+        timeout_secs
+    )
+    .into())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FlowStepProgress {
+    pub status: String, // "pending", "in_progress", "completed", "failed"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FlowProgress {
+    pub datasite: String,
+    pub flow_name: String,
+    pub run_id: String,
+    pub started_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<String>,
+    pub steps: HashMap<String, FlowStepProgress>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_step: Option<String>,
+}
+
+impl FlowProgress {
+    fn new(datasite: &str, flow_name: &str, run_id: &str) -> Self {
+        Self {
+            datasite: datasite.to_string(),
+            flow_name: flow_name.to_string(),
+            run_id: run_id.to_string(),
+            started_at: Utc::now().to_rfc3339(),
+            completed_at: None,
+            steps: HashMap::new(),
+            current_step: None,
+        }
+    }
+
+    fn mark_step_started(&mut self, step_id: &str) {
+        self.current_step = Some(step_id.to_string());
+        self.steps.insert(
+            step_id.to_string(),
+            FlowStepProgress {
+                status: "in_progress".to_string(),
+                started_at: Some(Utc::now().to_rfc3339()),
+                completed_at: None,
+                error: None,
+            },
+        );
+    }
+
+    fn mark_step_completed(&mut self, step_id: &str) {
+        if let Some(progress) = self.steps.get_mut(step_id) {
+            progress.status = "completed".to_string();
+            progress.completed_at = Some(Utc::now().to_rfc3339());
+        }
+        if self.current_step.as_deref() == Some(step_id) {
+            self.current_step = None;
+        }
+    }
+
+    fn mark_step_failed(&mut self, step_id: &str, error: &str) {
+        if let Some(progress) = self.steps.get_mut(step_id) {
+            progress.status = "failed".to_string();
+            progress.completed_at = Some(Utc::now().to_rfc3339());
+            progress.error = Some(error.to_string());
+        }
+    }
+
+    fn mark_flow_completed(&mut self) {
+        self.completed_at = Some(Utc::now().to_rfc3339());
+        self.current_step = None;
+    }
+}
+
+/// Get the flow run directory
+/// Structure: shared/flows/{flow_name}/{run_id}/
+fn get_flow_run_dir(shared_base: &Path, flow_name: &str, run_id: &str) -> PathBuf {
+    shared_base.join("flows").join(flow_name).join(run_id)
+}
+
+/// Get the progress directory for a flow run
+/// Structure: shared/flows/{flow_name}/{run_id}/_progress/
+fn get_progress_dir(shared_base: &Path, flow_name: &str, run_id: &str) -> PathBuf {
+    get_flow_run_dir(shared_base, flow_name, run_id).join("_progress")
+}
+
+/// Get the state.json file path (current snapshot of flow/step status)
+/// Structure: shared/flows/{flow_name}/{run_id}/_progress/state.json
+fn get_state_file(shared_base: &Path, flow_name: &str, run_id: &str) -> PathBuf {
+    get_progress_dir(shared_base, flow_name, run_id).join("state.json")
+}
+
+fn write_state(
+    shared_base: &Path,
+    flow_name: &str,
+    run_id: &str,
+    progress: &FlowProgress,
+) -> Result<()> {
+    let progress_dir = get_progress_dir(shared_base, flow_name, run_id);
+    std::fs::create_dir_all(&progress_dir)?;
+
+    // Write structured state.json
+    let state_file = progress_dir.join("state.json");
+    let json = serde_json::to_string_pretty(progress)?;
+    std::fs::write(&state_file, json)?;
+    Ok(())
+}
+
+/// Append a log entry to progress.json (JSONL format for event streaming)
+fn append_progress(
+    shared_base: &Path,
+    flow_name: &str,
+    run_id: &str,
+    event: &str,
+    step_id: Option<&str>,
+    message: &str,
+) -> Result<()> {
+    let progress_dir = get_progress_dir(shared_base, flow_name, run_id);
+    std::fs::create_dir_all(&progress_dir)?;
+
+    let log_file = progress_dir.join("progress.json");
+    let timestamp = Utc::now().to_rfc3339();
+    let log_entry = serde_json::json!({
+        "timestamp": timestamp,
+        "event": event,
+        "step": step_id,
+        "message": message,
+    });
+
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_file)?;
+    writeln!(file, "{}", log_entry.to_string())?;
+    Ok(())
+}
+
+fn read_state(progress_file: &Path) -> Result<FlowProgress> {
+    let content = std::fs::read_to_string(progress_file)?;
+    let progress: FlowProgress = serde_json::from_str(&content)?;
+    Ok(progress)
+}
+
+async fn wait_for_step_completion(
+    shared_base: &Path,
+    flow_name: &str,
+    run_id: &str,
+    source_datasite: &str,
+    step_id: &str,
+    timeout_secs: u64,
+    verbose: bool,
+) -> Result<()> {
+    let progress_file = get_state_file(shared_base, flow_name, run_id);
+    let start = std::time::Instant::now();
+    let poll_interval = Duration::from_millis(1000);
+    let timeout = Duration::from_secs(timeout_secs);
+
+    if verbose {
+        println!(
+            "⏳ Waiting for {} to complete step '{}'...",
+            source_datasite, step_id
+        );
+        println!("   Looking for: {}", progress_file.display());
+    }
+
+    while start.elapsed() < timeout {
+        if progress_file.exists() {
+            if let Ok(progress) = read_state(&progress_file) {
+                if let Some(step_progress) = progress.steps.get(step_id) {
+                    match step_progress.status.as_str() {
+                        "completed" => {
+                            if verbose {
+                                println!(
+                                    "✓  {} completed step '{}'",
+                                    source_datasite, step_id
+                                );
+                            }
+                            return Ok(());
+                        }
+                        "failed" => {
+                            return Err(anyhow!(
+                                "{} failed step '{}': {}",
+                                source_datasite,
+                                step_id,
+                                step_progress.error.as_deref().unwrap_or("unknown error")
+                            )
+                            .into());
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        sleep(poll_interval).await;
+    }
+
+    Err(anyhow!(
+        "Timeout waiting for {} to complete step '{}' (waited {}s)",
+        source_datasite,
+        step_id,
+        timeout_secs
+    )
+    .into())
+}
 
 const RESULTS_TABLE_PREFIX: &str = "z_results_";
 const DEFAULT_COLUMN_PREFIX: &str = "col";
@@ -70,180 +292,187 @@ impl<T> DialoguerResultExt<T> for std::result::Result<T, dialoguer::Error> {
     }
 }
 
-#[instrument(skip_all, fields(component = "pipeline", pipeline_name = ?name), err)]
+#[instrument(skip_all, fields(component = "flow", flow_name = ?name), err)]
 pub async fn create(
     file: Option<String>,
     name: Option<String>,
     uses: Option<String>,
     step_id: Option<String>,
 ) -> Result<()> {
-    let pipeline_path = resolve_pipeline_path(file);
+    let flow_path = resolve_flow_path(file);
     let db = BioVaultDb::new().ok();
 
-    if pipeline_path.exists()
+    if flow_path.exists()
         && !Confirm::with_theme(&ColorfulTheme::default())
             .with_prompt(format!(
-                "Pipeline file {} already exists. Overwrite?",
-                pipeline_path.display()
+                "Flow file {} already exists. Overwrite?",
+                flow_path.display()
             ))
             .default(false)
             .interact()
             .cli_result()?
     {
-        println!("✋ Aborting pipeline creation.");
+        println!("✋ Aborting flow creation.");
         return Ok(());
     }
 
     if let Some(uses_value) = uses {
-        let pipeline_dir = pipeline_path
+        let flow_dir = flow_path
             .parent()
             .filter(|p| !p.as_os_str().is_empty())
             .unwrap_or_else(|| Path::new("."));
 
-        let (reference, root) = normalize_project_reference(&uses_value, pipeline_dir)?;
-        let choice = ProjectChoice::Path {
+        let (reference, root) = normalize_module_reference(&uses_value, flow_dir)?;
+        let choice = ModuleChoice::Path {
             reference: reference.clone(),
             root: root.clone(),
         };
-        let project = load_project_spec(&choice)?;
+        let module = load_module_spec(&choice)?;
 
-        let mut spec = PipelineSpec::default();
-        spec.name = name.unwrap_or_else(|| project.spec.name.clone());
+        let mut spec = FlowSpec::default();
+        spec.name = name.unwrap_or_else(|| module.spec.name.clone());
 
-        let generated_id = generate_default_step_id(&project, &spec);
+        let generated_id = generate_default_step_id(&module, &spec);
         let step_id_value = step_id.unwrap_or(generated_id);
 
         let mut with_map = BTreeMap::new();
-        for input in &project.spec.inputs {
-            let key = ensure_pipeline_input(&mut spec, &step_id_value, input);
+        for input in &module.spec.inputs {
+            let key = ensure_flow_input(&mut spec, &step_id_value, input);
             with_map.insert(
                 input.name.clone(),
                 YamlValue::String(format!("inputs.{}", key)),
             );
         }
 
-        let publish_map = default_publish_map(&project.spec.outputs);
+        let publish_map = default_publish_map(&module.spec.outputs);
 
-        spec.steps.push(PipelineStepSpec {
+        spec.steps.push(FlowStepSpec {
             id: step_id_value,
             uses: Some(reference),
             where_exec: None,
             foreach: None,
             runs_on: None,
             order: None,
+            coordination: None,
             with: with_map,
             publish: publish_map,
             share: BTreeMap::new(),
             store: BTreeMap::new(),
+            permissions: Vec::new(),
+            barrier: None,
         });
 
-        spec.save(&pipeline_path)?;
+        spec.save(&flow_path)?;
 
         println!(
-            "\n✅ Saved pipeline to {}",
-            pipeline_path.display().to_string().bold()
+            "\n✅ Saved flow to {}",
+            flow_path.display().to_string().bold()
         );
 
-        let validation = validate_internal(&pipeline_path, &spec, db.as_ref())?;
+        let validation = validate_internal(&flow_path, &spec, db.as_ref())?;
         print_validation(&validation, true);
 
         return Ok(());
     }
 
-    let wizard = PipelineWizard::new(&pipeline_path, db.as_ref());
+    let wizard = FlowWizard::new(&flow_path, db.as_ref());
     let spec = wizard.run()?;
-    spec.save(&pipeline_path)?;
+    spec.save(&flow_path)?;
 
     println!(
-        "\n✅ Saved pipeline to {}",
-        pipeline_path.display().to_string().bold()
+        "\n✅ Saved flow to {}",
+        flow_path.display().to_string().bold()
     );
 
-    let validation = validate_internal(&pipeline_path, &spec, db.as_ref())?;
+    let validation = validate_internal(&flow_path, &spec, db.as_ref())?;
     print_validation(&validation, true);
 
     Ok(())
 }
 
 pub async fn add_step(file: Option<String>) -> Result<()> {
-    let pipeline_path = resolve_pipeline_path(file);
-    if !pipeline_path.exists() {
+    let flow_path = resolve_flow_path(file);
+    if !flow_path.exists() {
         return Err(anyhow!(
-            "Pipeline file not found: {}. Run 'bv pipeline create' first.",
-            pipeline_path.display()
+            "Flow file not found: {}. Run 'bv flow create' first.",
+            flow_path.display()
         )
         .into());
     }
 
-    let mut spec = PipelineSpec::load(&pipeline_path)?;
+    let mut spec = FlowSpec::load(&flow_path)?;
     let db = BioVaultDb::new().ok();
 
-    let wizard = PipelineWizard::new(&pipeline_path, db.as_ref());
+    let wizard = FlowWizard::new(&flow_path, db.as_ref());
     spec = wizard.add_step_to(spec)?;
-    spec.save(&pipeline_path)?;
+    spec.save(&flow_path)?;
 
     println!(
-        "\n✅ Updated pipeline at {}",
-        pipeline_path.display().to_string().bold()
+        "\n✅ Updated flow at {}",
+        flow_path.display().to_string().bold()
     );
 
-    let validation = validate_internal(&pipeline_path, &spec, db.as_ref())?;
+    let validation = validate_internal(&flow_path, &spec, db.as_ref())?;
     print_validation(&validation, true);
 
     Ok(())
 }
 
-#[instrument(skip(extra_args), fields(component = "pipeline", pipeline = %pipeline_path, dry_run = %dry_run, resume = %resume), err)]
-pub async fn run_pipeline(
-    pipeline_path: &str,
+#[instrument(skip(extra_args), fields(component = "flow", flow = %flow_path, dry_run = %dry_run, resume = %resume), err)]
+pub async fn run_flow(
+    flow_path: &str,
     extra_args: Vec<String>,
     dry_run: bool,
     resume: bool,
     results_dir_override: Option<String>,
 ) -> Result<()> {
-    let path = Path::new(pipeline_path);
+    let path = Path::new(flow_path);
     if !path.exists() {
-        return Err(anyhow!("Pipeline file not found: {}", pipeline_path).into());
+        return Err(anyhow!("Flow file not found: {}", flow_path).into());
     }
 
-    let (step_overrides, pipeline_overrides, explicit_results_dir, nextflow_passthrough) =
+    let (step_overrides, flow_overrides, explicit_results_dir, nextflow_passthrough) =
         parse_overrides(&extra_args, results_dir_override.clone())?;
 
-    let spec = PipelineSpec::load(path)?;
+    let spec = FlowSpec::load(path)?;
     let mut db = BioVaultDb::new().ok();
     let validation = validate_internal(path, &spec, db.as_ref())?;
 
     if validation.has_errors() {
         print_validation(&validation, true);
-        return Err(anyhow!("Pipeline has validation errors. Fix them before running.").into());
+        return Err(anyhow!("Flow has validation errors. Fix them before running.").into());
     }
 
     if !validation.unresolved_steps.is_empty() {
         return Err(anyhow!(
-            "Pipeline contains steps without a project. Set 'uses' or register the project before running."
+            "Flow contains steps without a module. Set 'uses' or register the module before running."
         )
         .into());
     }
 
-    let pipeline_dir = path
+    let flow_dir = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
 
-    let run_id = Utc::now().format("%Y%m%d%H%M%S").to_string();
-    let run_msg = format!("🆔 Pipeline run {}", run_id);
+    // Use shared run_id from env var (for distributed coordination) or generate new one
+    let run_id = env::var("BIOVAULT_FLOW_RUN_ID")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| Utc::now().format("%Y%m%d%H%M%S").to_string());
+    let run_msg = format!("🆔 Flow run {}", run_id);
     println!("{}", run_msg);
     append_desktop_log(&run_msg);
 
-    for key in pipeline_overrides.keys() {
+    for key in flow_overrides.keys() {
         if !spec.inputs.contains_key(key) {
-            return Err(anyhow!("Unknown pipeline input '{}' in --set", key).into());
+            return Err(anyhow!("Unknown flow input '{}' in --set", key).into());
         }
     }
 
     let mut resolved_inputs: HashMap<String, String> = HashMap::new();
     for (name, input_spec) in &spec.inputs {
-        if let Some(value) = pipeline_overrides.get(name) {
+        if let Some(value) = flow_overrides.get(name) {
             let resolved = literal_to_value(value, input_spec.raw_type())?;
             resolved_inputs.insert(name.clone(), resolved);
         } else if let Some(default_literal) = input_spec.default_literal() {
@@ -252,7 +481,8 @@ pub async fn run_pipeline(
         }
     }
 
-    let mut step_outputs: HashMap<String, HashMap<String, HashMap<String, String>>> = HashMap::new();
+    let mut step_outputs: HashMap<String, HashMap<String, HashMap<String, String>>> =
+        HashMap::new();
     let mut step_output_order: HashMap<String, Vec<String>> = HashMap::new();
 
     let requested_results_dir = explicit_results_dir.or(results_dir_override);
@@ -260,30 +490,317 @@ pub async fn run_pipeline(
     let base_results_dir = match requested_results_dir {
         Some(dir) => PathBuf::from(dir),
         None => {
-            let mut base = PathBuf::from("results/pipelines");
+            let mut base = PathBuf::from("results/flows");
             base.push(&spec.name);
             base
         }
     };
+    let base_results_dir_abs = if base_results_dir.is_absolute() {
+        base_results_dir.clone()
+    } else {
+        env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(&base_results_dir)
+    };
 
     if !dry_run {
-        fs::create_dir_all(&base_results_dir).await?;
+        fs::create_dir_all(&base_results_dir_abs).await?;
     }
 
     let current_datasite = resolve_current_datasite();
-    let run_all_targets = env::var("BIOVAULT_PIPELINE_RUN_ALL")
+    let run_all_targets = env::var("BIOVAULT_FLOW_RUN_ALL")
         .map(|value| !value.trim().is_empty())
         .unwrap_or(false);
     let syftbox_data_dir = crate::config::Config::load()
         .ok()
         .and_then(|cfg| cfg.get_syftbox_data_dir().ok());
+    let sandbox_root = env::var("BIOVAULT_SANDBOX_ROOT")
+        .ok()
+        .map(PathBuf::from)
+        .and_then(|p| p.canonicalize().ok());
 
-    for step in &spec.steps {
-        let project = resolve_project(step, pipeline_dir, db.as_ref())?
-            .ok_or_else(|| anyhow!("Step '{}' has no project to run", step.id))?;
+    // Progress tracking for distributed coordination
+    let verbose_progress = env::var("BIOVAULT_FLOW_VERBOSE")
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false);
+    let await_timeout_secs: u64 = env::var("BIOVAULT_FLOW_AWAIT_TIMEOUT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(120);
 
-        let project_root = project.root.to_string_lossy().to_string();
-        let project_spec = &project.spec;
+    // Determine shared base for progress logs
+    // Each party writes to THEIR OWN shared folder
+    // When reading, we look in the specific party's folder
+    let progress_write_base: Option<PathBuf> = if let Some(ref root) = sandbox_root {
+        if run_all_targets {
+            // In sandbox mode with run_all, use first datasite's folder
+            let all_datasites = resolve_all_datasites_from_spec(&spec, &resolved_inputs);
+            if let Some(first) = all_datasites.first() {
+                Some(
+                    root.join(first)
+                        .join("datasites")
+                        .join(first)
+                        .join("shared"),
+                )
+            } else {
+                None
+            }
+        } else if let Some(ref ds) = current_datasite {
+            // In sandbox mode with specific datasite, write to OUR OWN folder
+            Some(
+                root.join(ds)
+                    .join("datasites")
+                    .join(ds)
+                    .join("shared"),
+            )
+        } else {
+            None
+        }
+    } else if let Some(ref ds) = current_datasite {
+        // In distributed mode, write to OUR OWN shared folder
+        if let Some(ref data_dir) = syftbox_data_dir {
+            Some(data_dir.join("datasites").join(ds).join("shared"))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // For reading other parties' progress, we need to know where to look
+    // In sandbox mode: read directly from source_datasite's own folder (no sync needed for tests)
+    // In normal mode: use syftbox_data_dir/datasites/source_datasite/shared (synced via SyftBox)
+    let get_progress_read_base = |_reader_datasite: &str, source_datasite: &str| -> Option<PathBuf> {
+        if let Some(ref root) = sandbox_root {
+            // In sandbox mode, read directly from the source's own shared folder
+            // This bypasses the need for SyftBox sync in test environments
+            let path = root.join(source_datasite).join("datasites").join(source_datasite).join("shared");
+            eprintln!("DEBUG get_progress_read_base: sandbox_root={:?}, source={}, path={}", root, source_datasite, path.display());
+            Some(path)
+        } else if let Some(ref data_dir) = syftbox_data_dir {
+            // In normal mode, syftbox syncs files to our local view
+            let path = data_dir.join("datasites").join(source_datasite).join("shared");
+            eprintln!("DEBUG get_progress_read_base: syftbox_data_dir={:?}, source={}, path={}", data_dir, source_datasite, path.display());
+            Some(path)
+        } else {
+            eprintln!("DEBUG get_progress_read_base: no sandbox_root or syftbox_data_dir");
+            None
+        }
+    };
+
+    // Initialize progress tracking for this datasite (if we have a current datasite)
+    let mut flow_progress: Option<FlowProgress> = if !run_all_targets {
+        current_datasite
+            .as_ref()
+            .map(|ds| FlowProgress::new(ds, &spec.name, &run_id))
+    } else {
+        None
+    };
+
+    // Write initial progress
+    if let (Some(ref progress), Some(ref shared_base)) = (&flow_progress, &progress_write_base) {
+        if let Err(e) = write_state(shared_base, &spec.name, &run_id, progress) {
+            if verbose_progress {
+                println!("⚠️  Could not write initial progress: {}", e);
+            }
+        } else if verbose_progress {
+            let progress_dir = get_progress_dir(shared_base, &spec.name, &run_id);
+            println!("📝 Writing progress to: {}", progress_dir.display());
+        }
+    }
+
+    // Handle top-level coordination setup (before any steps run)
+    if let Some(ref coordination) = spec.coordination {
+        let all_datasites = resolve_all_datasites_from_spec(&spec, &resolved_inputs);
+
+        // Determine who can read the coordination files
+        let readers: Vec<String> = match &coordination.share_with {
+            crate::flow_spec::FlowCoordinationShareWith::All(s) if s == "all" => {
+                vec!["{datasites[*]}".to_string()]
+            }
+            crate::flow_spec::FlowCoordinationShareWith::All(s) => vec![s.clone()],
+            crate::flow_spec::FlowCoordinationShareWith::List(list) => list.clone(),
+        };
+
+        // Coordination runs on all datasites by default
+        let coord_targets: Vec<String> = if let Some(ref targets) = coordination.targets {
+            match targets {
+                crate::flow_spec::FlowRunTargets::One(s) if s == "all" => all_datasites.clone(),
+                crate::flow_spec::FlowRunTargets::One(s) => vec![s.clone()],
+                crate::flow_spec::FlowRunTargets::Many(v) => v.clone(),
+                crate::flow_spec::FlowRunTargets::Selector(sel) => sel.include.clone(),
+            }
+        } else {
+            all_datasites.clone()
+        };
+
+        let coord_run_targets =
+            resolve_run_targets(&coord_targets, current_datasite.as_deref(), run_all_targets);
+
+        for target in coord_run_targets {
+            let datasite_key = target.clone().unwrap_or_else(|| "local".to_string());
+            let target_data_dir = if let (Some(ref root), Some(ref site)) = (&sandbox_root, &target)
+            {
+                root.join(site)
+            } else {
+                syftbox_data_dir.clone().ok_or_else(|| {
+                    anyhow!("Coordination requires SYFTBOX_DATA_DIR or BIOVAULT_SANDBOX_ROOT")
+                })?
+            };
+
+            println!(
+                "\n🤝 Setting up coordination for {}",
+                datasite_key.bold()
+            );
+
+            // Create coordination folder and permissions
+            let url_template = coordination.url_template();
+            let progress_url = render_flow_template(
+                url_template,
+                &datasite_key,
+                &all_datasites,
+                &run_id,
+                &spec.name,
+                None,
+                None,
+                &spec.vars,
+            );
+
+            let permission_spec = FlowPermissionSpec {
+                url: progress_url,
+                rules: vec![FlowPermissionRuleSpec {
+                    pattern: "**".to_string(),
+                    access: FlowPermissionAccessSpec {
+                        read: readers.clone(),
+                        write: vec!["{datasite.current}".to_string()],
+                        admin: vec!["{datasite.current}".to_string()],
+                    },
+                }],
+            };
+
+            execute_permissions_step(
+                &[permission_spec],
+                &target_data_dir,
+                &all_datasites,
+                target.as_deref(),
+                &spec.name,
+                &run_id,
+            )?;
+        }
+    }
+
+    // Handle MPC setup (create communication channels between parties)
+    if let Some(ref mpc) = spec.mpc {
+        let all_datasites = resolve_all_datasites_from_spec(&spec, &resolved_inputs);
+        let party_count = all_datasites.len();
+
+        println!(
+            "\n🔐 Setting up MPC channels (topology: {}, {} parties)",
+            mpc.topology,
+            party_count
+        );
+
+        // Generate channels based on topology
+        let channels = mpc.generate_channels(party_count);
+        let channel_pattern = mpc.channel_pattern();
+
+        // MPC runs on all datasites
+        let mpc_run_targets =
+            resolve_run_targets(&all_datasites, current_datasite.as_deref(), run_all_targets);
+
+        for target in mpc_run_targets {
+            let datasite_key = target.clone().unwrap_or_else(|| "local".to_string());
+            let target_data_dir = if let (Some(ref root), Some(ref site)) = (&sandbox_root, &target)
+            {
+                root.join(site)
+            } else {
+                syftbox_data_dir.clone().ok_or_else(|| {
+                    anyhow!("MPC setup requires SYFTBOX_DATA_DIR or BIOVAULT_SANDBOX_ROOT")
+                })?
+            };
+
+            // Find this datasite's party index
+            let my_party_index = all_datasites
+                .iter()
+                .position(|ds| ds == &datasite_key)
+                .unwrap_or(0);
+
+            // Create outgoing channels (where this party is the sender)
+            let my_outgoing: Vec<_> = channels
+                .iter()
+                .filter(|(from, _)| *from == my_party_index)
+                .collect();
+
+            for (from_idx, to_idx) in my_outgoing {
+                let channel_name = channel_pattern
+                    .replace("{from}", &from_idx.to_string())
+                    .replace("{to}", &to_idx.to_string());
+
+                let receiver_datasite = &all_datasites[*to_idx];
+
+                // Create channel folder with permissions
+                let url_template = mpc.url_template();
+                let base_url = render_flow_template(
+                    url_template,
+                    &datasite_key,
+                    &all_datasites,
+                    &run_id,
+                    &spec.name,
+                    None,
+                    None,
+                    &spec.vars,
+                );
+                let channel_url = format!("{}/{}", base_url, channel_name);
+
+                println!(
+                    "  📡 {}@{} → {} (channel: {})",
+                    my_party_index,
+                    datasite_key,
+                    receiver_datasite,
+                    channel_name
+                );
+
+                let permission_spec = FlowPermissionSpec {
+                    url: channel_url,
+                    rules: vec![FlowPermissionRuleSpec {
+                        pattern: "**".to_string(),
+                        access: FlowPermissionAccessSpec {
+                            read: vec![datasite_key.clone(), receiver_datasite.clone()],
+                            write: vec![datasite_key.clone(), receiver_datasite.clone()],
+                            admin: vec![datasite_key.clone()],
+                        },
+                    }],
+                };
+
+                execute_permissions_step(
+                    &[permission_spec],
+                    &target_data_dir,
+                    &all_datasites,
+                    target.as_deref(),
+                    &spec.name,
+                    &run_id,
+                )?;
+            }
+        }
+
+        println!("  ✓ MPC channels configured");
+    }
+
+    for (step_index, step) in spec.steps.iter().enumerate() {
+        let step_number = step_index + 1; // 1-indexed for user display
+        let module = resolve_module(step, flow_dir, db.as_ref())?;
+        let is_permissions_only = module.is_none() && !step.permissions.is_empty();
+        let is_coordination = step.coordination.is_some();
+        let is_barrier = step.barrier.is_some();
+
+        if module.is_none() && step.permissions.is_empty() && !is_coordination && !is_barrier {
+            return Err(anyhow!(
+                "Step '{}' has no module to run, no permissions to create, no coordination, and no barrier",
+                step.id
+            )
+            .into());
+        }
+
         let step_targets = resolve_step_targets(step);
         if !step_targets.is_empty() {
             step_output_order.insert(step.id.clone(), step_targets.clone());
@@ -302,24 +819,32 @@ pub async fn run_pipeline(
         let mut share_locations_by_target: HashMap<String, HashMap<String, ShareLocation>> =
             HashMap::new();
         if !step.share.is_empty() {
-            let data_dir = syftbox_data_dir.as_ref().ok_or_else(|| {
-                anyhow!(
-                    "Step '{}' requires SYFTBOX_DATA_DIR to resolve shared paths",
-                    step.id
-                )
-            })?;
             for (share_name, share_spec) in &step.share {
                 for target in &step_targets {
+                    let data_dir = if let Some(ref root) = sandbox_root {
+                        root.join(target)
+                    } else {
+                        syftbox_data_dir.clone().ok_or_else(|| {
+                            anyhow!(
+                                "Step '{}' requires SYFTBOX_DATA_DIR or BIOVAULT_SANDBOX_ROOT to resolve shared paths",
+                                step.id
+                            )
+                        })?
+                    };
                     let share_location = resolve_share_location(
-                        &share_spec.path,
+                        &share_spec.url,
                         target,
                         &step_targets,
                         &run_id,
-                        data_dir,
+                        &spec.name,
+                        &data_dir,
+                        step_number,
+                        &step.id,
+                        &spec.vars,
                     )?;
                     share_locations_by_target
                         .entry(target.clone())
-                        .or_insert_with(HashMap::new)
+                        .or_default()
                         .insert(share_name.clone(), share_location);
                 }
             }
@@ -334,13 +859,9 @@ pub async fn run_pipeline(
 
         if run_targets.is_empty() {
             if !share_locations_by_target.is_empty() {
-                let step_entry = step_outputs
-                    .entry(step.id.clone())
-                    .or_insert_with(HashMap::new);
+                let step_entry = step_outputs.entry(step.id.clone()).or_default();
                 for (target, share_outputs) in &share_locations_by_target {
-                    let outputs = step_entry
-                        .entry(target.clone())
-                        .or_insert_with(HashMap::new);
+                    let outputs = step_entry.entry(target.clone()).or_default();
                     for (name, location) in share_outputs {
                         outputs
                             .entry(name.clone())
@@ -351,15 +872,378 @@ pub async fn run_pipeline(
             continue;
         }
 
+        // Handle permissions-only steps separately
+        if is_permissions_only {
+            let all_datasites = resolve_all_datasites_from_spec(&spec, &resolved_inputs);
+            for target in run_targets {
+                let datasite_key = target.clone().unwrap_or_else(|| "local".to_string());
+                let target_data_dir = if let (Some(ref root), Some(ref site)) = (&sandbox_root, &target) {
+                    root.join(site)
+                } else {
+                    syftbox_data_dir.clone().ok_or_else(|| {
+                        anyhow!("Permissions step requires SYFTBOX_DATA_DIR or BIOVAULT_SANDBOX_ROOT")
+                    })?
+                };
+
+                let step_label = format!("{}@{}", step.id, datasite_key);
+                println!("\n🔐 Creating permissions for step {}", step_label.bold());
+
+                execute_permissions_step(
+                    &step.permissions,
+                    &target_data_dir,
+                    &all_datasites,
+                    target.as_deref(),
+                    &spec.name,
+                    &run_id,
+                )?;
+            }
+            continue;
+        }
+
+        // Handle coordination steps - sets up _progress folder with permissions
+        if is_coordination {
+            let coordination = step.coordination.as_ref().unwrap();
+            let all_datasites = resolve_all_datasites_from_spec(&spec, &resolved_inputs);
+
+            // Determine targets from coordination spec or fall back to step runs_on targets
+            let coord_targets: Vec<String> = if let Some(ref targets) = coordination.targets {
+                match targets {
+                    crate::flow_spec::FlowRunTargets::One(s) if s == "all" => {
+                        all_datasites.clone()
+                    }
+                    crate::flow_spec::FlowRunTargets::One(s) => vec![s.clone()],
+                    crate::flow_spec::FlowRunTargets::Many(v) => v.clone(),
+                    crate::flow_spec::FlowRunTargets::Selector(sel) => sel.include.clone(),
+                }
+            } else if let Some(ref runs_on) = step.runs_on {
+                runs_on.as_vec()
+            } else {
+                all_datasites.clone()
+            };
+
+            // Determine who can read the coordination files
+            let readers: Vec<String> = match &coordination.share_with {
+                crate::flow_spec::FlowCoordinationShareWith::All(s) if s == "all" => {
+                    vec!["{datasites[*]}".to_string()]
+                }
+                crate::flow_spec::FlowCoordinationShareWith::All(s) => vec![s.clone()],
+                crate::flow_spec::FlowCoordinationShareWith::List(list) => list.clone(),
+            };
+
+            let coord_run_targets =
+                resolve_run_targets(&coord_targets, current_datasite.as_deref(), run_all_targets);
+
+            for target in coord_run_targets {
+                let datasite_key = target.clone().unwrap_or_else(|| "local".to_string());
+                let target_data_dir = if let (Some(ref root), Some(ref site)) = (&sandbox_root, &target) {
+                    root.join(site)
+                } else {
+                    syftbox_data_dir.clone().ok_or_else(|| {
+                        anyhow!("Coordination step requires SYFTBOX_DATA_DIR or BIOVAULT_SANDBOX_ROOT")
+                    })?
+                };
+
+                let step_label = format!("{}@{}", step.id, datasite_key);
+                println!("\n🤝 Setting up coordination for {}", step_label.bold());
+
+                // Create coordination folder and permissions
+                let url_template = coordination.url_template();
+                let progress_url = render_flow_template(
+                    url_template,
+                    &datasite_key,
+                    &all_datasites,
+                    &run_id,
+                    &spec.name,
+                    None,
+                    None,
+                    &spec.vars,
+                );
+
+                let permission_spec = FlowPermissionSpec {
+                    url: progress_url,
+                    rules: vec![FlowPermissionRuleSpec {
+                        pattern: "**".to_string(),
+                        access: FlowPermissionAccessSpec {
+                            read: readers.clone(),
+                            write: vec!["{datasite.current}".to_string()],
+                            admin: vec!["{datasite.current}".to_string()],
+                        },
+                    }],
+                };
+
+                execute_permissions_step(
+                    &[permission_spec],
+                    &target_data_dir,
+                    &all_datasites,
+                    target.as_deref(),
+                    &spec.name,
+                    &run_id,
+                )?;
+            }
+            continue;
+        }
+
+        // Handle barrier steps - wait for specified step to complete on specified targets
+        if is_barrier {
+            let barrier = step.barrier.as_ref().unwrap();
+            let all_datasites = resolve_all_datasites_from_spec(&spec, &resolved_inputs);
+
+            // Build groups map for target resolution
+            let mut groups: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
+            groups.insert("all".to_string(), all_datasites.clone());
+            if let Some(first) = all_datasites.first() {
+                groups.insert("aggregator".to_string(), vec![first.clone()]);
+            }
+            if all_datasites.len() > 1 {
+                groups.insert("clients".to_string(), all_datasites[1..].to_vec());
+            }
+
+            // Determine which targets to wait for (resolve groups)
+            let barrier_targets: Vec<String> = if let Some(ref targets) = barrier.targets {
+                match targets {
+                    crate::flow_spec::FlowRunTargets::One(s) if s == "all" => all_datasites.clone(),
+                    crate::flow_spec::FlowRunTargets::One(s) => {
+                        // Check if it's a group name
+                        groups.get(s).cloned().unwrap_or_else(|| vec![s.clone()])
+                    },
+                    crate::flow_spec::FlowRunTargets::Many(v) => v.clone(),
+                    crate::flow_spec::FlowRunTargets::Selector(sel) => sel.include.clone()
+                }
+            } else {
+                // Default to all datasites if not specified
+                all_datasites.clone()
+            };
+
+            let timeout_secs = barrier.timeout.unwrap_or(300); // Default 5 minutes
+            let wait_for_step = &barrier.wait_for;
+
+            println!(
+                "\n⏳ Barrier '{}': waiting for step '{}' to complete on {} target(s)...",
+                step.id.bold(),
+                wait_for_step.bold(),
+                barrier_targets.len()
+            );
+
+            // Skip waiting for ourselves
+            let targets_to_wait: Vec<&String> = barrier_targets
+                .iter()
+                .filter(|t| Some(t.as_str()) != current_datasite.as_deref())
+                .collect();
+
+            if targets_to_wait.is_empty() {
+                println!("   ✓ No other targets to wait for (only self)");
+            } else {
+                for target in &targets_to_wait {
+                    println!("   • Waiting for {} to complete '{}'...", target, wait_for_step);
+                }
+
+                // Wait for each target to complete the specified step
+                for target in targets_to_wait {
+                    if let Some(reader) = current_datasite.as_deref() {
+                        if let Some(read_base) = get_progress_read_base(reader, target) {
+                            wait_for_step_completion(
+                                &read_base,
+                                &spec.name,
+                                &run_id,
+                                target,
+                                wait_for_step,
+                                timeout_secs,
+                                true, // verbose
+                            )
+                            .await?;
+                        } else {
+                            return Err(anyhow!(
+                                "Barrier '{}': Cannot determine progress path for {}",
+                                step.id,
+                                target
+                            ).into());
+                        }
+                    }
+                }
+
+                println!("   ✓ All {} target(s) completed step '{}'", barrier_targets.len(), wait_for_step);
+            }
+
+            // Update progress for this barrier step
+            if let Some(ref mut progress) = flow_progress {
+                progress.mark_step_completed(&step.id);
+                if let Some(ref shared_base) = progress_write_base {
+                    if let Err(e) = write_state(shared_base, &spec.name, &run_id, progress) {
+                        if verbose_progress {
+                            println!("⚠️  Could not write barrier progress: {}", e);
+                        }
+                    }
+                    if let Err(e) = append_progress(
+                        shared_base,
+                        &spec.name,
+                        &run_id,
+                        "barrier_completed",
+                        Some(&step.id),
+                        &format!("Barrier {} completed (waited for {})", step.id, wait_for_step),
+                    ) {
+                        if verbose_progress {
+                            println!("⚠️  Could not append barrier progress: {}", e);
+                        }
+                    }
+                }
+            }
+
+            continue;
+        }
+
+        // At this point we have a module (permissions-only, coordination, and barrier steps already continued)
+        let module = module.unwrap();
+        let module_root = module.root.to_string_lossy().to_string();
+        let module_spec = &module.spec;
+
         for target in run_targets {
             let current_datasite = target.as_deref();
+            let target_data_dir = if let (Some(ref root), Some(site)) = (&sandbox_root, &target) {
+                Some(root.join(site))
+            } else {
+                syftbox_data_dir.clone()
+            };
+
+            // Wait for upstream steps from other datasites if not running all targets
+            if !run_all_targets {
+                for input in &module_spec.inputs {
+                    if let Some(binding) = step.with.get(&input.name).and_then(value_to_string) {
+                        if binding.starts_with("step.") {
+                            let parts: Vec<&str> = binding.split('.').collect();
+                            // Handle both outputs and share namespaces
+                            let is_valid_namespace = parts.len() >= 4
+                                && (parts[2] == "outputs" || parts[2] == "share");
+                            // Check if this is a url_list binding (needs all sites)
+                            let is_url_list = parts.len() >= 5
+                                && matches!(parts[4], "url_list" | "manifest" | "all" | "paths");
+
+                            if is_valid_namespace {
+                                let source_step = parts[1];
+                                let output_name = parts[3];
+
+                                if let Some(outputs_by_site) = step_outputs.get(source_step) {
+                                    // Check if current datasite has its own output from this step
+                                    let current_has_output = current_datasite
+                                        .and_then(|site| outputs_by_site.get(site))
+                                        .map(|outputs| outputs.contains_key(output_name))
+                                        .unwrap_or(false);
+
+                                    // Determine which sites to wait for:
+                                    // - For url_list bindings: wait for ALL other sites
+                                    // - For direct bindings: only wait if current doesn't have output
+                                    let sites_to_wait: Vec<&String> = if is_url_list {
+                                        // Need all sites for manifest
+                                        outputs_by_site
+                                            .keys()
+                                            .filter(|site| Some(site.as_str()) != current_datasite)
+                                            .collect()
+                                    } else if !current_has_output {
+                                        // Current site doesn't have output, wait for source sites
+                                        outputs_by_site.keys().collect()
+                                    } else {
+                                        // Current site has its own output, no waiting needed
+                                        Vec::new()
+                                    };
+
+                                    // Wait for step completion via progress logs
+                                    for site in &sites_to_wait {
+                                        if Some(site.as_str()) != current_datasite {
+                                            // Look in the current datasite's synced view of the source datasite's folder
+                                            if let Some(reader) = current_datasite {
+                                                if let Some(read_base) = get_progress_read_base(reader, site) {
+                                                    // Wait for this datasite to complete the source step
+                                                    wait_for_step_completion(
+                                                        &read_base,
+                                                        &spec.name,
+                                                        &run_id,
+                                                        site,
+                                                        source_step,
+                                                        await_timeout_secs,
+                                                        verbose_progress,
+                                                    )
+                                                    .await?;
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    // Also wait for the actual files (belt and suspenders)
+                                    let mut paths_to_wait: Vec<PathBuf> = Vec::new();
+                                    for site in &sites_to_wait {
+                                        if let Some(outputs) = outputs_by_site.get(*site) {
+                                            if let Some(value) = outputs.get(output_name) {
+                                                if value.starts_with("syft://") {
+                                                    if let Ok(resolved) = resolve_syft_path(
+                                                        value,
+                                                        target_data_dir.as_ref(),
+                                                        sandbox_root.as_ref(),
+                                                    ) {
+                                                        paths_to_wait.push(PathBuf::from(resolved));
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    for path in &paths_to_wait {
+                                        if !path.exists() {
+                                            if verbose_progress {
+                                                println!(
+                                                    "⏳ Waiting for file: {}",
+                                                    path.display()
+                                                );
+                                            }
+                                            wait_for_path(path, await_timeout_secs).await?;
+                                            if verbose_progress {
+                                                println!("✓  File available: {}", path.display());
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             let mut step_args = Vec::new();
 
-            for input in &project_spec.inputs {
-                let binding = step
-                    .with
-                    .get(&input.name)
-                    .and_then(value_to_string)
+            // Build groups map for conditional input resolution
+            // Convention: "aggregator" = first datasite, "clients" = rest
+            let datasite_groups: std::collections::BTreeMap<String, Vec<String>> = {
+                let mut groups = std::collections::BTreeMap::new();
+                if !step_targets.is_empty() {
+                    groups.insert("all".to_string(), step_targets.clone());
+                    if let Some(first) = step_targets.first() {
+                        groups.insert("aggregator".to_string(), vec![first.clone()]);
+                    }
+                    if step_targets.len() > 1 {
+                        groups.insert("clients".to_string(), step_targets[1..].to_vec());
+                    }
+                }
+                groups
+            };
+
+            let datasite_key = target.clone().unwrap_or_else(|| "local".to_string());
+
+            for input in &module_spec.inputs {
+                // Parse as conditional input to check only/without constraints
+                let with_value = step.with.get(&input.name);
+
+                let conditional = with_value.and_then(ConditionalInput::from_yaml);
+
+                // Check if this input applies to the current target
+                if let Some(ref cond) = conditional {
+                    if !cond.applies_to(&datasite_key, &datasite_groups) {
+                        // Input doesn't apply to this target, skip it
+                        continue;
+                    }
+                }
+
+                // Get the binding value (either from conditional or simple value)
+                let binding = conditional
+                    .map(|c| c.value)
+                    .or_else(|| with_value.and_then(value_to_string))
                     .ok_or_else(|| {
                         anyhow!(
                             "Step '{}' is missing a binding for input '{}'",
@@ -374,24 +1258,37 @@ pub async fn run_pipeline(
                     .cloned()
                     .unwrap_or(binding);
 
-                let resolved_value = resolve_binding(
+                // Render template variables in the binding (e.g., {datasite.index}, {datasites})
+                let rendered_binding = render_flow_template(
                     &resolved_binding,
+                    &datasite_key,
+                    &step_targets,
+                    &run_id,
+                    &spec.name,
+                    Some(step_number),
+                    Some(&step.id),
+                    &spec.vars,
+                );
+
+                let resolved_value = resolve_binding(
+                    &rendered_binding,
                     &input.raw_type,
                     &spec.inputs,
                     &resolved_inputs,
                     &step_outputs,
                     &step.id,
                     current_datasite,
-                    &base_results_dir,
+                    &base_results_dir_abs,
                     &step_output_order,
-                    syftbox_data_dir.as_ref(),
+                    target_data_dir.as_ref(),
+                    sandbox_root.as_ref(),
                 )?;
 
                 step_args.push(format!("--{}", input.name));
                 step_args.push(resolved_value);
             }
 
-            for param in &project_spec.parameters {
+            for param in &module_spec.parameters {
                 let override_key = (step.id.clone(), param.name.clone());
                 if let Some(value) = step_overrides.get(&override_key) {
                     step_args.push("--set".to_string());
@@ -404,14 +1301,19 @@ pub async fn run_pipeline(
             }
 
             let step_results_dir = if let Some(site) = &target {
-                base_results_dir.join(&step.id).join(sanitize_identifier(site))
+                base_results_dir_abs
+                    .join(&step.id)
+                    .join(sanitize_identifier(site))
             } else {
-                base_results_dir.join(&step.id)
+                base_results_dir_abs.join(&step.id)
             };
             let step_results_dir_str = step_results_dir.to_string_lossy().to_string();
 
             let previous_override = env::var("BIOVAULT_DATASITE_OVERRIDE").ok();
             let previous_datasites_override = env::var("BIOVAULT_DATASITES_OVERRIDE").ok();
+            let previous_syftbox_data_dir = env::var("SYFTBOX_DATA_DIR").ok();
+            let previous_run_id = env::var("BV_RUN_ID").ok();
+            let previous_flow_name = env::var("BV_FLOW_NAME").ok();
             match &target {
                 Some(site) => env::set_var("BIOVAULT_DATASITE_OVERRIDE", site),
                 None => env::remove_var("BIOVAULT_DATASITE_OVERRIDE"),
@@ -421,32 +1323,90 @@ pub async fn run_pipeline(
             } else {
                 env::set_var("BIOVAULT_DATASITES_OVERRIDE", step_targets.join(","));
             }
+            if let Some(ref data_dir) = target_data_dir {
+                env::set_var("SYFTBOX_DATA_DIR", data_dir.to_string_lossy().as_ref());
+            }
+            // Set flow context for MPC coordination
+            env::set_var("BV_RUN_ID", &run_id);
+            env::set_var("BV_FLOW_NAME", &spec.name);
 
             let step_label = match &target {
                 Some(site) => format!("{}@{}", step.id, site),
                 None => step.id.clone(),
             };
             println!(
-                "\n▶️  Running step {} using project {}",
+                "\n▶️  Running step {} using module {}",
                 step_label.bold(),
-                project_root
+                module_root
             );
 
+            // Mark step as started in progress log
+            if let Some(ref mut progress) = flow_progress {
+                progress.mark_step_started(&step.id);
+                if let Some(ref shared_base) = progress_write_base {
+                    if let Err(e) = write_state(shared_base, &spec.name, &run_id, progress) {
+                        if verbose_progress {
+                            println!("⚠️  Could not write step start progress: {}", e);
+                        }
+                    }
+                    let _ = append_progress(
+                        shared_base,
+                        &spec.name,
+                        &run_id,
+                        "step_started",
+                        Some(&step.id),
+                        &format!("Starting step {} using module {}", step_label, module_root),
+                    );
+                }
+            }
+
             append_desktop_log(&format!(
-                "[Pipeline] Running step {} with args: {:?}",
+                "[Flow] Running step {} with args: {:?}",
                 step_label, step_args
             ));
-            run_dynamic::execute_dynamic(
-                &project_root,
+
+            let step_result = run_dynamic::execute_dynamic(
+                &module_root,
                 step_args.clone(),
                 dry_run,
                 resume,
                 Some(step_results_dir_str.clone()),
                 run_dynamic::RunSettings::default(),
             )
-            .await?;
+            .await;
 
-            append_desktop_log(&format!("[Pipeline] Completed step {}", step_label));
+            // Mark step as completed or failed in progress log
+            if let Some(ref mut progress) = flow_progress {
+                let (event, msg) = match &step_result {
+                    Ok(_) => {
+                        progress.mark_step_completed(&step.id);
+                        ("step_completed", format!("Step {} completed successfully", step_label))
+                    }
+                    Err(e) => {
+                        progress.mark_step_failed(&step.id, &e.to_string());
+                        ("step_failed", format!("Step {} failed: {}", step_label, e))
+                    }
+                };
+                if let Some(ref shared_base) = progress_write_base {
+                    if let Err(e) = write_state(shared_base, &spec.name, &run_id, progress) {
+                        if verbose_progress {
+                            println!("⚠️  Could not write step completion progress: {}", e);
+                        }
+                    }
+                    let _ = append_progress(
+                        shared_base,
+                        &spec.name,
+                        &run_id,
+                        event,
+                        Some(&step.id),
+                        &msg,
+                    );
+                }
+            }
+
+            step_result?;
+
+            append_desktop_log(&format!("[Flow] Completed step {}", step_label));
 
             match previous_override {
                 Some(prev) => env::set_var("BIOVAULT_DATASITE_OVERRIDE", prev),
@@ -456,9 +1416,21 @@ pub async fn run_pipeline(
                 Some(prev) => env::set_var("BIOVAULT_DATASITES_OVERRIDE", prev),
                 None => env::remove_var("BIOVAULT_DATASITES_OVERRIDE"),
             }
+            match previous_syftbox_data_dir {
+                Some(prev) => env::set_var("SYFTBOX_DATA_DIR", prev),
+                None => env::remove_var("SYFTBOX_DATA_DIR"),
+            }
+            match previous_run_id {
+                Some(prev) => env::set_var("BV_RUN_ID", prev),
+                None => env::remove_var("BV_RUN_ID"),
+            }
+            match previous_flow_name {
+                Some(prev) => env::set_var("BV_FLOW_NAME", prev),
+                None => env::remove_var("BV_FLOW_NAME"),
+            }
 
             let mut outputs = HashMap::new();
-            for output in &project_spec.outputs {
+            for output in &module_spec.outputs {
                 let path = output
                     .path
                     .as_ref()
@@ -494,7 +1466,8 @@ pub async fn run_pipeline(
                                 datasite_key
                             )
                         })?;
-                    let source_path = outputs.get(&share_spec.source).ok_or_else(|| {
+                    let source_name = parse_share_source(&share_spec.source)?;
+                    let source_path = outputs.get(&source_name).ok_or_else(|| {
                         anyhow!(
                             "Shared output '{}' references unknown source '{}' in step '{}'",
                             share_name,
@@ -502,18 +1475,21 @@ pub async fn run_pipeline(
                             step.id
                         )
                     })?;
+                    let all_datasites = resolve_all_datasites_from_spec(&spec, &resolved_inputs);
                     create_shared_file(
                         Path::new(source_path),
                         &share_location.local_path,
                         share_spec,
-                        &step_targets,
+                        &all_datasites,
+                        Some(datasite_key.as_str()),
+                        sandbox_root.as_ref(),
                     )?;
                 }
             }
 
             step_outputs
                 .entry(step.id.clone())
-                .or_insert_with(HashMap::new)
+                .or_default()
                 .insert(datasite_key, outputs.clone());
 
             if !step.store.is_empty() {
@@ -522,7 +1498,7 @@ pub async fn run_pipeline(
                 })?;
                 for (store_name, store_spec) in &step.store {
                     match store_spec {
-                        PipelineStoreSpec::Sql(sql) => {
+                        FlowStoreSpec::Sql(sql) => {
                             if let Some(url) = parse_sql_destination(sql.target.as_deref())? {
                                 return Err(anyhow!(
                                     "SQL store '{}' destination '{}' not supported yet (only built-in biovault is available)",
@@ -553,13 +1529,9 @@ pub async fn run_pipeline(
         }
 
         if !share_locations_by_target.is_empty() {
-            let step_entry = step_outputs
-                .entry(step.id.clone())
-                .or_insert_with(HashMap::new);
+            let step_entry = step_outputs.entry(step.id.clone()).or_default();
             for (target, share_outputs) in &share_locations_by_target {
-                let outputs = step_entry
-                    .entry(target.clone())
-                    .or_insert_with(HashMap::new);
+                let outputs = step_entry.entry(target.clone()).or_default();
                 for (name, location) in share_outputs {
                     outputs
                         .entry(name.clone())
@@ -569,67 +1541,79 @@ pub async fn run_pipeline(
         }
     }
 
-    println!("\n✅ Pipeline run completed successfully");
+    // Mark flow as completed in progress log
+    if let Some(ref mut progress) = flow_progress {
+        progress.mark_flow_completed();
+        if let Some(ref shared_base) = progress_write_base {
+            if let Err(e) = write_state(shared_base, &spec.name, &run_id, progress) {
+                if verbose_progress {
+                    println!("⚠️  Could not write flow completion progress: {}", e);
+                }
+            }
+        }
+    }
+
+    println!("\n✅ Flow run completed successfully");
     println!("Results stored under {}", base_results_dir.display());
     Ok(())
 }
 
-#[instrument(skip_all, fields(component = "pipeline", pipeline = %file), err)]
+#[instrument(skip_all, fields(component = "flow", flow = %file), err)]
 pub fn validate(file: &str, diagram: bool) -> Result<()> {
-    let pipeline_path = Path::new(file);
-    if !pipeline_path.exists() {
-        return Err(anyhow!("Pipeline file not found: {}", pipeline_path.display()).into());
+    let flow_path = Path::new(file);
+    if !flow_path.exists() {
+        return Err(anyhow!("Flow file not found: {}", flow_path.display()).into());
     }
 
-    let spec = PipelineSpec::load(pipeline_path)?;
+    let spec = FlowSpec::load(flow_path)?;
     let db = BioVaultDb::new().ok();
-    let validation = validate_internal(pipeline_path, &spec, db.as_ref())?;
+    let validation = validate_internal(flow_path, &spec, db.as_ref())?;
 
     print_validation(&validation, diagram);
 
     if validation.has_errors() {
-        Err(anyhow!("Pipeline validation reported errors").into())
+        Err(anyhow!("Flow validation reported errors").into())
     } else {
-        println!("\n✅ Pipeline is valid");
+        println!("\n✅ Flow is valid");
         Ok(())
     }
 }
 
 pub fn inspect(file: &str) -> Result<()> {
-    let pipeline_path = Path::new(file);
-    if !pipeline_path.exists() {
-        return Err(anyhow!("Pipeline file not found: {}", pipeline_path.display()).into());
+    let flow_path = Path::new(file);
+    if !flow_path.exists() {
+        return Err(anyhow!("Flow file not found: {}", flow_path.display()).into());
     }
-    let spec = PipelineSpec::load(pipeline_path)?;
+    let spec = FlowSpec::load(flow_path)?;
     let db = BioVaultDb::new().ok();
-    let validation = validate_internal(pipeline_path, &spec, db.as_ref())?;
+    let validation = validate_internal(flow_path, &spec, db.as_ref())?;
     print_steps(&validation);
     Ok(())
 }
 
-struct PipelineWizard<'a> {
-    pipeline_path: &'a Path,
+struct FlowWizard<'a> {
+    flow_path: &'a Path,
     db: Option<&'a BioVaultDb>,
     theme: ColorfulTheme,
 }
 
-impl<'a> PipelineWizard<'a> {
-    fn new(pipeline_path: &'a Path, db: Option<&'a BioVaultDb>) -> Self {
+impl<'a> FlowWizard<'a> {
+    fn new(flow_path: &'a Path, db: Option<&'a BioVaultDb>) -> Self {
         Self {
-            pipeline_path,
+            flow_path,
             db,
             theme: ColorfulTheme::default(),
         }
     }
 
-    fn run(&self) -> Result<PipelineSpec> {
-        println!("🧪 Pipeline wizard — let’s assemble your pipeline");
+    fn run(&self) -> Result<FlowSpec> {
+        println!("🧪 Flow wizard — let’s assemble your flow");
 
         let spec_name = Input::with_theme(&self.theme)
-            .with_prompt("Pipeline name")
+            .with_prompt("Flow name")
             .validate_with(|input: &String| {
                 if input.trim().is_empty() {
-                    Err("Pipeline name cannot be empty")
+                    Err("Flow name cannot be empty")
                 } else {
                     Ok(())
                 }
@@ -637,9 +1621,9 @@ impl<'a> PipelineWizard<'a> {
             .interact_text()
             .cli_result()?;
 
-        let mut spec = PipelineSpec {
+        let mut spec = FlowSpec {
             name: spec_name,
-            ..PipelineSpec::default()
+            ..FlowSpec::default()
         };
 
         loop {
@@ -657,28 +1641,25 @@ impl<'a> PipelineWizard<'a> {
         Ok(spec)
     }
 
-    fn add_step_to(&self, mut spec: PipelineSpec) -> Result<PipelineSpec> {
-        let resolved_steps = resolve_existing_steps(&spec, self.pipeline_dir(), self.db)?;
+    fn add_step_to(&self, mut spec: FlowSpec) -> Result<FlowSpec> {
+        let resolved_steps = resolve_existing_steps(&spec, self.flow_dir(), self.db)?;
         let available_outputs = collect_available_outputs(&resolved_steps);
 
-        let project_choice = self.prompt_project_choice()?;
+        let module_choice = self.prompt_module_choice()?;
 
-        let loaded_project = match &project_choice {
-            ProjectChoice::Defer => None,
-            _ => Some(load_project_spec(&project_choice)?),
+        let loaded_module = match &module_choice {
+            ModuleChoice::Defer => None,
+            _ => Some(load_module_spec(&module_choice)?),
         };
 
-        if let Some(project) = &loaded_project {
-            println!(
-                "\nConfiguring step for project {}",
-                project.summary().bold()
-            );
+        if let Some(module) = &loaded_module {
+            println!("\nConfiguring step for module {}", module.summary().bold());
         } else {
-            println!("\nConfiguring step without a project (assign later)");
+            println!("\nConfiguring step without a module (assign later)");
         }
 
-        let default_id = if let Some(project) = &loaded_project {
-            generate_default_step_id(project, &spec)
+        let default_id = if let Some(module) = &loaded_module {
+            generate_default_step_id(module, &spec)
         } else {
             format!("step{}", spec.steps.len() + 1)
         };
@@ -701,8 +1682,8 @@ impl<'a> PipelineWizard<'a> {
         let mut with_map = BTreeMap::new();
         let mut publish_map = BTreeMap::new();
 
-        if let Some(project) = &loaded_project {
-            for input in &project.spec.inputs {
+        if let Some(module) = &loaded_module {
+            for input in &module.spec.inputs {
                 if let Some(binding) =
                     self.prompt_input_binding(&mut spec, &step_id, input, &available_outputs)?
                 {
@@ -710,64 +1691,67 @@ impl<'a> PipelineWizard<'a> {
                 }
             }
 
-            for input in &project.spec.inputs {
+            for input in &module.spec.inputs {
                 with_map.entry(input.name.clone()).or_insert_with(|| {
-                    let key = ensure_pipeline_input(&mut spec, &step_id, input);
+                    let key = ensure_flow_input(&mut spec, &step_id, input);
                     YamlValue::String(format!("inputs.{}", key))
                 });
             }
 
-            publish_map = prompt_publish_map(&self.theme, &project.spec.outputs)?;
+            publish_map = prompt_publish_map(&self.theme, &module.spec.outputs)?;
         }
 
-        let step = PipelineStepSpec {
+        let step = FlowStepSpec {
             id: step_id,
-            uses: project_choice.uses_value(),
+            uses: module_choice.uses_value(),
             where_exec: None,
             foreach: None,
             runs_on: None,
             order: None,
+            coordination: None,
             with: with_map,
             publish: publish_map,
             share: BTreeMap::new(),
             store: BTreeMap::new(),
+            permissions: Vec::new(),
+            barrier: None,
         };
 
         spec.steps.push(step);
         Ok(spec)
     }
 
-    fn prompt_project_choice(&self) -> Result<ProjectChoice> {
-        let mut options = list_registered_projects(self.db);
-        options.push(ProjectChoice::EnterPath);
-        options.push(ProjectChoice::Defer);
+    fn prompt_module_choice(&self) -> Result<ModuleChoice> {
+        let mut options = list_registered_modules(self.db);
+        options.push(ModuleChoice::EnterPath);
+        options.push(ModuleChoice::Defer);
 
         let items: Vec<String> = options.iter().map(|choice| choice.display()).collect();
 
         let index = Select::with_theme(&self.theme)
-            .with_prompt("Select a project to use")
+            .with_prompt("Select a module to use")
             .items(&items)
             .default(0)
             .interact()
             .cli_result()?;
 
         match &options[index] {
-            ProjectChoice::EnterPath => {
+            ModuleChoice::EnterPath => {
                 let input: String = Input::with_theme(&self.theme)
-                    .with_prompt("Project directory path or module.yaml")
+                    .with_prompt("Module directory path or module.yaml")
                     .interact_text()
                     .cli_result()?;
-                let (reference, root) = normalize_project_reference(&input, self.pipeline_dir())?;
-                Ok(ProjectChoice::Path { reference, root })
+                let (reference, root) = normalize_module_reference(&input, self.flow_dir())?;
+                Ok(ModuleChoice::Path { reference, root })
             }
-            ProjectChoice::Defer => Ok(ProjectChoice::Defer),
+            ModuleChoice::Defer => Ok(ModuleChoice::Defer),
             other => Ok(other.clone()),
         }
     }
 
     fn prompt_input_binding(
         &self,
-        spec: &mut PipelineSpec,
+        spec: &mut FlowSpec,
         step_id: &str,
         input: &InputSpec,
         available_outputs: &[CandidateOutput],
@@ -781,8 +1765,8 @@ impl<'a> PipelineWizard<'a> {
 
         let literal_index = options.len();
         options.push("Enter literal / path".to_string());
-        let pipeline_index = options.len();
-        options.push("Use pipeline input".to_string());
+        let flow_index = options.len();
+        options.push("Use flow input".to_string());
 
         let selection = Select::with_theme(&self.theme)
             .with_prompt("Binding")
@@ -805,7 +1789,7 @@ impl<'a> PipelineWizard<'a> {
             return Ok(Some(YamlValue::String(value)));
         }
 
-        if selection == pipeline_index {
+        if selection == flow_index {
             let matching_inputs: Vec<String> = spec
                 .inputs
                 .iter()
@@ -819,17 +1803,17 @@ impl<'a> PipelineWizard<'a> {
                 .collect();
 
             let chosen_key = if matching_inputs.is_empty() {
-                ensure_pipeline_input(spec, step_id, input)
+                ensure_flow_input(spec, step_id, input)
             } else {
-                let mut pipeline_options = matching_inputs
+                let mut flow_options = matching_inputs
                     .iter()
                     .map(|name| format!("Existing: {}", name))
                     .collect::<Vec<_>>();
-                pipeline_options.push(format!("Create new input for '{}'", input.name));
+                flow_options.push(format!("Create new input for '{}'", input.name));
 
                 let selected = Select::with_theme(&self.theme)
-                    .with_prompt("Pipeline input")
-                    .items(&pipeline_options)
+                    .with_prompt("Flow input")
+                    .items(&flow_options)
                     .default(0)
                     .interact()
                     .cli_result()?;
@@ -837,7 +1821,7 @@ impl<'a> PipelineWizard<'a> {
                 if selected < matching_inputs.len() {
                     matching_inputs[selected].clone()
                 } else {
-                    ensure_pipeline_input(spec, step_id, input)
+                    ensure_flow_input(spec, step_id, input)
                 }
             };
 
@@ -847,8 +1831,8 @@ impl<'a> PipelineWizard<'a> {
         Ok(None)
     }
 
-    fn pipeline_dir(&self) -> &Path {
-        self.pipeline_path
+    fn flow_dir(&self) -> &Path {
+        self.flow_path
             .parent()
             .filter(|p| !p.as_os_str().is_empty())
             .unwrap_or_else(|| Path::new("."))
@@ -897,80 +1881,80 @@ fn prompt_publish_map(
 }
 
 #[derive(Clone)]
-enum ProjectChoice {
+enum ModuleChoice {
     Registered { name: String, path: PathBuf },
     Path { reference: String, root: PathBuf },
     EnterPath,
     Defer,
 }
 
-impl ProjectChoice {
+impl ModuleChoice {
     fn display(&self) -> String {
         match self {
-            ProjectChoice::Registered { name, path } => {
+            ModuleChoice::Registered { name, path } => {
                 format!("{} (registered at {})", name, path.display())
             }
-            ProjectChoice::Path { reference, .. } => reference.clone(),
-            ProjectChoice::EnterPath => "Enter project path".to_string(),
-            ProjectChoice::Defer => "Skip (assign at run time)".to_string(),
+            ModuleChoice::Path { reference, .. } => reference.clone(),
+            ModuleChoice::EnterPath => "Enter module path".to_string(),
+            ModuleChoice::Defer => "Skip (assign at run time)".to_string(),
         }
     }
 
     fn uses_value(&self) -> Option<String> {
         match self {
-            ProjectChoice::Registered { name, .. } => Some(name.clone()),
-            ProjectChoice::Path { reference, .. } => Some(reference.clone()),
-            ProjectChoice::EnterPath => None,
-            ProjectChoice::Defer => None,
+            ModuleChoice::Registered { name, .. } => Some(name.clone()),
+            ModuleChoice::Path { reference, .. } => Some(reference.clone()),
+            ModuleChoice::EnterPath => None,
+            ModuleChoice::Defer => None,
         }
     }
 }
 
-struct LoadedProject {
-    spec: ProjectSpec,
+struct LoadedModule {
+    spec: ModuleSpec,
     root: PathBuf,
 }
 
-impl LoadedProject {
+impl LoadedModule {
     fn summary(&self) -> String {
         format!("{} ({})", self.spec.name, self.root.display())
     }
 }
 
-fn load_project_spec(choice: &ProjectChoice) -> Result<LoadedProject> {
+fn load_module_spec(choice: &ModuleChoice) -> Result<LoadedModule> {
     match choice {
-        ProjectChoice::Registered { name: _, path } => {
-            let spec_path = resolve_project_spec_path(Path::new(path));
-            let spec = ProjectSpec::load(&spec_path)?;
-            Ok(LoadedProject {
+        ModuleChoice::Registered { name: _, path } => {
+            let spec_path = Path::new(path).join("module.yaml");
+            let spec = ModuleSpec::load(&spec_path)?;
+            Ok(LoadedModule {
                 spec,
                 root: path.clone(),
             })
         }
-        ProjectChoice::Path { reference: _, root } => {
-            let spec_path = resolve_project_spec_path(Path::new(root));
+        ModuleChoice::Path { reference: _, root } => {
+            let spec_path = Path::new(root).join("module.yaml");
             if !spec_path.exists() {
                 return Err(anyhow!("No module.yaml found at {}", spec_path.display()).into());
             }
-            let spec = ProjectSpec::load(&spec_path)?;
-            Ok(LoadedProject {
+            let spec = ModuleSpec::load(&spec_path)?;
+            Ok(LoadedModule {
                 spec,
                 root: root.clone(),
             })
         }
-        ProjectChoice::EnterPath => Err(anyhow!("Unexpected project choice").into()),
-        ProjectChoice::Defer => Err(anyhow!("Deferred project has no spec").into()),
+        ModuleChoice::EnterPath => Err(anyhow!("Unexpected module choice").into()),
+        ModuleChoice::Defer => Err(anyhow!("Deferred module has no spec").into()),
     }
 }
 
-fn list_registered_projects(db: Option<&BioVaultDb>) -> Vec<ProjectChoice> {
+fn list_registered_modules(db: Option<&BioVaultDb>) -> Vec<ModuleChoice> {
     if let Some(db) = db {
-        match db.list_projects() {
-            Ok(projects) => projects
+        match db.list_modules() {
+            Ok(modules) => modules
                 .into_iter()
-                .map(|p| ProjectChoice::Registered {
+                .map(|p| ModuleChoice::Registered {
                     name: p.name,
-                    path: PathBuf::from(p.project_path),
+                    path: PathBuf::from(p.module_path),
                 })
                 .collect(),
             Err(_) => vec![],
@@ -980,8 +1964,8 @@ fn list_registered_projects(db: Option<&BioVaultDb>) -> Vec<ProjectChoice> {
     }
 }
 
-fn generate_default_step_id(project: &LoadedProject, spec: &PipelineSpec) -> String {
-    let mut base: String = project
+fn generate_default_step_id(module: &LoadedModule, spec: &FlowSpec) -> String {
+    let mut base: String = module
         .spec
         .name
         .chars()
@@ -1035,7 +2019,7 @@ impl CandidateOutput {
 fn collect_available_outputs(resolved_steps: &[ResolvedStep]) -> Vec<CandidateOutput> {
     let mut outputs = Vec::new();
     for step in resolved_steps {
-        for output in &step.project.spec.outputs {
+        for output in &step.module.spec.outputs {
             outputs.push(CandidateOutput {
                 binding: format!("step.{}.outputs.{}", step.step_id, output.name),
                 output: output.clone(),
@@ -1045,7 +2029,7 @@ fn collect_available_outputs(resolved_steps: &[ResolvedStep]) -> Vec<CandidateOu
     outputs
 }
 
-fn ensure_pipeline_input(spec: &mut PipelineSpec, step_id: &str, input: &InputSpec) -> String {
+fn ensure_flow_input(spec: &mut FlowSpec, step_id: &str, input: &InputSpec) -> String {
     if let Some(existing) = spec.inputs.get(&input.name) {
         if existing.raw_type() == input.raw_type {
             return input.name.clone();
@@ -1065,13 +2049,13 @@ fn ensure_pipeline_input(spec: &mut PipelineSpec, step_id: &str, input: &InputSp
     // If we had to rename due to type conflict, inform user via console.
     if key != input.name {
         println!(
-            "⚠️  Input '{}' on step '{}' conflicts with existing pipeline input; recorded as '{}'.",
+            "⚠️  Input '{}' on step '{}' conflicts with existing flow input; recorded as '{}'.",
             input.name, step_id, key
         );
     }
 
     spec.inputs
-        .insert(key.clone(), PipelineInputSpec::from_type(&input.raw_type));
+        .insert(key.clone(), FlowInputSpec::from_type(&input.raw_type));
     key
 }
 
@@ -1086,11 +2070,13 @@ fn is_type_placeholder(binding: &str, expected: &str) -> bool {
     if trimmed.contains('(') || trimmed.contains(')') {
         return false;
     }
-    crate::project_spec::types_compatible(trimmed, expected)
+    crate::module_spec::types_compatible(trimmed, expected)
 }
 
 fn normalize_manifest_binding(value: &str) -> (String, bool) {
-    for suffix in [".manifest", ".all", ".paths"] {
+    // .url_list is the preferred suffix - indicates you're getting a list of URLs
+    // .manifest kept for backwards compatibility
+    for suffix in [".url_list", ".manifest", ".all", ".paths"] {
         if let Some(base) = value.strip_suffix(suffix) {
             return (base.to_string(), true);
         }
@@ -1141,7 +2127,7 @@ fn parse_overrides(
     initial_results_dir: Option<String>,
 ) -> Result<ParseOverridesResult> {
     let mut step_overrides = HashMap::new();
-    let mut pipeline_overrides = HashMap::new();
+    let mut flow_overrides = HashMap::new();
     let mut results_dir = initial_results_dir;
     let mut nextflow_args = Vec::new();
     let mut i = 0;
@@ -1151,14 +2137,10 @@ fn parse_overrides(
             if i + 1 >= extra_args.len() {
                 return Err(anyhow!("--set requires an argument like step.input=value").into());
             }
-            parse_override_pair(
-                &extra_args[i + 1],
-                &mut step_overrides,
-                &mut pipeline_overrides,
-            )?;
+            parse_override_pair(&extra_args[i + 1], &mut step_overrides, &mut flow_overrides)?;
             i += 2;
         } else if let Some(kv) = arg.strip_prefix("--set=") {
-            parse_override_pair(kv, &mut step_overrides, &mut pipeline_overrides)?;
+            parse_override_pair(kv, &mut step_overrides, &mut flow_overrides)?;
             i += 1;
         } else if arg == "--results-dir" {
             if i + 1 >= extra_args.len() {
@@ -1177,18 +2159,13 @@ fn parse_overrides(
             i += 1;
         }
     }
-    Ok((
-        step_overrides,
-        pipeline_overrides,
-        results_dir,
-        nextflow_args,
-    ))
+    Ok((step_overrides, flow_overrides, results_dir, nextflow_args))
 }
 
 fn parse_override_pair(
     pair: &str,
     step_overrides: &mut HashMap<(String, String), String>,
-    pipeline_overrides: &mut HashMap<String, String>,
+    flow_overrides: &mut HashMap<String, String>,
 ) -> Result<()> {
     let (key, value) = pair
         .split_once('=')
@@ -1201,32 +2178,45 @@ fn parse_override_pair(
     }
     let value = value.trim().to_string();
     if step.trim() == "inputs" {
-        pipeline_overrides.insert(input.trim().to_string(), value);
+        flow_overrides.insert(input.trim().to_string(), value);
     } else {
         step_overrides.insert((step.trim().to_string(), input.trim().to_string()), value);
     }
     Ok(())
 }
 
-fn resolve_syft_path(value: &str, syftbox_data_dir: Option<&PathBuf>) -> Result<String> {
+fn resolve_syft_path(
+    value: &str,
+    syftbox_data_dir: Option<&PathBuf>,
+    sandbox_root: Option<&PathBuf>,
+) -> Result<String> {
     if !value.starts_with("syft://") {
         return Ok(value.to_string());
     }
-    let data_dir = syftbox_data_dir.ok_or_else(|| {
-        anyhow!("SYFTBOX_DATA_DIR is required to resolve syft:// outputs")
-    })?;
     let parsed = SyftURL::parse(value)?;
+
+    if let Some(root) = sandbox_root {
+        let path = root
+            .join(&parsed.email)
+            .join("datasites")
+            .join(&parsed.email)
+            .join(&parsed.path);
+        return Ok(path.to_string_lossy().to_string());
+    }
+
+    let data_dir = syftbox_data_dir
+        .ok_or_else(|| anyhow!("SYFTBOX_DATA_DIR is required to resolve syft:// outputs"))?;
     let path = data_dir
         .join("datasites")
-        .join(parsed.email)
-        .join(parsed.path);
+        .join(&parsed.email)
+        .join(&parsed.path);
     Ok(path.to_string_lossy().to_string())
 }
 
 fn resolve_binding(
     binding: &str,
     expected_type: &str,
-    pipeline_inputs: &BTreeMap<String, PipelineInputSpec>,
+    flow_inputs: &BTreeMap<String, FlowInputSpec>,
     resolved_inputs: &HashMap<String, String>,
     step_outputs: &HashMap<String, HashMap<String, HashMap<String, String>>>,
     current_step_id: &str,
@@ -1234,21 +2224,22 @@ fn resolve_binding(
     results_dir: &Path,
     step_output_order: &HashMap<String, Vec<String>>,
     syftbox_data_dir: Option<&PathBuf>,
+    sandbox_root: Option<&PathBuf>,
 ) -> Result<String> {
     if let Some(input_name) = binding.strip_prefix("inputs.") {
         if let Some(value) = resolved_inputs.get(input_name) {
             return Ok(value.clone());
         }
-        if let Some(_spec) = pipeline_inputs.get(input_name) {
+        if let Some(_spec) = flow_inputs.get(input_name) {
             return Err(anyhow!(
-                "Pipeline input '{}' is not set. Provide a value with --set inputs.{}=<value>.",
+                "Flow input '{}' is not set. Provide a value with --set inputs.{}=<value>.",
                 input_name,
                 input_name
             )
             .into());
         } else {
             return Err(anyhow!(
-                "Pipeline input '{}' referenced in step '{}' is not declared",
+                "Flow input '{}' referenced in step '{}' is not declared",
                 input_name,
                 current_step_id
             )
@@ -1258,11 +2249,11 @@ fn resolve_binding(
 
     if binding.starts_with("step.") {
         let parts: Vec<&str> = binding.split('.').collect();
-        let wants_manifest = parts.len() == 5
-            && matches!(parts[4], "manifest" | "all" | "paths");
-        if (parts.len() != 4 && !wants_manifest) || parts[2] != "outputs" {
+        let wants_manifest = parts.len() == 5 && matches!(parts[4], "url_list" | "manifest" | "all" | "paths");
+        let valid_namespace = parts.len() >= 3 && matches!(parts[2], "outputs" | "share");
+        if (parts.len() != 4 && !wants_manifest) || !valid_namespace {
             return Err(anyhow!(
-                "Invalid step output reference '{}' in step '{}'. Expected format step.<id>.outputs.<name> or step.<id>.outputs.<name>.manifest",
+                "Invalid step reference '{}' in step '{}'. Expected format step.<id>.outputs.<name> or step.<id>.share.<name>.url_list",
                 binding,
                 current_step_id
             )
@@ -1282,7 +2273,7 @@ fn resolve_binding(
             if let Some(site) = current_datasite {
                 if let Some(outputs) = outputs_by_site.get(site) {
                     if let Some(value) = outputs.get(output_name) {
-                        return resolve_syft_path(value, syftbox_data_dir);
+                        return resolve_syft_path(value, syftbox_data_dir, sandbox_root);
                     }
                 }
             }
@@ -1290,7 +2281,7 @@ fn resolve_binding(
             if outputs_by_site.len() == 1 {
                 if let Some(outputs) = outputs_by_site.values().next() {
                     if let Some(value) = outputs.get(output_name) {
-                        return resolve_syft_path(value, syftbox_data_dir);
+                        return resolve_syft_path(value, syftbox_data_dir, sandbox_root);
                     }
                 }
             }
@@ -1328,7 +2319,7 @@ fn resolve_binding(
         for site in ordered_sites {
             if let Some(outputs) = outputs_by_site.get(&site) {
                 if let Some(value) = outputs.get(output_name) {
-                    let resolved = resolve_syft_path(value, syftbox_data_dir)?;
+                    let resolved = resolve_syft_path(value, syftbox_data_dir, sandbox_root)?;
                     lines.push(format!("{}\t{}", site, resolved));
                 }
             }
@@ -1414,7 +2405,7 @@ fn sanitize_identifier(name: &str) -> String {
     trimmed
 }
 
-fn resolve_step_targets(step: &PipelineStepSpec) -> Vec<String> {
+fn resolve_step_targets(step: &FlowStepSpec) -> Vec<String> {
     if let Some(runs_on) = &step.runs_on {
         return runs_on.as_vec();
     }
@@ -1438,6 +2429,53 @@ fn resolve_run_targets(
     } else {
         Vec::new()
     }
+}
+
+fn resolve_all_datasites_from_spec(
+    spec: &FlowSpec,
+    resolved_inputs: &HashMap<String, String>,
+) -> Vec<String> {
+    if let Some(value) = resolved_inputs.get("datasites") {
+        return value.split(',').map(|s| s.trim().to_string()).collect();
+    }
+    if !spec.datasites.is_empty() {
+        return spec.datasites.clone();
+    }
+    Vec::new()
+}
+
+fn expand_permission_patterns(
+    patterns: &[String],
+    all_datasites: &[String],
+    current_datasite: Option<&str>,
+) -> Vec<String> {
+    let mut result = Vec::new();
+    for pattern in patterns {
+        let mut trimmed = pattern.trim().to_string();
+
+        // Expand {datasite.current} first
+        if let Some(current) = current_datasite {
+            trimmed = trimmed.replace("{datasite.current}", current);
+        }
+
+        if trimmed.contains("{datasites[") {
+            if trimmed.contains("[*]") {
+                result.extend(all_datasites.iter().cloned());
+            } else if let Some(inner) = trimmed
+                .strip_prefix("{datasites[")
+                .and_then(|s| s.strip_suffix("]}"))
+            {
+                if let Ok(index) = inner.trim().parse::<usize>() {
+                    if let Some(site) = all_datasites.get(index) {
+                        result.push(site.clone());
+                    }
+                }
+            }
+        } else {
+            result.push(trimmed.to_string());
+        }
+    }
+    result
 }
 
 fn resolve_current_datasite() -> Option<String> {
@@ -1464,15 +2502,47 @@ fn resolve_current_datasite() -> Option<String> {
     None
 }
 
-fn render_pipeline_template(template: &str, current: &str, datasites: &[String], run_id: &str) -> String {
+fn render_flow_template(
+    template: &str,
+    current: &str,
+    datasites: &[String],
+    run_id: &str,
+    flow_name: &str,
+    step_number: Option<usize>,
+    step_id: Option<&str>,
+    user_vars: &std::collections::BTreeMap<String, String>,
+) -> String {
     let mut rendered = template.to_string();
+
+    // First pass: expand user-defined variables (namespaced as {vars.name})
+    // Do multiple passes to handle variables that reference other variables
+    for _ in 0..5 {
+        let before = rendered.clone();
+        for (name, value) in user_vars {
+            rendered = rendered.replace(&format!("{{vars.{}}}", name), value);
+        }
+        if rendered == before {
+            break;
+        }
+    }
+
+    // Second pass: expand built-in variables
     rendered = rendered.replace("{current_datasite}", current);
+    rendered = rendered.replace("{datasite.current}", current);
+    rendered = rendered.replace("{flow_name}", flow_name);
+    rendered = rendered.replace("{run_id}", run_id);
     if let Some(index) = datasites.iter().position(|site| site == current) {
         rendered = rendered.replace("{datasites.index}", &index.to_string());
         rendered = rendered.replace("{datasite.index}", &index.to_string());
     }
     rendered = rendered.replace("{datasites}", &datasites.join(","));
-    rendered.replace("{run_id}", run_id)
+    if let Some(num) = step_number {
+        rendered = rendered.replace("{step.number}", &format!("{:02}", num));
+    }
+    if let Some(id) = step_id {
+        rendered = rendered.replace("{step.id}", id);
+    }
+    rendered
 }
 
 struct ShareLocation {
@@ -1481,51 +2551,51 @@ struct ShareLocation {
 }
 
 fn resolve_share_location(
-    template: &str,
+    url_template: &str,
     current: &str,
     datasites: &[String],
     run_id: &str,
+    flow_name: &str,
     data_dir: &Path,
+    step_number: usize,
+    step_id: &str,
+    user_vars: &std::collections::BTreeMap<String, String>,
 ) -> Result<ShareLocation> {
-    let rendered = render_pipeline_template(template, current, datasites, run_id);
-    if rendered.starts_with("syft://") {
-        let parsed = SyftURL::parse(&rendered)?;
-        let local_path = data_dir
-            .join("datasites")
-            .join(parsed.email)
-            .join(parsed.path);
-        return Ok(ShareLocation {
-            local_path,
-            syft_url: rendered,
-        });
+    // Expand template variables in the URL
+    let rendered = render_flow_template(
+        url_template,
+        current,
+        datasites,
+        run_id,
+        flow_name,
+        Some(step_number),
+        Some(step_id),
+        user_vars,
+    );
+
+    // Require syft:// URL scheme
+    if !rendered.starts_with("syft://") {
+        return Err(anyhow!(
+            "Share URL must use syft:// scheme, got: {}",
+            rendered
+        ).into());
     }
 
-    let path = PathBuf::from(&rendered);
-    if path.is_absolute() {
-        let datasite_root = data_dir.join("datasites").join(current);
-        let relative = path.strip_prefix(&datasite_root).map_err(|_| {
-            anyhow!(
-                "Shared path '{}' must be under '{}' or use a syft:// URL",
-                path.display(),
-                datasite_root.display()
-            )
-        })?;
-        let rel_str = relative.to_string_lossy().trim_start_matches('/').to_string();
-        let local_path = path.clone();
-        return Ok(ShareLocation {
-            local_path,
-            syft_url: format!("syft://{}/{}", current, rel_str),
-        });
-    }
+    // Parse and validate using SDK
+    let parsed = SyftURL::parse(&rendered)
+        .with_context(|| format!("Invalid share URL: {}", rendered))?;
 
-    let rel_str = rendered.trim_start_matches('/').to_string();
+    // Validate no path traversal
+    validate_no_path_traversal(&parsed.path)?;
+
     let local_path = data_dir
         .join("datasites")
-        .join(current)
-        .join(&rendered);
+        .join(&parsed.email)
+        .join(&parsed.path);
+
     Ok(ShareLocation {
         local_path,
-        syft_url: format!("syft://{}/{}", current, rel_str),
+        syft_url: rendered,
     })
 }
 
@@ -1542,37 +2612,142 @@ fn dedupe_emails(values: &[String]) -> Vec<String> {
     out
 }
 
+/// Validate a local path has no path traversal
+fn validate_no_path_traversal(path: &str) -> Result<()> {
+    if path.contains("..") {
+        return Err(anyhow!("Path traversal (..) not allowed: {}", path).into());
+    }
+    Ok(())
+}
+
+/// Parse share source reference (e.g., "self.outputs.rsids" -> "rsids")
+fn parse_share_source(source: &str) -> Result<String> {
+    let source = source.trim();
+    if let Some(name) = source.strip_prefix("self.outputs.") {
+        if name.is_empty() {
+            return Err(anyhow!("Invalid share source: {}", source).into());
+        }
+        return Ok(name.to_string());
+    }
+    if let Some(name) = source.strip_prefix("outputs.") {
+        if name.is_empty() {
+            return Err(anyhow!("Invalid share source: {}", source).into());
+        }
+        return Ok(name.to_string());
+    }
+    // For backwards compatibility, allow bare names
+    Ok(source.to_string())
+}
+
+fn execute_permissions_step(
+    permissions: &[FlowPermissionSpec],
+    target_data_dir: &Path,
+    all_datasites: &[String],
+    current_datasite: Option<&str>,
+    flow_name: &str,
+    run_id: &str,
+) -> Result<()> {
+    use crate::types::{AccessControl, PermissionRule, SyftPermissions};
+
+    for perm_spec in permissions {
+        // Expand templates in the URL
+        let expanded_url = perm_spec
+            .url
+            .replace("{flow_name}", flow_name)
+            .replace("{run_id}", run_id);
+        let expanded_url = if let Some(current) = current_datasite {
+            expanded_url.replace("{datasite.current}", current)
+        } else {
+            expanded_url
+        };
+
+        // Parse and validate syft:// URL using the SDK parser
+        let parsed = SyftURL::parse(&expanded_url)
+            .with_context(|| format!("Invalid permissions URL: {}", expanded_url))?;
+
+        // Validate no path traversal
+        validate_no_path_traversal(&parsed.path)?;
+
+        // Build local path from syft URL components
+        let full_path = target_data_dir.join("datasites").join(&parsed.email).join(&parsed.path);
+
+        std::fs::create_dir_all(&full_path)
+            .with_context(|| format!("Failed to create permissions directory: {}", full_path.display()))?;
+
+        let rules: Vec<PermissionRule> = perm_spec
+            .rules
+            .iter()
+            .map(|rule| {
+                let read = expand_permission_patterns(&rule.access.read, all_datasites, current_datasite);
+                let write = expand_permission_patterns(&rule.access.write, all_datasites, current_datasite);
+                let admin = expand_permission_patterns(&rule.access.admin, all_datasites, current_datasite);
+                PermissionRule {
+                    pattern: rule.pattern.clone(),
+                    access: AccessControl {
+                        read: dedupe_emails(&read),
+                        write: dedupe_emails(&write),
+                        admin: dedupe_emails(&admin),
+                    },
+                }
+            })
+            .collect();
+
+        let permissions = SyftPermissions { rules };
+        let perms_path = full_path.join("syft.pub.yaml");
+        let yaml = serde_yaml::to_string(&permissions)
+            .context("Failed to serialize permissions")?;
+        std::fs::write(&perms_path, yaml)
+            .with_context(|| format!("Failed to write {}", perms_path.display()))?;
+
+        println!("  📝 Created permissions at: {}", perms_path.display());
+    }
+
+    Ok(())
+}
+
 fn create_shared_file(
     source_path: &Path,
     shared_path: &Path,
-    share_spec: &PipelineShareSpec,
-    step_targets: &[String],
+    share_spec: &FlowShareSpec,
+    all_datasites: &[String],
+    current_datasite: Option<&str>,
+    _sandbox_root: Option<&PathBuf>,
 ) -> Result<()> {
     let read = if share_spec.read.is_empty() {
-        step_targets.to_vec()
+        all_datasites.to_vec()
     } else {
-        share_spec.read.clone()
+        expand_permission_patterns(&share_spec.read, all_datasites, current_datasite)
     };
     let read = dedupe_emails(&read);
     let write = if share_spec.write.is_empty() {
         read.clone()
     } else {
-        dedupe_emails(&share_spec.write)
+        expand_permission_patterns(&share_spec.write, all_datasites, current_datasite)
     };
-    let admin = dedupe_emails(&share_spec.admin);
+    let write = dedupe_emails(&write);
+    let admin = expand_permission_patterns(&share_spec.admin, all_datasites, current_datasite);
+    let admin = dedupe_emails(&admin);
 
     if let Some(parent) = shared_path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("Failed to create shared directory {}", parent.display()))?;
+        let file_pattern = shared_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("*");
         let permissions = SyftPermissions {
             rules: vec![PermissionRule {
-                pattern: "**".to_string(),
-                access: AccessControl { read, write, admin },
+                pattern: file_pattern.to_string(),
+                access: AccessControl {
+                    read: read.clone(),
+                    write,
+                    admin,
+                },
             }],
         };
         let perms_path = parent.join("syft.pub.yaml");
-        let yaml = serde_yaml::to_string(&permissions)
-            .context("Failed to serialize share permissions")?;
+        let yaml =
+            serde_yaml::to_string(&permissions).context("Failed to serialize share permissions")?;
         std::fs::write(&perms_path, yaml)
             .with_context(|| format!("Failed to write {}", perms_path.display()))?;
     }
@@ -1584,10 +2759,11 @@ fn create_shared_file(
             shared_path.display()
         )
     })?;
+
     Ok(())
 }
 
-fn detect_table_name(store_name: &str, spec: &PipelineSqlStoreSpec, run_id: &str) -> String {
+fn detect_table_name(store_name: &str, spec: &FlowSqlStoreSpec, run_id: &str) -> String {
     let template = spec
         .table
         .clone()
@@ -1596,7 +2772,7 @@ fn detect_table_name(store_name: &str, spec: &PipelineSqlStoreSpec, run_id: &str
     format!("{}{}", RESULTS_TABLE_PREFIX, table_name)
 }
 
-fn detect_format(spec: &PipelineSqlStoreSpec, output_path: &Path) -> String {
+fn detect_format(spec: &FlowSqlStoreSpec, output_path: &Path) -> String {
     if let Some(fmt) = spec.format.as_deref() {
         return fmt.to_ascii_lowercase();
     }
@@ -1662,7 +2838,7 @@ fn parse_sql_destination(target: Option<&str>) -> Result<Option<String>> {
 fn store_sql_output(
     db: &mut BioVaultDb,
     store_name: &str,
-    spec: &PipelineSqlStoreSpec,
+    spec: &FlowSqlStoreSpec,
     output_path: &Path,
     run_id: &str,
 ) -> Result<()> {
@@ -1826,21 +3002,21 @@ fn store_sql_output(
 
 struct ResolvedStep {
     step_id: String,
-    project: LoadedProject,
-    store: BTreeMap<String, PipelineStoreSpec>,
+    module: LoadedModule,
+    store: BTreeMap<String, FlowStoreSpec>,
 }
 
 fn resolve_existing_steps(
-    spec: &PipelineSpec,
-    pipeline_dir: &Path,
+    spec: &FlowSpec,
+    flow_dir: &Path,
     db: Option<&BioVaultDb>,
 ) -> Result<Vec<ResolvedStep>> {
     let mut resolved = Vec::new();
     for step in &spec.steps {
-        if let Some(project) = resolve_project(step, pipeline_dir, db)? {
+        if let Some(module) = resolve_module(step, flow_dir, db)? {
             resolved.push(ResolvedStep {
                 step_id: step.id.clone(),
-                project,
+                module,
                 store: step.store.clone(),
             });
         }
@@ -1848,16 +3024,16 @@ fn resolve_existing_steps(
     Ok(resolved)
 }
 
-fn normalize_project_reference(raw: &str, base_dir: &Path) -> Result<(String, PathBuf)> {
+fn normalize_module_reference(raw: &str, base_dir: &Path) -> Result<(String, PathBuf)> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
-        return Err(anyhow!("Project path cannot be empty").into());
+        return Err(anyhow!("Module path cannot be empty").into());
     }
 
     let mut reference_path = PathBuf::from(trimmed);
     if reference_path
         .file_name()
-        .map(|name| name == MODULE_YAML_FILE || name == PROJECT_YAML_FILE)
+        .map(|name| name == "module.yaml")
         .unwrap_or(false)
     {
         reference_path.pop();
@@ -1881,10 +3057,10 @@ fn normalize_project_reference(raw: &str, base_dir: &Path) -> Result<(String, Pa
             .join(&reference_path)
     };
 
-    if !resolve_project_spec_path(&absolute).exists() {
+    if !absolute.join("module.yaml").exists() {
         return Err(anyhow!(
             "No module.yaml found at {}",
-            resolve_project_spec_path(&absolute).display()
+            absolute.join("module.yaml").display()
         )
         .into());
     }
@@ -1897,50 +3073,50 @@ fn normalize_project_reference(raw: &str, base_dir: &Path) -> Result<(String, Pa
     Ok((reference_string, absolute))
 }
 
-fn resolve_project(
-    step: &PipelineStepSpec,
-    pipeline_dir: &Path,
+fn resolve_module(
+    step: &FlowStepSpec,
+    flow_dir: &Path,
     db: Option<&BioVaultDb>,
-) -> Result<Option<LoadedProject>> {
+) -> Result<Option<LoadedModule>> {
     match step.uses.as_deref().map(str::trim) {
         None | Some("") => Ok(None),
-        Some(uses) => resolve_project_by_uses(uses, pipeline_dir, db).map(Some),
+        Some(uses) => resolve_module_by_uses(uses, flow_dir, db).map(Some),
     }
 }
 
-fn resolve_project_by_uses(
+fn resolve_module_by_uses(
     uses: &str,
-    pipeline_dir: &Path,
+    flow_dir: &Path,
     db: Option<&BioVaultDb>,
-) -> Result<LoadedProject> {
+) -> Result<LoadedModule> {
     // Try 1: Resolve as path (relative or absolute)
-    if let Ok((reference, root)) = normalize_project_reference(uses, pipeline_dir) {
-        return load_project_spec(&ProjectChoice::Path { reference, root });
+    if let Ok((reference, root)) = normalize_module_reference(uses, flow_dir) {
+        return load_module_spec(&ModuleChoice::Path { reference, root });
     }
 
     // Try 2: Database lookup with exact name
     if let Some(db) = db {
-        if let Ok(Some(project)) = db.get_project(uses) {
-            return load_project_spec(&ProjectChoice::Registered {
-                name: project.name,
-                path: PathBuf::from(project.project_path),
+        if let Ok(Some(module)) = db.get_module(uses) {
+            return load_module_spec(&ModuleChoice::Registered {
+                name: module.name,
+                path: PathBuf::from(module.module_path),
             });
         }
     }
 
-    Err(anyhow!("Unable to resolve project reference '{}'", uses).into())
+    Err(anyhow!("Unable to resolve module reference '{}'", uses).into())
 }
 
-struct PipelineValidationResult {
+struct FlowValidationResult {
     resolved_steps: Vec<ResolvedStep>,
     unresolved_steps: Vec<UnresolvedStep>,
     bindings: Vec<BindingStatus>,
     errors: Vec<String>,
     warnings: Vec<String>,
-    pipeline_inputs: BTreeMap<String, PipelineInputSpec>,
+    flow_inputs: BTreeMap<String, FlowInputSpec>,
 }
 
-impl PipelineValidationResult {
+impl FlowValidationResult {
     fn has_errors(&self) -> bool {
         !self.errors.is_empty()
     }
@@ -1968,13 +3144,21 @@ struct UnresolvedStep {
     reason: String,
 }
 
+// Note: validate_module_interface and validate_module_assets functions removed
+// They require FlowFileSpec.modules which is not available in FlowSpec
+// TODO: Re-add when modules field is added to FlowSpec
+
+// Note: Module interface validation requires access to FlowFileSpec.modules
+// which is not available in FlowSpec. This validation is skipped for now.
+// TODO: Add modules field to FlowSpec or refactor validation to use FlowFile
+
 fn validate_internal(
-    pipeline_path: &Path,
-    spec: &PipelineSpec,
+    flow_path: &Path,
+    spec: &FlowSpec,
     db: Option<&BioVaultDb>,
-) -> Result<PipelineValidationResult> {
+) -> Result<FlowValidationResult> {
     spec.ensure_unique_step_ids()?;
-    let pipeline_dir = pipeline_path
+    let flow_dir = flow_path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
@@ -1987,17 +3171,19 @@ fn validate_internal(
     let mut warnings = Vec::new();
 
     for step_spec in &spec.steps {
-        match resolve_project(step_spec, pipeline_dir, db) {
-            Ok(Some(project)) => {
+        match resolve_module(step_spec, flow_dir, db) {
+            Ok(Some(module)) => {
                 let resolved_step = ResolvedStep {
                     step_id: step_spec.id.clone(),
-                    project,
+                    module,
                     store: step_spec.store.clone(),
                 };
 
-                let project_spec = &resolved_step.project.spec;
+                let module_spec = &resolved_step.module.spec;
 
-                for input in &project_spec.inputs {
+                // Note: Module interface/asset validation skipped - requires FlowFileSpec.modules
+
+                for input in &module_spec.inputs {
                     let raw_binding = step_spec.with.get(&input.name).cloned();
                     let binding_str = raw_binding.as_ref().and_then(value_to_string);
 
@@ -2044,7 +3230,7 @@ fn validate_internal(
                             if let Some(spec_input) = spec.inputs.get(input_name) {
                                 if !types_compatible(&input.raw_type, spec_input.raw_type()) {
                                     let msg = format!(
-                                        "Type mismatch: expected {} but pipeline input '{}' declares {}",
+                                        "Type mismatch: expected {} but flow input '{}' declares {}",
                                         input.raw_type,
                                         input_name,
                                         spec_input.raw_type()
@@ -2068,7 +3254,7 @@ fn validate_internal(
                                         actual: None,
                                         state: BindingState::Pending,
                                         message: Some(format!(
-                                            "Depends on pipeline input '{}'. Set it via --set inputs.{}=<value>.",
+                                            "Depends on flow input '{}'. Set it via --set inputs.{}=<value>.",
                                             input_name,
                                             input_name
                                         )),
@@ -2076,7 +3262,7 @@ fn validate_internal(
                                 }
                             } else {
                                 errors.push(format!(
-                                    "Binding '{}' for step '{}' input '{}' references unknown pipeline input",
+                                    "Binding '{}' for step '{}' input '{}' references unknown flow input",
                                     binding_value,
                                     resolved_step.step_id,
                                     input.name
@@ -2088,7 +3274,7 @@ fn validate_internal(
                                     expected: input.raw_type.clone(),
                                     actual: None,
                                     state: BindingState::Error,
-                                    message: Some("Unknown pipeline input".to_string()),
+                                    message: Some("Unknown flow input".to_string()),
                                 });
                             }
                         } else if binding_value.starts_with("step.") {
@@ -2126,7 +3312,7 @@ fn validate_internal(
                                 actual: None,
                                 state: BindingState::Pending,
                                 message: Some(
-                                    "Pending input – assign via CLI override or pipeline edit"
+                                    "Pending input – assign via CLI override or flow edit"
                                         .to_string(),
                                 ),
                             });
@@ -2203,15 +3389,25 @@ fn validate_internal(
                     }
                 }
 
-                for output in &project_spec.outputs {
+                for output in &module_spec.outputs {
                     let key = format!("step.{}.outputs.{}", resolved_step.step_id, output.name);
                     available.insert(key, (resolved_step.step_id.clone(), output.clone()));
                 }
                 for (share_name, share_spec) in &step_spec.share {
-                    let Some(source_output) = project_spec
+                    let source_name = match parse_share_source(&share_spec.source) {
+                        Ok(name) => name,
+                        Err(e) => {
+                            errors.push(format!(
+                                "Share '{}' in step '{}': {}",
+                                share_name, step_spec.id, e
+                            ));
+                            continue;
+                        }
+                    };
+                    let Some(source_output) = module_spec
                         .outputs
                         .iter()
-                        .find(|output| output.name == share_spec.source)
+                        .find(|output| output.name == source_name)
                     else {
                         errors.push(format!(
                             "Share '{}' in step '{}' references unknown output '{}'",
@@ -2221,15 +3417,13 @@ fn validate_internal(
                     };
                     let mut shared_output = source_output.clone();
                     shared_output.name = share_name.clone();
-                    let key = format!("step.{}.outputs.{}", resolved_step.step_id, share_name);
+                    // Use 'share' namespace to distinguish from module outputs
+                    let key = format!("step.{}.share.{}", resolved_step.step_id, share_name);
                     available.insert(key, (resolved_step.step_id.clone(), shared_output));
                 }
 
-                let mut known_outputs: HashSet<String> = project_spec
-                    .outputs
-                    .iter()
-                    .map(|o| o.name.clone())
-                    .collect();
+                let mut known_outputs: HashSet<String> =
+                    module_spec.outputs.iter().map(|o| o.name.clone()).collect();
                 for alias in step_spec.publish.keys() {
                     known_outputs.insert(alias.clone());
                 }
@@ -2238,7 +3432,7 @@ fn validate_internal(
                 }
                 for (store_name, store_spec) in &step_spec.store {
                     match store_spec {
-                        PipelineStoreSpec::Sql(sql) => {
+                        FlowStoreSpec::Sql(sql) => {
                             if !known_outputs.contains(&sql.source) {
                                 errors.push(format!(
                                     "Store '{}' in step '{}' references unknown output '{}'",
@@ -2252,11 +3446,13 @@ fn validate_internal(
                 resolved_steps.push(resolved_step);
             }
             Ok(None) => {
-                unresolved_steps.push(UnresolvedStep {
-                    step_id: step_spec.id.clone(),
-                    reason: "Project not specified (provide via --project or edit pipeline)"
-                        .to_string(),
-                });
+                // Skip adding to unresolved if this is a permissions-only or barrier step
+                if step_spec.permissions.is_empty() && step_spec.barrier.is_none() {
+                    unresolved_steps.push(UnresolvedStep {
+                        step_id: step_spec.id.clone(),
+                        reason: "Module not specified (provide via --module or edit flow)".to_string(),
+                    });
+                }
             }
             Err(err) => {
                 errors.push(format!("Step '{}': {}", step_spec.id, err));
@@ -2264,17 +3460,17 @@ fn validate_internal(
         }
     }
 
-    Ok(PipelineValidationResult {
+    Ok(FlowValidationResult {
         resolved_steps,
         unresolved_steps,
         bindings,
         errors,
         warnings,
-        pipeline_inputs: spec.inputs.clone(),
+        flow_inputs: spec.inputs.clone(),
     })
 }
 
-fn print_validation(result: &PipelineValidationResult, diagram: bool) {
+fn print_validation(result: &FlowValidationResult, diagram: bool) {
     if !result.errors.is_empty() {
         println!("\n❌ Errors:");
         for err in &result.errors {
@@ -2289,9 +3485,9 @@ fn print_validation(result: &PipelineValidationResult, diagram: bool) {
         }
     }
 
-    if !result.pipeline_inputs.is_empty() {
-        println!("\n🔑 Pipeline inputs:");
-        for (name, spec_input) in &result.pipeline_inputs {
+    if !result.flow_inputs.is_empty() {
+        println!("\n🔑 Flow inputs:");
+        for (name, spec_input) in &result.flow_inputs {
             let mut descriptor = spec_input.raw_type().to_string();
             if let Some(default) = spec_input.default_literal() {
                 descriptor.push_str(&format!(" (default: {})", default));
@@ -2333,10 +3529,10 @@ fn print_validation(result: &PipelineValidationResult, diagram: bool) {
     }
 }
 
-fn print_steps(result: &PipelineValidationResult) {
+fn print_steps(result: &FlowValidationResult) {
     println!("\n📦 Steps:");
     for step in &result.resolved_steps {
-        println!("  • {} → {}", step.step_id.bold(), step.project.summary());
+        println!("  • {} → {}", step.step_id.bold(), step.module.summary());
         for binding in result.bindings.iter().filter(|b| b.step_id == step.step_id) {
             let status = match binding.state {
                 BindingState::Ok => "ok".green(),
@@ -2384,7 +3580,7 @@ fn print_steps(result: &PipelineValidationResult) {
             println!("      store:");
             for (name, spec) in &step.store {
                 match spec {
-                    PipelineStoreSpec::Sql(sql) => {
+                    FlowStoreSpec::Sql(sql) => {
                         let table_display = sql.table.as_deref().unwrap_or("(auto)");
                         println!(
                             "        {} → sql(table: {}, source: {})",
@@ -2399,28 +3595,20 @@ fn print_steps(result: &PipelineValidationResult) {
 
     for pending in &result.unresolved_steps {
         println!(
-            "  • {} (pending project) {}",
+            "  • {} (pending module) {}",
             pending.step_id.bold(),
             pending.reason.as_str().dimmed()
         );
     }
 }
 
-fn resolve_pipeline_path(file: Option<String>) -> PathBuf {
-    if let Some(path) = file {
-        return PathBuf::from(path);
-    }
-
-    let flow_path = PathBuf::from(crate::pipeline_spec::FLOW_YAML_FILE);
-    if flow_path.exists() {
-        return flow_path;
-    }
-
-    PathBuf::from(crate::pipeline_spec::PIPELINE_YAML_FILE)
+fn resolve_flow_path(file: Option<String>) -> PathBuf {
+    file.map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("flow.yaml"))
 }
 
 fn types_compatible(expected: &str, actual: &str) -> bool {
-    crate::project_spec::types_compatible(expected, actual)
+    crate::module_spec::types_compatible(expected, actual)
 }
 
 #[cfg(test)]
@@ -2430,7 +3618,7 @@ mod tests {
 
     #[test]
     fn test_detect_table_name_default() {
-        let spec = PipelineSqlStoreSpec {
+        let spec = FlowSqlStoreSpec {
             target: None,
             source: "output".to_string(),
             table: None,
@@ -2444,7 +3632,7 @@ mod tests {
 
     #[test]
     fn test_detect_table_name_custom_template() {
-        let spec = PipelineSqlStoreSpec {
+        let spec = FlowSqlStoreSpec {
             target: None,
             source: "output".to_string(),
             table: Some("custom_table_{run_id}".to_string()),
@@ -2458,7 +3646,7 @@ mod tests {
 
     #[test]
     fn test_detect_table_name_no_run_id_substitution() {
-        let spec = PipelineSqlStoreSpec {
+        let spec = FlowSqlStoreSpec {
             target: None,
             source: "output".to_string(),
             table: Some("static_table".to_string()),
@@ -2472,7 +3660,7 @@ mod tests {
 
     #[test]
     fn test_detect_table_name_multiple_run_id() {
-        let spec = PipelineSqlStoreSpec {
+        let spec = FlowSqlStoreSpec {
             target: None,
             source: "output".to_string(),
             table: Some("tbl_{run_id}_v2_{run_id}".to_string()),
@@ -2618,7 +3806,7 @@ mod tests {
 
     #[test]
     fn test_detect_format_csv_extension() {
-        let spec = PipelineSqlStoreSpec {
+        let spec = FlowSqlStoreSpec {
             target: None,
             source: "output".to_string(),
             table: None,
@@ -2632,7 +3820,7 @@ mod tests {
 
     #[test]
     fn test_detect_format_tsv_extension() {
-        let spec = PipelineSqlStoreSpec {
+        let spec = FlowSqlStoreSpec {
             target: None,
             source: "output".to_string(),
             table: None,
@@ -2646,7 +3834,7 @@ mod tests {
 
     #[test]
     fn test_detect_format_uppercase_extension() {
-        let spec = PipelineSqlStoreSpec {
+        let spec = FlowSqlStoreSpec {
             target: None,
             source: "output".to_string(),
             table: None,
@@ -2660,7 +3848,7 @@ mod tests {
 
     #[test]
     fn test_detect_format_explicit_format() {
-        let spec = PipelineSqlStoreSpec {
+        let spec = FlowSqlStoreSpec {
             target: None,
             source: "output".to_string(),
             table: None,
@@ -2674,7 +3862,7 @@ mod tests {
 
     #[test]
     fn test_detect_format_no_extension() {
-        let spec = PipelineSqlStoreSpec {
+        let spec = FlowSqlStoreSpec {
             target: None,
             source: "output".to_string(),
             table: None,
@@ -2720,14 +3908,14 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_pipeline_path_default() {
-        assert_eq!(resolve_pipeline_path(None), PathBuf::from("pipeline.yaml"));
+    fn test_resolve_flow_path_default() {
+        assert_eq!(resolve_flow_path(None), PathBuf::from("flow.yaml"));
     }
 
     #[test]
-    fn test_resolve_pipeline_path_custom() {
+    fn test_resolve_flow_path_custom() {
         assert_eq!(
-            resolve_pipeline_path(Some("custom.yaml".to_string())),
+            resolve_flow_path(Some("custom.yaml".to_string())),
             PathBuf::from("custom.yaml")
         );
     }

@@ -33,7 +33,7 @@ fn configure_child_process(cmd: &mut Command) {
 fn configure_child_process(_cmd: &mut Command) {}
 
 #[derive(Debug, Serialize, Deserialize)]
-struct ProjectConfig {
+struct ModuleConfig {
     name: String,
     author: String,
     workflow: String,
@@ -43,6 +43,38 @@ struct ProjectConfig {
     assets: Vec<String>,
     #[serde(default)]
     participants: Vec<String>,
+}
+
+impl ModuleConfig {
+    fn from_yaml(raw: &str) -> anyhow::Result<Self> {
+        if let Ok(module) = crate::module_spec::ModuleFile::parse_yaml(raw) {
+            let author = module.metadata.authors.first().cloned().unwrap_or_default();
+            let runner = module.spec.runner.clone().unwrap_or_default();
+            let workflow = runner
+                .entrypoint
+                .clone()
+                .unwrap_or_else(|| "workflow.nf".to_string());
+            let template = runner.template.clone();
+            let assets = module
+                .spec
+                .assets
+                .unwrap_or_default()
+                .into_iter()
+                .map(|asset| asset.path)
+                .collect();
+            return Ok(ModuleConfig {
+                name: module.metadata.name,
+                author,
+                workflow,
+                template,
+                assets,
+                participants: Vec::new(),
+            });
+        }
+
+        let config: ModuleConfig = serde_yaml::from_str(raw)?;
+        Ok(config)
+    }
 }
 
 fn deserialize_string_or_vec<'de, D>(deserializer: D) -> std::result::Result<Vec<String>, D::Error>
@@ -295,7 +327,7 @@ fn should_forward_nextflow_line(line: &str) -> bool {
 
 fn spawn_nextflow_task_log_forwarder(
     work_dir: PathBuf,
-    project_root: Option<PathBuf>,
+    module_root: Option<PathBuf>,
 ) -> Option<LogTailHandle> {
     match std::env::var("BIOVAULT_DESKTOP_LOG_FILE") {
         Ok(path) if !path.is_empty() => path,
@@ -308,10 +340,10 @@ fn spawn_nextflow_task_log_forwarder(
     let handle = thread::spawn(move || {
         let mut offsets: HashMap<PathBuf, u64> = HashMap::new();
         while !thread_flag.load(Ordering::SeqCst) {
-            forward_nextflow_task_logs(&work_dir, project_root.as_deref(), &mut offsets);
+            forward_nextflow_task_logs(&work_dir, module_root.as_deref(), &mut offsets);
             thread::sleep(Duration::from_millis(750));
         }
-        forward_nextflow_task_logs(&work_dir, project_root.as_deref(), &mut offsets);
+        forward_nextflow_task_logs(&work_dir, module_root.as_deref(), &mut offsets);
     });
 
     Some(LogTailHandle { stop_flag, handle })
@@ -319,7 +351,7 @@ fn spawn_nextflow_task_log_forwarder(
 
 fn forward_nextflow_task_logs(
     work_dir: &Path,
-    project_root: Option<&Path>,
+    module_root: Option<&Path>,
     offsets: &mut HashMap<PathBuf, u64>,
 ) {
     const MAX_FILES_PER_TICK: usize = 250;
@@ -370,7 +402,7 @@ fn forward_nextflow_task_logs(
             continue;
         }
 
-        let rel = project_root
+        let rel = module_root
             .and_then(|root| path.strip_prefix(root).ok())
             .unwrap_or(path.as_path())
             .to_string_lossy()
@@ -413,7 +445,7 @@ pub(crate) fn execute_with_logging(
     mut cmd: Command,
     nextflow_log_path: Option<PathBuf>,
     work_dir: Option<PathBuf>,
-    project_root: Option<PathBuf>,
+    module_root: Option<PathBuf>,
 ) -> anyhow::Result<std::process::ExitStatus> {
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
@@ -473,7 +505,7 @@ pub(crate) fn execute_with_logging(
 
     let log_forwarder = nextflow_log_path.and_then(spawn_nextflow_log_forwarder);
     let task_log_forwarder =
-        work_dir.and_then(|dir| spawn_nextflow_task_log_forwarder(dir, project_root));
+        work_dir.and_then(|dir| spawn_nextflow_task_log_forwarder(dir, module_root));
 
     let status = child
         .wait()
@@ -496,7 +528,7 @@ pub(crate) fn execute_with_logging(
 }
 
 pub struct RunParams {
-    pub project_folder: String,
+    pub module_folder: String,
     pub participant_source: String,
     pub test: bool,
     pub download: bool,
@@ -1197,8 +1229,8 @@ async fn ensure_files_exist(
     Ok(local_participant)
 }
 
-async fn execute_sheet_workflow(params: &RunParams, config: &ProjectConfig) -> anyhow::Result<()> {
-    let project_path = PathBuf::from(&params.project_folder);
+async fn execute_sheet_workflow(params: &RunParams, config: &ModuleConfig) -> anyhow::Result<()> {
+    let module_path = PathBuf::from(&params.module_folder);
 
     println!("Running sheet-based workflow: {}", config.name.cyan());
 
@@ -1206,7 +1238,7 @@ async fn execute_sheet_workflow(params: &RunParams, config: &ProjectConfig) -> a
     if params.participant_source.is_empty() {
         return Err(anyhow!(
             "Sheet template requires a CSV/TSV file path. Usage: bv run {} <path/to/samplesheet.csv>",
-            params.project_folder
+            params.module_folder
         ));
     }
 
@@ -1219,25 +1251,25 @@ async fn execute_sheet_workflow(params: &RunParams, config: &ProjectConfig) -> a
     }
 
     // Determine assets directory and look for schema.yaml there
-    let mut assets_dir = project_path.join("assets");
+    let mut assets_dir = module_path.join("assets");
     if !config.assets.is_empty() {
-        let candidate = project_path.join(&config.assets[0]);
+        let candidate = module_path.join(&config.assets[0]);
         if candidate.is_dir() {
             assets_dir = candidate;
         }
     }
 
-    // Look for schema.yaml in assets directory (preferred) or project root
+    // Look for schema.yaml in assets directory (preferred) or module root
     let schema_path = if config.assets.contains(&"schema.yaml".to_string()) {
         // schema.yaml is listed in assets, find it
         let schema_in_assets = assets_dir.join("schema.yaml");
         if schema_in_assets.exists() {
             schema_in_assets
         } else {
-            project_path.join("schema.yaml")
+            module_path.join("schema.yaml")
         }
     } else {
-        project_path.join("schema.yaml")
+        module_path.join("schema.yaml")
     };
 
     if !schema_path.exists() {
@@ -1274,7 +1306,7 @@ async fn execute_sheet_workflow(params: &RunParams, config: &ProjectConfig) -> a
         .unwrap_or_else(|_| nextflow_config.clone());
 
     // Get workflow file
-    let workflow_file = project_path
+    let workflow_file = module_path
         .join("workflow.nf")
         .canonicalize()
         .context("Failed to resolve workflow.nf path")?;
@@ -1296,7 +1328,7 @@ async fn execute_sheet_workflow(params: &RunParams, config: &ProjectConfig) -> a
     } else {
         "results-real"
     };
-    let results_dir = project_path.join(results_base);
+    let results_dir = module_path.join(results_base);
     if !results_dir.exists() {
         fs::create_dir_all(&results_dir)?;
     }
@@ -1306,11 +1338,11 @@ async fn execute_sheet_workflow(params: &RunParams, config: &ProjectConfig) -> a
         .context("Failed to resolve results directory path")?;
 
     info!(
-        "Running sheet workflow '{}' from project '{}'",
+        "Running sheet workflow '{}' from module '{}'",
         config.workflow, config.name
     );
 
-    let nextflow_log_path = project_path.join(".nextflow.log");
+    let nextflow_log_path = module_path.join(".nextflow.log");
     fs::remove_file(&nextflow_log_path).ok();
 
     // Get configured Nextflow path or use default
@@ -1321,8 +1353,8 @@ async fn execute_sheet_workflow(params: &RunParams, config: &ProjectConfig) -> a
     // Build Nextflow command
     let mut cmd = Command::new(&nextflow_cmd);
 
-    // Set working directory to project directory
-    cmd.current_dir(&project_path);
+    // Set working directory to module directory
+    cmd.current_dir(&module_path);
 
     cmd.arg("-log").arg(&nextflow_log_path);
 
@@ -1405,12 +1437,12 @@ async fn execute_sheet_workflow(params: &RunParams, config: &ProjectConfig) -> a
         .work_dir
         .as_ref()
         .map(PathBuf::from)
-        .unwrap_or_else(|| project_path.join("work"));
+        .unwrap_or_else(|| module_path.join("work"));
     let status = execute_with_logging(
         cmd,
         Some(nextflow_log_path),
         Some(task_work_dir),
-        Some(project_path.clone()),
+        Some(module_path.clone()),
     )
     .context("Failed to execute Nextflow")?;
 
@@ -1428,45 +1460,31 @@ async fn execute_sheet_workflow(params: &RunParams, config: &ProjectConfig) -> a
 }
 
 pub async fn execute(params: RunParams) -> anyhow::Result<()> {
-    // Validate project directory
-    let project_path = PathBuf::from(&params.project_folder);
-    if !project_path.exists() {
-        return Err(Error::ProjectFolderMissing(params.project_folder.clone()).into());
+    // Validate module directory
+    let module_path = PathBuf::from(&params.module_folder);
+    if !module_path.exists() {
+        return Err(Error::ModuleFolderMissing(params.module_folder.clone()).into());
     }
 
-    let project_yaml = crate::project_spec::resolve_project_spec_path(&project_path);
-    if !project_yaml.exists() {
-        return Err(Error::ProjectConfigMissing(params.project_folder.clone()).into());
+    let module_yaml = module_path.join("module.yaml");
+    if !module_yaml.exists() {
+        return Err(Error::ModuleConfigMissing(params.module_folder.clone()).into());
     }
 
-    let workflow_file = project_path
+    let workflow_file = module_path
         .join("workflow.nf")
         .canonicalize()
         .context("Failed to resolve workflow.nf path")?;
 
     if !workflow_file.exists() {
-        return Err(Error::WorkflowMissing(params.project_folder.clone()).into());
+        return Err(Error::WorkflowMissing(params.module_folder.clone()).into());
     }
 
-    // Read project config
-    let config_content = fs::read_to_string(&project_yaml).context("Failed to read module spec")?;
-    let config: ProjectConfig =
-        match crate::spec_format::detect_spec_format(&project_yaml, &config_content) {
-            crate::spec_format::SpecFormat::Module => {
-                let spec = crate::project_spec::ProjectSpec::load(&project_yaml)?;
-                ProjectConfig {
-                    name: spec.name,
-                    author: spec.author,
-                    workflow: spec.workflow,
-                    template: spec.template,
-                    assets: spec.assets,
-                    participants: Vec::new(),
-                }
-            }
-            _ => serde_yaml::from_str(&config_content).context("Failed to parse project.yaml")?,
-        };
+    // Read module config
+    let config_content = fs::read_to_string(&module_yaml).context("Failed to read module.yaml")?;
+    let config = ModuleConfig::from_yaml(&config_content).context("Failed to parse module.yaml")?;
 
-    // Check if this is a sheet template project
+    // Check if this is a sheet template module
     let is_sheet_template = config
         .template
         .as_ref()
@@ -1492,7 +1510,7 @@ pub async fn execute(params: RunParams) -> anyhow::Result<()> {
         ensure_files_exist(&participant, params.download, &source, mock_key.as_deref()).await?;
 
     // Determine which template to use
-    // Priority: CLI flag > module spec > default
+    // Priority: CLI flag > module.yaml > default
     let template_name = params
         .template
         .or(config.template.clone())
@@ -1524,9 +1542,9 @@ pub async fn execute(params: RunParams) -> anyhow::Result<()> {
     // Determine assets directory
     // Prefer the conventional 'assets' folder. If the first assets entry is an existing directory,
     // use it; otherwise do NOT create a directory from a file name like 'eye_color.py'.
-    let mut assets_dir = project_path.join("assets");
+    let mut assets_dir = module_path.join("assets");
     if !config.assets.is_empty() {
-        let candidate = project_path.join(&config.assets[0]);
+        let candidate = module_path.join(&config.assets[0]);
         if candidate.is_dir() {
             assets_dir = candidate;
         }
@@ -1552,7 +1570,7 @@ pub async fn execute(params: RunParams) -> anyhow::Result<()> {
     } else {
         "results-real"
     };
-    let results_dir = project_path.join(results_base).join(&participant.id);
+    let results_dir = module_path.join(results_base).join(&participant.id);
     if !results_dir.exists() {
         fs::create_dir_all(&results_dir)?;
     }
@@ -1563,7 +1581,7 @@ pub async fn execute(params: RunParams) -> anyhow::Result<()> {
         .context("Failed to resolve results directory path")?;
 
     info!(
-        "Running workflow '{}' from project '{}'",
+        "Running workflow '{}' from module '{}'",
         config.workflow, config.name
     );
 
@@ -1576,7 +1594,7 @@ pub async fn execute(params: RunParams) -> anyhow::Result<()> {
         println!("Processing participant: {}", participant.id.cyan());
     }
 
-    let nextflow_log_path = project_path.join(".nextflow.log");
+    let nextflow_log_path = module_path.join(".nextflow.log");
     fs::remove_file(&nextflow_log_path).ok();
 
     // Get configured Nextflow path or use default
@@ -1587,8 +1605,8 @@ pub async fn execute(params: RunParams) -> anyhow::Result<()> {
     // Build Nextflow command
     let mut cmd = Command::new(&nextflow_cmd);
 
-    // Set working directory to project directory
-    cmd.current_dir(&project_path);
+    // Set working directory to module directory
+    cmd.current_dir(&module_path);
 
     cmd.arg("-log").arg(&nextflow_log_path);
 
@@ -1694,12 +1712,12 @@ pub async fn execute(params: RunParams) -> anyhow::Result<()> {
         .work_dir
         .clone()
         .map(PathBuf::from)
-        .unwrap_or_else(|| project_path.join("work"));
+        .unwrap_or_else(|| module_path.join("work"));
     let status = execute_with_logging(
         cmd,
         Some(nextflow_log_path),
         Some(task_work_dir),
-        Some(project_path.clone()),
+        Some(module_path.clone()),
     )
     .context("Failed to execute Nextflow")?;
 
@@ -1740,9 +1758,9 @@ mod tests {
     }
 
     #[test]
-    fn test_project_config_deserialize() {
+    fn test_module_config_deserialize() {
         let yaml = r#"
-name: test_project
+name: test_module
 author: test@example.com
 workflow: test.nf
 template: test_template
@@ -1751,8 +1769,8 @@ participants:
   - p1
   - p2
 "#;
-        let config: ProjectConfig = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(config.name, "test_project");
+        let config: ModuleConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.name, "test_module");
         assert_eq!(config.author, "test@example.com");
         assert_eq!(config.workflow, "test.nf");
         assert_eq!(config.template, Some("test_template".to_string()));
@@ -1811,7 +1829,7 @@ participants:
     #[test]
     fn test_run_params_default() {
         let params = RunParams {
-            project_folder: "/test".to_string(),
+            module_folder: "/test".to_string(),
             participant_source: "participants.yaml#TEST".to_string(),
             test: false,
             download: false,
@@ -1824,7 +1842,7 @@ participants:
             nextflow_args: vec![],
         };
 
-        assert_eq!(params.project_folder, "/test");
+        assert_eq!(params.module_folder, "/test");
         assert_eq!(params.participant_source, "participants.yaml#TEST");
         assert!(!params.test);
         assert!(!params.download);
@@ -1860,13 +1878,13 @@ participants:
     }
 
     #[test]
-    fn test_project_config_minimal() {
+    fn test_module_config_minimal() {
         let yaml = r#"
 name: minimal
 author: user@example.com
 workflow: main.nf
 "#;
-        let config: ProjectConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: ModuleConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.name, "minimal");
         assert_eq!(config.author, "user@example.com");
         assert_eq!(config.workflow, "main.nf");
@@ -1990,7 +2008,7 @@ participants:
     }
 
     #[tokio::test]
-    async fn execute_dry_run_minimal_project() {
+    async fn execute_dry_run_minimal_module() {
         // Isolate BIOVAULT home and create template files
         let bv_home = TempDir::new().unwrap();
         let env_dir = bv_home.path().join("env").join("test_tpl");
@@ -1999,10 +2017,10 @@ participants:
         fs::write(env_dir.join("nextflow.config"), "// config").unwrap();
         set_test_biovault_home(bv_home.path());
 
-        // Create minimal project
+        // Create minimal module
         let proj = TempDir::new().unwrap();
         fs::write(
-            proj.path().join("project.yaml"),
+            proj.path().join("module.yaml"),
             "name: p\nauthor: a\nworkflow: main.nf\ntemplate: test_tpl\n",
         )
         .unwrap();
@@ -2014,7 +2032,7 @@ participants:
         .unwrap();
 
         let params = RunParams {
-            project_folder: proj.path().to_string_lossy().to_string(),
+            module_folder: proj.path().to_string_lossy().to_string(),
             participant_source: proj
                 .path()
                 .join("participants.yaml#participants.X")
@@ -2057,11 +2075,11 @@ participants:
         fs::write(env_dir.join("nextflow.config"), "// config").unwrap();
         set_test_biovault_home(bv_home.path());
 
-        // Create minimal project with assets dir
+        // Create minimal module with assets dir
         let proj = TempDir::new().unwrap();
         fs::create_dir_all(proj.path().join("assets")).unwrap();
         fs::write(
-            proj.path().join("project.yaml"),
+            proj.path().join("module.yaml"),
             "name: p\nauthor: a\nworkflow: main.nf\ntemplate: full_tpl\nassets: assets\n",
         )
         .unwrap();
@@ -2085,7 +2103,7 @@ participants:
         fs::write(proj.path().join("participants.yaml"), participants_yaml).unwrap();
 
         let params = RunParams {
-            project_folder: proj.path().to_string_lossy().to_string(),
+            module_folder: proj.path().to_string_lossy().to_string(),
             participant_source: proj
                 .path()
                 .join("participants.yaml#participants.Y")
@@ -2114,9 +2132,9 @@ participants:
 
     #[tokio::test]
     async fn execute_errors_when_paths_missing() {
-        // Missing project directory
+        // Missing module directory
         let params = RunParams {
-            project_folder: "/definitely/not/here".into(),
+            module_folder: "/definitely/not/here".into(),
             participant_source: "participants.yaml#participants.X".into(),
             test: false,
             download: false,
@@ -2130,10 +2148,10 @@ participants:
         };
         assert!(execute(params).await.is_err());
 
-        // Project exists but missing project.yaml
+        // Module exists but missing module.yaml
         let proj = TempDir::new().unwrap();
         let params = RunParams {
-            project_folder: proj.path().to_string_lossy().to_string(),
+            module_folder: proj.path().to_string_lossy().to_string(),
             participant_source: "participants.yaml#participants.X".into(),
             test: false,
             download: false,
@@ -2147,14 +2165,14 @@ participants:
         };
         assert!(execute(params).await.is_err());
 
-        // project.yaml present, workflow.nf missing
+        // module.yaml present, workflow.nf missing
         fs::write(
-            proj.path().join("project.yaml"),
+            proj.path().join("module.yaml"),
             "name: p\nauthor: a\nworkflow: main.nf\n",
         )
         .unwrap();
         let params = RunParams {
-            project_folder: proj.path().to_string_lossy().to_string(),
+            module_folder: proj.path().to_string_lossy().to_string(),
             participant_source: "participants.yaml#participants.X".into(),
             test: false,
             download: false,
@@ -2180,7 +2198,7 @@ participants:
         let bv_home = TempDir::new().unwrap();
         set_test_biovault_home(bv_home.path());
         let params = RunParams {
-            project_folder: proj.path().to_string_lossy().to_string(),
+            module_folder: proj.path().to_string_lossy().to_string(),
             participant_source: proj
                 .path()
                 .join("participants.yaml#participants.X")

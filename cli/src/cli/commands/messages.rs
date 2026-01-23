@@ -4,16 +4,16 @@ use crate::cli::syft_url::SyftURL;
 use crate::config::Config;
 use crate::data::{self, BioVaultDb};
 use crate::messages::{Message, MessageDb, MessageSync};
-use crate::module_spec::ModuleFile;
-use crate::project_spec::{resolve_project_spec_path, ProjectSpec, MODULE_YAML_FILE};
+use crate::module_spec::ModuleSpec;
 use crate::syftbox::storage::SyftBoxStorage;
+use crate::types::ModuleYaml;
 use crate::types::SyftPermissions;
 use anyhow::{Context as _, Result};
 use colored::Colorize;
 use csv::Writer;
 use dialoguer::{Confirm, Input, Select};
 use serde_json::json;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
@@ -285,7 +285,7 @@ pub fn list_messages(
     config: &Config,
     unread_only: bool,
     sent_only: bool,
-    projects_only: bool,
+    modules_only: bool,
     json_output: bool,
 ) -> Result<()> {
     let (db, sync) = if json_output {
@@ -308,12 +308,12 @@ pub fn list_messages(
         db.list_messages(Some(50))?
     };
 
-    // Filter for projects if requested
-    if projects_only {
+    // Filter for modules if requested
+    if modules_only {
         messages.retain(|msg| {
             matches!(
                 msg.message_type,
-                crate::messages::MessageType::Project { .. }
+                crate::messages::MessageType::Module { .. }
             )
         });
     }
@@ -376,13 +376,13 @@ pub fn list_messages(
         };
         println!("  Body: {}", preview);
 
-        // If this is a project message with metadata, try quick verification
+        // If this is a module message with metadata, try quick verification
         if let Some(meta) = &msg.metadata {
-            if msg.message_type.to_string() == "project" {
-                match verify_project_from_metadata(config, meta) {
-                    Ok((true, note)) => println!("  Project Verify: OK{}", note),
-                    Ok((false, note)) => println!("  Project Verify: FAIL{}", note),
-                    Err(e) => println!("  Project Verify: UNVERIFIED ({})", e),
+            if msg.message_type.to_string() == "module" {
+                match verify_module_from_metadata(config, meta) {
+                    Ok((true, note)) => println!("  Module Verify: OK{}", note),
+                    Ok((false, note)) => println!("  Module Verify: FAIL{}", note),
+                    Err(e) => println!("  Module Verify: UNVERIFIED ({})", e),
                 }
             }
         }
@@ -435,12 +435,12 @@ pub async fn read_message(config: &Config, message_id: &str, non_interactive: bo
     let expanded_body = expand_env_vars_in_text(&msg.body)?;
     println!("{}", expanded_body);
 
-    // If this is a project message with metadata, attempt verification and show details
+    // If this is a module message with metadata, attempt verification and show details
     if let Some(meta) = &msg.metadata {
-        if msg.message_type.to_string() == "project" {
+        if msg.message_type.to_string() == "module" {
             println!("\nModule Verification:");
             println!("──────────────────────");
-            match verify_project_from_metadata(config, meta) {
+            match verify_module_from_metadata(config, meta) {
                 Ok((true, note)) => println!("Status: OK{}", note),
                 Ok((false, note)) => println!("Status: FAIL{}", note),
                 Err(e) => println!("Status: UNVERIFIED ({})", e),
@@ -448,7 +448,7 @@ pub async fn read_message(config: &Config, message_id: &str, non_interactive: bo
 
             println!("\nDetails:");
             println!("────────");
-            if let Some(loc) = metadata_submission_location(meta) {
+            if let Some(loc) = meta.get("module_location").and_then(|v| v.as_str()) {
                 println!("Module location: {}", loc.cyan());
                 if let Ok(p) = resolve_syft_url_to_path(config, loc) {
                     println!("Local path: {}", p.display());
@@ -457,21 +457,23 @@ pub async fn read_message(config: &Config, message_id: &str, non_interactive: bo
             if let Some(date) = meta.get("date").and_then(|v| v.as_str()) {
                 println!("Date: {}", date);
             }
-            if let Some(participants) = meta.get("participants").and_then(|v| v.as_array()) {
-                if !participants.is_empty() {
-                    let parts: Vec<String> = participants
-                        .iter()
-                        .filter_map(|p| p.as_str().map(|s| s.to_string()))
-                        .collect();
-                    println!("Desired participants: {}", parts.join(", "));
+            if let Some(module) = meta.get("module") {
+                if let Some(participants) = module.get("participants").and_then(|v| v.as_array()) {
+                    if !participants.is_empty() {
+                        let parts: Vec<String> = participants
+                            .iter()
+                            .filter_map(|p| p.as_str().map(|s| s.to_string()))
+                            .collect();
+                        println!("Desired participants: {}", parts.join(", "));
+                    }
                 }
-            }
-            if let Some(assets) = meta.get("assets").and_then(|v| v.as_array()) {
-                if !assets.is_empty() {
-                    println!("Assets:");
-                    for a in assets {
-                        if let Some(s) = a.as_str() {
-                            println!("  - {}", s);
+                if let Some(assets) = module.get("assets").and_then(|v| v.as_array()) {
+                    if !assets.is_empty() {
+                        println!("Assets:");
+                        for a in assets {
+                            if let Some(s) = a.as_str() {
+                                println!("  - {}", s);
+                            }
                         }
                     }
                 }
@@ -493,7 +495,7 @@ pub async fn read_message(config: &Config, message_id: &str, non_interactive: bo
                             println!("Results tree:");
                             print_dir_tree(storage_opt.as_ref(), &results, 3)?;
                         }
-                    } else if let Some(loc) = metadata_submission_location(meta) {
+                    } else if let Some(loc) = meta.get("module_location").and_then(|v| v.as_str()) {
                         if let Ok(root) = resolve_syft_url_to_path(config, loc) {
                             let results = root.join("results");
                             println!("Results location: {}", results.display());
@@ -526,11 +528,11 @@ pub async fn read_message(config: &Config, message_id: &str, non_interactive: bo
 
                 if let Some(idx) = choice {
                     match idx {
-                        0 => reject_project(config, &msg)?,
-                        1 => review_project(config, &msg)?,
-                        2 => approve_project(config, &msg).await?,
-                        3 => run_project_test(config, &msg).await?,
-                        4 => run_project_real(config, &msg).await?,
+                        0 => reject_module(config, &msg)?,
+                        1 => review_module(config, &msg)?,
+                        2 => approve_module(config, &msg).await?,
+                        3 => run_module_test(config, &msg).await?,
+                        4 => run_module_real(config, &msg).await?,
                         _ => {}
                     }
                 }
@@ -547,7 +549,7 @@ pub async fn read_message(config: &Config, message_id: &str, non_interactive: bo
                     .default(1)
                     .interact_opt()?;
                 if let Some(0) = choice {
-                    archive_project(config, &msg)?;
+                    archive_module(config, &msg)?;
                 }
             }
         }
@@ -583,7 +585,7 @@ pub async fn read_message(config: &Config, message_id: &str, non_interactive: bo
 }
 
 #[derive(Debug, Clone, Copy)]
-pub enum ProjectAction {
+pub enum ModuleAction {
     Reject,
     Review,
     Approve,
@@ -591,11 +593,11 @@ pub enum ProjectAction {
     RunReal,
 }
 
-/// Public entrypoint so other commands (like inbox) can trigger project triage actions
-pub async fn perform_project_action(
+/// Public entrypoint so other commands (like inbox) can trigger module triage actions
+pub async fn perform_module_action(
     config: &Config,
     message_id: &str,
-    action: ProjectAction,
+    action: ModuleAction,
 ) -> anyhow::Result<()> {
     let (db, _sync) = init_message_system(config)?;
     let msg = db
@@ -603,17 +605,17 @@ pub async fn perform_project_action(
         .ok_or_else(|| anyhow::anyhow!("Message not found: {}", message_id))?;
 
     match action {
-        ProjectAction::Reject => reject_project(config, &msg)?,
-        ProjectAction::Review => review_project(config, &msg)?,
-        ProjectAction::Approve => approve_project(config, &msg).await?,
-        ProjectAction::RunTest => run_project_test(config, &msg).await?,
-        ProjectAction::RunReal => run_project_real(config, &msg).await?,
+        ModuleAction::Reject => reject_module(config, &msg)?,
+        ModuleAction::Review => review_module(config, &msg)?,
+        ModuleAction::Approve => approve_module(config, &msg).await?,
+        ModuleAction::RunTest => run_module_test(config, &msg).await?,
+        ModuleAction::RunReal => run_module_real(config, &msg).await?,
     }
     Ok(())
 }
 
-/// Process a project message non-interactively (for automated testing)
-pub async fn process_project_message(
+/// Process a module message non-interactively (for automated testing)
+pub async fn process_module_message(
     config: &Config,
     message_id: &str,
     test: bool,
@@ -627,34 +629,27 @@ pub async fn process_project_message(
         .get_message(message_id)?
         .ok_or_else(|| anyhow::anyhow!("Message not found: {}", message_id))?;
 
-    // Verify it's a project message
+    // Verify it's a module message
     if !matches!(
         msg.message_type,
-        crate::messages::MessageType::Project { .. }
+        crate::messages::MessageType::Module { .. }
     ) {
         return Err(anyhow::anyhow!(
-            "Message {} is not a project message",
+            "Message {} is not a module message",
             message_id
         ));
     }
 
-    // Build the project copy in private directory
-    let dest = build_run_project_copy(config, &msg)?;
+    // Build the module copy in private directory
+    let dest = build_run_module_copy(config, &msg)?;
 
     // Load spec to determine runtime handling (dynamic vs legacy)
-    // Use storage decryption since the file may be encrypted in the private folder
-    let project_spec_path = dest.join(MODULE_YAML_FILE);
-    let storage = syftbox_storage(config)?;
-    let spec = if storage.contains(&project_spec_path) {
-        let bytes = storage.read_with_shadow(&project_spec_path)?;
-        ProjectSpec::load_from_bytes(&project_spec_path, &bytes)?
-    } else {
-        ProjectSpec::load(&project_spec_path)?
-    };
+    let module_spec_path = dest.join("module.yaml");
+    let spec = ModuleSpec::load(&module_spec_path)?;
 
     match spec.template.as_deref() {
         Some("dynamic-nextflow") => {
-            return process_dynamic_project_message(
+            return process_dynamic_module_message(
                 config,
                 &msg,
                 &dest,
@@ -665,7 +660,7 @@ pub async fn process_project_message(
             .await;
         }
         Some("shell") => {
-            return process_shell_project_message(config, &msg, &dest, test, approve).await;
+            return process_shell_module_message(config, &msg, &dest, test, approve).await;
         }
         _ => {}
     }
@@ -686,11 +681,11 @@ pub async fn process_project_message(
         ));
     };
 
-    // Run the project
+    // Run the module
     use crate::cli::commands::run::{execute as run_execute, RunParams};
 
     let result = run_execute(RunParams {
-        project_folder: dest.to_string_lossy().to_string(),
+        module_folder: dest.to_string_lossy().to_string(),
         participant_source: participant_source.clone(),
         test,
         download: true,
@@ -707,7 +702,7 @@ pub async fn process_project_message(
     match result {
         Ok(_) => {
             println!(
-                "✓ Project processed successfully with participant: {}",
+                "✓ Module processed successfully with participant: {}",
                 participant_source
             );
 
@@ -720,12 +715,12 @@ pub async fn process_project_message(
 
             // Approve if requested
             if approve {
-                approve_project_non_interactive(config, &msg, test).await?;
-                println!("✓ Project approved and results sent to sender");
+                approve_module_non_interactive(config, &msg, test).await?;
+                println!("✓ Module approved and results sent to sender");
             }
         }
         Err(e) => {
-            eprintln!("✗ Failed to process project: {}", e);
+            eprintln!("✗ Failed to process module: {}", e);
             return Err(e);
         }
     }
@@ -740,19 +735,21 @@ pub fn archive_message(config: &Config, message_id: &str) -> anyhow::Result<()> 
         .get_message(message_id)?
         .ok_or_else(|| anyhow::anyhow!("Message not found: {}", message_id))?;
 
-    archive_project(config, &msg)?;
+    archive_module(config, &msg)?;
     Ok(())
 }
 
-fn archive_project(config: &Config, msg: &Message) -> anyhow::Result<()> {
+fn archive_module(config: &Config, msg: &Message) -> anyhow::Result<()> {
     // Update syft.pub.yaml by removing the results write rule
     let meta = msg
         .metadata
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("missing metadata"))?;
-    let project_location = metadata_submission_location(meta)
+    let module_location = meta
+        .get("module_location")
+        .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow::anyhow!("missing module_location"))?;
-    let root = resolve_syft_url_to_path(config, project_location)?;
+    let root = resolve_syft_url_to_path(config, module_location)?;
     let perm_path = root.join("syft.pub.yaml");
     if perm_path.exists() {
         let storage = syftbox_storage(config)?;
@@ -779,14 +776,16 @@ fn archive_project(config: &Config, msg: &Message) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn sender_project_root(
+fn sender_module_root(
     config: &Config,
     meta: &serde_json::Value,
 ) -> anyhow::Result<(PathBuf, String)> {
-    let project_location = metadata_submission_location(meta)
+    let module_location = meta
+        .get("module_location")
+        .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow::anyhow!("missing module_location"))?;
-    let path = resolve_syft_url_to_path(config, project_location)?;
-    let folder = Path::new(project_location)
+    let path = resolve_syft_url_to_path(config, module_location)?;
+    let folder = Path::new(module_location)
         .components()
         .next_back()
         .and_then(|c| match c {
@@ -929,24 +928,23 @@ fn list_dir_any(storage: Option<&SyftBoxStorage>, dir: &Path) -> anyhow::Result<
         .collect())
 }
 
-fn build_run_project_copy(config: &Config, msg: &Message) -> anyhow::Result<PathBuf> {
+fn build_run_module_copy(config: &Config, msg: &Message) -> anyhow::Result<PathBuf> {
     let meta = msg
         .metadata
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("missing metadata"))?;
-    let (sender_root, folder_name) = sender_project_root(config, meta)?;
+    let (sender_root, folder_name) = sender_module_root(config, meta)?;
     let dest_root = receiver_private_submissions_path(config)?;
     let dest_path = dest_root.join(&folder_name);
 
     // Always copy if key files are missing (handles incomplete/failed copies)
-    let module_yaml = dest_path.join(MODULE_YAML_FILE);
-    let project_yaml = dest_path.join("project.yaml");
+    let module_yaml = dest_path.join("module.yaml");
     let assets_dir = dest_path.join("assets");
     let assets_missing = !assets_dir.exists()
         || fs::read_dir(&assets_dir)
             .map(|mut entries| entries.next().is_none())
             .unwrap_or(true);
-    if (!module_yaml.exists() && !project_yaml.exists()) || assets_missing {
+    if !module_yaml.exists() || assets_missing {
         copy_dir_recursive(config, &sender_root, &dest_path)?;
     }
 
@@ -991,7 +989,7 @@ fn send_status_ack_with_meta(
         config.email.clone(),
         body.unwrap_or_else(|| status.to_string()),
     );
-    reply.subject = Some(format!("Project {}", status));
+    reply.subject = Some(format!("Module {}", status));
     reply.message_type = crate::messages::MessageType::Request {
         request_type: "status".to_string(),
         params: None,
@@ -1019,7 +1017,7 @@ fn send_status_ack_with_meta(
     Ok(())
 }
 
-fn reject_project(config: &Config, msg: &Message) -> anyhow::Result<()> {
+fn reject_module(config: &Config, msg: &Message) -> anyhow::Result<()> {
     let custom = Confirm::new()
         .with_prompt("Add a rejection reason?")
         .default(true)
@@ -1040,7 +1038,7 @@ fn reject_project(config: &Config, msg: &Message) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn review_project(config: &Config, msg: &Message) -> anyhow::Result<()> {
+fn review_module(config: &Config, msg: &Message) -> anyhow::Result<()> {
     send_status_ack_with_meta(
         config,
         msg,
@@ -1052,8 +1050,8 @@ fn review_project(config: &Config, msg: &Message) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn run_project_test(config: &Config, msg: &Message) -> anyhow::Result<()> {
-    let dest = build_run_project_copy(config, msg)?;
+async fn run_module_test(config: &Config, msg: &Message) -> anyhow::Result<()> {
+    let dest = build_run_module_copy(config, msg)?;
     let run_dir = prepare_run_directory(config, &dest, &msg.id)?;
 
     if let Some(invocation) = try_prepare_dynamic_run(config, &run_dir, true)? {
@@ -1073,7 +1071,7 @@ async fn run_project_test(config: &Config, msg: &Message) -> anyhow::Result<()> 
     let source = prompt_participant_source("NA06985")?;
     let source_for_run = source.clone();
     run_execute(RunParams {
-        project_folder: run_dir.to_string_lossy().to_string(),
+        module_folder: run_dir.to_string_lossy().to_string(),
         participant_source: source_for_run,
         test: true,
         download: true,
@@ -1091,8 +1089,8 @@ async fn run_project_test(config: &Config, msg: &Message) -> anyhow::Result<()> 
     Ok(())
 }
 
-async fn run_project_real(config: &Config, msg: &Message) -> anyhow::Result<()> {
-    let dest = build_run_project_copy(config, msg)?;
+async fn run_module_real(config: &Config, msg: &Message) -> anyhow::Result<()> {
+    let dest = build_run_module_copy(config, msg)?;
     let run_dir = prepare_run_directory(config, &dest, &msg.id)?;
 
     if let Some(invocation) = try_prepare_dynamic_run(config, &run_dir, false)? {
@@ -1126,7 +1124,7 @@ async fn run_project_real(config: &Config, msg: &Message) -> anyhow::Result<()> 
     let source = normalize_participant_source_for_real(&raw)?;
     let source_for_run = source.clone();
     run_execute(RunParams {
-        project_folder: run_dir.to_string_lossy().to_string(),
+        module_folder: run_dir.to_string_lossy().to_string(),
         participant_source: source_for_run,
         test: false,
         download: false,
@@ -1150,7 +1148,7 @@ async fn run_project_real(config: &Config, msg: &Message) -> anyhow::Result<()> 
     Ok(())
 }
 
-async fn process_shell_project_message(
+async fn process_shell_module_message(
     config: &Config,
     msg: &Message,
     dest: &Path,
@@ -1176,20 +1174,20 @@ async fn process_shell_project_message(
         copy_dir_recursive(config, &source_results, &dest_results)?;
     }
 
-    println!("✓ Project processed successfully (shell template)");
+    println!("✓ Module processed successfully (shell template)");
     if dest_results.exists() {
         println!("Results saved to: {}", dest_results.display());
     }
 
     if approve {
-        approve_project_non_interactive(config, msg, test).await?;
-        println!("✓ Project approved and results sent to sender");
+        approve_module_non_interactive(config, msg, test).await?;
+        println!("✓ Module approved and results sent to sender");
     }
 
     Ok(())
 }
 
-async fn process_dynamic_project_message(
+async fn process_dynamic_module_message(
     config: &Config,
     msg: &Message,
     dest: &Path,
@@ -1228,7 +1226,7 @@ async fn process_dynamic_project_message(
         .unwrap_or(participant_hint);
 
     println!(
-        "✓ Project processed successfully with participant: {}",
+        "✓ Module processed successfully with participant: {}",
         participant_label
     );
     let results_path = dest.join(&invocation.results_dir);
@@ -1237,8 +1235,8 @@ async fn process_dynamic_project_message(
     }
 
     if approve {
-        approve_project_non_interactive(config, msg, test).await?;
-        println!("✓ Project approved and results sent to sender");
+        approve_module_non_interactive(config, msg, test).await?;
+        println!("✓ Module approved and results sent to sender");
     }
 
     Ok(())
@@ -1246,19 +1244,12 @@ async fn process_dynamic_project_message(
 
 fn prepare_dynamic_run_non_interactive(
     config: &Config,
-    project_dir: &Path,
+    module_dir: &Path,
     participant_hint: &str,
     test: bool,
 ) -> anyhow::Result<DynamicRunInvocation> {
-    let spec_path = resolve_project_spec_path(project_dir);
-    // Use storage decryption since the file may be encrypted in the private folder
-    let storage = syftbox_storage(config)?;
-    let spec = if storage.contains(&spec_path) {
-        let bytes = storage.read_with_shadow(&spec_path)?;
-        ProjectSpec::load_from_bytes(&spec_path, &bytes)?
-    } else {
-        ProjectSpec::load(&spec_path)?
-    };
+    let spec_path = module_dir.join("module.yaml");
+    let spec = ModuleSpec::load(&spec_path)?;
 
     if participant_hint.eq_ignore_ascii_case("ALL") || participant_hint.eq_ignore_ascii_case("AUTO")
     {
@@ -1272,7 +1263,7 @@ fn prepare_dynamic_run_non_interactive(
     for input in &spec.inputs {
         match input.name.as_str() {
             "samplesheet" => {
-                let path = resolve_samplesheet_path(config, project_dir, participant_hint)?;
+                let path = resolve_samplesheet_path(config, module_dir, participant_hint)?;
                 args.push("--set".to_string());
                 args.push(format!("inputs.{}={}", input.name, path));
                 samplesheet_value = Some(path);
@@ -1293,7 +1284,7 @@ fn prepare_dynamic_run_non_interactive(
     }
 
     let samplesheet_path = samplesheet_value.ok_or_else(|| {
-        anyhow::anyhow!("Dynamic project requires a 'samplesheet' input but none could be inferred")
+        anyhow::anyhow!("Dynamic module requires a 'samplesheet' input but none could be inferred")
     })?;
 
     if needs_data_dir {
@@ -1314,12 +1305,12 @@ fn prepare_dynamic_run_non_interactive(
 
 fn resolve_samplesheet_path(
     config: &Config,
-    project_dir: &Path,
+    module_dir: &Path,
     participant_hint: &str,
 ) -> anyhow::Result<String> {
     if participant_hint.eq_ignore_ascii_case("ALL") || participant_hint.eq_ignore_ascii_case("AUTO")
     {
-        let generated = auto_generate_samplesheet(config, project_dir)?;
+        let generated = auto_generate_samplesheet(config, module_dir)?;
         return Ok(canonicalize_string(PathBuf::from(generated)));
     }
 
@@ -1338,9 +1329,9 @@ fn resolve_samplesheet_path(
     let candidate = if direct.is_absolute() && direct.exists() {
         direct
     } else {
-        let project_candidate = project_dir.join(&direct);
-        if project_candidate.exists() {
-            project_candidate
+        let module_candidate = module_dir.join(&direct);
+        if module_candidate.exists() {
+            module_candidate
         } else {
             let data_root = config.get_syftbox_data_dir()?;
             let data_candidate = data_root.join(&direct);
@@ -1448,13 +1439,13 @@ fn ensure_catalog_ready_for_all(_config: &Config) -> anyhow::Result<()> {
     ))
 }
 
-/// Non-interactive version of approve_project for automated testing
-async fn approve_project_non_interactive(
+/// Non-interactive version of approve_module for automated testing
+async fn approve_module_non_interactive(
     config: &Config,
     msg: &Message,
     test: bool,
 ) -> anyhow::Result<()> {
-    let dest = build_run_project_copy(config, msg)?;
+    let dest = build_run_module_copy(config, msg)?;
     let storage = syftbox_storage(config)?;
     let results_dir = if test {
         // In test mode, use test results for approval
@@ -1473,7 +1464,7 @@ async fn approve_project_non_interactive(
     if needs_run && !test {
         // Only run real data if not in test mode
         println!("No results found. Running on real data before approval...");
-        run_project_real(config, msg).await?;
+        run_module_real(config, msg).await?;
     } else if needs_run && test {
         return Err(anyhow::anyhow!(
             "No test results found. Run with --test first before approving."
@@ -1485,12 +1476,15 @@ async fn approve_project_non_interactive(
         .metadata
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("missing metadata"))?;
-    let (sender_root, _folder) = sender_project_root(config, meta)?;
+    let (sender_root, _folder) = sender_module_root(config, meta)?;
     let sender_results = sender_root.join("results");
     copy_dir_recursive(config, &results_dir, &sender_results)?;
 
-    // Get project details for the message
-    let project_location = metadata_submission_location(meta).unwrap_or("unknown");
+    // Get module details for the message
+    let module_location = meta
+        .get("module_location")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
 
     // Check if results exist and get basic info
     let results_info = if sender_results.exists() {
@@ -1528,8 +1522,8 @@ async fn approve_project_non_interactive(
 
     // Create the default approval message with results location
     let body = format!(
-        "Your project has been approved.\n\nProject location: {}\nResults location: {}\n\n{}",
-        project_location, relative_results, results_info
+        "Your module has been approved.\n\nModule location: {}\nResults location: {}\n\n{}",
+        module_location, relative_results, results_info
     );
 
     // Include results_path in the status update so sender can see it directly
@@ -1542,8 +1536,8 @@ async fn approve_project_non_interactive(
     Ok(())
 }
 
-async fn approve_project(config: &Config, msg: &Message) -> anyhow::Result<()> {
-    let dest = build_run_project_copy(config, msg)?;
+async fn approve_module(config: &Config, msg: &Message) -> anyhow::Result<()> {
+    let dest = build_run_module_copy(config, msg)?;
     let results_dir = dest.join("results-real");
     let storage = syftbox_storage(config)?;
     let needs_run = !results_dir.exists()
@@ -1553,7 +1547,7 @@ async fn approve_project(config: &Config, msg: &Message) -> anyhow::Result<()> {
             .unwrap_or(true);
     if needs_run {
         println!("No results found. Running on real data before approval...");
-        run_project_real(config, msg).await?;
+        run_module_real(config, msg).await?;
     }
 
     // Release results to sender shared location
@@ -1561,12 +1555,15 @@ async fn approve_project(config: &Config, msg: &Message) -> anyhow::Result<()> {
         .metadata
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("missing metadata"))?;
-    let (sender_root, _folder) = sender_project_root(config, meta)?;
+    let (sender_root, _folder) = sender_module_root(config, meta)?;
     let sender_results = sender_root.join("results");
     copy_dir_recursive(config, &results_dir, &sender_results)?;
 
-    // Get project details for the message
-    let project_location = metadata_submission_location(meta).unwrap_or("unknown");
+    // Get module details for the message
+    let module_location = meta
+        .get("module_location")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
 
     // Check if results exist and get basic info
     let results_info = if sender_results.exists() {
@@ -1604,8 +1601,8 @@ async fn approve_project(config: &Config, msg: &Message) -> anyhow::Result<()> {
 
     // Create the default approval message with results location
     let default_message = format!(
-        "Your project has been approved.\n\nProject location: {}\nResults location: {}\n\n{}",
-        project_location, relative_results, results_info
+        "Your module has been approved.\n\nModule location: {}\nResults location: {}\n\n{}",
+        module_location, relative_results, results_info
     );
 
     // Optional approval message
@@ -1660,49 +1657,23 @@ struct DynamicRunInvocation {
 
 fn try_prepare_dynamic_run(
     config: &Config,
-    project_dir: &Path,
+    module_dir: &Path,
     is_test: bool,
 ) -> anyhow::Result<Option<DynamicRunInvocation>> {
-    let spec_path = resolve_project_spec_path(project_dir);
+    let spec_path = module_dir.join("module.yaml");
     if !spec_path.exists() {
         return Ok(None);
     }
 
-    // Use storage decryption since the file may be encrypted in the private folder
-    let storage = syftbox_storage(config)?;
-    let spec = if storage.contains(&spec_path) {
-        match storage.read_with_shadow(&spec_path) {
-            Ok(bytes) => match ProjectSpec::load_from_bytes(&spec_path, &bytes) {
-                Ok(spec) => spec,
-                Err(err) => {
-                    println!(
-                        "⚠ Failed to load project spec at {}: {}",
-                        spec_path.display(),
-                        err
-                    );
-                    return Ok(None);
-                }
-            },
-            Err(err) => {
-                println!(
-                    "⚠ Failed to read project spec at {}: {}",
-                    spec_path.display(),
-                    err
-                );
-                return Ok(None);
-            }
-        }
-    } else {
-        match ProjectSpec::load(&spec_path) {
-            Ok(spec) => spec,
-            Err(err) => {
-                println!(
-                    "⚠ Failed to load project spec at {}: {}",
-                    spec_path.display(),
-                    err
-                );
-                return Ok(None);
-            }
+    let spec = match ModuleSpec::load(&spec_path) {
+        Ok(spec) => spec,
+        Err(err) => {
+            println!(
+                "⚠ Failed to load module spec at {}: {}",
+                spec_path.display(),
+                err
+            );
+            return Ok(None);
         }
     };
 
@@ -1711,7 +1682,7 @@ fn try_prepare_dynamic_run(
     }
 
     println!(
-        "Project '{}' requires {} input(s).",
+        "Module '{}' requires {} input(s).",
         spec.name,
         spec.inputs.len()
     );
@@ -1731,14 +1702,14 @@ fn try_prepare_dynamic_run(
 
         let resolved = if trimmed.is_empty() {
             if input.name == "samplesheet" {
-                auto_generate_samplesheet(config, project_dir)?
+                auto_generate_samplesheet(config, module_dir)?
             } else {
                 trimmed.to_string()
             }
         } else if input.name == "samplesheet"
             && matches!(trimmed.to_ascii_uppercase().as_str(), "ALL" | "AUTO")
         {
-            auto_generate_samplesheet(config, project_dir)?
+            auto_generate_samplesheet(config, module_dir)?
         } else {
             trimmed.to_string()
         };
@@ -1762,18 +1733,18 @@ fn try_prepare_dynamic_run(
         "results-real".to_string()
     };
 
-    let preview = format_bv_run_command(project_dir, &results_dir, &args);
+    let preview = format_bv_run_command(module_dir, &results_dir, &args);
     println!("Nextflow command:\n  {}", preview);
 
     Ok(Some(DynamicRunInvocation { args, results_dir }))
 }
 
-fn format_bv_run_command(project_dir: &Path, results_dir: &str, args: &[String]) -> String {
-    let project_path = project_dir.to_string_lossy().into_owned();
+fn format_bv_run_command(module_dir: &Path, results_dir: &str, args: &[String]) -> String {
+    let module_path = module_dir.to_string_lossy().into_owned();
     let mut tokens = vec![
         "bv".to_string(),
         "run".to_string(),
-        shell_escape(&project_path),
+        shell_escape(&module_path),
         "--results-dir".to_string(),
         shell_escape(results_dir),
     ];
@@ -1794,8 +1765,8 @@ fn shell_escape(arg: &str) -> String {
     }
 }
 
-fn print_dynamic_results(project_root: &Path, results_dir: &str) -> anyhow::Result<()> {
-    let results_path = project_root.join(results_dir);
+fn print_dynamic_results(module_root: &Path, results_dir: &str) -> anyhow::Result<()> {
+    let results_path = module_root.join(results_dir);
     println!("Results location: {}", results_path.display());
     if results_path.exists() {
         println!("Results tree:");
@@ -1822,7 +1793,7 @@ fn prepare_run_directory(
     Ok(run_dir)
 }
 
-fn auto_generate_samplesheet(_config: &Config, project_dir: &Path) -> anyhow::Result<String> {
+fn auto_generate_samplesheet(_config: &Config, module_dir: &Path) -> anyhow::Result<String> {
     let db = BioVaultDb::new()?;
     let mut stmt = db.conn.prepare(
         "SELECT f.file_path, p.participant_id
@@ -1843,7 +1814,7 @@ fn auto_generate_samplesheet(_config: &Config, project_dir: &Path) -> anyhow::Re
         );
     }
 
-    let inputs_dir = project_dir.join("inputs");
+    let inputs_dir = module_dir.join("inputs");
     fs::create_dir_all(&inputs_dir)?;
     let sheet_path = inputs_dir.join("auto_samplesheet.csv");
     let mut writer = Writer::from_path(&sheet_path)?;
@@ -1867,7 +1838,7 @@ fn auto_generate_samplesheet(_config: &Config, project_dir: &Path) -> anyhow::Re
 
 fn print_results_location_and_tree(
     config: &Config,
-    project_root: &Path,
+    module_root: &Path,
     participant_source: &str,
     is_test: bool,
 ) -> anyhow::Result<()> {
@@ -1878,8 +1849,8 @@ fn print_results_location_and_tree(
         "results-real"
     };
     let storage = syftbox_storage(config).ok();
-    let results_dir = project_root.join(base).join(&id);
-    let base_dir = project_root.join(base);
+    let results_dir = module_root.join(base).join(&id);
+    let base_dir = module_root.join(base);
     println!("Results location: {}", results_dir.display());
     if results_dir.exists() {
         println!("Results tree:");
@@ -1985,32 +1956,27 @@ fn resolve_syft_url_to_path(config: &Config, url: &str) -> anyhow::Result<PathBu
         .join(parsed.path))
 }
 
-fn metadata_submission_location(meta: &serde_json::Value) -> Option<&str> {
-    meta.get("module_location")
-        .and_then(|v| v.as_str())
-        .or_else(|| meta.get("project_location").and_then(|v| v.as_str()))
-}
-
-fn metadata_module_value(meta: &serde_json::Value) -> Option<&serde_json::Value> {
-    meta.get("module").or_else(|| meta.get("project"))
-}
-
-/// Verify a project message using embedded metadata
+/// Verify a module message using embedded metadata
 /// Returns (is_ok, extra_note)
-fn verify_project_from_metadata(
+fn verify_module_from_metadata(
     config: &Config,
     metadata: &serde_json::Value,
 ) -> anyhow::Result<(bool, String)> {
-    // Extract the embedded module spec
-    let module_val = metadata_module_value(metadata)
+    // Extract the embedded module.yaml
+    let module_val = metadata
+        .get("module")
         .ok_or_else(|| anyhow::anyhow!("missing module metadata"))?;
-    let _ = serde_json::from_value::<ModuleFile>(module_val.clone());
 
-    // Extract submission location syft URL
-    let project_location = metadata_submission_location(metadata)
+    let module: ModuleYaml = serde_json::from_value(module_val.clone())
+        .map_err(|e| anyhow::anyhow!("invalid module metadata: {}", e))?;
+
+    // Extract module location syft URL
+    let module_location = metadata
+        .get("module_location")
+        .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow::anyhow!("missing module_location syft URL"))?;
 
-    let root = resolve_syft_url_to_path(config, project_location)?;
+    let root = resolve_syft_url_to_path(config, module_location)?;
     if !root.exists() {
         return Ok((false, format!(" (missing path: {})", root.display())));
     }
@@ -2018,14 +1984,8 @@ fn verify_project_from_metadata(
     let storage = syftbox_storage(config)?;
 
     // Need b3_hashes to verify
-    let b3_hashes_value = metadata
-        .get("b3_hashes")
-        .cloned()
-        .or_else(|| module_val.get("b3_hashes").cloned());
-    let expected_hashes: HashMap<String, String> = match b3_hashes_value {
-        Some(value) => serde_json::from_value(value)
-            .map_err(|e| anyhow::anyhow!("invalid b3_hashes metadata: {}", e))?,
-        None => return Ok((false, " (no hashes provided)".to_string())),
+    let Some(expected_hashes) = module.b3_hashes.clone() else {
+        return Ok((false, " (no hashes provided)".to_string()));
     };
 
     // Verify each expected file hash
@@ -2194,15 +2154,15 @@ mod tests {
             .write_plaintext_file(&root.join("a/syft.pub.yaml"), b"rules:", true)
             .unwrap();
 
-        // sender_project_root from metadata
+        // sender_module_root from metadata
         let loc = format!(
             "syft://u@example.com/app_data/biovault/submissions/{}",
             "proj1"
         );
         let meta = json!({
-            "project_location": loc
+            "module_location": loc
         });
-        let (sender_root, folder) = sender_project_root(&cfg, &meta)?;
+        let (sender_root, folder) = sender_module_root(&cfg, &meta)?;
         assert_eq!(folder, "proj1");
         assert!(sender_root.ends_with("proj1"));
 
@@ -2223,7 +2183,7 @@ mod tests {
     }
 
     #[test]
-    fn build_run_project_copy_creates_dest_once() -> Result<()> {
+    fn build_run_module_copy_creates_dest_once() -> Result<()> {
         let tmp = TempDir::new()?;
         crate::config::set_test_syftbox_data_dir(tmp.path());
         let cfg = Config {
@@ -2247,20 +2207,20 @@ mod tests {
             .write_plaintext_file(&proj.join("dir/f.txt"), b"x", true)
             .unwrap();
         let meta =
-            json!({"project_location": "syft://u@example.com/app_data/biovault/submissions/projX"});
+            json!({"module_location": "syft://u@example.com/app_data/biovault/submissions/projX"});
         let mut msg = Message::new("u@example.com".into(), "v@example.com".into(), "b".into());
         msg.metadata = Some(meta);
 
-        let dest1 = build_run_project_copy(&cfg, &msg)?;
+        let dest1 = build_run_module_copy(&cfg, &msg)?;
         assert!(dest1.join("dir/f.txt").exists());
         // Call again; should not error and keep same path
-        let dest2 = build_run_project_copy(&cfg, &msg)?;
+        let dest2 = build_run_module_copy(&cfg, &msg)?;
         assert_eq!(dest1, dest2);
         Ok(())
     }
 
     #[test]
-    fn verify_project_from_metadata_ok_and_fail() -> Result<()> {
+    fn verify_module_from_metadata_ok_and_fail() -> Result<()> {
         let tmp = TempDir::new()?;
         crate::config::set_test_syftbox_data_dir(tmp.path());
         let cfg = Config {
@@ -2276,7 +2236,7 @@ mod tests {
             agent_bridge_blocklist: None,
         };
 
-        // Build project root with two files and compute blake3
+        // Build module root with two files and compute blake3
         let app = SyftBoxApp::new(tmp.path(), &cfg.email, "biovault").unwrap();
         let root = app.app_data_dir.join("submissions").join("projZ");
         app.storage.ensure_dir(&root).unwrap();
@@ -2292,22 +2252,36 @@ mod tests {
             .to_string();
 
         // Construct embedded module.yaml equivalent in metadata
-        let project = json!({
-            "name": "n", "author":"a", "workflow":"w",
-            "b3_hashes": {"a.txt": h1, "b.txt": h2}
-        });
+        let module = serde_json::to_value(ModuleYaml {
+            name: "n".into(),
+            version: "0.1.0".into(),
+            author: "a".into(),
+            datasites: None,
+            participants: None,
+            workflow: "w".into(),
+            template: None,
+            assets: None,
+            parameters: None,
+            inputs: None,
+            outputs: None,
+            b3_hashes: Some(std::collections::HashMap::from([
+                ("a.txt".to_string(), h1.clone()),
+                ("b.txt".to_string(), h2.clone()),
+            ])),
+            extra: std::collections::HashMap::new(),
+        })?;
         let meta_ok = json!({
-            "project": project,
-            "project_location": "syft://u@example.com/app_data/biovault/submissions/projZ"
+            "module": module,
+            "module_location": "syft://u@example.com/app_data/biovault/submissions/projZ"
         });
-        let (ok, note) = verify_project_from_metadata(&cfg, &meta_ok)?;
+        let (ok, note) = verify_module_from_metadata(&cfg, &meta_ok)?;
         assert!(ok, "expected OK, got note: {}", note);
 
         // Now break one file and expect failure with note
         app.storage
             .write_plaintext_file(&f2, b"BROKEN", true)
             .unwrap();
-        let (ok2, note2) = verify_project_from_metadata(&cfg, &meta_ok)?;
+        let (ok2, note2) = verify_module_from_metadata(&cfg, &meta_ok)?;
         assert!(!ok2);
         assert!(!note2.is_empty());
         Ok(())

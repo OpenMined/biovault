@@ -1,0 +1,15 @@
+name: syqure-allele-freq
+author: madhava@openmined.org
+workflow: workflow.sh
+template: shell
+version: 0.1.0
+description: Run allele-freq Nextflow pipeline and securely aggregate allele counts via Syqure.
+datasites:
+  - aggregator@sandbox.local
+  - client1@sandbox.local
+  - client2@sandbox.local
+env:
+  SEQURE_FILE_DEBUG: "1"
+  SEQURE_FILE_KEEP: "1"
+  SEQURE_SYFT_WAIT_STRICT: "1"
+  SEQURE_SYFT_WAIT_TIMEOUT: "600"

@@ -1,0 +1,39 @@
+apiVersion: syftbox.openmined.org/v1alpha1
+kind: Module
+metadata:
+  name: secure-aggregate
+  version: 0.1.0
+  description: Secure multi-party aggregation using Syqure MPC
+spec:
+  # Future: native syqure runner
+  # runner:
+  #   kind: syqure
+  #   entrypoint: secure_aggregate.codon
+
+  # Current: bash wrapper invoking syqure binary
+  runner:
+    template: shell
+    entrypoint: run.sh
+  assets:
+    - path: run.sh
+    - path: secure_aggregate.codon
+  inputs:
+    - name: counts
+      type: File
+      format: { kind: json }
+      description: Aligned count array (clients only - stays private for MPC)
+    - name: array_length
+      type: String
+      description: Number of elements to aggregate (from build_master)
+    - name: party_id
+      type: String
+      description: MPC party ID (0=aggregator, 1=client1, 2=client2)
+    - name: party_emails
+      type: String
+      description: Comma-separated list of party emails
+  outputs:
+    - name: aggregated_counts
+      type: File
+      format: { kind: json }
+      path: aggregated_counts.json
+      description: Aggregated sum (all parties write and share for verification)

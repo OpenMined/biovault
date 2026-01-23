@@ -1,0 +1,219 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF_USAGE' >&2
+Usage: run_syqure_allele_freq_project.sh --sandbox DIR --bv PATH --agg MSG --client1 MSG --client2 MSG
+
+Options:
+  --sandbox DIR   Sandbox root containing datasite folders
+  --bv PATH       Path to bv binary
+  --agg MSG       Aggregator message ID
+  --client1 MSG   Client1 message ID
+  --client2 MSG   Client2 message ID
+EOF_USAGE
+}
+
+SANDBOX=""
+BV_BIN=""
+AGG_MSG=""
+C1_MSG=""
+C2_MSG=""
+SEQURE_MODE="${SEQURE_MODE:-native}"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --sandbox) SANDBOX="${2:-}"; shift ;;
+    --bv) BV_BIN="${2:-}"; shift ;;
+    --agg) AGG_MSG="${2:-}"; shift ;;
+    --client1) C1_MSG="${2:-}"; shift ;;
+    --client2) C2_MSG="${2:-}"; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "Unknown option: $1" >&2; usage; exit 1 ;;
+  esac
+  shift
+ done
+
+if [[ -z "$SANDBOX" || -z "$BV_BIN" || -z "$AGG_MSG" || -z "$C1_MSG" || -z "$C2_MSG" ]]; then
+  usage
+  exit 1
+fi
+
+detect_syqure_repo() {
+  if [[ -n "${SEQURE_REPO:-}" ]]; then
+    echo "$SEQURE_REPO"
+    return 0
+  fi
+
+  local script_dir biovault_root workspace_root candidate
+  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+  biovault_root="$(cd "$script_dir/../.." && pwd -P)"
+  workspace_root="$(cd "$biovault_root/.." && pwd -P)"
+  candidate="$workspace_root/syqure"
+  if [[ -f "$candidate/Cargo.toml" ]]; then
+    echo "$candidate"
+    return 0
+  fi
+
+  if [[ -n "$BV_BIN" ]]; then
+    local bv_root ws_root
+    bv_root="$(cd "$(dirname "$BV_BIN")/../../.." && pwd -P)"
+    ws_root="$(cd "$bv_root/.." && pwd -P)"
+    candidate="$ws_root/syqure"
+    if [[ -f "$candidate/Cargo.toml" ]]; then
+      echo "$candidate"
+      return 0
+    fi
+  fi
+
+  return 1
+}
+
+ensure_syqure_binary() {
+  local uname_out repo
+
+  uname_out="$(uname -s)"
+  case "$uname_out" in
+    MINGW*|MSYS*|CYGWIN*)
+      export SEQURE_MODE="docker"
+      echo "Windows detected; using SEQURE_MODE=docker" >&2
+      return 0
+      ;;
+  esac
+
+  if [[ "$SEQURE_MODE" == "docker" ]]; then
+    return 0
+  fi
+
+  if ! repo="$(detect_syqure_repo)"; then
+    echo "Syqure repo not found. Set SEQURE_REPO or use SEQURE_MODE=docker." >&2
+    return 1
+  fi
+
+  echo "Building syqure binary in ${repo}" >&2
+  (cd "$repo" && cargo build --release)
+}
+
+ensure_syqure_binary
+
+cleanup_containers() {
+  docker rm -f $(docker ps -aq --filter "name=syqure-") >/dev/null 2>&1 || true
+}
+
+start_tailer() {
+  local email="$1"
+  local label="$2"
+  local start_ts="$3"
+  local base="${SANDBOX}/${email}/datasites/${email}/shared/syqure"
+  python3 - "$base" "$label" "$start_ts" <<'PY' &
+import os
+import sys
+import time
+
+base = sys.argv[1]
+label = sys.argv[2]
+start_ts = int(sys.argv[3])
+
+deadline = time.time() + 50
+log_path = None
+while time.time() < deadline and log_path is None:
+    if os.path.isdir(base):
+        best = None
+        best_mtime = 0
+        for entry in os.listdir(base):
+            candidate = os.path.join(base, entry, "file_transport.log")
+            if not os.path.isfile(candidate):
+                continue
+            try:
+                mtime = int(os.path.getmtime(candidate))
+            except OSError:
+                continue
+            if mtime >= start_ts and mtime >= best_mtime:
+                best = candidate
+                best_mtime = mtime
+        log_path = best
+    if log_path is None:
+        time.sleep(0.5)
+
+if log_path is None:
+    sys.exit(0)
+
+with open(log_path, "r") as f:
+    f.seek(0, os.SEEK_END)
+    while True:
+        line = f.readline()
+        if not line:
+            time.sleep(0.1)
+            continue
+        sys.stdout.write(f"[{label}] {line}")
+        sys.stdout.flush()
+PY
+  echo $!
+}
+
+results_ready_party() {
+  local email="$1"
+  local msg="$2"
+  local home="${SANDBOX}/${email}"
+  if [[ -f "${home}/.biovault/runs/${msg}/results-test/sum_ac.txt" && -f "${home}/.biovault/runs/${msg}/results-test/sum_an.txt" ]]; then
+    return 0
+  fi
+  compgen -G "${home}/private/app_data/biovault/submissions/*/results-test/sum_ac.txt" >/dev/null && \
+    compgen -G "${home}/private/app_data/biovault/submissions/*/results-test/sum_an.txt" >/dev/null
+}
+
+results_ready() {
+  results_ready_party "aggregator@sandbox.local" "$AGG_MSG" && \
+    results_ready_party "client1@sandbox.local" "$C1_MSG" && \
+    results_ready_party "client2@sandbox.local" "$C2_MSG"
+}
+
+cleanup_containers
+
+start_ts="$(date +%s)"
+tail_pids=()
+tail_pids+=("$(start_tailer "aggregator@sandbox.local" "agg" "$start_ts")")
+tail_pids+=("$(start_tailer "client1@sandbox.local" "c1" "$start_ts")")
+tail_pids+=("$(start_tailer "client2@sandbox.local" "c2" "$start_ts")")
+
+run_party() {
+  local email="$1"
+  local msg="$2"
+  local home="${SANDBOX}/${email}"
+  if [[ ! -d "$home" ]]; then
+    echo "Missing datasite dir: ${home}" >&2
+    return 1
+  fi
+  HOME="$home" \
+    SYFTBOX_EMAIL="$email" \
+    SYFTBOX_DATA_DIR="$home" \
+    SYFTBOX_CONFIG_PATH="$home/.syftbox/config.json" \
+    BV_BIN="$BV_BIN" \
+    "$BV_BIN" message process "$msg" \
+      --test \
+      --approve \
+      --non-interactive
+}
+
+pids=()
+run_party "aggregator@sandbox.local" "$AGG_MSG" & pids+=("$!")
+run_party "client1@sandbox.local" "$C1_MSG" & pids+=("$!")
+run_party "client2@sandbox.local" "$C2_MSG" & pids+=("$!")
+
+status=0
+for pid in "${pids[@]}"; do
+  if ! wait "$pid"; then
+    status=1
+  fi
+ done
+
+for pid in "${tail_pids[@]}"; do
+  kill "$pid" >/dev/null 2>&1 || true
+ done
+
+if [[ "$status" -eq 0 ]] && ! results_ready; then
+  echo "Syqure allele-freq results not found after runs completed." >&2
+  exit 1
+fi
+
+exit "$status"

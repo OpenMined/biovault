@@ -131,15 +131,15 @@ CREATE INDEX IF NOT EXISTS idx_genotype_file_id ON genotype_metadata(file_id);
 -- SQLite doesn't have IF NOT EXISTS for ALTER TABLE, so we check first
 -- This is handled by separate migration code if needed
 
--- NEW: Projects (Desktop-only but in shared DB)
-CREATE TABLE IF NOT EXISTS projects (
+-- NEW: Modules (Desktop-only but in shared DB)
+CREATE TABLE IF NOT EXISTS modules (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
     version TEXT NOT NULL DEFAULT '1.0.0',
     author TEXT NOT NULL,
     workflow TEXT NOT NULL,
     template TEXT NOT NULL,
-    project_path TEXT UNIQUE NOT NULL,
+    module_path TEXT UNIQUE NOT NULL,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(name, version)
 );
@@ -147,7 +147,7 @@ CREATE TABLE IF NOT EXISTS projects (
 -- NEW: Development Environments (virtualenvs for Jupyter, etc.)
 CREATE TABLE IF NOT EXISTS dev_envs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    project_path TEXT UNIQUE NOT NULL,
+    module_path TEXT UNIQUE NOT NULL,
     python_version TEXT NOT NULL,
     env_type TEXT DEFAULT 'jupyter',
     jupyter_installed INTEGER DEFAULT 0,
@@ -159,60 +159,60 @@ CREATE TABLE IF NOT EXISTS dev_envs (
     last_used_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE INDEX IF NOT EXISTS idx_dev_envs_project_path ON dev_envs(project_path);
+CREATE INDEX IF NOT EXISTS idx_dev_envs_module_path ON dev_envs(module_path);
 CREATE INDEX IF NOT EXISTS idx_dev_envs_env_type ON dev_envs(env_type);
 
--- NEW: Pipelines (shared CLI/Desktop)
-CREATE TABLE IF NOT EXISTS pipelines (
+-- NEW: Flows (shared CLI/Desktop)
+CREATE TABLE IF NOT EXISTS flows (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL UNIQUE,
-    pipeline_path TEXT NOT NULL,
+    flow_path TEXT NOT NULL,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
--- NEW: Unified Runs Table (handles both pipeline and standalone step runs)
-CREATE TABLE IF NOT EXISTS runs (
+-- NEW: Unified Flow Runs Table (handles both flow and standalone module runs)
+CREATE TABLE IF NOT EXISTS flow_runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    pipeline_id INTEGER,                -- NULL for standalone step runs
-    step_id INTEGER,                    -- NULL for pipeline runs (references projects table)
+    flow_id INTEGER,                    -- NULL for standalone module runs
+    module_id INTEGER,                  -- NULL for flow runs (references modules table)
     status TEXT NOT NULL,
     work_dir TEXT NOT NULL,
     results_dir TEXT,
-    participant_count INTEGER,          -- Only for standalone step runs
+    participant_count INTEGER,          -- Only for standalone module runs
     metadata TEXT,                      -- JSON: { "input_overrides": {...}, "parameter_overrides": {...} }
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     completed_at DATETIME,
-    FOREIGN KEY (pipeline_id) REFERENCES pipelines(id) ON DELETE CASCADE,
-    FOREIGN KEY (step_id) REFERENCES projects(id) ON DELETE SET NULL,
-    CHECK ((pipeline_id IS NULL) != (step_id IS NULL))  -- Exactly one must be set
+    FOREIGN KEY (flow_id) REFERENCES flows(id) ON DELETE CASCADE,
+    FOREIGN KEY (module_id) REFERENCES modules(id) ON DELETE SET NULL,
+    CHECK ((flow_id IS NULL) != (module_id IS NULL))  -- Exactly one must be set
 );
 
-CREATE INDEX IF NOT EXISTS idx_runs_pipeline_id ON runs(pipeline_id);
-CREATE INDEX IF NOT EXISTS idx_runs_step_id ON runs(step_id);
-CREATE INDEX IF NOT EXISTS idx_runs_status ON runs(status);
+CREATE INDEX IF NOT EXISTS idx_flow_runs_flow_id ON flow_runs(flow_id);
+CREATE INDEX IF NOT EXISTS idx_flow_runs_module_id ON flow_runs(module_id);
+CREATE INDEX IF NOT EXISTS idx_flow_runs_status ON flow_runs(status);
 
--- NEW: Run Participants (for standalone step runs only)
-CREATE TABLE IF NOT EXISTS run_participants (
+-- NEW: Run Participants (for standalone module runs only)
+CREATE TABLE IF NOT EXISTS flow_run_participants (
     run_id INTEGER NOT NULL,
     participant_id INTEGER NOT NULL,
-    FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE,
+    FOREIGN KEY (run_id) REFERENCES flow_runs(id) ON DELETE CASCADE,
     FOREIGN KEY (participant_id) REFERENCES participants(id) ON DELETE CASCADE,
     PRIMARY KEY (run_id, participant_id)
 );
 
--- NEW: Run Configurations (saved pipeline input configurations)
-CREATE TABLE IF NOT EXISTS run_configs (
+-- NEW: Run Configurations (saved flow input configurations)
+CREATE TABLE IF NOT EXISTS flow_run_configs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    pipeline_id INTEGER NOT NULL,
+    flow_id INTEGER NOT NULL,
     name TEXT NOT NULL,
     config_data TEXT NOT NULL,  -- JSON: { "inputs": {...}, "parameters": {...} }
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (pipeline_id) REFERENCES pipelines(id) ON DELETE CASCADE
+    FOREIGN KEY (flow_id) REFERENCES flows(id) ON DELETE CASCADE
 );
 
-CREATE INDEX IF NOT EXISTS idx_run_configs_pipeline_id ON run_configs(pipeline_id);
+CREATE INDEX IF NOT EXISTS idx_flow_run_configs_flow_id ON flow_run_configs(flow_id);
 
 -- NEW: Sessions (for collaborative Jupyter environments with beaver)
 -- Sessions allow data scientists to create collaborative Jupyter environments

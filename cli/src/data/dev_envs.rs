@@ -8,7 +8,7 @@ use super::BioVaultDb;
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct DevEnv {
     pub id: i64,
-    pub project_path: String,
+    pub module_path: String,
     pub python_version: String,
     pub env_type: String,
     pub jupyter_installed: bool,
@@ -24,15 +24,15 @@ impl BioVaultDb {
     /// Register a new development environment
     pub fn register_dev_env(
         &self,
-        project_path: &Path,
+        module_path: &Path,
         python_version: &str,
         env_type: &str,
         jupyter_installed: bool,
     ) -> Result<i64> {
-        let path_str = project_path
+        let path_str = module_path
             .canonicalize()?
             .to_str()
-            .ok_or_else(|| anyhow::anyhow!("Invalid project path"))?
+            .ok_or_else(|| anyhow::anyhow!("Invalid module path"))?
             .to_string();
 
         // Check if env already exists for this path
@@ -49,7 +49,7 @@ impl BioVaultDb {
 
         // Insert new
         self.conn.execute(
-            "INSERT INTO dev_envs (project_path, python_version, env_type, jupyter_installed)
+            "INSERT INTO dev_envs (module_path, python_version, env_type, jupyter_installed)
              VALUES (?1, ?2, ?3, ?4)",
             params![path_str, python_version, env_type, jupyter_installed as i32],
         )?;
@@ -57,19 +57,19 @@ impl BioVaultDb {
         Ok(self.conn.last_insert_rowid())
     }
 
-    /// Get dev environment by project path
-    pub fn get_dev_env(&self, project_path: &str) -> Result<Option<DevEnv>> {
+    /// Get dev environment by module path
+    pub fn get_dev_env(&self, module_path: &str) -> Result<Option<DevEnv>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, project_path, python_version, env_type, jupyter_installed, jupyter_port, jupyter_pid, jupyter_url, jupyter_token, created_at, last_used_at
+            "SELECT id, module_path, python_version, env_type, jupyter_installed, jupyter_port, jupyter_pid, jupyter_url, jupyter_token, created_at, last_used_at
              FROM dev_envs
-             WHERE project_path = ?1",
+             WHERE module_path = ?1",
         )?;
 
         let env = stmt
-            .query_row([project_path], |row| {
+            .query_row([module_path], |row| {
                 Ok(DevEnv {
                     id: row.get(0)?,
-                    project_path: row.get(1)?,
+                    module_path: row.get(1)?,
                     python_version: row.get(2)?,
                     env_type: row.get(3)?,
                     jupyter_installed: row.get::<_, i32>(4)? != 0,
@@ -89,7 +89,7 @@ impl BioVaultDb {
     /// List all development environments
     pub fn list_dev_envs(&self) -> Result<Vec<DevEnv>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, project_path, python_version, env_type, jupyter_installed, jupyter_port, jupyter_pid, jupyter_url, jupyter_token, created_at, last_used_at
+            "SELECT id, module_path, python_version, env_type, jupyter_installed, jupyter_port, jupyter_pid, jupyter_url, jupyter_token, created_at, last_used_at
              FROM dev_envs
              ORDER BY last_used_at DESC",
         )?;
@@ -98,7 +98,7 @@ impl BioVaultDb {
             .query_map([], |row| {
                 Ok(DevEnv {
                     id: row.get(0)?,
-                    project_path: row.get(1)?,
+                    module_path: row.get(1)?,
                     python_version: row.get(2)?,
                     env_type: row.get(3)?,
                     jupyter_installed: row.get::<_, i32>(4)? != 0,
@@ -116,14 +116,14 @@ impl BioVaultDb {
     }
 
     /// Update last used timestamp for a dev environment
-    pub fn update_dev_env_last_used(&self, project_path: &Path) -> Result<()> {
-        let canonical_path = project_path.canonicalize()?;
+    pub fn update_dev_env_last_used(&self, module_path: &Path) -> Result<()> {
+        let canonical_path = module_path.canonicalize()?;
         let path_str = canonical_path
             .to_str()
-            .ok_or_else(|| anyhow::anyhow!("Invalid project path"))?;
+            .ok_or_else(|| anyhow::anyhow!("Invalid module path"))?;
 
         self.conn.execute(
-            "UPDATE dev_envs SET last_used_at = CURRENT_TIMESTAMP WHERE project_path = ?1",
+            "UPDATE dev_envs SET last_used_at = CURRENT_TIMESTAMP WHERE module_path = ?1",
             params![path_str],
         )?;
 
@@ -133,19 +133,19 @@ impl BioVaultDb {
     /// Update Jupyter session info (port, PID, URL, token)
     pub fn update_jupyter_session(
         &self,
-        project_path: &Path,
+        module_path: &Path,
         port: Option<i32>,
         pid: Option<i32>,
         url: Option<&str>,
         token: Option<&str>,
     ) -> Result<()> {
-        let canonical_path = project_path.canonicalize()?;
+        let canonical_path = module_path.canonicalize()?;
         let path_str = canonical_path
             .to_str()
-            .ok_or_else(|| anyhow::anyhow!("Invalid project path"))?;
+            .ok_or_else(|| anyhow::anyhow!("Invalid module path"))?;
 
         self.conn.execute(
-            "UPDATE dev_envs SET jupyter_port = ?1, jupyter_pid = ?2, jupyter_url = ?3, jupyter_token = ?4, last_used_at = CURRENT_TIMESTAMP WHERE project_path = ?5",
+            "UPDATE dev_envs SET jupyter_port = ?1, jupyter_pid = ?2, jupyter_url = ?3, jupyter_token = ?4, last_used_at = CURRENT_TIMESTAMP WHERE module_path = ?5",
             params![port, pid, url, token, path_str],
         )?;
 
@@ -153,10 +153,10 @@ impl BioVaultDb {
     }
 
     /// Delete a dev environment record
-    pub fn delete_dev_env(&self, project_path: &str) -> Result<()> {
+    pub fn delete_dev_env(&self, module_path: &str) -> Result<()> {
         self.conn.execute(
-            "DELETE FROM dev_envs WHERE project_path = ?1",
-            params![project_path],
+            "DELETE FROM dev_envs WHERE module_path = ?1",
+            params![module_path],
         )?;
 
         Ok(())
@@ -183,11 +183,11 @@ mod tests {
     #[test]
     fn test_register_and_list_dev_envs() {
         let (tmp, db) = setup_test_db();
-        let project_path = tmp.path().join("test-project");
-        fs::create_dir_all(&project_path).unwrap();
+        let module_path = tmp.path().join("test-module");
+        fs::create_dir_all(&module_path).unwrap();
 
         let id = db
-            .register_dev_env(&project_path, "3.12", "jupyter", true)
+            .register_dev_env(&module_path, "3.12", "jupyter", true)
             .unwrap();
         assert!(id > 0);
 
@@ -202,13 +202,13 @@ mod tests {
     #[test]
     fn test_get_dev_env() {
         let (tmp, db) = setup_test_db();
-        let project_path = tmp.path().join("test-project");
-        fs::create_dir_all(&project_path).unwrap();
+        let module_path = tmp.path().join("test-module");
+        fs::create_dir_all(&module_path).unwrap();
 
-        db.register_dev_env(&project_path, "3.12", "jupyter", true)
+        db.register_dev_env(&module_path, "3.12", "jupyter", true)
             .unwrap();
 
-        let canonical_path = project_path.canonicalize().unwrap();
+        let canonical_path = module_path.canonicalize().unwrap();
         let env = db.get_dev_env(canonical_path.to_str().unwrap()).unwrap();
         assert!(env.is_some());
         assert_eq!(env.unwrap().python_version, "3.12");
@@ -219,18 +219,18 @@ mod tests {
     #[test]
     fn test_update_dev_env_last_used() {
         let (tmp, db) = setup_test_db();
-        let project_path = tmp.path().join("test-project");
-        fs::create_dir_all(&project_path).unwrap();
+        let module_path = tmp.path().join("test-module");
+        fs::create_dir_all(&module_path).unwrap();
 
-        db.register_dev_env(&project_path, "3.12", "jupyter", true)
+        db.register_dev_env(&module_path, "3.12", "jupyter", true)
             .unwrap();
 
         // Small delay to ensure timestamp changes
         std::thread::sleep(std::time::Duration::from_millis(10));
 
-        db.update_dev_env_last_used(&project_path).unwrap();
+        db.update_dev_env_last_used(&module_path).unwrap();
 
-        let canonical_path = project_path.canonicalize().unwrap();
+        let canonical_path = module_path.canonicalize().unwrap();
         let env = db.get_dev_env(canonical_path.to_str().unwrap()).unwrap();
         assert!(env.is_some());
 
@@ -240,22 +240,22 @@ mod tests {
     #[test]
     fn test_update_existing_dev_env() {
         let (tmp, db) = setup_test_db();
-        let project_path = tmp.path().join("test-project");
-        fs::create_dir_all(&project_path).unwrap();
+        let module_path = tmp.path().join("test-module");
+        fs::create_dir_all(&module_path).unwrap();
 
         // Register first time
         let id1 = db
-            .register_dev_env(&project_path, "3.11", "jupyter", false)
+            .register_dev_env(&module_path, "3.11", "jupyter", false)
             .unwrap();
 
         // Register again with different values - should update
         let id2 = db
-            .register_dev_env(&project_path, "3.12", "jupyter", true)
+            .register_dev_env(&module_path, "3.12", "jupyter", true)
             .unwrap();
 
         assert_eq!(id1, id2); // Same ID means it was updated, not inserted
 
-        let canonical_path = project_path.canonicalize().unwrap();
+        let canonical_path = module_path.canonicalize().unwrap();
         let env = db
             .get_dev_env(canonical_path.to_str().unwrap())
             .unwrap()

@@ -1,5 +1,5 @@
-# Syqure aggregate project (shell workflow + file transport)
-# Run with: ./test-scenario.sh tests/scenarios/syqure-project.yaml
+# Share kitchen sink scenario (multi-datasite pipeline foreach)
+# Run with: ./test-scenario.sh tests/scenarios/share-kitchen-sink.yaml
 
 setup:
   server:
@@ -37,34 +37,32 @@ steps:
         datasites/client2@sandbox.local/public/crypto/did.json \
         --expected-identity client2@sandbox.local
 
-  - name: Create Syqure aggregate project folder
+  - name: Create share-kitchen-sink project folder
     datasite: aggregator@sandbox.local
     run: |
-      rm -rf syqure-aggregate
-      mkdir -p syqure-aggregate
-      cp -R "{{workspace}}/tests/scenarios/syqure/." syqure-aggregate/
-      mv syqure-aggregate/syqure-aggregate.yaml syqure-aggregate/project.yaml
+      rm -rf share-kitchen-sink
+      cp -R "{{workspace}}/tests/scenarios/share-kitchen-sink" share-kitchen-sink
 
-  - name: Submit Syqure project to aggregator
+  - name: Submit share-kitchen-sink project to aggregator
     datasite: aggregator@sandbox.local
     run: |
-      {{workspace}}/cli/target/release/bv submit syqure-aggregate \
+      {{workspace}}/cli/target/release/bv submit share-kitchen-sink \
         aggregator@sandbox.local \
         --non-interactive \
         --force
 
-  - name: Submit Syqure project to client1
+  - name: Submit share-kitchen-sink project to client1
     datasite: aggregator@sandbox.local
     run: |
-      {{workspace}}/cli/target/release/bv submit syqure-aggregate \
+      {{workspace}}/cli/target/release/bv submit share-kitchen-sink \
         client1@sandbox.local \
         --non-interactive \
         --force
 
-  - name: Submit Syqure project to client2
+  - name: Submit share-kitchen-sink project to client2
     datasite: aggregator@sandbox.local
     run: |
-      {{workspace}}/cli/target/release/bv submit syqure-aggregate \
+      {{workspace}}/cli/target/release/bv submit share-kitchen-sink \
         client2@sandbox.local \
         --non-interactive \
         --force
@@ -92,16 +90,6 @@ steps:
       {{workspace}}/cli/target/release/bv syc import \
         datasites/aggregator@sandbox.local/public/crypto/did.json \
         --expected-identity aggregator@sandbox.local
-
-  - name: Wait for project to sync to client1
-    datasite: client1@sandbox.local
-    wait_for: datasites/aggregator@sandbox.local/shared/biovault/submissions/*/project.yaml
-    timeout: 120
-
-  - name: Wait for project to sync to client2
-    datasite: client2@sandbox.local
-    wait_for: datasites/aggregator@sandbox.local/shared/biovault/submissions/*/project.yaml
-    timeout: 120
 
   - name: Aggregator syncs inbox
     datasite: aggregator@sandbox.local
@@ -172,17 +160,50 @@ steps:
       jq -r '.messages[] | select(.message_type.Project != null and .to == "client2@sandbox.local") | .id' <<< '{{c2_inbox}}' | head -n 1
     capture: c2_msg
 
-  - name: Process Syqure project concurrently
+  - name: Process share-kitchen-sink project concurrently
     datasite: aggregator@sandbox.local
     run: |
-      bash {{workspace}}/tests/scripts/run_syqure_project.sh --sandbox "{{sandbox}}" --bv "{{workspace}}/cli/target/release/bv" --agg "{{agg_msg}}" --client1 "{{c1_msg}}" --client2 "{{c2_msg}}"
+      set -euo pipefail
+      BV_BIN="{{workspace}}/cli/target/release/bv"
+      SANDBOX_DIR="{{sandbox}}"
 
-  - name: Wait for client1 result (local run)
+      HOME="${SANDBOX_DIR}/aggregator@sandbox.local" \
+        BIOVAULT_HOME="${SANDBOX_DIR}/aggregator@sandbox.local/.biovault" \
+        SYFTBOX_EMAIL="aggregator@sandbox.local" \
+        SYFTBOX_DATA_DIR="${SANDBOX_DIR}/aggregator@sandbox.local" \
+        SYFTBOX_CONFIG_PATH="${SANDBOX_DIR}/aggregator@sandbox.local/.syftbox/config.json" \
+        BV_BIN="$BV_BIN" \
+        "$BV_BIN" message process "{{agg_msg}}" --test --approve --non-interactive &
+
+      HOME="${SANDBOX_DIR}/client1@sandbox.local" \
+        BIOVAULT_HOME="${SANDBOX_DIR}/client1@sandbox.local/.biovault" \
+        SYFTBOX_EMAIL="client1@sandbox.local" \
+        SYFTBOX_DATA_DIR="${SANDBOX_DIR}/client1@sandbox.local" \
+        SYFTBOX_CONFIG_PATH="${SANDBOX_DIR}/client1@sandbox.local/.syftbox/config.json" \
+        BV_BIN="$BV_BIN" \
+        "$BV_BIN" message process "{{c1_msg}}" --test --approve --non-interactive &
+
+      HOME="${SANDBOX_DIR}/client2@sandbox.local" \
+        BIOVAULT_HOME="${SANDBOX_DIR}/client2@sandbox.local/.biovault" \
+        SYFTBOX_EMAIL="client2@sandbox.local" \
+        SYFTBOX_DATA_DIR="${SANDBOX_DIR}/client2@sandbox.local" \
+        SYFTBOX_CONFIG_PATH="${SANDBOX_DIR}/client2@sandbox.local/.syftbox/config.json" \
+        BV_BIN="$BV_BIN" \
+        "$BV_BIN" message process "{{c2_msg}}" --test --approve --non-interactive &
+
+      wait
+
+  - name: Wait for aggregator combined output
+    datasite: aggregator@sandbox.local
+    wait_for: .biovault/runs/{{agg_msg}}/results-test/pipeline/collect/*/combined_hello.txt
+    timeout: 180
+
+  - name: Wait for client1 combined copy
     datasite: client1@sandbox.local
-    wait_for: .biovault/runs/{{c1_msg}}/results-test/1_out.txt
-    timeout: 120
+    wait_for: .biovault/runs/{{c1_msg}}/results-test/pipeline/wait_clients/*/combined_from_agg.txt
+    timeout: 180
 
-  - name: Wait for client2 result (local run)
+  - name: Wait for client2 combined copy
     datasite: client2@sandbox.local
-    wait_for: .biovault/runs/{{c2_msg}}/results-test/2_out.txt
-    timeout: 120
+    wait_for: .biovault/runs/{{c2_msg}}/results-test/pipeline/wait_clients/*/combined_from_agg.txt
+    timeout: 180
