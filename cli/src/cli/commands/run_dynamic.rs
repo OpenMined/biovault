@@ -1233,7 +1233,6 @@ pub async fn execute_dynamic(
             .into());
         }
     }
-    }
 
     let current_datasite = resolve_current_datasite();
 

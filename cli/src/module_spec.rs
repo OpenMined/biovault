@@ -6,6 +6,8 @@ use std::path::Path;
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::project_spec as project_spec;
+
 macro_rules! wln {
     ($buf:expr) => {
         writeln!($buf).map_err(|e| anyhow!(e.to_string()))?
@@ -1305,6 +1307,185 @@ impl ModuleFile {
             steps: Vec::new(),
             runner: Some(runner),
         })
+    }
+
+    pub fn to_project_spec(&self) -> Result<project_spec::ProjectSpec> {
+        let module = self.to_module_spec()?;
+        Ok(module_spec_to_project_spec(module))
+    }
+
+    pub fn from_project_spec(spec: &project_spec::ProjectSpec) -> Self {
+        let module = project_spec_to_module_spec(spec);
+        Self::from_module_spec(&module)
+    }
+}
+
+fn module_spec_to_project_spec(spec: ModuleSpec) -> project_spec::ProjectSpec {
+    project_spec::ProjectSpec {
+        name: spec.name,
+        author: spec.author,
+        workflow: spec.workflow,
+        description: spec.description,
+        template: spec.runtime,
+        version: spec.version,
+        datasites: spec.datasites,
+        env: spec.env,
+        assets: spec.assets,
+        parameters: spec
+            .parameters
+            .into_iter()
+            .map(|param| project_spec::ParameterSpec {
+                name: param.name,
+                raw_type: param.raw_type,
+                description: param.description,
+                default: param.default,
+                choices: param.choices,
+                advanced: param.advanced,
+            })
+            .collect(),
+        inputs: spec
+            .inputs
+            .into_iter()
+            .map(|input| project_spec::InputSpec {
+                name: input.name,
+                raw_type: input.raw_type,
+                description: input.description,
+                format: input.format,
+                path: input.path,
+                mapping: input.mapping,
+            })
+            .collect(),
+        outputs: spec
+            .outputs
+            .into_iter()
+            .map(|output| project_spec::OutputSpec {
+                name: output.name,
+                raw_type: output.raw_type,
+                description: output.description,
+                format: output.format,
+                path: output.path,
+            })
+            .collect(),
+        steps: spec
+            .steps
+            .into_iter()
+            .map(|step| project_spec::ProjectStepSpec {
+                id: step.id,
+                foreach: step.foreach,
+                order: step.order,
+                env: step.env,
+                inputs: step
+                    .inputs
+                    .into_iter()
+                    .map(|input| project_spec::InputSpec {
+                        name: input.name,
+                        raw_type: input.raw_type,
+                        description: input.description,
+                        format: input.format,
+                        path: input.path,
+                        mapping: input.mapping,
+                    })
+                    .collect(),
+                outputs: step
+                    .outputs
+                    .into_iter()
+                    .map(|output| project_spec::OutputSpec {
+                        name: output.name,
+                        raw_type: output.raw_type,
+                        description: output.description,
+                        format: output.format,
+                        path: output.path,
+                    })
+                    .collect(),
+            })
+            .collect(),
+    }
+}
+
+fn project_spec_to_module_spec(spec: &project_spec::ProjectSpec) -> ModuleSpec {
+    ModuleSpec {
+        name: spec.name.clone(),
+        author: spec.author.clone(),
+        workflow: spec.workflow.clone(),
+        description: spec.description.clone(),
+        runtime: spec.template.clone(),
+        version: spec.version.clone(),
+        datasites: spec.datasites.clone(),
+        env: spec.env.clone(),
+        assets: spec.assets.clone(),
+        parameters: spec
+            .parameters
+            .iter()
+            .cloned()
+            .map(|param| ParameterSpec {
+                name: param.name,
+                raw_type: param.raw_type,
+                description: param.description,
+                default: param.default,
+                choices: param.choices,
+                advanced: param.advanced,
+            })
+            .collect(),
+        inputs: spec
+            .inputs
+            .iter()
+            .cloned()
+            .map(|input| InputSpec {
+                name: input.name,
+                raw_type: input.raw_type,
+                description: input.description,
+                format: input.format,
+                path: input.path,
+                mapping: input.mapping,
+            })
+            .collect(),
+        outputs: spec
+            .outputs
+            .iter()
+            .cloned()
+            .map(|output| OutputSpec {
+                name: output.name,
+                raw_type: output.raw_type,
+                description: output.description,
+                format: output.format,
+                path: output.path,
+            })
+            .collect(),
+        steps: spec
+            .steps
+            .iter()
+            .cloned()
+            .map(|step| ModuleStepSpec {
+                id: step.id,
+                foreach: step.foreach,
+                order: step.order,
+                env: step.env,
+                inputs: step
+                    .inputs
+                    .into_iter()
+                    .map(|input| InputSpec {
+                        name: input.name,
+                        raw_type: input.raw_type,
+                        description: input.description,
+                        format: input.format,
+                        path: input.path,
+                        mapping: input.mapping,
+                    })
+                    .collect(),
+                outputs: step
+                    .outputs
+                    .into_iter()
+                    .map(|output| OutputSpec {
+                        name: output.name,
+                        raw_type: output.raw_type,
+                        description: output.description,
+                        format: output.format,
+                        path: output.path,
+                    })
+                    .collect(),
+            })
+            .collect(),
+        runner: None,
     }
 }
 

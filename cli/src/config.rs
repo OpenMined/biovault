@@ -162,7 +162,6 @@ pub struct SyqureConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub use_docker: Option<bool>,
 }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyftBoxConfig {
