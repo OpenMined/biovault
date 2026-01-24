@@ -15,17 +15,19 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Temporarily disabled - re-enable by removing 'if: false' and uncommenting matrix entries
   run-scenarios:
+    if: false
     runs-on: ${{ matrix.os == 'windows' && 'namespace-profile-windows-medium' || 'ubuntu-latest' }}
     strategy:
       fail-fast: false
       matrix:
         include:
           # Linux-only while CI is unstable (easy to re-enable below).
-          # - os: linux
-          #   client_mode: rust
-          #   scenario: tests/scenarios/inbox-ping-pong.yaml
-          #   needs_container: true
+          - os: linux
+            client_mode: rust
+            scenario: tests/scenarios/inbox-ping-pong.yaml
+            needs_container: true
           # - os: linux
           #   client_mode: go
           #   scenario: tests/scenarios/import-and-run.yaml
