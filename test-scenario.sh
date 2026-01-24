@@ -138,7 +138,9 @@ if (( NEEDS_SYQURE )); then
   else
     SYQURE_DIR="$ROOT_DIR/syqure"
   fi
-  SYQURE_BIN="$SYQURE_DIR/target/debug/syqure"
+  SYQURE_BIN_DEBUG="$SYQURE_DIR/target/debug/syqure"
+  SYQURE_BIN_RELEASE="$SYQURE_DIR/target/release/syqure"
+  SYQURE_BIN="$SYQURE_BIN_DEBUG"
 
   if (( IS_WINDOWS )); then
     # Syqure can't build on Windows - use Docker mode
@@ -279,9 +281,25 @@ if (( NEEDS_SYQURE )); then
         exit 1
       fi
     fi
-    if [[ -x "$SYQURE_BIN" ]]; then
-      export SEQURE_NATIVE_BIN="$SYQURE_BIN"
-      echo "Syqure mode: Native ($SYQURE_BIN)"
+    # Prefer release binary for runtime stability unless explicitly disabled.
+    if [[ "${BV_SYQURE_PREFER_RELEASE:-1}" == "1" ]]; then
+      if [[ ! -x "$SYQURE_BIN_RELEASE" && -d "$SYQURE_DIR" ]]; then
+        echo "Building syqure native binary (release)..."
+        (cd "$SYQURE_DIR" && cargo build -p syqure --release) || {
+          echo "Failed to build syqure (release). Falling back to debug binary." >&2
+        }
+      fi
+      if [[ -x "$SYQURE_BIN_RELEASE" ]]; then
+        export SEQURE_NATIVE_BIN="$SYQURE_BIN_RELEASE"
+      fi
+    fi
+
+    if [[ -z "${SEQURE_NATIVE_BIN:-}" && -x "$SYQURE_BIN_DEBUG" ]]; then
+      export SEQURE_NATIVE_BIN="$SYQURE_BIN_DEBUG"
+    fi
+
+    if [[ -x "${SEQURE_NATIVE_BIN:-}" ]]; then
+      echo "Syqure mode: Native ($SEQURE_NATIVE_BIN)"
     fi
   fi
 else
