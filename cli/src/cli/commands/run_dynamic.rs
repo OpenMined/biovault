@@ -2978,11 +2978,23 @@ fn execute_syqure_docker(
     run_id: &str,
     platform: &str,
 ) -> Result<()> {
-    println!("  Using Docker image: {}", image);
+    // Use podman if BIOVAULT_CONTAINER_RUNTIME is set to "podman"
+    let container_runtime = env::var("BIOVAULT_CONTAINER_RUNTIME")
+        .unwrap_or_else(|_| "docker".to_string());
+
+    println!(
+        "  Using {} image: {}",
+        if container_runtime == "podman" {
+            "Podman"
+        } else {
+            "Docker"
+        },
+        image
+    );
 
     let container_name = format!("syqure-{}-pid{}", run_id, party_id);
 
-    let _ = Command::new("docker")
+    let _ = Command::new(&container_runtime)
         .args(["rm", "-f", &container_name])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -3011,10 +3023,13 @@ fn execute_syqure_docker(
         })
         .unwrap_or_else(|| module_path.join("results"));
 
-    let mut cmd = Command::new("docker");
+    let mut cmd = Command::new(&container_runtime);
     cmd.args(["run", "--rm", "--name", &container_name]);
 
-    cmd.args(["--platform", platform]);
+    // Only add --platform for docker (podman handles this differently)
+    if container_runtime == "docker" {
+        cmd.args(["--platform", platform]);
+    }
 
     for (k, v) in env_map {
         if k == "SEQURE_DATASITES_ROOT" {
