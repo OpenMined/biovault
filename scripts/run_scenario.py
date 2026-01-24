@@ -13,6 +13,12 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+# Fix Unicode encoding on Windows (cp1252 doesn't support emojis)
+if sys.platform == "win32":
+    import io
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
+
 ROOT = Path(__file__).resolve().parent.parent
 _SANDBOX_ENV = os.environ.get("SANDBOX_DIR") or os.environ.get("SCENARIO_SANDBOX_DIR")
 SANDBOX_ROOT = Path(_SANDBOX_ENV).resolve() if _SANDBOX_ENV else (ROOT / "sandbox").resolve()
