@@ -225,6 +225,8 @@ jobs:
         include:
           - os: ubuntu-latest
             runner: ubuntu-latest
+          - os: macos-latest
+            runner: macos-latest
           - os: windows
             runner: namespace-profile-windows-medium
         # os: [ubuntu-latest, macos-latest]
@@ -308,12 +310,19 @@ jobs:
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Install syqure deps (Unix)
-        if: matrix.os != 'windows'
+      - name: Install syqure deps (Linux)
+        if: matrix.os == 'ubuntu-latest'
         shell: bash
         run: |
           sudo apt-get update
-          sudo apt-get install -y llvm-dev zstd
+          sudo apt-get install -y llvm-dev zstd libgmp-dev
+
+      - name: Install syqure deps (macOS)
+        if: matrix.os == 'macos-latest'
+        shell: bash
+        run: |
+          brew install llvm zstd gmp
+          echo "LLVM_PREFIX=$(brew --prefix llvm)" >> "$GITHUB_ENV"
 
       - name: Build syqure (Unix)
         if: matrix.os != 'windows'
