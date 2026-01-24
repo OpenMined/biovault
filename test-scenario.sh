@@ -150,6 +150,7 @@ if (( NEEDS_SYQURE )); then
   else
     # Preflight: if no bundle is available for native syqure, fall back to Docker.
     BUNDLE_OK=0
+    HAS_PREBUILT_CODON=0
     if [[ -n "${SYQURE_BUNDLE_FILE:-}" && -f "${SYQURE_BUNDLE_FILE}" ]]; then
       BUNDLE_OK=1
     else
@@ -158,40 +159,129 @@ if (( NEEDS_SYQURE )); then
         if [[ -n "$HOST_TRIPLE" && -f "$SYQURE_DIR/bundles/${HOST_TRIPLE}.tar.zst" ]]; then
           BUNDLE_OK=1
         fi
+        if [[ -n "$HOST_TRIPLE" && -f "$SYQURE_DIR/syqure/bundles/${HOST_TRIPLE}.tar.zst" ]]; then
+          BUNDLE_OK=1
+        fi
       fi
       if [[ -d "$SYQURE_DIR/bin/macos-arm64/codon" || -d "$SYQURE_DIR/bin/macos-x86_64/codon" || -d "$SYQURE_DIR/bin/linux-x86/codon" || -d "$SYQURE_DIR/bin/linux-arm64/codon" ]]; then
-        BUNDLE_OK=1
+        HAS_PREBUILT_CODON=1
       fi
       if [[ -d "$ROOT_DIR/../codon/install/lib/codon" ]]; then
         BUNDLE_OK=1
       fi
     fi
 
+    if [[ "${SYQURE_FORCE_BUNDLE_REBUILD:-0}" == "1" ]]; then
+      BUNDLE_OK=0
+    fi
+
     if (( ! BUNDLE_OK )); then
-      USE_DOCKER=1
-      export BV_SYQURE_USE_DOCKER=1
-      echo "Syqure bundle not found; falling back to Docker. Set SYQURE_BUNDLE_FILE to use native."
-    else
-      # Native mode - build syqure if needed
-      if [[ ! -x "$SYQURE_BIN" ]]; then
-        if [[ -d "$SYQURE_DIR" ]]; then
-          echo "Building syqure native binary..."
-          (cd "$SYQURE_DIR" && cargo build) || {
-            echo "Failed to build syqure. Use --docker flag for Docker mode." >&2
-            exit 1
-          }
-        else
-          echo "Syqure directory not found at $SYQURE_DIR. Use --docker flag for Docker mode." >&2
-          exit 1
+      if [[ -d "$SYQURE_DIR/.git" && -f "$SYQURE_DIR/.gitmodules" ]]; then
+        echo "Syqure bundle/assets missing; initializing submodules..."
+        (cd "$SYQURE_DIR" && git submodule update --init --recursive)
+      fi
+
+      if (( HAS_PREBUILT_CODON )) && [[ -x "$SYQURE_DIR/syqure_bins.sh" ]]; then
+        echo "Building syqure bundle from prebuilts (syqure_bins.sh)..."
+        (cd "$SYQURE_DIR" && ./syqure_bins.sh)
+      elif [[ -x "$SYQURE_DIR/build_libs.sh" ]]; then
+        echo "Building syqure bundle (build_libs.sh)..."
+        (cd "$SYQURE_DIR" && ./build_libs.sh)
+      fi
+
+      # Re-check after attempted build.
+      if [[ -n "${SYQURE_BUNDLE_FILE:-}" && -f "${SYQURE_BUNDLE_FILE}" ]]; then
+        BUNDLE_OK=1
+      else
+        if command -v rustc >/dev/null 2>&1; then
+          HOST_TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"
+          if [[ -n "$HOST_TRIPLE" && -f "$SYQURE_DIR/bundles/${HOST_TRIPLE}.tar.zst" ]]; then
+            BUNDLE_OK=1
+          fi
+          if [[ -n "$HOST_TRIPLE" && -f "$SYQURE_DIR/syqure/bundles/${HOST_TRIPLE}.tar.zst" ]]; then
+            BUNDLE_OK=1
+          fi
         fi
       fi
-      if [[ -x "$SYQURE_BIN" ]]; then
-        export SEQURE_NATIVE_BIN="$SYQURE_BIN"
-        echo "Syqure mode: Native ($SYQURE_BIN)"
+
+      if (( ! BUNDLE_OK )); then
+        USE_DOCKER=1
+        export BV_SYQURE_USE_DOCKER=1
+        echo "Syqure bundle not found; falling back to Docker. Set SYQURE_BUNDLE_FILE to use native."
+      fi
+    fi
+  fi
+
+  if (( USE_DOCKER )); then
+    export BV_SYQURE_USE_DOCKER=1
+    echo "Syqure mode: Docker"
+  else
+    # Native mode - build syqure if needed
+    if [[ ! -x "$SYQURE_BIN" ]]; then
+      if [[ -d "$SYQURE_DIR" ]]; then
+        echo "Building syqure native binary (CI-style)..."
+        # Mirror syqure CI smoke build: use precompiled Codon from bin/<platform>/codon if present.
+        SYQURE_PLATFORM=""
+        OS_NAME="$(uname -s | tr '[:upper:]' '[:lower:]')"
+        ARCH_NAME="$(uname -m | tr '[:upper:]' '[:lower:]')"
+        case "$OS_NAME" in
+          darwin) OS_LABEL="macos" ;;
+          linux) OS_LABEL="linux" ;;
+          *) OS_LABEL="$OS_NAME" ;;
+        esac
+        case "$ARCH_NAME" in
+          arm64|aarch64) ARCH_LABEL="arm64" ;;
+          x86_64|amd64|i386|i686) ARCH_LABEL="x86" ;;
+          *) ARCH_LABEL="$ARCH_NAME" ;;
+        esac
+        SYQURE_PLATFORM="${OS_LABEL}-${ARCH_LABEL}"
+        BIN_ROOT="$SYQURE_DIR/bin/$SYQURE_PLATFORM/codon"
+        if [[ -d "$BIN_ROOT" ]]; then
+          export SYQURE_CPP_INCLUDE="$BIN_ROOT/include"
+          export SYQURE_CPP_LIB_DIRS="$BIN_ROOT/lib/codon"
+          # Fix broken libgmp symlink in precompiled bundle if needed (macOS).
+          if [[ "$OS_LABEL" == "macos" ]]; then
+            GMP_FILE="$BIN_ROOT/lib/codon/libgmp.dylib"
+            if [[ -L "$GMP_FILE" && ! -e "$GMP_FILE" ]]; then
+              echo "Repairing broken libgmp symlink in $BIN_ROOT..."
+              GMP_SRC=""
+              if command -v brew >/dev/null 2>&1; then
+                GMP_PREFIX="$(brew --prefix gmp 2>/dev/null || true)"
+                if [[ -n "$GMP_PREFIX" && -f "$GMP_PREFIX/lib/libgmp.dylib" ]]; then
+                  GMP_SRC="$GMP_PREFIX/lib/libgmp.dylib"
+                fi
+              fi
+              if [[ -z "$GMP_SRC" ]]; then
+                for candidate in /opt/homebrew/opt/gmp/lib/libgmp.dylib /usr/local/opt/gmp/lib/libgmp.dylib; do
+                  if [[ -f "$candidate" ]]; then
+                    GMP_SRC="$candidate"
+                    break
+                  fi
+                done
+              fi
+              if [[ -n "$GMP_SRC" ]]; then
+                rm -f "$BIN_ROOT/lib/codon/libgmp.dylib" "$BIN_ROOT/lib/codon/libgmp.so"
+                cp -L "$GMP_SRC" "$BIN_ROOT/lib/codon/libgmp.dylib"
+                cp -L "$GMP_SRC" "$BIN_ROOT/lib/codon/libgmp.so"
+              else
+                echo "libgmp.dylib not found; install gmp or set SEQURE_GMP_PATH" >&2
+                exit 1
+              fi
+            fi
+          fi
+        fi
+        (cd "$SYQURE_DIR" && cargo build -p syqure) || {
+          echo "Failed to build syqure. Use --docker flag for Docker mode." >&2
+          exit 1
+        }
       else
-        echo "Syqure binary not found at $SYQURE_BIN. Use --docker flag for Docker mode." >&2
+        echo "Syqure directory not found at $SYQURE_DIR. Use --docker flag for Docker mode." >&2
         exit 1
       fi
+    fi
+    if [[ -x "$SYQURE_BIN" ]]; then
+      export SEQURE_NATIVE_BIN="$SYQURE_BIN"
+      echo "Syqure mode: Native ($SYQURE_BIN)"
     fi
   fi
 else
