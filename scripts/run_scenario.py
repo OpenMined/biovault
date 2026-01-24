@@ -420,8 +420,10 @@ def run_shell(
     variables: Dict[str, str],
     capture: bool = False,
 ) -> subprocess.CompletedProcess:
+    use_bash = os.name == "nt"
     shell_vars = variables
-    if datasite and os.name == "nt":
+    # On Windows, always convert paths to MSYS format
+    if use_bash:
         shell_vars = dict(variables)
         shell_vars["workspace"] = to_msys_path(variables.get("workspace", ""))
         shell_vars["sandbox"] = to_msys_path(variables.get("sandbox", ""))
@@ -434,6 +436,20 @@ def run_shell(
     java_home = JAVA_HOME_OVERRIDE
     user_path = env.get("SCENARIO_USER_PATH")
 
+    # On Windows, ensure uv-managed Python is on PATH for bash subprocesses
+    if os.name == "nt":
+        uv_python = Path(os.environ.get("APPDATA", "")) / "uv" / "python"
+        if uv_python.exists():
+            for pydir in sorted(uv_python.glob("cpython-3.11*"), reverse=True):
+                if pydir.is_dir():
+                    uv_python_path = to_msys_path(str(pydir))
+                    if user_path:
+                        user_path = f"{uv_python_path}:{user_path}"
+                    else:
+                        user_path = uv_python_path
+                    break
+
+    # Build the command args and cwd
     if datasite:
         client_dir = SANDBOX_ROOT / datasite
         if not client_dir.is_dir():
@@ -444,19 +460,19 @@ def run_shell(
         if not config_path.exists():
             raise SystemExit(f"Missing SyftBox config for {datasite}: {config_path}")
 
-        # Set BioVault/SyftBox env vars - do NOT set HOME to avoid macOS cache pollution
-        config_yaml = client_dir / "config.yaml"
-        if config_yaml.exists():
-            env["BIOVAULT_HOME"] = str(client_dir)
-        else:
-            env["BIOVAULT_HOME"] = str(client_dir / ".biovault")
         env.update(
             {
+                "HOME": str(client_dir),
                 "SYFTBOX_EMAIL": datasite,
                 "SYFTBOX_DATA_DIR": str(data_dir),
                 "SYFTBOX_CONFIG_PATH": str(config_path),
             }
         )
+        config_yaml = client_dir / "config.yaml"
+        if config_yaml.exists():
+            env["BIOVAULT_HOME"] = str(client_dir)
+        else:
+            env["BIOVAULT_HOME"] = str(client_dir / ".biovault")
         if java_home:
             env["JAVA_HOME"] = java_home
             env["JAVA_CMD"] = str(Path(java_home) / "bin" / "java")
@@ -469,15 +485,12 @@ def run_shell(
 
         bash_cmd = resolve_bash()
         env = ensure_shims(env)
-        result = subprocess.run(
-            bash_cmd + ["-lc", expanded],
-            cwd=client_dir,
-            env=env,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            capture_output=True,
-        )
+        # On Windows, don't use -l (login shell) as it resets PATH from profile files,
+        # losing the Python and other tool paths we've set up.
+        bash_flags = "-c" if os.name == "nt" else "-lc"
+        cmd_args = bash_cmd + [bash_flags, expanded]
+        cwd = client_dir
+        use_shell = False
     else:
         if java_home:
             env["JAVA_HOME"] = java_home
@@ -485,19 +498,69 @@ def run_shell(
         env.setdefault("NXF_DISABLE_JAVA_VERSION_CHECK", "true")
         env.setdefault("NXF_IGNORE_JAVA_VERSION", "true")
         env.setdefault("NXF_OPTS", "-Dnxf.java.check=false")
-        result = subprocess.run(
-            expanded,
-            cwd=ROOT,
-            env=env,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            shell=True,
-            capture_output=True,
-        )
+        if user_path:
+            env["PATH"] = user_path
+        if use_bash:
+            bash_cmd = resolve_bash()
+            env = ensure_shims(env)
+            # On Windows, don't use -l (login shell) as it resets PATH from profile files
+            bash_flags = "-c" if os.name == "nt" else "-lc"
+            cmd_args = bash_cmd + [bash_flags, expanded]
+            cwd = ROOT
+            use_shell = False
+        else:
+            cmd_args = expanded
+            cwd = ROOT
+            use_shell = True
 
-    write_stream(sys.stdout, result.stdout)
-    write_stream(sys.stderr, result.stderr)
+    # Stream output in real-time instead of capturing
+    print(f"[run] {expanded}", flush=True)
+    stdout_lines: list[str] = []
+    stderr_lines: list[str] = []
+
+    process = subprocess.Popen(
+        cmd_args,
+        cwd=cwd,
+        env=env,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        shell=use_shell,
+    )
+
+    # Read stdout and stderr in real-time using threads
+    def read_stream(stream, lines_list, output_stream):
+        for line in iter(stream.readline, ''):
+            if line:
+                lines_list.append(line)
+                try:
+                    output_stream.write(line)
+                    output_stream.flush()
+                except UnicodeEncodeError:
+                    output_stream.buffer.write(line.encode("utf-8", errors="replace"))
+                    output_stream.flush()
+        stream.close()
+
+    stdout_thread = threading.Thread(target=read_stream, args=(process.stdout, stdout_lines, sys.stdout))
+    stderr_thread = threading.Thread(target=read_stream, args=(process.stderr, stderr_lines, sys.stderr))
+
+    stdout_thread.start()
+    stderr_thread.start()
+
+    process.wait()
+    stdout_thread.join()
+    stderr_thread.join()
+
+    # Create a CompletedProcess-like result for compatibility
+    result = subprocess.CompletedProcess(
+        args=cmd_args,
+        returncode=process.returncode,
+        stdout=''.join(stdout_lines),
+        stderr=''.join(stderr_lines),
+    )
+
     if result.returncode != 0:
         raise SystemExit(f"Command failed (exit {result.returncode}): {expanded}")
     return result
@@ -522,8 +585,10 @@ def run_shell_background(
     name: str = "background",
 ) -> subprocess.Popen:
     """Run a shell command in the background, returning the process handle."""
+    use_bash = os.name == "nt"
     shell_vars = variables
-    if datasite and os.name == "nt":
+    # On Windows, always convert paths to MSYS format
+    if use_bash:
         shell_vars = dict(variables)
         shell_vars["workspace"] = to_msys_path(variables.get("workspace", ""))
         shell_vars["sandbox"] = to_msys_path(variables.get("sandbox", ""))
@@ -536,6 +601,19 @@ def run_shell_background(
     java_home = JAVA_HOME_OVERRIDE
     user_path = env.get("SCENARIO_USER_PATH")
 
+    # On Windows, ensure uv-managed Python is on PATH for bash subprocesses
+    if os.name == "nt":
+        uv_python = Path(os.environ.get("APPDATA", "")) / "uv" / "python"
+        if uv_python.exists():
+            for pydir in sorted(uv_python.glob("cpython-3.11*"), reverse=True):
+                if pydir.is_dir():
+                    uv_python_path = to_msys_path(str(pydir))
+                    if user_path:
+                        user_path = f"{uv_python_path}:{user_path}"
+                    else:
+                        user_path = uv_python_path
+                    break
+
     if datasite:
         client_dir = SANDBOX_ROOT / datasite
         if not client_dir.is_dir():
@@ -546,19 +624,19 @@ def run_shell_background(
         if not config_path.exists():
             raise SystemExit(f"Missing SyftBox config for {datasite}: {config_path}")
 
-        # Set BioVault/SyftBox env vars - do NOT set HOME to avoid macOS cache pollution
-        config_yaml = client_dir / "config.yaml"
-        if config_yaml.exists():
-            env["BIOVAULT_HOME"] = str(client_dir)
-        else:
-            env["BIOVAULT_HOME"] = str(client_dir / ".biovault")
         env.update(
             {
+                "HOME": str(client_dir),
                 "SYFTBOX_EMAIL": datasite,
                 "SYFTBOX_DATA_DIR": str(data_dir),
                 "SYFTBOX_CONFIG_PATH": str(config_path),
             }
         )
+        config_yaml = client_dir / "config.yaml"
+        if config_yaml.exists():
+            env["BIOVAULT_HOME"] = str(client_dir)
+        else:
+            env["BIOVAULT_HOME"] = str(client_dir / ".biovault")
         if java_home:
             env["JAVA_HOME"] = java_home
             env["JAVA_CMD"] = str(Path(java_home) / "bin" / "java")
@@ -570,8 +648,10 @@ def run_shell_background(
 
         bash_cmd = resolve_bash()
         env = ensure_shims(env)
+        # On Windows, don't use -l (login shell) as it resets PATH from profile files
+        bash_flags = "-c" if os.name == "nt" else "-lc"
         proc = subprocess.Popen(
-            bash_cmd + ["-lc", expanded],
+            bash_cmd + [bash_flags, expanded],
             cwd=client_dir,
             env=env,
             text=True,
@@ -587,17 +667,36 @@ def run_shell_background(
         env.setdefault("NXF_DISABLE_JAVA_VERSION_CHECK", "true")
         env.setdefault("NXF_IGNORE_JAVA_VERSION", "true")
         env.setdefault("NXF_OPTS", "-Dnxf.java.check=false")
-        proc = subprocess.Popen(
-            expanded,
-            cwd=ROOT,
-            env=env,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            shell=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-        )
+        if user_path:
+            env["PATH"] = user_path
+        # On Windows, use Git Bash for all shell commands
+        if use_bash:
+            bash_cmd = resolve_bash()
+            env = ensure_shims(env)
+            # On Windows, don't use -l (login shell) as it resets PATH from profile files
+            bash_flags = "-c" if os.name == "nt" else "-lc"
+            proc = subprocess.Popen(
+                bash_cmd + [bash_flags, expanded],
+                cwd=ROOT,
+                env=env,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+            )
+        else:
+            proc = subprocess.Popen(
+                expanded,
+                cwd=ROOT,
+                env=env,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                shell=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+            )
 
     # Stream output in a background thread
     def stream_output():

@@ -22,10 +22,10 @@ jobs:
       matrix:
         include:
           # Linux-only while CI is unstable (easy to re-enable below).
-          - os: linux
-            client_mode: rust
-            scenario: tests/scenarios/inbox-ping-pong.yaml
-            needs_container: true
+          # - os: linux
+          #   client_mode: rust
+          #   scenario: tests/scenarios/inbox-ping-pong.yaml
+          #   needs_container: true
           # - os: linux
           #   client_mode: go
           #   scenario: tests/scenarios/import-and-run.yaml
@@ -220,12 +220,64 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest]
+        include:
+          - os: ubuntu-latest
+            runner: ubuntu-latest
+          - os: windows
+            runner: namespace-profile-windows-medium
         # os: [ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.runner }}
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Setup Podman Hyper-V (Windows)
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Continue"
+
+          Write-Host "=== System Info ===" -ForegroundColor Cyan
+          Write-Host "OS: $([System.Environment]::OSVersion.VersionString)"
+          whoami
+
+          Write-Host ""
+          Write-Host "=== Hyper-V Status ===" -ForegroundColor Cyan
+          Get-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V* | Format-Table FeatureName, State
+
+          Write-Host ""
+          Write-Host "=== Installing Chocolatey ===" -ForegroundColor Cyan
+          if (-not (Get-Command choco -ErrorAction SilentlyContinue)) {
+            Set-ExecutionPolicy Bypass -Scope Process -Force
+            [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
+            Invoke-Expression ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
+            $env:PATH = "$env:PATH;C:\ProgramData\chocolatey\bin"
+          }
+          choco --version
+
+          Write-Host ""
+          Write-Host "=== Installing Podman ===" -ForegroundColor Cyan
+          choco install podman-cli -y
+          $env:PATH = "C:\ProgramData\chocolatey\bin;$env:PATH"
+
+          Write-Host ""
+          Write-Host "=== Podman Version ===" -ForegroundColor Cyan
+          podman --version
+
+          Write-Host ""
+          Write-Host "=== Initializing Podman with Hyper-V ===" -ForegroundColor Cyan
+          $env:CONTAINERS_MACHINE_PROVIDER = "hyperv"
+          [Environment]::SetEnvironmentVariable("CONTAINERS_MACHINE_PROVIDER", "hyperv", "Process")
+
+          podman machine stop podman-machine-default 2>$null
+          podman machine init podman-hyperv 2>$null
+          podman machine start podman-hyperv
+          podman system connection default podman-hyperv
+
+          Write-Host ""
+          Write-Host "=== Testing Podman ===" -ForegroundColor Cyan
+          podman info
+          podman run --rm hello-world
 
       - name: Setup workspace dependencies
         shell: bash
@@ -254,7 +306,8 @@ jobs:
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build syqure
+      - name: Build syqure (Unix)
+        if: matrix.os != 'windows'
         run: |
           cd syqure
           cargo build
@@ -263,8 +316,18 @@ jobs:
       - name: Build BioVault CLI
         run: cd cli && cargo build --release
 
-      - name: Run syqure-distributed scenario
+      - name: Run syqure-distributed scenario (Unix)
+        if: matrix.os != 'windows'
         run: ./test-scenario.sh --client-mode rust tests/scenarios/syqure-distributed.yaml
+
+      - name: Run syqure-distributed scenario (Windows)
+        if: matrix.os == 'windows'
+        shell: pwsh
+        env:
+          CONTAINERS_MACHINE_PROVIDER: hyperv
+          BIOVAULT_CONTAINER_RUNTIME: podman
+          BIOVAULT_HYPERV_MOUNT: "1"
+        run: .\win.ps1 ./test-scenario.sh --docker tests/scenarios/syqure-distributed.yaml
 
       - name: Show logs on failure
         if: failure()

@@ -18,69 +18,6 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-#[derive(Debug, serde::Serialize)]
-struct MpcChannelStatus {
-    party: String,
-    file_count: usize,
-    last_modified: Option<u64>,
-    last_modified_ago_secs: Option<u64>,
-}
-
-#[derive(Debug, serde::Serialize)]
-struct MpcMonitorStatus {
-    timestamp: u64,
-    local_party: String,
-    channels: Vec<MpcChannelStatus>,
-}
-
-fn monitor_mpc_channels(
-    datasites_root: &str,
-    file_dir: &str,
-    party_emails: &[String],
-    local_email: &str,
-    progress_path: &Path,
-    stop_flag: Arc<AtomicBool>,
-    poll_interval_ms: u64,
-) {
-    let monitor_file = progress_path.join("mpc_monitor.json");
-
-    while !stop_flag.load(Ordering::Relaxed) {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-
-        let mut channels = Vec::new();
-
-        for party in party_emails {
-            let channel_path = PathBuf::from(datasites_root).join(party).join(file_dir);
-
-            let (file_count, last_modified) = count_mpc_files(&channel_path);
-            let last_modified_ago = last_modified.map(|lm| now.saturating_sub(lm));
-
-            channels.push(MpcChannelStatus {
-                party: party.clone(),
-                file_count,
-                last_modified,
-                last_modified_ago_secs: last_modified_ago,
-            });
-        }
-
-        let status = MpcMonitorStatus {
-            timestamp: now,
-            local_party: local_email.to_string(),
-            channels,
-        };
-
-        if let Ok(json) = serde_json::to_string_pretty(&status) {
-            let _ = fs::create_dir_all(progress_path);
-            let _ = fs::write(&monitor_file, json);
-        }
-
-        thread::sleep(Duration::from_millis(poll_interval_ms));
-    }
-}
-
 fn count_mpc_files(dir: &Path) -> (usize, Option<u64>) {
     let mut count = 0usize;
     let mut latest_modified: Option<u64> = None;
@@ -227,6 +164,45 @@ impl Default for RunSettings {
 /// Check if we should use Docker to run Nextflow (Windows only)
 fn should_use_docker_for_nextflow() -> bool {
     cfg!(target_os = "windows")
+}
+
+/// Find Git Bash on Windows, falling back to "bash" if not found.
+#[cfg(target_os = "windows")]
+fn resolve_git_bash() -> String {
+    let candidates = [
+        r"C:\Program Files\Git\bin\bash.exe",
+        r"C:\Program Files\Git\usr\bin\bash.exe",
+        r"C:\Program Files (x86)\Git\bin\bash.exe",
+        r"C:\Program Files (x86)\Git\usr\bin\bash.exe",
+    ];
+    for candidate in candidates {
+        if Path::new(candidate).exists() {
+            return candidate.to_string();
+        }
+    }
+    // Fallback to PATH lookup
+    "bash".to_string()
+}
+
+#[cfg(not(target_os = "windows"))]
+fn resolve_git_bash() -> String {
+    "bash".to_string()
+}
+
+/// Strip the Windows extended path prefix (\\?\) for use with Docker volume mounts.
+/// Docker Desktop on Windows expects standard Windows paths like C:\Users\foo,
+/// not extended paths like \\?\C:\Users\foo.
+#[cfg(target_os = "windows")]
+fn strip_extended_path_prefix(path: &str) -> String {
+    let stripped = path
+        .trim_start_matches(r"\\?\")
+        .trim_start_matches(r"//?/");
+    stripped.to_string()
+}
+
+#[cfg(not(target_os = "windows"))]
+fn strip_extended_path_prefix(path: &str) -> String {
+    path.to_string()
 }
 
 /// Convert a Windows path to a container-compatible path for volume mounts.
@@ -2547,8 +2523,13 @@ async fn execute_shell(
             env_map.insert(env_key, output_path.to_string_lossy().to_string());
         }
 
-        let mut cmd = Command::new("bash");
-        cmd.arg(&workflow_path);
+        let mut cmd = Command::new(resolve_git_bash());
+        // Convert Windows path to Unix-style for Git Bash
+        #[cfg(target_os = "windows")]
+        let bash_workflow_path = windows_path_to_container(&workflow_path, false);
+        #[cfg(not(target_os = "windows"))]
+        let bash_workflow_path = workflow_path.to_string_lossy().to_string();
+        cmd.arg(&bash_workflow_path);
         if !passthrough_args.is_empty() {
             cmd.args(&passthrough_args);
         }
@@ -2610,7 +2591,15 @@ async fn execute_syqure(
         .unwrap_or_else(|_| chrono::Local::now().format("%Y%m%d%H%M%S").to_string());
 
     let datasites_root = env::var("BV_DATASITES_ROOT")
-        .or_else(|_| env::var("SYFTBOX_DATA_DIR").map(|dir| format!("{}/datasites", dir)))
+        .or_else(|_| {
+            env::var("SYFTBOX_DATA_DIR").map(|dir| {
+                // Use PathBuf::join to properly handle path separators on all platforms
+                PathBuf::from(&dir)
+                    .join("datasites")
+                    .to_string_lossy()
+                    .to_string()
+            })
+        })
         .map_err(|_| {
             anyhow::anyhow!(
                 "Syqure runtime requires BV_DATASITES_ROOT or SYFTBOX_DATA_DIR environment variable"
@@ -2918,7 +2907,7 @@ fn execute_syqure_native(
         .get("SEQURE_PARTY_EMAILS")
         .map(|s| s.split(',').map(|e| e.to_string()).collect())
         .unwrap_or_default();
-    let local_email = env_map
+    let _local_email = env_map
         .get("SEQURE_LOCAL_EMAIL")
         .cloned()
         .unwrap_or_default();
@@ -2929,7 +2918,6 @@ fn execute_syqure_native(
     let datasites_root_clone = datasites_root.clone();
     let file_dir_clone = file_dir.clone();
     let party_emails_clone = party_emails.clone();
-    let local_email_clone = local_email.clone();
 
     let monitor_handle = thread::spawn(move || {
         let mut last_status = String::new();
@@ -3060,17 +3048,21 @@ fn execute_syqure_docker(
         }
     }
 
+    // Strip Windows extended path prefix for Docker volume mounts
+    let module_mount_path =
+        strip_extended_path_prefix(&module_path_abs.to_string_lossy().to_string());
+    let datasites_mount_path = strip_extended_path_prefix(effective_datasites_mount);
+    let results_mount_path =
+        strip_extended_path_prefix(&results_root.to_string_lossy().to_string());
+
+    cmd.args(["-v", &format!("{}:/workspace/project", module_mount_path)]);
     cmd.args([
         "-v",
-        &format!("{}:/workspace/project", module_path_abs.display()),
+        &format!("{}:{}", datasites_mount_path, datasites_in_container),
     ]);
     cmd.args([
         "-v",
-        &format!("{}:{}", effective_datasites_mount, datasites_in_container),
-    ]);
-    cmd.args([
-        "-v",
-        &format!("{}:{}", results_root.display(), results_in_container),
+        &format!("{}:{}", results_mount_path, results_in_container),
     ]);
 
     cmd.arg(image);
