@@ -321,8 +321,8 @@ jobs:
         if: matrix.os == 'macos-latest'
         shell: bash
         run: |
-          brew install llvm zstd gmp
-          echo "LLVM_PREFIX=$(brew --prefix llvm)" >> "$GITHUB_ENV"
+          brew install llvm@17 zstd gmp
+          echo "LLVM_PREFIX=$(brew --prefix llvm@17)" >> "$GITHUB_ENV"
 
       - name: Build syqure (Unix)
         if: matrix.os != 'windows'
