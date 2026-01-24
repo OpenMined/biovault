@@ -308,11 +308,20 @@ jobs:
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Install syqure deps (Unix)
+        if: matrix.os != 'windows'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y llvm-dev zstd
+
       - name: Build syqure (Unix)
         if: matrix.os != 'windows'
+        shell: bash
         run: |
           cd syqure
-          cargo build
+          chmod +x syqure_bins.sh
+          ./syqure_bins.sh
           ls -la target/debug/syqure
 
       - name: Build BioVault CLI
