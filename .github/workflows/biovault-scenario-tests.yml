@@ -327,6 +327,8 @@ jobs:
       - name: Build syqure (Unix)
         if: matrix.os != 'windows'
         shell: bash
+        env:
+          LLVM_PREFIX: /opt/homebrew/opt/llvm@17
         run: |
           cd syqure
           chmod +x syqure_bins.sh
