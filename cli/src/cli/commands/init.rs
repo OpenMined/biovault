@@ -576,6 +576,12 @@ rules:
   - action: allow
     datasite: "*"
     path: "shared/biovault/**"
+  - action: allow
+    datasite: "*"
+    path: "shared/flows/**"
+  - action: allow
+    datasite: "*"
+    path: "shared/syqure/**"
 "#;
     fs::write(&sub_path, contents)
         .with_context(|| format!("Failed to write {}", sub_path.display()))?;

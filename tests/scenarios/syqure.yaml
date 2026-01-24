@@ -14,6 +14,44 @@ setup:
     - "./tests/scripts/devstack.sh --reset --clients client1@sandbox.local,client2@sandbox.local,aggregator@sandbox.local"
 
 steps:
+  - name: Allow Syqure shared paths in subscriptions
+    run: |
+      set -euo pipefail
+      for email in client1@sandbox.local client2@sandbox.local aggregator@sandbox.local; do
+        sub_path="{{sandbox}}/${email}/.data/syft.sub.yaml"
+        mkdir -p "$(dirname "$sub_path")"
+        printf '%s\n' \
+          'version: 1' \
+          'defaults:' \
+          '  action: block' \
+          'rules:' \
+          '  - action: allow' \
+          '    datasite: "*"' \
+          '    path: "public/crypto/did.json"' \
+          '  - action: allow' \
+          '    datasite: "*"' \
+          '    path: "public/biovault/datasets/*.yaml"' \
+          '  - action: allow' \
+          '    datasite: "*"' \
+          '    path: "app_data/biovault/*.yaml"' \
+          '  - action: allow' \
+          '    datasite: "*"' \
+          '    path: "**/syft.pub.yaml"' \
+          '  - action: allow' \
+          '    datasite: "*"' \
+          '    path: "**/*.request"' \
+          '  - action: allow' \
+          '    datasite: "*"' \
+          '    path: "**/*.response"' \
+          '  - action: allow' \
+          '    datasite: "*"' \
+          '    path: "shared/biovault/**"' \
+          '  - action: allow' \
+          '    datasite: "*"' \
+          '    path: "shared/syqure/**"' \
+          > "$sub_path"
+      done
+
   - name: Generate run id
     run: |
       date +%Y%m%d%H%M%S
@@ -260,7 +298,6 @@ steps:
         echo "Syqure example not found: $EXAMPLE" >&2
         exit 1
       fi
-
       LOG_DIR="{{sandbox}}/syqure-native-logs/${RUN_ID}"
       mkdir -p "$LOG_DIR"
 

@@ -185,8 +185,58 @@ if [[ "$SCENARIO" == *"syqure"* ]]; then
     # Native mode - build syqure if needed
     if [[ ! -x "$SYQURE_BIN" ]]; then
       if [[ -d "$SYQURE_DIR" ]]; then
-        echo "Building syqure native binary..."
-        (cd "$SYQURE_DIR" && cargo build) || {
+        echo "Building syqure native binary (CI-style)..."
+        # Mirror syqure CI smoke build: use precompiled Codon from bin/<platform>/codon if present.
+        SYQURE_PLATFORM=""
+        OS_NAME="$(uname -s | tr '[:upper:]' '[:lower:]')"
+        ARCH_NAME="$(uname -m | tr '[:upper:]' '[:lower:]')"
+        case "$OS_NAME" in
+          darwin) OS_LABEL="macos" ;;
+          linux) OS_LABEL="linux" ;;
+          *) OS_LABEL="$OS_NAME" ;;
+        esac
+        case "$ARCH_NAME" in
+          arm64|aarch64) ARCH_LABEL="arm64" ;;
+          x86_64|amd64|i386|i686) ARCH_LABEL="x86" ;;
+          *) ARCH_LABEL="$ARCH_NAME" ;;
+        esac
+        SYQURE_PLATFORM="${OS_LABEL}-${ARCH_LABEL}"
+        BIN_ROOT="$SYQURE_DIR/bin/$SYQURE_PLATFORM/codon"
+        if [[ -d "$BIN_ROOT" ]]; then
+          export SYQURE_CPP_INCLUDE="$BIN_ROOT/include"
+          export SYQURE_CPP_LIB_DIRS="$BIN_ROOT/lib/codon"
+          # Fix broken libgmp symlink in precompiled bundle if needed (macOS).
+          if [[ "$OS_LABEL" == "macos" ]]; then
+            GMP_FILE="$BIN_ROOT/lib/codon/libgmp.dylib"
+            if [[ -L "$GMP_FILE" && ! -e "$GMP_FILE" ]]; then
+              echo "Repairing broken libgmp symlink in $BIN_ROOT..."
+              GMP_SRC=""
+              if command -v brew >/dev/null 2>&1; then
+                GMP_PREFIX="$(brew --prefix gmp 2>/dev/null || true)"
+                if [[ -n "$GMP_PREFIX" && -f "$GMP_PREFIX/lib/libgmp.dylib" ]]; then
+                  GMP_SRC="$GMP_PREFIX/lib/libgmp.dylib"
+                fi
+              fi
+              if [[ -z "$GMP_SRC" ]]; then
+                for candidate in /opt/homebrew/opt/gmp/lib/libgmp.dylib /usr/local/opt/gmp/lib/libgmp.dylib; do
+                  if [[ -f "$candidate" ]]; then
+                    GMP_SRC="$candidate"
+                    break
+                  fi
+                done
+              fi
+              if [[ -n "$GMP_SRC" ]]; then
+                rm -f "$BIN_ROOT/lib/codon/libgmp.dylib" "$BIN_ROOT/lib/codon/libgmp.so"
+                cp -L "$GMP_SRC" "$BIN_ROOT/lib/codon/libgmp.dylib"
+                cp -L "$GMP_SRC" "$BIN_ROOT/lib/codon/libgmp.so"
+              else
+                echo "libgmp.dylib not found; install gmp or set SEQURE_GMP_PATH" >&2
+                exit 1
+              fi
+            fi
+          fi
+        fi
+        (cd "$SYQURE_DIR" && cargo build -p syqure) || {
           echo "Failed to build syqure. Use --docker flag for Docker mode." >&2
           exit 1
         }

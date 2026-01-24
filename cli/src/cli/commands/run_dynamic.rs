@@ -2898,6 +2898,12 @@ fn execute_syqure_native(
     for (k, v) in env_map {
         cmd.env(k, v);
     }
+    if env::var("BV_SYQURE_BACKTRACE")
+        .map(|v| v == "1" || v.to_lowercase() == "true")
+        .unwrap_or(false)
+    {
+        cmd.env("RUST_BACKTRACE", "1");
+    }
 
     let display_cmd = format_command(&cmd);
     println!("\n▶️  Executing syqure...");
@@ -2961,6 +2967,13 @@ fn execute_syqure_native(
     let _ = monitor_handle.join();
 
     if !status.success() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::ExitStatusExt;
+            if let Some(signal) = status.signal() {
+                return Err(anyhow::anyhow!("Syqure exited due to signal: {}", signal).into());
+            }
+        }
         return Err(anyhow::anyhow!("Syqure exited with code: {:?}", status.code()).into());
     }
 
