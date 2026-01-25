@@ -121,6 +121,10 @@ jobs:
         run: |
           chmod +x scripts/setup-workspace.sh
           ./scripts/setup-workspace.sh
+      - name: Init syqure submodules
+        shell: bash
+        run: |
+          git -C syqure submodule update --init --recursive
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
@@ -288,6 +292,10 @@ jobs:
         run: |
           chmod +x scripts/setup-workspace.sh
           ./scripts/setup-workspace.sh
+      - name: Init syqure submodules
+        shell: bash
+        run: |
+          git -C syqure submodule update --init --recursive
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master

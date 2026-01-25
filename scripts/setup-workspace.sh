@@ -67,6 +67,12 @@ clone_if_missing "sbenv" "https://github.com/OpenMined/sbenv.git"
 clone_if_missing "bioscript" "https://github.com/OpenMined/bioscript.git"
 clone_if_missing "syqure" "https://github.com/madhavajay/syqure.git"
 
+# Ensure syqure submodules are initialized (codon, sequre, llvm)
+if [[ -d "$PARENT_DIR/syqure/.git" ]]; then
+    echo "Initializing syqure submodules..."
+    git -C "$PARENT_DIR/syqure" submodule update --init --recursive
+fi
+
 # Setup syftbox-sdk's own dependencies (syft-crypto-core)
 if [[ -f "$PARENT_DIR/syftbox-sdk/scripts/setup-workspace.sh" ]]; then
     echo "Setting up syftbox-sdk dependencies..."
