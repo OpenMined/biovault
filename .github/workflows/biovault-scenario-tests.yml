@@ -15,55 +15,53 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # Temporarily disabled - re-enable by removing 'if: false' and uncommenting matrix entries
   run-scenarios:
-    if: false
     runs-on: ${{ matrix.os == 'windows' && 'namespace-profile-windows-medium' || 'namespace-profile-linux-medium' }}
     strategy:
       fail-fast: false
       matrix:
         include:
           # Linux-only while CI is unstable (easy to re-enable below).
-          - os: linux
-            client_mode: rust
-            scenario: tests/scenarios/inbox-ping-pong.yaml
-            needs_container: true
           # - os: linux
-          #   client_mode: go
-          #   scenario: tests/scenarios/import-and-run.yaml
-          #   needs_container: true
-          # - os: linux
-          #   client_mode: go
-          #   scenario: tests/scenarios/messaging-core.yaml
-          #   needs_container: false
-          # - os: linux
-          #   client_mode: go
-          #   scenario: tests/scenarios/break-nextflow.yaml
-          #   needs_container: true
-          # - os: linux
-          #   client_mode: go
-          #   scenario: tests/scenarios/key-management.yaml
-          #   needs_container: false
-          # - os: windows
-          #   client_mode: go
-          #   scenario: tests/scenarios/import-and-run.yaml
-          #   needs_container: true
-          # - os: windows
-          #   client_mode: go
+          #   client_mode: rust
           #   scenario: tests/scenarios/inbox-ping-pong.yaml
           #   needs_container: true
-          # - os: windows
+          # - os: linux
+          #   client_mode: go
+          #   scenario: tests/scenarios/import-and-run.yaml
+          #   needs_container: true
+          # - os: linux
           #   client_mode: go
           #   scenario: tests/scenarios/messaging-core.yaml
           #   needs_container: false
-          # - os: windows
+          # - os: linux
           #   client_mode: go
           #   scenario: tests/scenarios/break-nextflow.yaml
           #   needs_container: true
-          # - os: windows
+          # - os: linux
           #   client_mode: go
           #   scenario: tests/scenarios/key-management.yaml
           #   needs_container: false
+          - os: windows
+            client_mode: go
+            scenario: tests/scenarios/import-and-run.yaml
+            needs_container: true
+          - os: windows
+            client_mode: go
+            scenario: tests/scenarios/inbox-ping-pong.yaml
+            needs_container: true
+          - os: windows
+            client_mode: go
+            scenario: tests/scenarios/messaging-core.yaml
+            needs_container: false
+          - os: windows
+            client_mode: go
+            scenario: tests/scenarios/break-nextflow.yaml
+            needs_container: true
+          - os: windows
+            client_mode: go
+            scenario: tests/scenarios/key-management.yaml
+            needs_container: false
 
     steps:
       - uses: actions/checkout@v4
@@ -231,8 +229,10 @@ jobs:
           #   runner: namespace-profile-mac-medium
           # - os: ubuntu-latest
           #   runner: ubuntu-latest
-          - os: ubuntu-latest
-            runner: namespace-profile-linux-medium
+          # - os: ubuntu-latest
+          #   runner: namespace-profile-linux-medium
+          - os: windows
+            runner: namespace-profile-windows-medium
         # os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.runner }}
 

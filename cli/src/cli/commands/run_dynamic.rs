@@ -2993,6 +2993,9 @@ fn execute_syqure_docker(
     );
 
     let container_name = format!("syqure-{}-pid{}", run_id, party_id);
+    let keep_containers =
+        env_var_truthy("BIOVAULT_SYQURE_KEEP_CONTAINERS")
+            || env_var_truthy("BV_SYQURE_KEEP_CONTAINERS");
 
     let _ = Command::new(&container_runtime)
         .args(["rm", "-f", &container_name])
@@ -3024,7 +3027,10 @@ fn execute_syqure_docker(
         .unwrap_or_else(|| module_path.join("results"));
 
     let mut cmd = Command::new(&container_runtime);
-    cmd.args(["run", "--rm", "--name", &container_name]);
+    cmd.args(["run", "--name", &container_name]);
+    if !keep_containers {
+        cmd.arg("--rm");
+    }
 
     // Only add --platform for docker (podman handles this differently)
     if container_runtime == "docker" {
@@ -3091,6 +3097,17 @@ fn execute_syqure_docker(
 
     let status = cmd.status().context("Failed to execute syqure in Docker")?;
     if !status.success() {
+        if keep_containers {
+            eprintln!("Syqure container {} failed; dumping logs:", container_name);
+            let _ = Command::new(&container_runtime)
+                .args(["logs", "--tail", "200", &container_name])
+                .status();
+        } else {
+            eprintln!(
+                "Syqure container exited with code {:?}. Re-run with BIOVAULT_SYQURE_KEEP_CONTAINERS=1 to keep containers for logs.",
+                status.code()
+            );
+        }
         return Err(anyhow::anyhow!(
             "Syqure Docker container exited with code: {:?}",
             status.code()

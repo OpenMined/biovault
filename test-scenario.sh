@@ -22,6 +22,8 @@ Options:
   --rust-client-bin P  Path to Rust client binary (optional)
   --skip-rust-build    Do not build Rust client (requires binary exists)
   --docker             Force Docker mode for syqure runtime
+  --podman             Force Podman runtime (sets BIOVAULT_CONTAINER_RUNTIME=podman)
+  --keep-containers    Keep syqure containers on failure (for logs/debugging)
   -h, --help           Show this message
 
 Examples:
@@ -30,6 +32,8 @@ Examples:
   ./test-scenario.sh --sandbox sandbox-rs tests/scenarios/inbox-ping-pong.yaml
   ./test-scenario.sh --client-mode embedded tests/scenarios/inbox-ping-pong.yaml
   ./test-scenario.sh --docker tests/scenarios/syqure-distributed.yaml
+  ./test-scenario.sh --podman tests/scenarios/syqure-distributed.yaml
+  ./test-scenario.sh --podman --keep-containers tests/scenarios/syqure-distributed.yaml
 EOF
 }
 
@@ -38,6 +42,8 @@ SANDBOX_DIR=""
 RUST_CLIENT_BIN=""
 SKIP_RUST_BUILD=0
 USE_DOCKER=0
+USE_PODMAN=0
+KEEP_CONTAINERS=0
 SCENARIO=""
 
 while [[ $# -gt 0 ]]; do
@@ -62,6 +68,13 @@ while [[ $# -gt 0 ]]; do
       ;;
     --docker)
       USE_DOCKER=1
+      ;;
+    --podman)
+      USE_PODMAN=1
+      USE_DOCKER=1
+      ;;
+    --keep-containers)
+      KEEP_CONTAINERS=1
       ;;
     -h|--help)
       usage
@@ -102,6 +115,15 @@ if [[ -n "$SANDBOX_DIR" ]]; then
   export SANDBOX_DIR="$SANDBOX_DIR"
 fi
 
+if (( USE_PODMAN )); then
+  export BIOVAULT_CONTAINER_RUNTIME="podman"
+  export CONTAINERS_MACHINE_PROVIDER="${CONTAINERS_MACHINE_PROVIDER:-hyperv}"
+  export BIOVAULT_HYPERV_MOUNT="${BIOVAULT_HYPERV_MOUNT:-1}"
+fi
+if (( KEEP_CONTAINERS )); then
+  export BIOVAULT_SYQURE_KEEP_CONTAINERS="1"
+fi
+
 # Let tests/scripts/devstack.sh decide which syftbox client to run.
 export BV_DEVSTACK_CLIENT_MODE="$CLIENT_MODE"
 if [[ -n "$RUST_CLIENT_BIN" ]]; then
@@ -123,10 +145,59 @@ if [[ "$(uname -s)" == MINGW* ]] || [[ "$(uname -s)" == MSYS* ]] || [[ "$(uname 
   IS_WINDOWS=1
 fi
 
-# Check if scenario needs syqure (contains syqure or mpc references)
+# Check if scenario needs syqure or container runtime
 NEEDS_SYQURE=0
 if grep -qiE '(syqure|mpc|sequre)' "$SCENARIO" 2>/dev/null; then
   NEEDS_SYQURE=1
+fi
+
+NEEDS_CONTAINER=0
+if grep -qiE '(syqure|mpc|sequre|nextflow|workflow\.nf|bv submit)' "$SCENARIO" 2>/dev/null; then
+  NEEDS_CONTAINER=1
+fi
+
+if (( IS_WINDOWS )) && (( NEEDS_CONTAINER )); then
+  RUNTIME_PREF="${BIOVAULT_CONTAINER_RUNTIME:-}"
+  if (( USE_PODMAN )); then
+    RUNTIME_PREF="podman"
+  elif (( USE_DOCKER )); then
+    RUNTIME_PREF="docker"
+  fi
+
+  check_docker() {
+    command -v docker >/dev/null 2>&1 || return 1
+    docker info >/dev/null 2>&1
+  }
+
+  check_podman() {
+    command -v podman >/dev/null 2>&1 || return 1
+    podman info >/dev/null 2>&1
+  }
+
+  case "$RUNTIME_PREF" in
+    podman)
+      if ! check_podman; then
+        echo "Podman is required for this scenario but is not running. Start it with 'podman machine start'." >&2
+        exit 1
+      fi
+      ;;
+    docker)
+      if ! check_docker; then
+        echo "Docker is required for this scenario but is not running. Start Docker Desktop." >&2
+        exit 1
+      fi
+      ;;
+    *)
+      if check_docker; then
+        : # ok
+      elif check_podman; then
+        : # ok
+      else
+        echo "This scenario requires a container runtime (Docker or Podman), but neither is running." >&2
+        exit 1
+      fi
+      ;;
+  esac
 fi
 
 if (( NEEDS_SYQURE )); then
