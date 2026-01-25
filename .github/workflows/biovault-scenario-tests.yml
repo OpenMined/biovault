@@ -223,12 +223,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-latest
-            runner: namespace-profile-mac-medium
+          # - os: macos-latest
+          #   runner: namespace-profile-mac-medium
           # - os: ubuntu-latest
           #   runner: ubuntu-latest
-          # - os: windows
-          #   runner: namespace-profile-windows-medium
+          - os: windows
+            runner: namespace-profile-windows-medium
         # os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.runner }}
 
