@@ -18,7 +18,7 @@ jobs:
   # Temporarily disabled - re-enable by removing 'if: false' and uncommenting matrix entries
   run-scenarios:
     if: false
-    runs-on: ${{ matrix.os == 'windows' && 'namespace-profile-windows-medium' || 'ubuntu-latest' }}
+    runs-on: ${{ matrix.os == 'windows' && 'namespace-profile-windows-medium' || 'namespace-profile-linux-medium' }}
     strategy:
       fail-fast: false
       matrix:
@@ -227,8 +227,8 @@ jobs:
           #   runner: namespace-profile-mac-medium
           # - os: ubuntu-latest
           #   runner: ubuntu-latest
-          - os: windows
-            runner: namespace-profile-windows-medium
+          - os: ubuntu-latest
+            runner: namespace-profile-linux-medium
         # os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.runner }}
 
