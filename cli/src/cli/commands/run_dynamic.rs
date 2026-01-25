@@ -370,6 +370,20 @@ fn env_var_truthy(name: &str) -> bool {
     }
 }
 
+#[cfg(not(target_os = "windows"))]
+fn env_var_truthy(name: &str) -> bool {
+    match std::env::var(name) {
+        Ok(value) => {
+            let normalized = value.trim().to_ascii_lowercase();
+            !normalized.is_empty()
+                && normalized != "0"
+                && normalized != "false"
+                && normalized != "no"
+        }
+        Err(_) => false,
+    }
+}
+
 /// Normalize and lowercase a Windows path for case-insensitive comparisons.
 #[cfg(target_os = "windows")]
 fn normalize_windows_path_for_compare(path: &Path) -> PathBuf {
