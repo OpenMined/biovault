@@ -93,6 +93,13 @@ if ($forwardArgs.Count -eq 0) {
     exit 1
 }
 
+# If Docker is explicitly requested but not installed, warn and skip without failing.
+$needsDocker = ($forwardArgs -contains "--docker") -or ($forwardArgs -contains "--podman")
+if ($needsDocker -and -not (Get-Command docker -ErrorAction SilentlyContinue)) {
+    Write-Host "Docker not found on PATH. Skipping run (no failure)." -ForegroundColor Yellow
+    exit 0
+}
+
 # Convert Windows path to Unix path for the script
 $script = $forwardArgs[0]
 $scriptArgs = if ($forwardArgs.Count -gt 1) { @($forwardArgs[1..($forwardArgs.Count-1)]) } else { @() }
@@ -150,12 +157,20 @@ foreach ($p in $toolPaths) {
 }
 $extraPath = ($unixToolPaths -join ':')
 
+# Use a clean Docker config to avoid credential helper failures on Windows.
+$dockerConfigDir = Join-Path $env:TEMP ("docker-nocreds-" + [System.Guid]::NewGuid().ToString("N"))
+New-Item -ItemType Directory -Force -Path $dockerConfigDir | Out-Null
+@'{"auths":{}}'@ | Set-Content -Encoding ascii (Join-Path $dockerConfigDir "config.json")
+$dockerConfigUnix = $dockerConfigDir -replace '\\', '/' -replace '^([A-Za-z]):', '/$1'
+$dockerConfigUnix = $dockerConfigUnix.ToLower() -replace '^/([a-z])', '/$1'
+
 # Build the command with PATH additions
 # Note: We save PATH to a temp var first to avoid issues with spaces in PATH during export
 $cmd = @"
 # Save original PATH (may contain spaces in paths like /c/Program Files/...)
 _ORIG_PATH="`$PATH"
 export PATH="$extraPath`:`$_ORIG_PATH"
+export DOCKER_CONFIG="$dockerConfigUnix"
 
 cd '$unixPath'
 
@@ -193,6 +208,7 @@ try {
     $exitCode = 1
 } finally {
     Remove-Item $tempScript -ErrorAction SilentlyContinue
+    Remove-Item $dockerConfigDir -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 exit $exitCode

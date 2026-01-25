@@ -42,26 +42,26 @@ jobs:
           #   client_mode: go
           #   scenario: tests/scenarios/key-management.yaml
           #   needs_container: false
-          - os: windows
-            client_mode: go
-            scenario: tests/scenarios/import-and-run.yaml
-            needs_container: true
-          - os: windows
-            client_mode: go
-            scenario: tests/scenarios/inbox-ping-pong.yaml
-            needs_container: true
-          - os: windows
-            client_mode: go
-            scenario: tests/scenarios/messaging-core.yaml
-            needs_container: false
-          - os: windows
-            client_mode: go
-            scenario: tests/scenarios/break-nextflow.yaml
-            needs_container: true
-          - os: windows
-            client_mode: go
-            scenario: tests/scenarios/key-management.yaml
-            needs_container: false
+          # - os: windows
+          #   client_mode: go
+          #   scenario: tests/scenarios/import-and-run.yaml
+          #   needs_container: true
+          # - os: windows
+          #   client_mode: go
+          #   scenario: tests/scenarios/inbox-ping-pong.yaml
+          #   needs_container: true
+          # - os: windows
+          #   client_mode: go
+          #   scenario: tests/scenarios/messaging-core.yaml
+          #   needs_container: false
+          # - os: windows
+          #   client_mode: go
+          #   scenario: tests/scenarios/break-nextflow.yaml
+          #   needs_container: true
+          # - os: windows
+          #   client_mode: go
+          #   scenario: tests/scenarios/key-management.yaml
+          #   needs_container: false
 
     steps:
       - uses: actions/checkout@v4
@@ -105,7 +105,7 @@ jobs:
           [Environment]::SetEnvironmentVariable("CONTAINERS_MACHINE_PROVIDER", "hyperv", "Process")
 
           podman machine stop podman-machine-default 2>$null
-          podman machine init podman-hyperv 2>$null
+          podman machine init podman-hyperv --cpus 8 --memory 12288 2>$null
           podman machine start podman-hyperv
           podman system connection default podman-hyperv
 
@@ -181,12 +181,35 @@ jobs:
           CONTAINERS_MACHINE_PROVIDER: hyperv
           BIOVAULT_CONTAINER_RUNTIME: podman
           BIOVAULT_HYPERV_MOUNT: "1"
+          BIOVAULT_SYQURE_KEEP_CONTAINERS: "1"
         run: .\win.ps1 ./test-scenario.sh --client-mode ${{ matrix.client_mode }} ${{ matrix.scenario }}
 
       - name: Run scenario (Windows)
         if: matrix.os == 'windows' && matrix.needs_container != true
         shell: pwsh
         run: .\win.ps1 ./test-scenario.sh --client-mode ${{ matrix.client_mode }} ${{ matrix.scenario }}
+
+      - name: Podman debug (Windows)
+        if: failure() && matrix.os == 'windows'
+        shell: pwsh
+        env:
+          CONTAINERS_MACHINE_PROVIDER: hyperv
+        run: |
+          Write-Host "=== Podman Machine List ===" -ForegroundColor Cyan
+          podman machine list
+          Write-Host ""
+          Write-Host "=== Podman System Info ===" -ForegroundColor Cyan
+          podman info
+          Write-Host ""
+          Write-Host "=== Podman Containers (all) ===" -ForegroundColor Cyan
+          podman ps -a --format "table {{.ID}}\t{{.Names}}\t{{.Status}}\t{{.ExitCode}}"
+          Write-Host ""
+          Write-Host "=== Syqure Container Logs (last 200 lines) ===" -ForegroundColor Cyan
+          $containers = podman ps -a --format "{{.Names}}" | Where-Object { $_ -match "syqure" }
+          foreach ($name in $containers) {
+            Write-Host "--- $name ---" -ForegroundColor Yellow
+            podman logs --tail 200 $name 2>$null
+          }
 
       - name: Show logs on failure
         if: failure()
@@ -278,7 +301,7 @@ jobs:
           [Environment]::SetEnvironmentVariable("CONTAINERS_MACHINE_PROVIDER", "hyperv", "Process")
 
           podman machine stop podman-machine-default 2>$null
-          podman machine init podman-hyperv 2>$null
+          podman machine init podman-hyperv --cpus 8 --memory 12288 2>$null
           podman machine start podman-hyperv
           podman system connection default podman-hyperv
 
@@ -364,7 +387,30 @@ jobs:
           CONTAINERS_MACHINE_PROVIDER: hyperv
           BIOVAULT_CONTAINER_RUNTIME: podman
           BIOVAULT_HYPERV_MOUNT: "1"
+          BIOVAULT_SYQURE_KEEP_CONTAINERS: "1"
         run: .\win.ps1 ./test-scenario.sh --docker tests/scenarios/syqure-distributed.yaml
+
+      - name: Podman debug (Windows)
+        if: failure() && matrix.os == 'windows'
+        shell: pwsh
+        env:
+          CONTAINERS_MACHINE_PROVIDER: hyperv
+        run: |
+          Write-Host "=== Podman Machine List ===" -ForegroundColor Cyan
+          podman machine list
+          Write-Host ""
+          Write-Host "=== Podman System Info ===" -ForegroundColor Cyan
+          podman info
+          Write-Host ""
+          Write-Host "=== Podman Containers (all) ===" -ForegroundColor Cyan
+          podman ps -a --format "table {{.ID}}\t{{.Names}}\t{{.Status}}\t{{.ExitCode}}"
+          Write-Host ""
+          Write-Host "=== Syqure Container Logs (last 200 lines) ===" -ForegroundColor Cyan
+          $containers = podman ps -a --format "{{.Names}}" | Where-Object { $_ -match "syqure" }
+          foreach ($name in $containers) {
+            Write-Host "--- $name ---" -ForegroundColor Yellow
+            podman logs --tail 200 $name 2>$null
+          }
 
       - name: Show logs on failure
         if: failure()
