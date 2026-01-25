@@ -131,7 +131,7 @@ steps:
       echo "Expected:       $EXPECTED"
 
       # Both clients should have the same correct result
-      if [[ "$RESULT_CLIENT1" == "$EXPECTED" && "$RESULT_CLIENT2" == "$EXPECTED" ]]; then
+      if [ "$RESULT_CLIENT1" = "$EXPECTED" ] && [ "$RESULT_CLIENT2" = "$EXPECTED" ]; then
         echo "✓ MPC aggregation result is correct!"
       else
         echo "✗ ERROR: MPC result does not match expected sum"
