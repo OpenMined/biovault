@@ -310,6 +310,12 @@ jobs:
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Setup Go
+        if: matrix.os != 'windows'
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: syftbox/go.mod
+
       - name: Install syqure deps (Linux)
         if: matrix.os == 'ubuntu-latest'
         shell: bash
