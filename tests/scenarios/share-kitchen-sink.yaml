@@ -173,7 +173,7 @@ steps:
         SYFTBOX_DATA_DIR="${SANDBOX_DIR}/aggregator@sandbox.local" \
         SYFTBOX_CONFIG_PATH="${SANDBOX_DIR}/aggregator@sandbox.local/.syftbox/config.json" \
         BV_BIN="$BV_BIN" \
-        "$BV_BIN" message process "{{agg_msg}}" --test --approve --non-interactive &
+        "$BV_BIN" message process "{{agg_msg}}" --test --approve --sync --non-interactive &
 
       HOME="${SANDBOX_DIR}/client1@sandbox.local" \
         BIOVAULT_HOME="${SANDBOX_DIR}/client1@sandbox.local/.biovault" \
@@ -181,7 +181,7 @@ steps:
         SYFTBOX_DATA_DIR="${SANDBOX_DIR}/client1@sandbox.local" \
         SYFTBOX_CONFIG_PATH="${SANDBOX_DIR}/client1@sandbox.local/.syftbox/config.json" \
         BV_BIN="$BV_BIN" \
-        "$BV_BIN" message process "{{c1_msg}}" --test --approve --non-interactive &
+        "$BV_BIN" message process "{{c1_msg}}" --test --approve --sync --non-interactive &
 
       HOME="${SANDBOX_DIR}/client2@sandbox.local" \
         BIOVAULT_HOME="${SANDBOX_DIR}/client2@sandbox.local/.biovault" \
@@ -189,7 +189,7 @@ steps:
         SYFTBOX_DATA_DIR="${SANDBOX_DIR}/client2@sandbox.local" \
         SYFTBOX_CONFIG_PATH="${SANDBOX_DIR}/client2@sandbox.local/.syftbox/config.json" \
         BV_BIN="$BV_BIN" \
-        "$BV_BIN" message process "{{c2_msg}}" --test --approve --non-interactive &
+        "$BV_BIN" message process "{{c2_msg}}" --test --approve --sync --non-interactive &
 
       wait
 

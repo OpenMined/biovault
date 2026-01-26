@@ -215,6 +215,7 @@ steps:
         --test \
         --participant ALL \
         --approve \
+        --sync \
         --non-interactive
 
   - name: Wait for results to sync to client1

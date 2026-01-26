@@ -5,6 +5,7 @@ use crate::config::Config;
 use crate::data::{self, BioVaultDb};
 use crate::messages::{Message, MessageDb, MessageSync};
 use crate::module_spec::ModuleSpec;
+use crate::subscriptions;
 use crate::syftbox::storage::SyftBoxStorage;
 use crate::types::ModuleYaml;
 use crate::types::SyftPermissions;
@@ -17,6 +18,8 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
+use std::thread;
+use std::time::{Duration, Instant};
 use std::sync::{Mutex, OnceLock};
 
 const MESSAGE_ENDPOINT: &str = "/message";
@@ -604,6 +607,14 @@ pub async fn perform_module_action(
         .get_message(message_id)?
         .ok_or_else(|| anyhow::anyhow!("Message not found: {}", message_id))?;
 
+    if let Some(meta) = msg.metadata.as_ref() {
+        if let Some(loc) = meta.get("module_location").and_then(|v| v.as_str()) {
+            if let Err(err) = add_subscription_for_syft_url(config, loc) {
+                eprintln!("⚠️  Warning: failed to add subscription: {}", err);
+            }
+        }
+    }
+
     match action {
         ModuleAction::Reject => reject_module(config, &msg)?,
         ModuleAction::Review => review_module(config, &msg)?,
@@ -623,11 +634,27 @@ pub async fn process_module_message(
     participant: Option<String>,
     approve: bool,
     _non_interactive: bool, // Currently always non-interactive
+    sync: bool,
+    sync_timeout: Option<u64>,
 ) -> anyhow::Result<()> {
     let (db, _sync) = init_message_system(config)?;
     let msg = db
         .get_message(message_id)?
         .ok_or_else(|| anyhow::anyhow!("Message not found: {}", message_id))?;
+
+    if let Some(meta) = msg.metadata.as_ref() {
+        if let Some(loc) = meta.get("module_location").and_then(|v| v.as_str()) {
+            if let Err(err) = add_subscription_for_syft_url(config, loc) {
+                eprintln!("⚠️  Warning: failed to add subscription: {}", err);
+            }
+            if sync {
+                // NOTE: This waits on files declared in module metadata. Flow request
+                // submissions can include multiple modules/assets outside this manifest,
+                // so they may still race until flow-level manifests are added.
+                wait_for_submission_sync(config, loc, meta, sync_timeout.unwrap_or(60))?;
+            }
+        }
+    }
 
     // Verify it's a module message
     if !matches!(
@@ -723,6 +750,115 @@ pub async fn process_module_message(
             eprintln!("✗ Failed to process module: {}", e);
             return Err(e);
         }
+    }
+
+    Ok(())
+}
+
+fn wait_for_submission_sync(
+    config: &Config,
+    url: &str,
+    metadata: &serde_json::Value,
+    timeout_secs: u64,
+) -> anyhow::Result<()> {
+    let root = resolve_syft_url_to_path(config, url)?;
+    let module_yaml = root.join("module.yaml");
+    let expected_paths = expected_submission_files(metadata);
+    let start = Instant::now();
+
+    while start.elapsed() < Duration::from_secs(timeout_secs) {
+        if module_yaml.exists()
+            && expected_paths.iter().all(|rel| root.join(rel).exists())
+        {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_secs(1));
+    }
+
+    anyhow::bail!(
+        "Timed out waiting for submission sync (missing files under {} after {}s)",
+        root.display(),
+        timeout_secs
+    )
+}
+
+fn expected_submission_files(metadata: &serde_json::Value) -> Vec<String> {
+    let mut files: Vec<String> = Vec::new();
+
+    if let Some(module) = metadata.get("module") {
+        if let Some(hashes) = module.get("b3_hashes").and_then(|v| v.as_object()) {
+            for key in hashes.keys() {
+                if !key.trim().is_empty() {
+                    files.push(key.to_string());
+                }
+            }
+        }
+    }
+
+    if !files.iter().any(|p| p == "module.yaml") {
+        files.push("module.yaml".to_string());
+    }
+
+    files.sort();
+    files.dedup();
+    files
+}
+
+fn add_subscription_for_syft_url(config: &Config, url: &str) -> anyhow::Result<()> {
+    let parsed = SyftURL::parse(url)?;
+    let data_dir = config.get_syftbox_data_dir()?;
+    let syftsub_path = data_dir.join(".data").join("syft.sub.yaml");
+
+    let mut cfg = subscriptions::load(&syftsub_path)
+        .unwrap_or_else(|_| subscriptions::default_config());
+
+    let mut path = parsed.path.trim_start_matches('/').to_string();
+    let path_obj = Path::new(&path);
+    let last_segment_is_file = path_obj
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| !ext.is_empty())
+        .unwrap_or(false);
+    if last_segment_is_file {
+        if let Some(parent) = path_obj.parent() {
+            path = parent.to_string_lossy().to_string();
+        }
+    }
+    if path.is_empty() {
+        return Ok(());
+    }
+    let rule_path = format!("{}/**", path.trim_end_matches('/'));
+
+    let exists = cfg.rules.iter().any(|rule| {
+        rule.action == subscriptions::Action::Allow
+            && rule
+                .datasite
+                .as_deref()
+                .map(|ds| ds.eq_ignore_ascii_case(&parsed.email))
+                .unwrap_or(false)
+            && rule.path == rule_path
+    });
+
+    if !exists {
+        cfg.rules.push(subscriptions::Rule {
+            action: subscriptions::Action::Allow,
+            datasite: Some(parsed.email.clone()),
+            path: rule_path.clone(),
+        });
+        subscriptions::save(&syftsub_path, &cfg)?;
+        println!(
+            "🔧 Added subscription: datasite={} path={} (file: {})",
+            parsed.email,
+            rule_path,
+            syftsub_path.display()
+        );
+    } else {
+        println!(
+            "ℹ️  Subscription already present: datasite={} path={} (file: {})",
+            parsed.email,
+            rule_path,
+            syftsub_path.display()
+        );
     }
 
     Ok(())

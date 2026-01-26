@@ -1499,6 +1499,12 @@ enum MessageCommands {
 
         #[arg(long, help = "Non-interactive mode (skip prompts)")]
         non_interactive: bool,
+
+        #[arg(long, help = "Sync and wait for submission files before processing")]
+        sync: bool,
+
+        #[arg(long, help = "Max seconds to wait for sync (requires --sync)")]
+        sync_timeout: Option<u64>,
     },
 
     #[command(about = "Archive a module message (revoke write permissions)")]
@@ -2416,6 +2422,8 @@ async fn async_main_with(cli: Cli) -> Result<()> {
                 participant,
                 approve,
                 non_interactive,
+                sync,
+                sync_timeout,
             } => {
                 let config = biovault::config::Config::load()?;
                 commands::messages::process_module_message(
@@ -2426,6 +2434,8 @@ async fn async_main_with(cli: Cli) -> Result<()> {
                     participant,
                     approve,
                     non_interactive,
+                    sync,
+                    sync_timeout,
                 )
                 .await?;
             }

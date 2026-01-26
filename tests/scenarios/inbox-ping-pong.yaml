@@ -45,9 +45,9 @@ steps:
         --non-interactive \
         --force
 
-  - name: Wait for module files to sync
+  - name: Wait for module request to arrive
     datasite: client2@sandbox.local
-    wait_for: datasites/client1@sandbox.local/shared/biovault/submissions/*/module.yaml
+    wait_for: datasites/client2@sandbox.local/app_data/biovault/rpc/message/*.request
     timeout: 30
 
   - name: Client2 syncs inbox
@@ -74,6 +74,8 @@ steps:
         --test \
         --participant ALL \
         --approve \
+        --sync \
+        --sync-timeout 120 \
         --non-interactive
 
   - name: Assert Client2 has module file shadows
