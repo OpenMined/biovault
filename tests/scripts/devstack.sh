@@ -431,7 +431,7 @@ rules:
     path: "**/*.response"
   - action: allow
     datasite: "*"
-    path: "shared/biovault/**"
+    path: "shared/biovault/**/flow.yaml"
 EOF
 }
 

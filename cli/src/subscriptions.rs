@@ -105,7 +105,7 @@ pub fn default_rules() -> Vec<Rule> {
         Rule {
             action: Action::Allow,
             datasite: Some("*".to_string()),
-            path: "shared/biovault/**".to_string(),
+            path: "shared/biovault/**/flow.yaml".to_string(),
         },
         Rule {
             action: Action::Allow,

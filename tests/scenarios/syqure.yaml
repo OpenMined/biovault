@@ -48,7 +48,7 @@ steps:
           '    path: "**/*.response"' \
           '  - action: allow' \
           '    datasite: "*"' \
-          '    path: "shared/biovault/**"' \
+          '    path: "shared/biovault/**/flow.yaml"' \
           '  - action: allow' \
           '    datasite: "*"' \
           '    path: "shared/syqure/**"' \
