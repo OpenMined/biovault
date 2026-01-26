@@ -1,0 +1,186 @@
+name: BioVault Syqure Scenario Tests
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '15 3 * * *'
+  workflow_call:
+
+concurrency:
+  group: biovault-syqure-tests-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  syqure-distributed:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            runner: namespace-profile-linux-medium
+          - os: macos-latest
+            runner: macos-latest
+          # - os: windows
+          #   runner: namespace-profile-windows-medium
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Podman Hyper-V (Windows)
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Continue"
+
+          Write-Host "=== System Info ===" -ForegroundColor Cyan
+          Write-Host "OS: $([System.Environment]::OSVersion.VersionString)"
+          whoami
+
+          Write-Host ""
+          Write-Host "=== Hyper-V Status ===" -ForegroundColor Cyan
+          Get-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V* | Format-Table FeatureName, State
+
+          Write-Host ""
+          Write-Host "=== Installing Chocolatey ===" -ForegroundColor Cyan
+          if (-not (Get-Command choco -ErrorAction SilentlyContinue)) {
+            Set-ExecutionPolicy Bypass -Scope Process -Force
+            [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
+            Invoke-Expression ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
+            $env:PATH = "$env:PATH;C:\ProgramData\chocolatey\bin"
+          }
+          choco --version
+
+          Write-Host ""
+          Write-Host "=== Installing Podman ===" -ForegroundColor Cyan
+          choco install podman-cli -y
+          $env:PATH = "C:\ProgramData\chocolatey\bin;$env:PATH"
+
+          Write-Host ""
+          Write-Host "=== Podman Version ===" -ForegroundColor Cyan
+          podman --version
+
+          Write-Host ""
+          Write-Host "=== Initializing Podman with Hyper-V ===" -ForegroundColor Cyan
+          $env:CONTAINERS_MACHINE_PROVIDER = "hyperv"
+          [Environment]::SetEnvironmentVariable("CONTAINERS_MACHINE_PROVIDER", "hyperv", "Process")
+
+          podman machine stop podman-machine-default 2>$null
+          podman machine init podman-hyperv --cpus 8 --memory 12288 2>$null
+          podman machine start podman-hyperv
+          podman system connection default podman-hyperv
+
+          Write-Host ""
+          Write-Host "=== Testing Podman ===" -ForegroundColor Cyan
+          podman info
+          podman run --rm hello-world
+
+      - name: Setup workspace dependencies
+        shell: bash
+        run: |
+          chmod +x scripts/setup-workspace.sh
+          ./scripts/setup-workspace.sh
+
+      - name: Init syqure submodules
+        shell: bash
+        run: |
+          git -C syqure submodule update --init --recursive
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.91.0
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            cli -> target
+            syftbox/rust -> target
+            syqure -> target
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v2
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Go
+        if: matrix.os != 'windows'
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: syftbox/go.mod
+
+      - name: Install syqure deps (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y llvm-17 llvm-17-dev zstd libgmp-dev
+
+      - name: Install syqure deps (macOS)
+        if: matrix.os == 'macos-latest'
+        shell: bash
+        run: |
+          brew install llvm@17 zstd gmp
+          echo "LLVM_PREFIX=$(brew --prefix llvm@17)" >> "$GITHUB_ENV"
+
+      - name: Build syqure (Unix)
+        if: matrix.os != 'windows'
+        shell: bash
+        env:
+          LLVM_PREFIX: /opt/homebrew/opt/llvm@17
+          SYQURE_LLVM_INCLUDE: /usr/lib/llvm-17/include
+        run: |
+          cd syqure
+          chmod +x syqure_bins.sh
+          ./syqure_bins.sh
+          ls -la target/debug/syqure
+
+      - name: Build BioVault CLI
+        run: cd cli && cargo build --release
+
+      - name: Run syqure-distributed scenario (Unix)
+        if: matrix.os != 'windows'
+        run: ./test-scenario.sh --client-mode rust tests/scenarios/syqure-distributed.yaml
+
+      - name: Run syqure-distributed scenario (Windows)
+        if: matrix.os == 'windows'
+        shell: pwsh
+        env:
+          CONTAINERS_MACHINE_PROVIDER: hyperv
+          BIOVAULT_CONTAINER_RUNTIME: podman
+          BIOVAULT_HYPERV_MOUNT: "1"
+          BIOVAULT_SYQURE_KEEP_CONTAINERS: "1"
+        run: .\win.ps1 ./test-scenario.sh --docker tests/scenarios/syqure-distributed.yaml
+
+      - name: Podman debug (Windows)
+        if: failure() && matrix.os == 'windows'
+        shell: pwsh
+        env:
+          CONTAINERS_MACHINE_PROVIDER: hyperv
+        run: |
+          Write-Host "=== Podman Machine List ===" -ForegroundColor Cyan
+          podman machine list
+          Write-Host ""
+          Write-Host "=== Podman System Info ===" -ForegroundColor Cyan
+          podman info
+          Write-Host ""
+          Write-Host "=== Podman Containers (all) ===" -ForegroundColor Cyan
+          podman ps -a --format "table {{.ID}}\t{{.Names}}\t{{.Status}}\t{{.ExitCode}}"
+          Write-Host ""
+          Write-Host "=== Syqure Container Logs (last 200 lines) ===" -ForegroundColor Cyan
+          $containers = podman ps -a --format "{{.Names}}" | Where-Object { $_ -match "syqure" }
+          foreach ($name in $containers) {
+            Write-Host "--- $name ---" -ForegroundColor Yellow
+            podman logs --tail 200 $name 2>$null
+          }
+
+      - name: Show logs on failure
+        if: failure()
+        shell: bash
+        run: |
+          echo "=== Sandbox Directory Structure ==="
+          find sandbox -type d -maxdepth 3 2>/dev/null || true
