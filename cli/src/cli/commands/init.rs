@@ -2,7 +2,9 @@ use crate::config::{get_biovault_home, is_syftbox_env, Config};
 use crate::syftbox::syc;
 use crate::Result;
 use anyhow::Context;
+use crate::subscriptions;
 use dialoguer::{theme::ColorfulTheme, Confirm, Input, Select};
+use serde_yaml;
 use std::env;
 use std::fs;
 use std::io::IsTerminal;
@@ -551,38 +553,8 @@ fn ensure_default_syft_subscriptions(data_root: &Path) -> Result<()> {
         fs::create_dir_all(parent)
             .with_context(|| format!("Failed to create {}", parent.display()))?;
     }
-    let contents = r#"version: 1
-defaults:
-  action: block
-rules:
-  - action: allow
-    datasite: "*"
-    path: "public/crypto/did.json"
-  - action: allow
-    datasite: "*"
-    path: "public/biovault/datasets/*.yaml"
-  - action: allow
-    datasite: "*"
-    path: "app_data/biovault/*.yaml"
-  - action: allow
-    datasite: "*"
-    path: "**/syft.pub.yaml"
-  - action: allow
-    datasite: "*"
-    path: "**/*.request"
-  - action: allow
-    datasite: "*"
-    path: "**/*.response"
-  - action: allow
-    datasite: "*"
-    path: "shared/biovault/**"
-  - action: allow
-    datasite: "*"
-    path: "shared/flows/**"
-  - action: allow
-    datasite: "*"
-    path: "shared/syqure/**"
-"#;
+    let contents = serde_yaml::to_string(&subscriptions::default_config())
+        .with_context(|| "Failed to serialize default syft.sub.yaml")?;
     fs::write(&sub_path, contents)
         .with_context(|| format!("Failed to write {}", sub_path.display()))?;
     Ok(())

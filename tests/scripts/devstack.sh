@@ -413,7 +413,10 @@ rules:
     path: "public/crypto/did.json"
   - action: allow
     datasite: "*"
-    path: "public/biovault/datasets/*.yaml"
+    path: "public/biovault/datasets.yaml"
+  - action: allow
+    datasite: "*"
+    path: "public/biovault/datasets/*/dataset.yaml"
   - action: allow
     datasite: "*"
     path: "app_data/biovault/*.yaml"

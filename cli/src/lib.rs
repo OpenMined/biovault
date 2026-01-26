@@ -8,6 +8,7 @@ pub mod messages;
 pub mod module_spec;
 pub mod project_spec;
 pub mod spec_format;
+pub mod subscriptions;
 pub mod types;
 
 #[cfg(feature = "telemetry")]
