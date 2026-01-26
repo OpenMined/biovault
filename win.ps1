@@ -163,8 +163,9 @@ New-Item -ItemType Directory -Force -Path $dockerConfigDir | Out-Null
 @'
 {"auths":{}}
 '@ | Set-Content -Encoding ascii (Join-Path $dockerConfigDir "config.json")
-$dockerConfigUnix = $dockerConfigDir -replace '\\', '/' -replace '^([A-Za-z]):', '/$1'
-$dockerConfigUnix = $dockerConfigUnix.ToLower() -replace '^/([a-z])', '/$1'
+$dockerConfigForDocker = ($dockerConfigDir -replace '\\', '/')
+$dockerConfigForDocker = $dockerConfigForDocker -replace '^([A-Za-z]):', '/$1'
+$dockerConfigForDocker = $dockerConfigForDocker.ToLower() -replace '^/([a-z])', '/$1'
 
 # Build the command with PATH additions
 # Note: We save PATH to a temp var first to avoid issues with spaces in PATH during export
@@ -172,7 +173,7 @@ $cmd = @"
 # Save original PATH (may contain spaces in paths like /c/Program Files/...)
 _ORIG_PATH="`$PATH"
 export PATH="$extraPath`:`$_ORIG_PATH"
-export DOCKER_CONFIG="$dockerConfigUnix"
+export DOCKER_CONFIG="$dockerConfigForDocker"
 
 cd '$unixPath'
 

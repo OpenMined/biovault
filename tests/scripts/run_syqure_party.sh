@@ -19,6 +19,23 @@ EOF
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
+# Detect Windows (Git Bash / MSYS / Cygwin)
+IS_WINDOWS=0
+if [[ "$(uname -s)" == MINGW* ]] || [[ "$(uname -s)" == MSYS* ]] || [[ "$(uname -s)" == CYGWIN* ]]; then
+  IS_WINDOWS=1
+fi
+
+docker_host_path() {
+  local path="$1"
+  if (( IS_WINDOWS )); then
+    if command -v cygpath >/dev/null 2>&1; then
+      cygpath -m "$path"
+      return
+    fi
+  fi
+  echo "$path"
+}
+
 PID=""
 EMAIL=""
 RUN_ID=""
@@ -82,15 +99,17 @@ while [[ ! -d "$DATASITES_ROOT" && $waited -lt 50 ]]; do
 done
 
 DATASITES_ROOT_IN_CONTAINER="/datasites"
-MOUNT_SPEC="-v ${DATASITES_ROOT}:${DATASITES_ROOT_IN_CONTAINER}"
+DATASITES_ROOT_HOST="$(docker_host_path "$DATASITES_ROOT")"
+MOUNT_SPEC="-v ${DATASITES_ROOT_HOST}:${DATASITES_ROOT_IN_CONTAINER}"
 if ! docker run --rm ${MOUNT_SPEC} alpine:3.19 sh -c 'test -d /datasites' >/dev/null 2>&1; then
   parent_dir="$(dirname "$DATASITES_ROOT")"
   if [[ ! -d "$parent_dir" ]]; then
     echo "Datasites parent directory not found: $parent_dir" >&2
     exit 1
   fi
+  parent_dir_host="$(docker_host_path "$parent_dir")"
   DATASITES_ROOT_IN_CONTAINER="/datasites-root/datasites"
-  MOUNT_SPEC="-v ${parent_dir}:/datasites-root"
+  MOUNT_SPEC="-v ${parent_dir_host}:/datasites-root"
 fi
 
 if [[ "$PROGRAM_PATH" == /workspace/example/* ]]; then
@@ -103,6 +122,66 @@ fi
 
 if [[ -n "$FILE_DEBUG" ]]; then
   log_path="${DATASITES_ROOT_IN_CONTAINER}/${EMAIL}/shared/syqure/${RUN_ID}/file_transport.log"
+  example_dir_host="$(docker_host_path "$EXAMPLE_DIR")"
+  if (( IS_WINDOWS )); then
+    MSYS2_ARG_CONV_EXCL="*" docker run -d --name "$CONTAINER_NAME" --platform "$PLATFORM" \
+      -e "SEQURE_TRANSPORT=${TRANSPORT}" \
+      -e "SEQURE_FILE_DIR=shared/syqure/${RUN_ID}" \
+      -e "SEQURE_FILE_POLL_MS=${POLL_MS}" \
+      -e "SEQURE_CP_COUNT=${CP_COUNT}" \
+      -e "SEQURE_PARTY_EMAILS=${PARTY_EMAILS}" \
+      -e "SEQURE_DATASITES_ROOT=${DATASITES_ROOT_IN_CONTAINER}" \
+      -e "SEQURE_LOCAL_EMAIL=${EMAIL}" \
+      ${FILE_KEEP:+-e "SEQURE_FILE_KEEP=${FILE_KEEP}"} \
+      ${FILE_DEBUG:+-e "SEQURE_FILE_DEBUG=${FILE_DEBUG}"} \
+      -v "${example_dir_host}:/workspace/example:ro" \
+      ${MOUNT_SPEC} \
+      "$IMAGE_NAME" sh -c "syqure \"$PROGRAM_PATH\" -- \"$PID\" & pid=\$!; \
+        log=\"${log_path}\"; \
+        i=0; while [ \$i -lt 300 ]; do [ -f \"\$log\" ] && break; sleep 0.2; i=\$((i+1)); done; \
+        if [ -f \"\$log\" ]; then tail -n 50 -F \"\$log\" & tpid=\$!; fi; \
+        wait \$pid; status=\$?; \
+        if [ -n \"\${tpid:-}\" ]; then kill \$tpid 2>/dev/null || true; fi; \
+        exit \$status"
+  else
+    docker run -d --name "$CONTAINER_NAME" --platform "$PLATFORM" \
+      -e "SEQURE_TRANSPORT=${TRANSPORT}" \
+      -e "SEQURE_FILE_DIR=shared/syqure/${RUN_ID}" \
+      -e "SEQURE_FILE_POLL_MS=${POLL_MS}" \
+      -e "SEQURE_CP_COUNT=${CP_COUNT}" \
+      -e "SEQURE_PARTY_EMAILS=${PARTY_EMAILS}" \
+      -e "SEQURE_DATASITES_ROOT=${DATASITES_ROOT_IN_CONTAINER}" \
+      -e "SEQURE_LOCAL_EMAIL=${EMAIL}" \
+      ${FILE_KEEP:+-e "SEQURE_FILE_KEEP=${FILE_KEEP}"} \
+      ${FILE_DEBUG:+-e "SEQURE_FILE_DEBUG=${FILE_DEBUG}"} \
+      -v "${EXAMPLE_DIR}:/workspace/example:ro" \
+      ${MOUNT_SPEC} \
+      "$IMAGE_NAME" sh -c "syqure \"$PROGRAM_PATH\" -- \"$PID\" & pid=\$!; \
+        log=\"${log_path}\"; \
+        i=0; while [ \$i -lt 300 ]; do [ -f \"\$log\" ] && break; sleep 0.2; i=\$((i+1)); done; \
+        if [ -f \"\$log\" ]; then tail -n 50 -F \"\$log\" & tpid=\$!; fi; \
+        wait \$pid; status=\$?; \
+        if [ -n \"\${tpid:-}\" ]; then kill \$tpid 2>/dev/null || true; fi; \
+        exit \$status"
+  fi
+  exit $?
+fi
+
+example_dir_host="$(docker_host_path "$EXAMPLE_DIR")"
+if (( IS_WINDOWS )); then
+  MSYS2_ARG_CONV_EXCL="*" docker run -d --name "$CONTAINER_NAME" --platform "$PLATFORM" \
+    -e "SEQURE_TRANSPORT=${TRANSPORT}" \
+    -e "SEQURE_FILE_DIR=shared/syqure/${RUN_ID}" \
+    -e "SEQURE_FILE_POLL_MS=${POLL_MS}" \
+    -e "SEQURE_CP_COUNT=${CP_COUNT}" \
+    -e "SEQURE_PARTY_EMAILS=${PARTY_EMAILS}" \
+    -e "SEQURE_DATASITES_ROOT=${DATASITES_ROOT_IN_CONTAINER}" \
+    ${FILE_KEEP:+-e "SEQURE_FILE_KEEP=${FILE_KEEP}"} \
+    ${FILE_DEBUG:+-e "SEQURE_FILE_DEBUG=${FILE_DEBUG}"} \
+    -v "${example_dir_host}:/workspace/example:ro" \
+    ${MOUNT_SPEC} \
+    "$IMAGE_NAME" syqure "$PROGRAM_PATH" -- "$PID"
+else
   docker run -d --name "$CONTAINER_NAME" --platform "$PLATFORM" \
     -e "SEQURE_TRANSPORT=${TRANSPORT}" \
     -e "SEQURE_FILE_DIR=shared/syqure/${RUN_ID}" \
@@ -110,30 +189,9 @@ if [[ -n "$FILE_DEBUG" ]]; then
     -e "SEQURE_CP_COUNT=${CP_COUNT}" \
     -e "SEQURE_PARTY_EMAILS=${PARTY_EMAILS}" \
     -e "SEQURE_DATASITES_ROOT=${DATASITES_ROOT_IN_CONTAINER}" \
-    -e "SEQURE_LOCAL_EMAIL=${EMAIL}" \
     ${FILE_KEEP:+-e "SEQURE_FILE_KEEP=${FILE_KEEP}"} \
     ${FILE_DEBUG:+-e "SEQURE_FILE_DEBUG=${FILE_DEBUG}"} \
     -v "${EXAMPLE_DIR}:/workspace/example:ro" \
     ${MOUNT_SPEC} \
-    "$IMAGE_NAME" sh -c "syqure \"$PROGRAM_PATH\" -- \"$PID\" & pid=\$!; \
-      log=\"${log_path}\"; \
-      i=0; while [ \$i -lt 300 ]; do [ -f \"\$log\" ] && break; sleep 0.2; i=\$((i+1)); done; \
-      if [ -f \"\$log\" ]; then tail -n 50 -F \"\$log\" & tpid=\$!; fi; \
-      wait \$pid; status=\$?; \
-      if [ -n \"\${tpid:-}\" ]; then kill \$tpid 2>/dev/null || true; fi; \
-      exit \$status"
-  exit $?
+    "$IMAGE_NAME" syqure "$PROGRAM_PATH" -- "$PID"
 fi
-
-docker run -d --name "$CONTAINER_NAME" --platform "$PLATFORM" \
-  -e "SEQURE_TRANSPORT=${TRANSPORT}" \
-  -e "SEQURE_FILE_DIR=shared/syqure/${RUN_ID}" \
-  -e "SEQURE_FILE_POLL_MS=${POLL_MS}" \
-  -e "SEQURE_CP_COUNT=${CP_COUNT}" \
-  -e "SEQURE_PARTY_EMAILS=${PARTY_EMAILS}" \
-  -e "SEQURE_DATASITES_ROOT=${DATASITES_ROOT_IN_CONTAINER}" \
-  ${FILE_KEEP:+-e "SEQURE_FILE_KEEP=${FILE_KEEP}"} \
-  ${FILE_DEBUG:+-e "SEQURE_FILE_DEBUG=${FILE_DEBUG}"} \
-  -v "${EXAMPLE_DIR}:/workspace/example:ro" \
-  ${MOUNT_SPEC} \
-  "$IMAGE_NAME" syqure "$PROGRAM_PATH" -- "$PID"

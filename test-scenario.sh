@@ -123,6 +123,10 @@ fi
 if (( KEEP_CONTAINERS )); then
   export BIOVAULT_SYQURE_KEEP_CONTAINERS="1"
 fi
+if (( USE_DOCKER )); then
+  # Ensure syqure.yaml switches into Docker mode when --docker/--podman is used.
+  export SEQURE_MODE="${SEQURE_MODE:-docker}"
+fi
 
 # Let tests/scripts/devstack.sh decide which syftbox client to run.
 export BV_DEVSTACK_CLIENT_MODE="$CLIENT_MODE"
@@ -377,10 +381,66 @@ else
   echo "Syqure mode: Not needed for this scenario"
 fi
 
-if python3 -c 'import yaml' >/dev/null 2>&1; then
-  python3 "$ROOT_DIR/scripts/run_scenario.py" "$SCENARIO"
-  exit 0
+# Syqure runs can take longer; increase background timeout unless user set it.
+if (( NEEDS_SYQURE )); then
+  if (( IS_WINDOWS )); then
+    export SCENARIO_BG_TIMEOUT="${SCENARIO_BG_TIMEOUT:-3600}"
+  else
+    export SCENARIO_BG_TIMEOUT="${SCENARIO_BG_TIMEOUT:-1200}"
+  fi
+  echo "Background process timeout: ${SCENARIO_BG_TIMEOUT}s"
+  if (( IS_WINDOWS )); then
+    export SCENARIO_TAIL_SYQURE_LOGS="${SCENARIO_TAIL_SYQURE_LOGS:-1}"
+  fi
 fi
 
+TAIL_PID=""
+PROGRESS_PID=""
+start_syqure_log_tail() {
+  if [[ "${SCENARIO_TAIL_SYQURE_LOGS:-0}" != "1" ]]; then
+    return
+  fi
+  if (( ! IS_WINDOWS )); then
+    return
+  fi
+  echo "Tailing syqure file_transport.log (Windows)..."
+  powershell.exe -NoProfile -Command '& { $ErrorActionPreference = "SilentlyContinue"; $root = (Get-Location).Path + "\\sandbox"; $pos = @{}; while ($true) { Get-ChildItem -Recurse -Filter file_transport.log $root -ErrorAction SilentlyContinue | ForEach-Object { $p = $_.FullName; if (-not $pos.ContainsKey($p)) { $pos[$p] = 0 }; try { $fs = [IO.File]::Open($p, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite); $fs.Seek([long]$pos[$p], [IO.SeekOrigin]::Begin) | Out-Null; $sr = New-Object IO.StreamReader($fs); while (-not $sr.EndOfStream) { $line = $sr.ReadLine(); if ($line) { Write-Host ("[syqure-log] {0}: {1}" -f $p, $line) } }; $pos[$p] = $fs.Position; $sr.Close(); $fs.Close() } catch {} }; Start-Sleep -Seconds 2 } }' &
+  TAIL_PID=$!
+}
+
+stop_syqure_log_tail() {
+  if [[ -n "${TAIL_PID:-}" ]]; then
+    kill "$TAIL_PID" >/dev/null 2>&1 || true
+  fi
+  if [[ -n "${PROGRESS_PID:-}" ]]; then
+    kill "$PROGRESS_PID" >/dev/null 2>&1 || true
+  fi
+}
+
+start_syqure_progress_tail() {
+  if [[ "${SCENARIO_TAIL_SYQURE_LOGS:-0}" != "1" ]]; then
+    return
+  fi
+  if (( ! IS_WINDOWS )); then
+    return
+  fi
+  echo "Tracking syqure message counts (Windows)..."
+  powershell.exe -NoProfile -Command '& { $ErrorActionPreference = "SilentlyContinue"; $root = (Get-Location).Path + "\\sandbox"; while ($true) { $now = Get-Date -Format "HH:mm:ss"; $groups = Get-ChildItem -Recurse -Filter *.request $root -ErrorAction SilentlyContinue | Group-Object DirectoryName | Sort-Object Count -Descending | Select-Object -First 5; if ($groups) { foreach ($g in $groups) { Write-Host ("[syqure-progress] {0} {1} files in {2}" -f $now, $g.Count, $g.Name) } } else { Write-Host ("[syqure-progress] {0} no request files yet" -f $now) }; Start-Sleep -Seconds 10 } }' &
+  PROGRESS_PID=$!
+}
+
+if python3 -c 'import yaml' >/dev/null 2>&1; then
+  start_syqure_log_tail
+  start_syqure_progress_tail
+  python3 "$ROOT_DIR/scripts/run_scenario.py" "$SCENARIO"
+  status=$?
+  stop_syqure_log_tail
+  exit $status
+fi
+
+start_syqure_log_tail
+start_syqure_progress_tail
 python3 "$ROOT_DIR/scripts/run_scenario.py" "$SCENARIO"
-exit 0
+status=$?
+stop_syqure_log_tail
+exit $status

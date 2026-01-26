@@ -254,7 +254,7 @@ steps:
         exit 0
       fi
       docker rm -f syqure-aggregator syqure-client1 syqure-client2 syqure-aggregator-{{run_id}} syqure-client1-{{run_id}} syqure-client2-{{run_id}} >/dev/null 2>&1 || true
-      SEQURE_FILE_KEEP=1 SEQURE_FILE_DEBUG=1 {{workspace}}/tests/scripts/run_syqure_party.sh --pid 0 --email aggregator@sandbox.local --run-id {{run_id}} --party-emails aggregator@sandbox.local,client1@sandbox.local,client2@sandbox.local --datasites-root "{{sandbox}}/aggregator@sandbox.local/datasites" --image syqure-cli-files --platform linux/amd64 --name syqure-aggregator-{{run_id}}
+      SEQURE_FILE_KEEP=1 SEQURE_FILE_DEBUG=1 {{workspace}}/tests/scripts/run_syqure_party.sh --pid 0 --email aggregator@sandbox.local --run-id {{run_id}} --party-emails aggregator@sandbox.local,client1@sandbox.local,client2@sandbox.local --datasites-root "{{sandbox}}/aggregator@sandbox.local/datasites" --image ghcr.io/madhavajay/syqure-cli:latest --platform linux/amd64 --name syqure-aggregator-{{run_id}}
 
   - name: Capture Syqure start time (ms)
     run: |
@@ -347,14 +347,14 @@ steps:
       if [[ "${SEQURE_MODE:-native}" != "docker" ]]; then
         exit 0
       fi
-      SEQURE_FILE_KEEP=1 SEQURE_FILE_DEBUG=1 {{workspace}}/tests/scripts/run_syqure_party.sh --pid 1 --email client1@sandbox.local --run-id {{run_id}} --party-emails aggregator@sandbox.local,client1@sandbox.local,client2@sandbox.local --datasites-root "{{sandbox}}/client1@sandbox.local/datasites" --image syqure-cli-files --platform linux/amd64 --name syqure-client1-{{run_id}}
+      SEQURE_FILE_KEEP=1 SEQURE_FILE_DEBUG=1 {{workspace}}/tests/scripts/run_syqure_party.sh --pid 1 --email client1@sandbox.local --run-id {{run_id}} --party-emails aggregator@sandbox.local,client1@sandbox.local,client2@sandbox.local --datasites-root "{{sandbox}}/client1@sandbox.local/datasites" --image ghcr.io/madhavajay/syqure-cli:latest --platform linux/amd64 --name syqure-client1-{{run_id}}
 
   - name: Start client2 (CP2) container
     run: |
       if [[ "${SEQURE_MODE:-native}" != "docker" ]]; then
         exit 0
       fi
-      SEQURE_FILE_KEEP=1 SEQURE_FILE_DEBUG=1 {{workspace}}/tests/scripts/run_syqure_party.sh --pid 2 --email client2@sandbox.local --run-id {{run_id}} --party-emails aggregator@sandbox.local,client1@sandbox.local,client2@sandbox.local --datasites-root "{{sandbox}}/client2@sandbox.local/datasites" --image syqure-cli-files --platform linux/amd64 --name syqure-client2-{{run_id}}
+      SEQURE_FILE_KEEP=1 SEQURE_FILE_DEBUG=1 {{workspace}}/tests/scripts/run_syqure_party.sh --pid 2 --email client2@sandbox.local --run-id {{run_id}} --party-emails aggregator@sandbox.local,client1@sandbox.local,client2@sandbox.local --datasites-root "{{sandbox}}/client2@sandbox.local/datasites" --image ghcr.io/madhavajay/syqure-cli:latest --platform linux/amd64 --name syqure-client2-{{run_id}}
 
   - name: Wait for Syqure containers to finish (streaming logs)
     run: |

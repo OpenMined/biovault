@@ -718,18 +718,31 @@ def run_shell_background(
     return proc
 
 
-def wait_for_background_processes(timeout: int = 300) -> bool:
+def wait_for_background_processes(timeout: int | None = None) -> bool:
     """Wait for all background processes to complete."""
+    if timeout is None:
+        try:
+            timeout = int(os.getenv("SCENARIO_BG_TIMEOUT", "300"))
+        except ValueError:
+            timeout = 300
+    if timeout <= 0:
+        timeout = None
+        print("Background process timeout: disabled")
+    else:
+        print(f"Background process timeout: {timeout}s")
     start = time.time()
     all_ok = True
     for proc in _background_processes:
-        remaining = timeout - (time.time() - start)
-        if remaining <= 0:
-            print("Timeout waiting for background processes")
-            all_ok = False
-            break
         try:
-            proc.wait(timeout=remaining)
+            if timeout is None:
+                proc.wait()
+            else:
+                remaining = timeout - (time.time() - start)
+                if remaining <= 0:
+                    print("Timeout waiting for background processes")
+                    all_ok = False
+                    break
+                proc.wait(timeout=remaining)
             if proc.returncode != 0:
                 print(f"Background process exited with code {proc.returncode}")
                 all_ok = False
@@ -897,7 +910,17 @@ def run_step(step: Dict[str, Any], variables: Dict[str, str]):
         print(f"[captured {capture}]")
 
 
-def run_parallel_steps(steps: List[Dict[str, Any]], variables: Dict[str, str], timeout: int = 300):
+def resolve_bg_timeout(step_timeout: int | None = None) -> int | None:
+    env_timeout = os.getenv("SCENARIO_BG_TIMEOUT")
+    if env_timeout is not None:
+        try:
+            return int(env_timeout)
+        except ValueError:
+            return step_timeout
+    return step_timeout
+
+
+def run_parallel_steps(steps: List[Dict[str, Any]], variables: Dict[str, str], timeout: int | None = 300):
     """Run multiple steps in parallel and wait for all to complete."""
     print(f"\n=== Running {len(steps)} steps in parallel ===")
 
@@ -912,7 +935,7 @@ def run_parallel_steps(steps: List[Dict[str, Any]], variables: Dict[str, str], t
 
     # Wait for all to complete
     print(f"\n=== Waiting for {len(steps)} parallel steps to complete ===")
-    if not wait_for_background_processes(timeout=timeout):
+    if not wait_for_background_processes(timeout=resolve_bg_timeout(timeout)):
         raise SystemExit("One or more parallel steps failed")
 
 
@@ -1004,7 +1027,7 @@ def main():
         if step.get("wait_background"):
             timeout = step.get("timeout", 300)
             print(f"\n=== Waiting for background processes ===")
-            if not wait_for_background_processes(timeout=timeout):
+            if not wait_for_background_processes(timeout=resolve_bg_timeout(timeout)):
                 raise SystemExit("One or more background processes failed")
             continue
 
@@ -1013,7 +1036,7 @@ def main():
     # Wait for any remaining background processes
     if _background_processes:
         print(f"\n=== Waiting for remaining background processes ===")
-        if not wait_for_background_processes(timeout=300):
+        if not wait_for_background_processes(timeout=resolve_bg_timeout(300)):
             raise SystemExit("One or more background processes failed")
 
     print("\nScenario completed successfully.")

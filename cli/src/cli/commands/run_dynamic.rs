@@ -2991,6 +2991,36 @@ fn execute_syqure_docker(
     run_id: &str,
     platform: &str,
 ) -> Result<()> {
+    fn to_container_path(path: &Path) -> String {
+        path.to_string_lossy().replace('\\', "/")
+    }
+
+    fn map_env_path(
+        value: &str,
+        module_root: &Path,
+        results_root: &Path,
+        datasites_root: &Path,
+    ) -> Option<String> {
+        if value.starts_with('/') {
+            return Some(value.replace('\\', "/"));
+        }
+        let stripped = strip_extended_path_prefix(value);
+        let value_path = PathBuf::from(&stripped);
+        if let Ok(rel_path) = value_path.strip_prefix(results_root) {
+            return Some(format!("/results/{}", to_container_path(&rel_path)));
+        }
+        if let Ok(rel_path) = value_path.strip_prefix(module_root) {
+            return Some(format!(
+                "/workspace/project/{}",
+                to_container_path(&rel_path)
+            ));
+        }
+        if let Ok(rel_path) = value_path.strip_prefix(datasites_root) {
+            return Some(format!("/datasites/{}", to_container_path(&rel_path)));
+        }
+        None
+    }
+
     // Use podman if BIOVAULT_CONTAINER_RUNTIME is set to "podman"
     let container_runtime =
         env::var("BIOVAULT_CONTAINER_RUNTIME").unwrap_or_else(|_| "docker".to_string());
@@ -3026,7 +3056,7 @@ fn execute_syqure_docker(
     let effective_datasites_mount = shared_datasites_root.as_deref().unwrap_or(datasites_root);
 
     let entrypoint_rel = entrypoint.strip_prefix(module_path).unwrap_or(entrypoint);
-    let container_entrypoint = format!("/workspace/project/{}", entrypoint_rel.display());
+    let container_entrypoint = format!("/workspace/project/{}", to_container_path(entrypoint_rel));
 
     let results_root = env_map
         .get("BV_RESULTS_DIR")
@@ -3037,6 +3067,16 @@ fn execute_syqure_docker(
                 .map(|p| p.to_path_buf())
         })
         .unwrap_or_else(|| module_path.join("results"));
+
+    let module_root_for_match = PathBuf::from(strip_extended_path_prefix(
+        &module_path_abs.to_string_lossy().to_string(),
+    ));
+    let results_root_for_match = PathBuf::from(strip_extended_path_prefix(
+        &results_root.to_string_lossy().to_string(),
+    ));
+    let datasites_root_for_match = PathBuf::from(strip_extended_path_prefix(
+        effective_datasites_mount,
+    ));
 
     let mut cmd = Command::new(&container_runtime);
     cmd.args(["run", "--name", &container_name]);
@@ -3052,26 +3092,13 @@ fn execute_syqure_docker(
     for (k, v) in env_map {
         if k == "SEQURE_DATASITES_ROOT" {
             cmd.args(["-e", &format!("{}={}", k, datasites_in_container)]);
-        } else if k.starts_with("BV_INPUT_") || k.starts_with("SEQURE_INPUT_") {
-            if let Ok(rel_path) = PathBuf::from(v).strip_prefix(&results_root) {
-                let container_path = format!("{}/{}", results_in_container, rel_path.display());
-                cmd.args(["-e", &format!("{}={}", k, container_path)]);
-            } else if let Ok(rel_path) = PathBuf::from(v).strip_prefix(module_path) {
-                let container_path = format!("/workspace/project/{}", rel_path.display());
-                cmd.args(["-e", &format!("{}={}", k, container_path)]);
-            } else {
-                cmd.args(["-e", &format!("{}={}", k, v)]);
-            }
-        } else if k.starts_with("BV_OUTPUT_")
-            || k.starts_with("SEQURE_OUTPUT_")
-            || k == "BV_RESULTS_DIR"
-        {
-            if let Ok(rel_path) = PathBuf::from(v).strip_prefix(&results_root) {
-                let container_path = format!("{}/{}", results_in_container, rel_path.display());
-                cmd.args(["-e", &format!("{}={}", k, container_path)]);
-            } else {
-                cmd.args(["-e", &format!("{}={}", k, v)]);
-            }
+        } else if let Some(mapped) = map_env_path(
+            v,
+            &module_root_for_match,
+            &results_root_for_match,
+            &datasites_root_for_match,
+        ) {
+            cmd.args(["-e", &format!("{}={}", k, mapped)]);
         } else {
             cmd.args(["-e", &format!("{}={}", k, v)]);
         }

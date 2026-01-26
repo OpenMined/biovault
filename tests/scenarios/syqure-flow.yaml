@@ -44,6 +44,16 @@ steps:
               - aggregator@sandbox.local
       YAML
 
+  - name: Wait for share to sync to client1
+    datasite: client1@sandbox.local
+    wait_for: datasites/aggregator@sandbox.local/shared/flows/syqure/{{run_id}}/syft.pub.yaml
+    timeout: 30
+
+  - name: Wait for share to sync to client2
+    datasite: client2@sandbox.local
+    wait_for: datasites/aggregator@sandbox.local/shared/flows/syqure/{{run_id}}/syft.pub.yaml
+    timeout: 30
+
   # ========== PHASE 1: Clients submit their rsids and counts ==========
 
   - name: Client1 writes rsids and counts into aggregator shared folder
