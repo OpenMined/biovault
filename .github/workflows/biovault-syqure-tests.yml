@@ -91,6 +91,8 @@ jobs:
 
       - name: Setup workspace dependencies
         shell: bash
+        env:
+          BV_INCLUDE_SYQURE: "1"
         run: |
           chmod +x scripts/setup-workspace.sh
           ./scripts/setup-workspace.sh
@@ -98,7 +100,12 @@ jobs:
       - name: Init syqure submodules
         shell: bash
         run: |
-          git -C syqure submodule update --init --recursive
+          if [ -d syqure/.git ]; then
+            git -C syqure submodule sync --recursive
+            git -C syqure submodule update --init --recursive
+          else
+            echo "syqure directory not found; skipping submodule init"
+          fi
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
