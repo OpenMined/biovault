@@ -84,9 +84,7 @@ pub async fn submit(
     // Override security-sensitive fields
     module.author = config.email.clone();
     let mut datasites = module.datasites.clone().unwrap_or_default();
-    if datasites.is_empty() {
-        datasites.push(datasite_email.clone());
-    } else if !datasites.contains(&datasite_email) {
+    if !datasites.contains(&datasite_email) {
         datasites.push(datasite_email.clone());
     }
     module.datasites = Some(datasites);
@@ -326,9 +324,7 @@ pub async fn submit(
                         if updated_datasites.is_empty() {
                             updated_datasites = module.datasites.clone().unwrap_or_default();
                         }
-                        if updated_datasites.is_empty() {
-                            updated_datasites.push(datasite_email.clone());
-                        } else if !updated_datasites.contains(&datasite_email) {
+                        if !updated_datasites.contains(&datasite_email) {
                             updated_datasites.push(datasite_email.clone());
                         }
                         updated_datasites = dedupe_recipients(updated_datasites);
@@ -805,7 +801,7 @@ mod tests {
             datasites,
             participants: None,
             workflow: "workflow.nf".into(),
-            template: None,
+            runtime: None,
             assets: Some(vec!["assets/data.csv".into()]),
             parameters: None,
             inputs: None,
@@ -832,6 +828,7 @@ mod tests {
             agent_bridge_http_port: None,
             agent_bridge_token: None,
             agent_bridge_blocklist: None,
+            syqure: None,
         };
         config.save(bv_home.join("config.yaml")).unwrap();
 
@@ -1110,6 +1107,7 @@ mod tests {
             agent_bridge_http_port: None,
             agent_bridge_token: None,
             agent_bridge_blocklist: None,
+            syqure: None,
         };
 
         let app = SyftBoxApp::new(&syft_dir, &config.email, "biovault").unwrap();
@@ -1132,7 +1130,7 @@ mod tests {
             datasites: Some(vec![config.email.clone()]),
             participants: Some(vec!["participant1".into()]),
             workflow: "workflow.nf".into(),
-            template: None,
+            runtime: None,
             assets: Some(vec!["assets/data.csv".into()]),
             parameters: None,
             inputs: None,
@@ -1260,6 +1258,7 @@ mod tests {
             agent_bridge_http_port: None,
             agent_bridge_token: None,
             agent_bridge_blocklist: None,
+            syqure: None,
         })
         .unwrap();
         let db = MessageDb::new(&db_path).unwrap();

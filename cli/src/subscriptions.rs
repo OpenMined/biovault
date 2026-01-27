@@ -48,7 +48,6 @@ pub enum Action {
     Unknown,
 }
 
-
 impl Action {
     fn normalize(self) -> Action {
         match self {

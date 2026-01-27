@@ -106,6 +106,7 @@ impl ModuleYaml {
         ModuleYaml::from_str(&content)
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(content: &str) -> anyhow::Result<Self> {
         let value: serde_yaml::Value = serde_yaml::from_str(content)?;
         let module_file: ModuleFile = serde_yaml::from_value(value.clone())?;

@@ -211,6 +211,7 @@ pub struct FlowModuleSandbox {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
+#[allow(clippy::large_enum_variant)]
 pub enum FlowStepUses {
     Name(String),
     Ref(FlowModuleRef),
@@ -1146,26 +1147,15 @@ impl FlowFile {
                 .store
                 .iter()
                 .map(|(name, store)| {
-                    let kind = store.kind.as_deref().unwrap_or("sql").to_lowercase();
-                    let value = if kind == "sql" {
-                        FlowStoreSpec::Sql(FlowSqlStoreSpec {
-                            target: None,
-                            source: store.source.clone(),
-                            table: store.table.clone(),
-                            participant_column: store.key_column.clone(),
-                            overwrite: store.overwrite,
-                            format: None,
-                        })
-                    } else {
-                        FlowStoreSpec::Sql(FlowSqlStoreSpec {
-                            target: None,
-                            source: store.source.clone(),
-                            table: store.table.clone(),
-                            participant_column: store.key_column.clone(),
-                            overwrite: store.overwrite,
-                            format: None,
-                        })
-                    };
+                    let _kind = store.kind.as_deref().unwrap_or("sql").to_lowercase();
+                    let value = FlowStoreSpec::Sql(FlowSqlStoreSpec {
+                        target: None,
+                        source: store.source.clone(),
+                        table: store.table.clone(),
+                        participant_column: store.key_column.clone(),
+                        overwrite: store.overwrite,
+                        format: None,
+                    });
                     (name.clone(), value)
                 })
                 .collect();

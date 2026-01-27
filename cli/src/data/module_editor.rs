@@ -213,7 +213,7 @@ mod tests {
             name: "example".into(),
             author: "test@example.com".into(),
             workflow: "workflow.nf".into(),
-            template: Some("sheet".into()),
+            runtime: Some("sheet".into()),
             version: Some("1.2.3".into()),
             assets: vec!["schema.yaml".into(), "src/main.py".into()],
             parameters: vec![crate::module_spec::ParameterSpec {
@@ -246,7 +246,7 @@ mod tests {
         assert_eq!(loaded.name, "example");
         assert_eq!(loaded.author, "test@example.com");
         assert_eq!(loaded.workflow, "workflow.nf");
-        assert_eq!(loaded.template.as_deref(), Some("sheet"));
+        assert_eq!(loaded.runtime.as_deref(), Some("sheet"));
         assert_eq!(loaded.assets.len(), 2);
         assert_eq!(loaded.version.as_deref(), Some("1.2.3"));
         assert_eq!(loaded.parameters.len(), 1);

@@ -2980,6 +2980,7 @@ fn execute_syqure_native(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn execute_syqure_docker(
     image: &str,
     entrypoint: &Path,
@@ -3061,14 +3062,10 @@ fn execute_syqure_docker(
             } else {
                 cmd.args(["-e", &format!("{}={}", k, v)]);
             }
-        } else if k.starts_with("BV_OUTPUT_") || k.starts_with("SEQURE_OUTPUT_") {
-            if let Ok(rel_path) = PathBuf::from(v).strip_prefix(&results_root) {
-                let container_path = format!("{}/{}", results_in_container, rel_path.display());
-                cmd.args(["-e", &format!("{}={}", k, container_path)]);
-            } else {
-                cmd.args(["-e", &format!("{}={}", k, v)]);
-            }
-        } else if k == "BV_RESULTS_DIR" {
+        } else if k.starts_with("BV_OUTPUT_")
+            || k.starts_with("SEQURE_OUTPUT_")
+            || k == "BV_RESULTS_DIR"
+        {
             if let Ok(rel_path) = PathBuf::from(v).strip_prefix(&results_root) {
                 let container_path = format!("{}/{}", results_in_container, rel_path.display());
                 cmd.args(["-e", &format!("{}={}", k, container_path)]);
@@ -3081,11 +3078,9 @@ fn execute_syqure_docker(
     }
 
     // Strip Windows extended path prefix for Docker volume mounts
-    let module_mount_path =
-        strip_extended_path_prefix(module_path_abs.to_string_lossy().as_ref());
+    let module_mount_path = strip_extended_path_prefix(module_path_abs.to_string_lossy().as_ref());
     let datasites_mount_path = strip_extended_path_prefix(effective_datasites_mount);
-    let results_mount_path =
-        strip_extended_path_prefix(results_root.to_string_lossy().as_ref());
+    let results_mount_path = strip_extended_path_prefix(results_root.to_string_lossy().as_ref());
 
     cmd.args(["-v", &format!("{}:/workspace/project", module_mount_path)]);
     cmd.args([

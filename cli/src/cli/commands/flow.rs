@@ -2227,6 +2227,7 @@ fn resolve_syft_path(
     Ok(path.to_string_lossy().to_string())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn resolve_binding(
     binding: &str,
     expected_type: &str,
@@ -2517,6 +2518,7 @@ fn resolve_current_datasite() -> Option<String> {
     None
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_flow_template(
     template: &str,
     current: &str,
@@ -2565,6 +2567,7 @@ struct ShareLocation {
     syft_url: String,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn resolve_share_location(
     url_template: &str,
     current: &str,

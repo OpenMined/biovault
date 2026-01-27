@@ -115,6 +115,7 @@ mod tests_fast_helpers {
             agent_bridge_http_port: None,
             agent_bridge_token: None,
             agent_bridge_blocklist: None,
+            syqure: None,
         };
         let path = get_message_db_path(&cfg).unwrap();
         // Parent dir should exist now
@@ -155,6 +156,7 @@ mod tests_fast_helpers {
             agent_bridge_http_port: None,
             agent_bridge_token: None,
             agent_bridge_blocklist: None,
+            syqure: None,
         };
         // Create db first
         let _ = get_message_db_path(&cfg).unwrap();
@@ -626,6 +628,7 @@ pub async fn perform_module_action(
 }
 
 /// Process a module message non-interactively (for automated testing)
+#[allow(clippy::too_many_arguments)]
 pub async fn process_module_message(
     config: &Config,
     message_id: &str,
@@ -2170,6 +2173,7 @@ mod tests {
             agent_bridge_http_port: None,
             agent_bridge_token: None,
             agent_bridge_blocklist: None,
+            syqure: None,
         }
     }
 
@@ -2276,6 +2280,7 @@ mod tests {
             agent_bridge_http_port: None,
             agent_bridge_token: None,
             agent_bridge_blocklist: None,
+            syqure: None,
         };
 
         let app = SyftBoxApp::new(tmp.path(), &cfg.email, "biovault").unwrap();
@@ -2331,6 +2336,7 @@ mod tests {
             agent_bridge_http_port: None,
             agent_bridge_token: None,
             agent_bridge_blocklist: None,
+            syqure: None,
         };
 
         // Make sender tree and one file
@@ -2368,6 +2374,7 @@ mod tests {
             agent_bridge_http_port: None,
             agent_bridge_token: None,
             agent_bridge_blocklist: None,
+            syqure: None,
         };
 
         // Build module root with two files and compute blake3
@@ -2393,7 +2400,7 @@ mod tests {
             datasites: None,
             participants: None,
             workflow: "w".into(),
-            template: None,
+            runtime: None,
             assets: None,
             parameters: None,
             inputs: None,
@@ -2437,6 +2444,7 @@ mod tests {
             agent_bridge_http_port: None,
             agent_bridge_token: None,
             agent_bridge_blocklist: None,
+            syqure: None,
         };
         // Init DB only
         let db_path = get_message_db_path(&cfg)?;
@@ -2469,6 +2477,7 @@ mod tests {
             agent_bridge_http_port: None,
             agent_bridge_token: None,
             agent_bridge_blocklist: None,
+            syqure: None,
         };
         let db_path = get_message_db_path(&cfg)?;
         let db = MessageDb::new(&db_path)?;

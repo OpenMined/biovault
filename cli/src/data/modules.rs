@@ -34,6 +34,7 @@ fn default_version() -> String {
 }
 
 impl ModuleYaml {
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(raw: &str) -> Result<Self> {
         let module: ModuleFile = serde_yaml::from_str(raw)?;
         Ok(ModuleYaml::from_module_file(module))

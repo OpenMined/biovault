@@ -1410,6 +1410,7 @@ mod tests {
             agent_bridge_http_port: None,
             agent_bridge_token: None,
             agent_bridge_blocklist: None,
+            syqure: None,
         };
         let name = get_service_name(&config);
         assert!(name.starts_with("biovault-daemon-"));
@@ -1432,6 +1433,7 @@ mod tests {
             agent_bridge_http_port: None,
             agent_bridge_token: None,
             agent_bridge_blocklist: None,
+            syqure: None,
         };
         let dir = get_biovault_dir(&config);
         assert!(dir.is_ok());
@@ -1453,6 +1455,7 @@ mod tests {
             agent_bridge_http_port: None,
             agent_bridge_token: None,
             agent_bridge_blocklist: None,
+            syqure: None,
         };
         let path = get_pid_file_path(&config);
         assert!(path.is_ok());
@@ -1475,6 +1478,7 @@ mod tests {
             agent_bridge_http_port: None,
             agent_bridge_token: None,
             agent_bridge_blocklist: None,
+            syqure: None,
         };
         let path = get_status_file_path(&config);
         assert!(path.is_ok());
@@ -1497,6 +1501,7 @@ mod tests {
             agent_bridge_http_port: None,
             agent_bridge_token: None,
             agent_bridge_blocklist: None,
+            syqure: None,
         };
         let path = get_log_file_path(&config);
         assert!(path.is_ok());
@@ -1575,6 +1580,7 @@ mod tests {
             agent_bridge_http_port: None,
             agent_bridge_token: None,
             agent_bridge_blocklist: None,
+            syqure: None,
         };
 
         let result = is_daemon_running(&config);
@@ -1598,6 +1604,7 @@ mod tests {
             agent_bridge_http_port: None,
             agent_bridge_token: None,
             agent_bridge_blocklist: None,
+            syqure: None,
         };
 
         let result = cleanup_stale_pid_files(&config);
@@ -1620,6 +1627,7 @@ mod tests {
             agent_bridge_http_port: None,
             agent_bridge_token: None,
             agent_bridge_blocklist: None,
+            syqure: None,
         };
 
         let result = get_daemon_status(&config);
@@ -1646,6 +1654,7 @@ mod tests {
             agent_bridge_http_port: None,
             agent_bridge_token: None,
             agent_bridge_blocklist: None,
+            syqure: None,
         };
 
         let result = generate_systemd_service_content(&config);
@@ -1669,6 +1678,7 @@ mod tests {
             agent_bridge_http_port: None,
             agent_bridge_token: None,
             agent_bridge_blocklist: None,
+            syqure: None,
         };
 
         // Create invalid PID file
@@ -1699,6 +1709,7 @@ mod tests {
             agent_bridge_http_port: None,
             agent_bridge_token: None,
             agent_bridge_blocklist: None,
+            syqure: None,
         };
 
         // Create invalid PID file
@@ -1731,6 +1742,7 @@ mod tests {
             agent_bridge_http_port: None,
             agent_bridge_token: None,
             agent_bridge_blocklist: None,
+            syqure: None,
         };
 
         // Create valid status file
@@ -1772,6 +1784,7 @@ mod tests {
             agent_bridge_http_port: None,
             agent_bridge_token: None,
             agent_bridge_blocklist: None,
+            syqure: None,
         };
         let name = get_service_name(&config);
         assert!(name.contains("user-at-example-com"));
@@ -1810,6 +1823,7 @@ mod tests {
             agent_bridge_http_port: None,
             agent_bridge_token: None,
             agent_bridge_blocklist: None,
+            syqure: None,
         };
 
         let biovault_dir = get_biovault_dir(&config).unwrap();
@@ -1859,6 +1873,7 @@ mod tests {
             agent_bridge_http_port: None,
             agent_bridge_token: None,
             agent_bridge_blocklist: None,
+            syqure: None,
         };
 
         let result = stop(&config).await;
@@ -1882,6 +1897,7 @@ mod tests {
             agent_bridge_http_port: None,
             agent_bridge_token: None,
             agent_bridge_blocklist: None,
+            syqure: None,
         };
 
         let result = logs(&config, false, Some(10)).await;
@@ -1905,6 +1921,7 @@ mod tests {
             agent_bridge_http_port: None,
             agent_bridge_token: None,
             agent_bridge_blocklist: None,
+            syqure: None,
         };
 
         // Should work even when daemon not running
@@ -1926,6 +1943,7 @@ mod tests {
             agent_bridge_http_port: None,
             agent_bridge_token: None,
             agent_bridge_blocklist: None,
+            syqure: None,
         };
 
         let result = install_service(&config).await;
@@ -1946,6 +1964,7 @@ mod tests {
             agent_bridge_http_port: None,
             agent_bridge_token: None,
             agent_bridge_blocklist: None,
+            syqure: None,
         };
 
         let result = uninstall_service(&config).await;
@@ -1966,6 +1985,7 @@ mod tests {
             agent_bridge_http_port: None,
             agent_bridge_token: None,
             agent_bridge_blocklist: None,
+            syqure: None,
         };
 
         let result = service_status(&config).await;
@@ -1986,6 +2006,7 @@ mod tests {
             agent_bridge_http_port: None,
             agent_bridge_token: None,
             agent_bridge_blocklist: None,
+            syqure: None,
         };
 
         let result = show_service(&config).await;
@@ -2006,6 +2027,7 @@ mod tests {
             agent_bridge_http_port: None,
             agent_bridge_token: None,
             agent_bridge_blocklist: None,
+            syqure: None,
         };
 
         let result = reinstall_service(&config).await;
@@ -2029,6 +2051,7 @@ mod tests {
             agent_bridge_http_port: None,
             agent_bridge_token: None,
             agent_bridge_blocklist: None,
+            syqure: None,
         };
 
         if let Ok(content) = generate_systemd_service_content(&config) {
@@ -2080,6 +2103,7 @@ mod tests {
             agent_bridge_http_port: None,
             agent_bridge_token: None,
             agent_bridge_blocklist: None,
+            syqure: None,
         };
 
         // Create invalid JSON status file
@@ -2108,6 +2132,7 @@ mod tests {
             agent_bridge_http_port: None,
             agent_bridge_token: None,
             agent_bridge_blocklist: None,
+            syqure: None,
         };
 
         // Create PID file with non-existent PID
@@ -2136,6 +2161,7 @@ mod tests {
             agent_bridge_http_port: None,
             agent_bridge_token: None,
             agent_bridge_blocklist: None,
+            syqure: None,
         };
 
         // Create PID file with non-existent PID
@@ -2180,6 +2206,7 @@ mod tests {
                 agent_bridge_http_port: None,
                 agent_bridge_token: None,
                 agent_bridge_blocklist: None,
+                syqure: None,
             };
             let name = get_service_name(&config);
             assert!(
@@ -2209,6 +2236,7 @@ mod tests {
             agent_bridge_http_port: None,
             agent_bridge_token: None,
             agent_bridge_blocklist: None,
+            syqure: None,
         };
 
         let config2 = Config {
@@ -2222,6 +2250,7 @@ mod tests {
             agent_bridge_http_port: None,
             agent_bridge_token: None,
             agent_bridge_blocklist: None,
+            syqure: None,
         };
 
         let dir1 = get_biovault_dir(&config1).unwrap();
@@ -2252,6 +2281,7 @@ mod tests {
             agent_bridge_http_port: None,
             agent_bridge_token: None,
             agent_bridge_blocklist: None,
+            syqure: None,
         };
 
         // Create PID file with current process ID (which is running)
@@ -2296,6 +2326,7 @@ mod tests {
             agent_bridge_http_port: None,
             agent_bridge_token: None,
             agent_bridge_blocklist: None,
+            syqure: None,
         };
 
         let pid_path = get_pid_file_path(&config).unwrap();
@@ -2320,6 +2351,7 @@ mod tests {
             agent_bridge_http_port: None,
             agent_bridge_token: None,
             agent_bridge_blocklist: None,
+            syqure: None,
         };
 
         let log_path = get_log_file_path(&config).unwrap();
@@ -2344,6 +2376,7 @@ mod tests {
             agent_bridge_http_port: None,
             agent_bridge_token: None,
             agent_bridge_blocklist: None,
+            syqure: None,
         };
 
         // Test with different line counts
@@ -2380,6 +2413,7 @@ mod tests {
             agent_bridge_http_port: None,
             agent_bridge_token: None,
             agent_bridge_blocklist: None,
+            syqure: None,
         };
 
         let status_path = get_status_file_path(&config).unwrap();
@@ -2414,6 +2448,7 @@ mod tests {
             agent_bridge_http_port: None,
             agent_bridge_token: None,
             agent_bridge_blocklist: None,
+            syqure: None,
         };
 
         let name = get_service_name(&config);

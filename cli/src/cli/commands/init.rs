@@ -413,6 +413,41 @@ fn prompt_for_location() -> Result<PathBuf> {
     Ok(biovault_dir)
 }
 
+fn ensure_default_syft_subscriptions(data_root: &Path) -> Result<()> {
+    let sub_path = data_root.join(".data").join("syft.sub.yaml");
+    let mut cfg = if sub_path.exists() {
+        subscriptions::load(&sub_path).unwrap_or_else(|_| subscriptions::default_config())
+    } else {
+        if let Some(parent) = sub_path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("Failed to create {}", parent.display()))?;
+        }
+        subscriptions::default_config()
+    };
+
+    let mut changed = false;
+    for rule in subscriptions::default_rules() {
+        let exists = cfg.rules.iter().any(|existing| {
+            existing.action == rule.action
+                && existing.datasite == rule.datasite
+                && existing.path == rule.path
+        });
+        if !exists {
+            cfg.rules.push(rule);
+            changed = true;
+        }
+    }
+
+    if sub_path.exists() && !changed {
+        return Ok(());
+    }
+    let contents =
+        serde_yaml::to_string(&cfg).with_context(|| "Failed to serialize default syft.sub.yaml")?;
+    fs::write(&sub_path, contents)
+        .with_context(|| format!("Failed to write {}", sub_path.display()))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -489,6 +524,7 @@ mod tests {
             agent_bridge_http_port: None,
             agent_bridge_token: None,
             agent_bridge_blocklist: None,
+            syqure: None,
         };
         let config_path = temp_dir.path().join(".biovault").join("config.yaml");
         fs::create_dir_all(config_path.parent().unwrap()).unwrap();
@@ -542,39 +578,4 @@ mod tests {
 
         crate::config::clear_test_biovault_home();
     }
-}
-
-fn ensure_default_syft_subscriptions(data_root: &Path) -> Result<()> {
-    let sub_path = data_root.join(".data").join("syft.sub.yaml");
-    let mut cfg = if sub_path.exists() {
-        subscriptions::load(&sub_path).unwrap_or_else(|_| subscriptions::default_config())
-    } else {
-        if let Some(parent) = sub_path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("Failed to create {}", parent.display()))?;
-        }
-        subscriptions::default_config()
-    };
-
-    let mut changed = false;
-    for rule in subscriptions::default_rules() {
-        let exists = cfg.rules.iter().any(|existing| {
-            existing.action == rule.action
-                && existing.datasite == rule.datasite
-                && existing.path == rule.path
-        });
-        if !exists {
-            cfg.rules.push(rule);
-            changed = true;
-        }
-    }
-
-    if sub_path.exists() && !changed {
-        return Ok(());
-    }
-    let contents =
-        serde_yaml::to_string(&cfg).with_context(|| "Failed to serialize default syft.sub.yaml")?;
-    fs::write(&sub_path, contents)
-        .with_context(|| format!("Failed to write {}", sub_path.display()))?;
-    Ok(())
 }
