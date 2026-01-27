@@ -3,6 +3,10 @@ name: BioVault Scenario Tests
 on:
   pull_request:
     branches: [main]
+  push:
+    branches: [main]
+  schedule:
+    - cron: '45 2 * * *'
   workflow_dispatch:
   workflow_call:
 
@@ -12,50 +16,59 @@ concurrency:
 
 jobs:
   run-scenarios:
-    runs-on: ${{ matrix.os == 'windows' && 'namespace-profile-windows-medium' || 'ubuntu-latest' }}
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          # Linux + Windows coverage for all scenarios.
           - os: linux
-            client_mode: go
-            scenario: tests/scenarios/import-and-run.yaml
-            needs_container: true
-          - os: linux
-            client_mode: go
+            runner: namespace-profile-linux-medium
+            client_mode: rust
             scenario: tests/scenarios/inbox-ping-pong.yaml
             needs_container: true
           - os: linux
-            client_mode: go
+            runner: namespace-profile-linux-medium
+            client_mode: rust
+            scenario: tests/scenarios/import-and-run.yaml
+            needs_container: true
+          - os: linux
+            runner: namespace-profile-linux-medium
+            client_mode: rust
             scenario: tests/scenarios/messaging-core.yaml
             needs_container: false
           - os: linux
-            client_mode: go
+            runner: namespace-profile-linux-medium
+            client_mode: rust
             scenario: tests/scenarios/break-nextflow.yaml
             needs_container: true
           - os: linux
-            client_mode: go
+            runner: namespace-profile-linux-medium
+            client_mode: rust
             scenario: tests/scenarios/key-management.yaml
             needs_container: false
           - os: windows
-            client_mode: go
+            runner: namespace-profile-windows-medium
+            client_mode: rust
             scenario: tests/scenarios/import-and-run.yaml
             needs_container: true
           - os: windows
-            client_mode: go
+            runner: namespace-profile-windows-medium
+            client_mode: rust
             scenario: tests/scenarios/inbox-ping-pong.yaml
             needs_container: true
           - os: windows
-            client_mode: go
+            runner: namespace-profile-windows-medium
+            client_mode: rust
             scenario: tests/scenarios/messaging-core.yaml
             needs_container: false
           - os: windows
-            client_mode: go
+            runner: namespace-profile-windows-medium
+            client_mode: rust
             scenario: tests/scenarios/break-nextflow.yaml
             needs_container: true
           - os: windows
-            client_mode: go
+            runner: namespace-profile-windows-medium
+            client_mode: rust
             scenario: tests/scenarios/key-management.yaml
             needs_container: false
 
@@ -100,9 +113,21 @@ jobs:
           $env:CONTAINERS_MACHINE_PROVIDER = "hyperv"
           [Environment]::SetEnvironmentVariable("CONTAINERS_MACHINE_PROVIDER", "hyperv", "Process")
 
+          # Clean up stale machines (namespace runners can retain state)
+          podman machine stop podman-hyperv 2>$null
           podman machine stop podman-machine-default 2>$null
-          podman machine init podman-hyperv 2>$null
-          podman machine start podman-hyperv
+          podman machine rm -f podman-hyperv 2>$null
+          podman machine rm -f podman-machine-default 2>$null
+
+          podman machine init podman-hyperv --cpus 8 --memory 12288 2>$null
+
+          $started = $false
+          for ($i=0; $i -lt 3; $i++) {
+            podman machine start podman-hyperv
+            if ($LASTEXITCODE -eq 0) { $started = $true; break }
+            Start-Sleep -Seconds 5
+          }
+          if (-not $started) { throw "Podman Hyper-V machine failed to start" }
           podman system connection default podman-hyperv
 
           Write-Host ""
@@ -115,6 +140,10 @@ jobs:
         run: |
           chmod +x scripts/setup-workspace.sh
           ./scripts/setup-workspace.sh
+      - name: Init syqure submodules
+        shell: bash
+        run: |
+          git -C syqure submodule update --init --recursive
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
@@ -173,12 +202,35 @@ jobs:
           CONTAINERS_MACHINE_PROVIDER: hyperv
           BIOVAULT_CONTAINER_RUNTIME: podman
           BIOVAULT_HYPERV_MOUNT: "1"
+          BIOVAULT_SYQURE_KEEP_CONTAINERS: "1"
         run: .\win.ps1 ./test-scenario.sh --client-mode ${{ matrix.client_mode }} ${{ matrix.scenario }}
 
       - name: Run scenario (Windows)
         if: matrix.os == 'windows' && matrix.needs_container != true
         shell: pwsh
         run: .\win.ps1 ./test-scenario.sh --client-mode ${{ matrix.client_mode }} ${{ matrix.scenario }}
+
+      - name: Podman debug (Windows)
+        if: failure() && matrix.os == 'windows'
+        shell: pwsh
+        env:
+          CONTAINERS_MACHINE_PROVIDER: hyperv
+        run: |
+          Write-Host "=== Podman Machine List ===" -ForegroundColor Cyan
+          podman machine list
+          Write-Host ""
+          Write-Host "=== Podman System Info ===" -ForegroundColor Cyan
+          podman info
+          Write-Host ""
+          Write-Host "=== Podman Containers (all) ===" -ForegroundColor Cyan
+          podman ps -a --format "table {{.ID}}\t{{.Names}}\t{{.Status}}\t{{.ExitCode}}"
+          Write-Host ""
+          Write-Host "=== Syqure Container Logs (last 200 lines) ===" -ForegroundColor Cyan
+          $containers = podman ps -a --format "{{.Names}}" | Where-Object { $_ -match "syqure" }
+          foreach ($name in $containers) {
+            Write-Host "--- $name ---" -ForegroundColor Yellow
+            podman logs --tail 200 $name 2>$null
+          }
 
       - name: Show logs on failure
         if: failure()
@@ -204,6 +256,20 @@ jobs:
             echo "=== Nextflow Task Run Script ==="
             find "$WORK_DIR" -name ".command.run" 2>/dev/null | head -1 | xargs cat 2>/dev/null || echo "No run files found"
           fi
+
+      - name: Cleanup devstack
+        if: always()
+        shell: bash
+        run: |
+          chmod +x ./tests/scripts/devstack.sh
+          ./tests/scripts/devstack.sh --stop --reset || true
+
+          echo ""
+          echo "=== Client Logs ==="
+          find sandbox -name "*.log" -exec echo "--- {} ---" \; -exec cat {} \; 2>/dev/null || true
+          echo ""
+          echo "=== MPC Channel Files ==="
+          find sandbox -path "*/_mpc/*" -type f 2>/dev/null | head -50 || true
 
       - name: Cleanup devstack
         if: always()

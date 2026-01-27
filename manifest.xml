@@ -7,4 +7,5 @@
   <project name="OpenMined/biovault-beaver" path="biovault-beaver" revision="main" />
   <project name="OpenMined/sbenv" path="sbenv" revision="main" />
   <project name="OpenMined/bioscript" path="bioscript" revision="main" />
+  <project name="madhavajay/syqure" path="syqure" revision="main" />
 </manifest>

@@ -1,0 +1,37 @@
+name: syqure-aggregate
+author: madhava@openmined.org
+workflow: aggregate.sh
+template: shell
+version: 0.1.0
+env:
+  SEQURE_SYFT_WAIT_STRICT: "1"
+  SEQURE_SYFT_WAIT_TIMEOUT: "600"
+  SEQURE_FILE_DEBUG: "1"
+  SEQURE_FILE_KEEP: "1"
+  SEQURE_LOG_DIR: "syqure-logs"
+assets:
+  - assets/aggregate.codon
+  - assets/0.txt
+  - assets/1.txt
+  - assets/2.txt
+description: Aggregate a number
+datasites: &datasites
+  - aggregator@sandbox.local
+  - client1@sandbox.local
+  - client2@sandbox.local
+steps:
+  - id: aggregate
+    foreach: *datasites
+    order: parallel
+    inputs:
+      - name: my_val
+        type: File
+        description: text file with integer
+        format: txt
+        path: "assets/{datasites.index}.txt"
+    outputs:
+      - name: aggregate_result
+        type: File
+        description: Aggregated Result
+        format: txt
+        path: "{datasites.index}_out.txt"

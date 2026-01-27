@@ -2,14 +2,22 @@
 """Simple YAML-driven scenario runner for sandbox datasites."""
 
 import argparse
+import hashlib
 import json
 import os
 import subprocess
 import shutil
 import sys
 import threading
+import time
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
+
+# Fix Unicode encoding on Windows (cp1252 doesn't support emojis)
+if sys.platform == "win32":
+    import io
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
 ROOT = Path(__file__).resolve().parent.parent
 _SANDBOX_ENV = os.environ.get("SANDBOX_DIR") or os.environ.get("SCENARIO_SANDBOX_DIR")
@@ -354,6 +362,22 @@ def minimal_yaml_load(text: str, path: Path) -> Dict[str, Any]:
     return node
 
 
+def generate_run_id(scenario_name: str, datasites: Optional[List[str]] = None) -> str:
+    """
+    Generate a unique run_id for distributed flow coordination.
+
+    Uses hash of scenario name + datasites + current minute for:
+    - Uniqueness per scenario
+    - Determinism within the same minute (so parallel processes get the same id)
+    - Time-based uniqueness across runs
+    """
+    time_bucket = int(time.time() // 60)
+    datasites_str = ",".join(sorted(datasites)) if datasites else ""
+    key = f"{scenario_name}:{datasites_str}:{time_bucket}"
+    h = hashlib.sha256(key.encode()).hexdigest()[:12]
+    return f"{time_bucket}-{h}"
+
+
 def replace_vars(command: str, variables: Dict[str, str]) -> str:
     result = command
     for key, value in variables.items():
@@ -404,6 +428,7 @@ def run_shell(
 ) -> subprocess.CompletedProcess:
     use_bash = os.name == "nt"
     shell_vars = variables
+    # On Windows, always convert paths to MSYS format
     if use_bash:
         shell_vars = dict(variables)
         shell_vars["workspace"] = to_msys_path(variables.get("workspace", ""))
@@ -412,6 +437,8 @@ def run_shell(
     env = os.environ.copy()
     env["WORKSPACE_ROOT"] = str(ROOT)
     env["SCENARIO_DATASITE"] = datasite or ""
+    env["BIOVAULT_SANDBOX_ROOT"] = str(SANDBOX_ROOT)
+    env.setdefault("BIOVAULT_FLOW_AWAIT_TIMEOUT", "15")  # Fast fail for testing
     java_home = JAVA_HOME_OVERRIDE
     user_path = env.get("SCENARIO_USER_PATH")
 
@@ -552,6 +579,187 @@ def execute_commands(commands: Any, variables: Dict[str, str]):
         run_shell(cmd, None, variables)
 
 
+# Track background processes
+_background_processes: List[subprocess.Popen] = []
+_background_threads: List[threading.Thread] = []
+
+
+def run_shell_background(
+    command: str,
+    datasite: Optional[str],
+    variables: Dict[str, str],
+    name: str = "background",
+) -> subprocess.Popen:
+    """Run a shell command in the background, returning the process handle."""
+    use_bash = os.name == "nt"
+    shell_vars = variables
+    # On Windows, always convert paths to MSYS format
+    if use_bash:
+        shell_vars = dict(variables)
+        shell_vars["workspace"] = to_msys_path(variables.get("workspace", ""))
+        shell_vars["sandbox"] = to_msys_path(variables.get("sandbox", ""))
+    expanded = replace_vars(command, shell_vars)
+    env = os.environ.copy()
+    env["WORKSPACE_ROOT"] = str(ROOT)
+    env["SCENARIO_DATASITE"] = datasite or ""
+    env["BIOVAULT_SANDBOX_ROOT"] = str(SANDBOX_ROOT)
+    env.setdefault("BIOVAULT_FLOW_AWAIT_TIMEOUT", "15")  # Fast fail for testing
+    java_home = JAVA_HOME_OVERRIDE
+    user_path = env.get("SCENARIO_USER_PATH")
+
+    # On Windows, ensure uv-managed Python is on PATH for bash subprocesses
+    if os.name == "nt":
+        uv_python = Path(os.environ.get("APPDATA", "")) / "uv" / "python"
+        if uv_python.exists():
+            for pydir in sorted(uv_python.glob("cpython-3.11*"), reverse=True):
+                if pydir.is_dir():
+                    uv_python_path = to_msys_path(str(pydir))
+                    if user_path:
+                        user_path = f"{uv_python_path}:{user_path}"
+                    else:
+                        user_path = uv_python_path
+                    break
+
+    if datasite:
+        client_dir = SANDBOX_ROOT / datasite
+        if not client_dir.is_dir():
+            raise SystemExit(f"Sandbox datasite missing: {client_dir}")
+
+        data_dir = client_dir
+        config_path = client_dir / ".syftbox" / "config.json"
+        if not config_path.exists():
+            raise SystemExit(f"Missing SyftBox config for {datasite}: {config_path}")
+
+        env.update(
+            {
+                "HOME": str(client_dir),
+                "SYFTBOX_EMAIL": datasite,
+                "SYFTBOX_DATA_DIR": str(data_dir),
+                "SYFTBOX_CONFIG_PATH": str(config_path),
+            }
+        )
+        config_yaml = client_dir / "config.yaml"
+        if config_yaml.exists():
+            env["BIOVAULT_HOME"] = str(client_dir)
+        else:
+            env["BIOVAULT_HOME"] = str(client_dir / ".biovault")
+        if java_home:
+            env["JAVA_HOME"] = java_home
+            env["JAVA_CMD"] = str(Path(java_home) / "bin" / "java")
+        env.setdefault("NXF_DISABLE_JAVA_VERSION_CHECK", "true")
+        env.setdefault("NXF_IGNORE_JAVA_VERSION", "true")
+        env.setdefault("NXF_OPTS", "-Dnxf.java.check=false")
+        if user_path:
+            env["PATH"] = user_path
+
+        bash_cmd = resolve_bash()
+        env = ensure_shims(env)
+        # On Windows, don't use -l (login shell) as it resets PATH from profile files
+        bash_flags = "-c" if os.name == "nt" else "-lc"
+        proc = subprocess.Popen(
+            bash_cmd + [bash_flags, expanded],
+            cwd=client_dir,
+            env=env,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+    else:
+        if java_home:
+            env["JAVA_HOME"] = java_home
+            env["JAVA_CMD"] = str(Path(java_home) / "bin" / "java")
+        env.setdefault("NXF_DISABLE_JAVA_VERSION_CHECK", "true")
+        env.setdefault("NXF_IGNORE_JAVA_VERSION", "true")
+        env.setdefault("NXF_OPTS", "-Dnxf.java.check=false")
+        if user_path:
+            env["PATH"] = user_path
+        # On Windows, use Git Bash for all shell commands
+        if use_bash:
+            bash_cmd = resolve_bash()
+            env = ensure_shims(env)
+            # On Windows, don't use -l (login shell) as it resets PATH from profile files
+            bash_flags = "-c" if os.name == "nt" else "-lc"
+            proc = subprocess.Popen(
+                bash_cmd + [bash_flags, expanded],
+                cwd=ROOT,
+                env=env,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+            )
+        else:
+            proc = subprocess.Popen(
+                expanded,
+                cwd=ROOT,
+                env=env,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                shell=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+            )
+
+    # Stream output in a background thread
+    def stream_output():
+        prefix = f"[{name}] " if name else ""
+        for line in proc.stdout:
+            print(f"{prefix}{line}", end="")
+        proc.wait()
+
+    thread = threading.Thread(target=stream_output, daemon=True)
+    thread.start()
+    _background_processes.append(proc)
+    _background_threads.append(thread)
+    return proc
+
+
+def wait_for_background_processes(timeout: int | None = None) -> bool:
+    """Wait for all background processes to complete."""
+    if timeout is None:
+        try:
+            timeout = int(os.getenv("SCENARIO_BG_TIMEOUT", "300"))
+        except ValueError:
+            timeout = 300
+    if timeout <= 0:
+        timeout = None
+        print("Background process timeout: disabled")
+    else:
+        print(f"Background process timeout: {timeout}s")
+    start = time.time()
+    all_ok = True
+    for proc in _background_processes:
+        try:
+            if timeout is None:
+                proc.wait()
+            else:
+                remaining = timeout - (time.time() - start)
+                if remaining <= 0:
+                    print("Timeout waiting for background processes")
+                    all_ok = False
+                    break
+                proc.wait(timeout=remaining)
+            if proc.returncode != 0:
+                print(f"Background process exited with code {proc.returncode}")
+                all_ok = False
+        except subprocess.TimeoutExpired:
+            print("Timeout waiting for background process")
+            proc.kill()
+            all_ok = False
+
+    # Wait for output threads to finish
+    for thread in _background_threads:
+        thread.join(timeout=5)
+
+    _background_processes.clear()
+    _background_threads.clear()
+    return all_ok
+
+
 def run_step(step: Dict[str, Any], variables: Dict[str, str]):
     name = step.get("name")
     if name:
@@ -684,6 +892,13 @@ def run_step(step: Dict[str, Any], variables: Dict[str, str]):
     if not command:
         raise SystemExit("Each step must define a 'run', 'wait_for', 'assert_no_encrypted', or 'assert_encrypted' command.")
 
+    # Handle background execution
+    background = step.get("background", False)
+    if background:
+        run_shell_background(command, datasite, variables, name=name or "background")
+        print(f"[started in background]")
+        return
+
     result = run_shell(command, datasite, variables, capture=bool(capture))
 
     if expect:
@@ -695,15 +910,92 @@ def run_step(step: Dict[str, Any], variables: Dict[str, str]):
         print(f"[captured {capture}]")
 
 
+def resolve_bg_timeout(step_timeout: int | None = None) -> int | None:
+    env_timeout = os.getenv("SCENARIO_BG_TIMEOUT")
+    if env_timeout is not None:
+        try:
+            return int(env_timeout)
+        except ValueError:
+            return step_timeout
+    return step_timeout
+
+
+def run_parallel_steps(steps: List[Dict[str, Any]], variables: Dict[str, str], timeout: int | None = 300):
+    """Run multiple steps in parallel and wait for all to complete."""
+    print(f"\n=== Running {len(steps)} steps in parallel ===")
+
+    # Launch all steps in background
+    for step in steps:
+        name = step.get("name", "parallel")
+        datasite = step.get("datasite")
+        command = step.get("run")
+        if command:
+            print(f"  Starting: {name}")
+            run_shell_background(command, datasite, variables, name=name)
+
+    # Wait for all to complete
+    print(f"\n=== Waiting for {len(steps)} parallel steps to complete ===")
+    if not wait_for_background_processes(timeout=resolve_bg_timeout(timeout)):
+        raise SystemExit("One or more parallel steps failed")
+
+
+def extract_datasites_from_scenario(scenario: Dict[str, Any]) -> List[str]:
+    """Extract datasite list from scenario for run_id generation."""
+    datasites: List[str] = []
+
+    # Check setup.server for --clients argument
+    setup = scenario.get("setup", {})
+    server_cmds = setup.get("server", [])
+    for cmd in server_cmds:
+        if "--clients" in cmd:
+            # Parse --clients client1@...,client2@...,agg@...
+            import re
+            match = re.search(r"--clients\s+([^\s]+)", cmd)
+            if match:
+                clients_str = match.group(1)
+                datasites = [c.strip() for c in clients_str.split(",") if c.strip()]
+                break
+
+    # Check steps for unique datasites
+    if not datasites:
+        steps = scenario.get("steps", [])
+        seen = set()
+        for step in steps:
+            ds = step.get("datasite")
+            if ds and ds not in seen:
+                seen.add(ds)
+                datasites.append(ds)
+            # Also check parallel steps
+            if "parallel" in step:
+                for pstep in step["parallel"]:
+                    pds = pstep.get("datasite")
+                    if pds and pds not in seen:
+                        seen.add(pds)
+                        datasites.append(pds)
+
+    return datasites
+
+
 def main():
     parser = argparse.ArgumentParser(description="Run YAML scenarios against sandbox datasites.")
     parser.add_argument("scenario", type=Path, help="Path to YAML scenario file")
     args = parser.parse_args()
 
     scenario = load_scenario(args.scenario)
-    variables: Dict[str, str] = {"workspace": str(ROOT), "sandbox": str(SANDBOX_ROOT)}
+
+    # Extract datasites and generate run_id
+    scenario_name = args.scenario.stem
+    datasites = extract_datasites_from_scenario(scenario)
+    run_id = generate_run_id(scenario_name, datasites)
+
+    variables: Dict[str, str] = {
+        "workspace": str(ROOT),
+        "sandbox": str(SANDBOX_ROOT),
+        "run_id": run_id,
+    }
 
     print(f"Using sandbox: {SANDBOX_ROOT}")
+    print(f"Generated run_id: {run_id}")
     requested_client_mode = os.environ.get("BV_DEVSTACK_CLIENT_MODE")
     if requested_client_mode:
         print(f"SyftBox client mode (env BV_DEVSTACK_CLIENT_MODE): {requested_client_mode}")
@@ -721,7 +1013,31 @@ def main():
     for step in steps:
         if not isinstance(step, dict):
             raise SystemExit("Each step must be a mapping.")
+
+        # Handle parallel block
+        if "parallel" in step:
+            parallel_steps = step["parallel"]
+            if not isinstance(parallel_steps, list):
+                raise SystemExit("'parallel' must be a list of steps.")
+            timeout = step.get("timeout", 300)
+            run_parallel_steps(parallel_steps, variables, timeout=timeout)
+            continue
+
+        # Handle wait_background step
+        if step.get("wait_background"):
+            timeout = step.get("timeout", 300)
+            print(f"\n=== Waiting for background processes ===")
+            if not wait_for_background_processes(timeout=resolve_bg_timeout(timeout)):
+                raise SystemExit("One or more background processes failed")
+            continue
+
         run_step(step, variables)
+
+    # Wait for any remaining background processes
+    if _background_processes:
+        print(f"\n=== Waiting for remaining background processes ===")
+        if not wait_for_background_processes(timeout=resolve_bg_timeout(300)):
+            raise SystemExit("One or more background processes failed")
 
     print("\nScenario completed successfully.")
 

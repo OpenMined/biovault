@@ -6,17 +6,19 @@ pub mod error;
 pub mod flow_spec;
 pub mod messages;
 pub mod module_spec;
-pub mod pipeline_spec;
 pub mod project_spec;
 pub mod spec_format;
+pub mod subscriptions;
+pub mod types;
+
 #[cfg(feature = "telemetry")]
 pub mod telemetry;
+
 #[cfg(not(feature = "telemetry"))]
 pub mod telemetry {
     pub fn init() {}
     pub fn shutdown() {}
 }
-pub mod types;
 
 pub mod syftbox {
     pub use syftbox_sdk::syftbox::*;

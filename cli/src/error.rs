@@ -4,11 +4,11 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug, Error)]
 pub enum Error {
-    #[error("Project folder does not exist: {0}")]
-    ProjectFolderMissing(String),
+    #[error("Module folder does not exist: {0}")]
+    ModuleFolderMissing(String),
 
-    #[error("Project configuration not found: {0}")]
-    ProjectConfigMissing(String),
+    #[error("Module configuration not found: {0}")]
+    ModuleConfigMissing(String),
 
     #[error("Workflow file not found: {0}")]
     WorkflowMissing(String),

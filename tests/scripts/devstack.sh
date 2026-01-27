@@ -49,6 +49,7 @@ SKIP_SYNC_CHECK=0
 SKIP_KEYS=0
 SKIP_CLIENT_DAEMONS=0
 EMBEDDED_MODE=0
+ALLOW_PUBLIC_SUBS=0
 RAW_CLIENTS=()
 CLIENT_MODE=""
 CLIENT_MODE_EXPLICIT=0
@@ -329,6 +330,10 @@ configure_syftbox_clients() {
       return 0
       ;;
     rust|mixed)
+      # Rust client defaults to blocking remote sync without subscriptions.
+      # For devstack tests, allow public paths and skip the built-in sync probe.
+      SKIP_SYNC_CHECK=1
+      ALLOW_PUBLIC_SUBS=1
       ;;
     *)
       echo "Invalid --client-mode: $mode (expected go|rust|mixed|embedded)" >&2
@@ -393,6 +398,7 @@ start_syftboxd() {
     ) || true
   done
 }
+
 
 start_stack() {
   require_bin go

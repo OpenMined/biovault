@@ -1,0 +1,307 @@
+setup:
+  server:
+    - "./tests/scripts/devstack.sh --reset --clients client1@sandbox.local,client2@sandbox.local,aggregator@sandbox.local"
+
+steps:
+  - name: Initialize BioVault for client1
+    datasite: client1@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv init client1@sandbox.local --quiet
+
+  - name: Initialize BioVault for client2
+    datasite: client2@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv init client2@sandbox.local --quiet
+
+  - name: Initialize BioVault for aggregator
+    datasite: aggregator@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv init aggregator@sandbox.local --quiet
+
+  - name: Set run id
+    run: |
+      echo "test-run-001"
+    capture: run_id
+
+  - name: Aggregator creates shared folder with write access
+    datasite: aggregator@sandbox.local
+    run: |
+      SHARE_DIR="datasites/aggregator@sandbox.local/shared/flows/syqure/{{run_id}}"
+      mkdir -p "${SHARE_DIR}"
+      cat > "${SHARE_DIR}/syft.pub.yaml" <<'YAML'
+      rules:
+        - pattern: "**"
+          access:
+            read:
+              - client1@sandbox.local
+              - client2@sandbox.local
+              - aggregator@sandbox.local
+            write:
+              - client1@sandbox.local
+              - client2@sandbox.local
+              - aggregator@sandbox.local
+            admin:
+              - aggregator@sandbox.local
+      YAML
+
+  - name: Wait for share to sync to client1
+    datasite: client1@sandbox.local
+    wait_for: datasites/aggregator@sandbox.local/shared/flows/syqure/{{run_id}}/syft.pub.yaml
+    timeout: 30
+
+  - name: Wait for share to sync to client2
+    datasite: client2@sandbox.local
+    wait_for: datasites/aggregator@sandbox.local/shared/flows/syqure/{{run_id}}/syft.pub.yaml
+    timeout: 30
+
+  # ========== PHASE 1: Clients submit their rsids and counts ==========
+
+  - name: Client1 writes rsids and counts into aggregator shared folder
+    datasite: client1@sandbox.local
+    run: |
+      TARGET_DIR="datasites/aggregator@sandbox.local/shared/flows/syqure/{{run_id}}/client1@sandbox.local"
+      mkdir -p "${TARGET_DIR}"
+      printf "rs1\nrs2\n" > "${TARGET_DIR}/rsids.txt"
+      cat > "${TARGET_DIR}/counts.json" <<'JSON'
+      {"rs1": 3, "rs2": 1}
+      JSON
+
+  - name: Client2 writes rsids and counts into aggregator shared folder
+    datasite: client2@sandbox.local
+    run: |
+      TARGET_DIR="datasites/aggregator@sandbox.local/shared/flows/syqure/{{run_id}}/client2@sandbox.local"
+      mkdir -p "${TARGET_DIR}"
+      printf "rs2\nrs3\nrs4\n" > "${TARGET_DIR}/rsids.txt"
+      cat > "${TARGET_DIR}/counts.json" <<'JSON'
+      {"rs2": 2, "rs3": 4, "rs4": 5}
+      JSON
+
+  - name: Wait for Client1 data to sync to aggregator
+    datasite: aggregator@sandbox.local
+    wait_for: datasites/aggregator@sandbox.local/shared/flows/syqure/{{run_id}}/client1@sandbox.local/counts.json
+    timeout: 30
+
+  - name: Wait for Client2 data to sync to aggregator
+    datasite: aggregator@sandbox.local
+    wait_for: datasites/aggregator@sandbox.local/shared/flows/syqure/{{run_id}}/client2@sandbox.local/counts.json
+    timeout: 30
+
+  # ========== PHASE 2: Aggregator builds sorted master list ==========
+
+  - name: Aggregator builds sorted master list
+    datasite: aggregator@sandbox.local
+    run: |
+      FLOW_DIR="datasites/aggregator@sandbox.local/shared/flows/syqure/{{run_id}}"
+      OUTPUT_DIR="${FLOW_DIR}/results"
+      mkdir -p "${OUTPUT_DIR}"
+
+      # Combine and deduplicate rsids, sort alphabetically
+      cat "${FLOW_DIR}/client1@sandbox.local/rsids.txt" \
+          "${FLOW_DIR}/client2@sandbox.local/rsids.txt" \
+        | sort -u > "${OUTPUT_DIR}/master_list.txt"
+
+      # Create permissions for results folder (read-only for clients)
+      cat > "${OUTPUT_DIR}/syft.pub.yaml" <<'YAML'
+      rules:
+        - pattern: "**"
+          access:
+            read:
+              - client1@sandbox.local
+              - client2@sandbox.local
+              - aggregator@sandbox.local
+            write:
+              - aggregator@sandbox.local
+            admin:
+              - aggregator@sandbox.local
+      YAML
+
+      echo "Master list has $(wc -l < "${OUTPUT_DIR}/master_list.txt" | tr -d ' ') unique rsids:"
+      cat "${OUTPUT_DIR}/master_list.txt"
+
+  - name: Wait for master list to sync to client1
+    datasite: client1@sandbox.local
+    wait_for: datasites/aggregator@sandbox.local/shared/flows/syqure/{{run_id}}/results/master_list.txt
+    timeout: 30
+
+  - name: Wait for master list to sync to client2
+    datasite: client2@sandbox.local
+    wait_for: datasites/aggregator@sandbox.local/shared/flows/syqure/{{run_id}}/results/master_list.txt
+    timeout: 30
+
+  # ========== PHASE 3: Clients align counts to master list ==========
+
+  - name: Client1 aligns counts to master list
+    datasite: client1@sandbox.local
+    run: |
+      FLOW_DIR="datasites/aggregator@sandbox.local/shared/flows/syqure/{{run_id}}"
+      MASTER_LIST="${FLOW_DIR}/results/master_list.txt"
+      MY_COUNTS="${FLOW_DIR}/client1@sandbox.local/counts.json"
+      OUTPUT="${FLOW_DIR}/client1@sandbox.local/counts_array.json"
+
+      python3 - "${MASTER_LIST}" "${MY_COUNTS}" "${OUTPUT}" <<'PY'
+      import json
+      import sys
+      from pathlib import Path
+
+      master_path, counts_path, output_path = sys.argv[1:4]
+      master_list = [line.strip() for line in Path(master_path).read_text().splitlines() if line.strip()]
+      counts = json.loads(Path(counts_path).read_text())
+      aligned = [int(counts.get(rsid, 0)) for rsid in master_list]
+      Path(output_path).write_text(json.dumps(aligned) + "\n")
+      print(f"Client1 aligned array: {aligned}")
+      PY
+
+  - name: Client2 aligns counts to master list
+    datasite: client2@sandbox.local
+    run: |
+      FLOW_DIR="datasites/aggregator@sandbox.local/shared/flows/syqure/{{run_id}}"
+      MASTER_LIST="${FLOW_DIR}/results/master_list.txt"
+      MY_COUNTS="${FLOW_DIR}/client2@sandbox.local/counts.json"
+      OUTPUT="${FLOW_DIR}/client2@sandbox.local/counts_array.json"
+
+      python3 - "${MASTER_LIST}" "${MY_COUNTS}" "${OUTPUT}" <<'PY'
+      import json
+      import sys
+      from pathlib import Path
+
+      master_path, counts_path, output_path = sys.argv[1:4]
+      master_list = [line.strip() for line in Path(master_path).read_text().splitlines() if line.strip()]
+      counts = json.loads(Path(counts_path).read_text())
+      aligned = [int(counts.get(rsid, 0)) for rsid in master_list]
+      Path(output_path).write_text(json.dumps(aligned) + "\n")
+      print(f"Client2 aligned array: {aligned}")
+      PY
+
+  - name: Wait for Client1 array to sync to aggregator
+    datasite: aggregator@sandbox.local
+    wait_for: datasites/aggregator@sandbox.local/shared/flows/syqure/{{run_id}}/client1@sandbox.local/counts_array.json
+    timeout: 30
+
+  - name: Wait for Client2 array to sync to aggregator
+    datasite: aggregator@sandbox.local
+    wait_for: datasites/aggregator@sandbox.local/shared/flows/syqure/{{run_id}}/client2@sandbox.local/counts_array.json
+    timeout: 30
+
+  # ========== PHASE 4: Aggregator sums the arrays ==========
+
+  - name: Aggregator sums count arrays
+    datasite: aggregator@sandbox.local
+    run: |
+      FLOW_DIR="datasites/aggregator@sandbox.local/shared/flows/syqure/{{run_id}}"
+      OUTPUT="${FLOW_DIR}/results/aggregated_counts.json"
+
+      python3 - "${FLOW_DIR}" "${OUTPUT}" <<'PY'
+      import json
+      import sys
+      from pathlib import Path
+
+      flow_dir, output_path = sys.argv[1:3]
+      flow_dir = Path(flow_dir)
+
+      # Load both client arrays
+      arr1 = json.loads((flow_dir / "client1@sandbox.local" / "counts_array.json").read_text())
+      arr2 = json.loads((flow_dir / "client2@sandbox.local" / "counts_array.json").read_text())
+
+      # Sum element-wise
+      totals = [a + b for a, b in zip(arr1, arr2)]
+
+      Path(output_path).write_text(json.dumps(totals) + "\n")
+      print(f"Aggregated counts: {totals}")
+      PY
+
+  - name: Wait for aggregated counts to sync to client1
+    datasite: client1@sandbox.local
+    wait_for: datasites/aggregator@sandbox.local/shared/flows/syqure/{{run_id}}/results/aggregated_counts.json
+    timeout: 30
+
+  - name: Wait for aggregated counts to sync to client2
+    datasite: client2@sandbox.local
+    wait_for: datasites/aggregator@sandbox.local/shared/flows/syqure/{{run_id}}/results/aggregated_counts.json
+    timeout: 30
+
+  # ========== PHASE 5: Verification ==========
+
+  - name: Client1 verifies results
+    datasite: client1@sandbox.local
+    run: |
+      FLOW_DIR="datasites/aggregator@sandbox.local/shared/flows/syqure/{{run_id}}"
+
+      python3 - "${FLOW_DIR}" <<'PY'
+      import json
+      from pathlib import Path
+      import sys
+
+      flow_dir = Path(sys.argv[1])
+
+      master_list = [line.strip() for line in (flow_dir / "results" / "master_list.txt").read_text().splitlines() if line.strip()]
+      my_array = json.loads((flow_dir / "client1@sandbox.local" / "counts_array.json").read_text())
+      aggregated = json.loads((flow_dir / "results" / "aggregated_counts.json").read_text())
+
+      print("=" * 50)
+      print("CLIENT1 VERIFICATION")
+      print("=" * 50)
+      print(f"Master list:      {master_list}")
+      print(f"My input array:   {my_array}")
+      print(f"Aggregated total: {aggregated}")
+      print(f"My sum:           {sum(my_array)}")
+      print(f"Total sum:        {sum(aggregated)}")
+      print("=" * 50)
+      PY
+
+  - name: Client2 verifies results
+    datasite: client2@sandbox.local
+    run: |
+      FLOW_DIR="datasites/aggregator@sandbox.local/shared/flows/syqure/{{run_id}}"
+
+      python3 - "${FLOW_DIR}" <<'PY'
+      import json
+      from pathlib import Path
+      import sys
+
+      flow_dir = Path(sys.argv[1])
+
+      master_list = [line.strip() for line in (flow_dir / "results" / "master_list.txt").read_text().splitlines() if line.strip()]
+      my_array = json.loads((flow_dir / "client2@sandbox.local" / "counts_array.json").read_text())
+      aggregated = json.loads((flow_dir / "results" / "aggregated_counts.json").read_text())
+
+      print("=" * 50)
+      print("CLIENT2 VERIFICATION")
+      print("=" * 50)
+      print(f"Master list:      {master_list}")
+      print(f"My input array:   {my_array}")
+      print(f"Aggregated total: {aggregated}")
+      print(f"My sum:           {sum(my_array)}")
+      print(f"Total sum:        {sum(aggregated)}")
+      print("=" * 50)
+      PY
+
+  - name: Final assertion
+    datasite: aggregator@sandbox.local
+    run: |
+      FLOW_DIR="datasites/aggregator@sandbox.local/shared/flows/syqure/{{run_id}}"
+
+      python3 - "${FLOW_DIR}" <<'PY'
+      import json
+      from pathlib import Path
+      import sys
+
+      flow_dir = Path(sys.argv[1])
+
+      arr1 = json.loads((flow_dir / "client1@sandbox.local" / "counts_array.json").read_text())
+      arr2 = json.loads((flow_dir / "client2@sandbox.local" / "counts_array.json").read_text())
+      aggregated = json.loads((flow_dir / "results" / "aggregated_counts.json").read_text())
+
+      expected = [a + b for a, b in zip(arr1, arr2)]
+
+      print("=" * 50)
+      print("FINAL ASSERTION")
+      print("=" * 50)
+      print(f"Client1 array: {arr1}")
+      print(f"Client2 array: {arr2}")
+      print(f"Expected sum:  {expected}")
+      print(f"Actual sum:    {aggregated}")
+
+      assert aggregated == expected, f"Mismatch! Expected {expected}, got {aggregated}"
+      print("SUCCESS: Aggregated counts match expected sum!")
+      print("=" * 50)
+      PY

@@ -1,9 +1,6 @@
 use crate::cli::examples;
 use crate::error::Result;
-use crate::project_spec::{
-    self, resolve_project_spec_path, InputSpec, OutputSpec, ParameterSpec, ProjectSpec,
-    MODULE_YAML_FILE,
-};
+use crate::module_spec::{self, InputSpec, ModuleSpec, OutputSpec, ParameterSpec};
 use crate::types::InboxSubmission;
 use colored::Colorize;
 use dialoguer::{theme::ColorfulTheme, Confirm, Input, MultiSelect, Select};
@@ -13,12 +10,6 @@ use std::fs;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-
-fn command<S: AsRef<std::ffi::OsStr>>(program: S) -> Command {
-    let mut cmd = Command::new(program);
-    super::configure_child_process(&mut cmd);
-    cmd
-}
 use walkdir::WalkDir;
 
 trait DialoguerResultExt<T> {
@@ -47,33 +38,33 @@ pub fn list_examples() -> Result<()> {
         println!();
     }
 
-    println!("To create a project from an example:");
-    println!("  bv project create --example <example-name>");
+    println!("To create a module from an example:");
+    println!("  bv module create --example <example-name>");
 
     Ok(())
 }
 
 pub fn view(path: Option<String>) -> Result<()> {
-    let project_dir = path.unwrap_or_else(|| ".".to_string());
-    let project_path = Path::new(&project_dir);
+    let module_dir = path.unwrap_or_else(|| ".".to_string());
+    let module_path = Path::new(&module_dir);
 
-    if !project_path.exists() {
+    if !module_path.exists() {
         return Err(crate::error::Error::Anyhow(anyhow::anyhow!(
-            "Project directory does not exist: {}",
-            project_dir
+            "Module directory does not exist: {}",
+            module_dir
         )));
     }
 
-    let spec_path = resolve_project_spec_path(project_path);
+    let spec_path = module_path.join("module.yaml");
     if !spec_path.exists() {
         return Err(crate::error::Error::Anyhow(anyhow::anyhow!(
             "module.yaml not found in {}",
-            project_dir
+            module_dir
         )));
     }
 
-    let spec = project_spec::ProjectSpec::load(&spec_path)?;
-    print_project_view(&spec, &project_dir);
+    let spec = module_spec::ModuleSpec::load(&spec_path)?;
+    print_module_view(&spec, &module_dir);
 
     Ok(())
 }
@@ -102,19 +93,19 @@ pub async fn create(
         None
     };
 
-    // Determine project name
+    // Determine module name
     let mut prompted_for_name = false;
-    let project_name = if let Some(ref ex) = selected_example {
+    let module_name = if let Some(ref ex) = selected_example {
         ex.clone()
     } else if let Some(n) = name {
         n
     } else if std::io::stdin().is_terminal() {
         prompted_for_name = true;
         Input::with_theme(&ColorfulTheme::default())
-            .with_prompt("Project name")
+            .with_prompt("Module name")
             .validate_with(|input: &String| {
                 if input.trim().is_empty() {
-                    Err("Project name cannot be empty")
+                    Err("Module name cannot be empty")
                 } else {
                     Ok(())
                 }
@@ -124,36 +115,36 @@ pub async fn create(
             .trim()
             .to_string()
     } else {
-        println!("Enter project name:");
+        println!("Enter module name:");
         let mut input = String::new();
         std::io::stdin().read_line(&mut input)?;
         input.trim().to_string()
     };
 
     // Determine folder path (default to ./<name>)
-    let project_folder = folder.unwrap_or_else(|| format!("./{}", project_name));
-    let project_path = Path::new(&project_folder);
+    let module_folder = folder.unwrap_or_else(|| format!("./{}", module_name));
+    let module_path = Path::new(&module_folder);
 
-    if project_path.exists() {
+    if module_path.exists() {
         return Err(crate::error::Error::Anyhow(anyhow::anyhow!(
-            "Project folder already exists: {}",
-            project_folder
+            "Module folder already exists: {}",
+            module_folder
         )));
     }
 
     // Create base folder
-    fs::create_dir_all(project_path)?;
+    fs::create_dir_all(module_path)?;
 
     if let Some(ref example_name) = selected_example {
         // Use the new examples system to write files
-        examples::write_example_to_directory(example_name, project_path)
+        examples::write_example_to_directory(example_name, module_path)
             .map_err(crate::error::Error::Anyhow)?;
 
         // Load the generated spec to display summary
-        let spec_path = resolve_project_spec_path(project_path);
-        let spec = ProjectSpec::load(&spec_path)?;
+        let spec_path = module_path.join("module.yaml");
+        let spec = ModuleSpec::load(&spec_path)?;
         println!("   (from example '{}')", example_name);
-        print_project_summary(&spec, &project_folder);
+        print_module_summary(&spec, &module_folder);
     } else {
         // Load user email from config (if available)
         let email = match crate::config::Config::load() {
@@ -173,32 +164,32 @@ pub async fn create(
             && std::env::var("CI").is_err()
             && std::env::var("BIOVAULT_NON_INTERACTIVE").is_err();
 
-        // Load prepopulated inputs/outputs for pipeline composition
-        // --output_from: new project's inputs FROM other project's outputs
+        // Load prepopulated inputs/outputs for flow composition
+        // --output_from: new module's inputs FROM other module's outputs
         let prepopulated_inputs = if let Some(ref output_from_path) = output_from {
-            let output_from_spec_path = resolve_project_spec_path(Path::new(output_from_path));
+            let output_from_spec_path = Path::new(output_from_path).join("module.yaml");
             if !output_from_spec_path.exists() {
                 return Err(crate::error::Error::Anyhow(anyhow::anyhow!(
                     "Cannot load --output_from: module.yaml not found in {}",
                     output_from_path
                 )));
             }
-            let source_spec = project_spec::ProjectSpec::load(&output_from_spec_path)?;
+            let source_spec = module_spec::ModuleSpec::load(&output_from_spec_path)?;
             Some(source_spec.outputs)
         } else {
             None
         };
 
-        // --input_to: new project's outputs TO other project's inputs
+        // --input_to: new module's outputs TO other module's inputs
         let prepopulated_outputs = if let Some(ref input_to_path) = input_to {
-            let input_to_spec_path = resolve_project_spec_path(Path::new(input_to_path));
+            let input_to_spec_path = Path::new(input_to_path).join("module.yaml");
             if !input_to_spec_path.exists() {
                 return Err(crate::error::Error::Anyhow(anyhow::anyhow!(
                     "Cannot load --input_to: module.yaml not found in {}",
                     input_to_path
                 )));
             }
-            let source_spec = project_spec::ProjectSpec::load(&input_to_spec_path)?;
+            let source_spec = module_spec::ModuleSpec::load(&input_to_spec_path)?;
             Some(source_spec.inputs)
         } else {
             None
@@ -206,17 +197,17 @@ pub async fn create(
 
         let spec_data = if let Some(spec_path) = spec {
             let spec_path = Path::new(&spec_path);
-            let spec_loaded = project_spec::ProjectSpec::load(spec_path)?;
-            project_spec::scaffold_from_spec(spec_loaded, project_path)?
+            let spec_loaded = module_spec::ModuleSpec::load(spec_path)?;
+            module_spec::scaffold_from_spec(spec_loaded, module_path)?
         } else if terminal_available {
-            let wizard_spec = run_project_spec_wizard(
-                &project_name,
+            let wizard_spec = run_module_spec_wizard(
+                &module_name,
                 &author_default,
                 prompted_for_name,
                 prepopulated_inputs,
                 prepopulated_outputs,
             )?;
-            project_spec::scaffold_from_spec(wizard_spec, project_path)?
+            module_spec::scaffold_from_spec(wizard_spec, module_path)?
         } else {
             // Non-interactive fallback - use prepopulated values if available
             let fallback_inputs = if let Some(ref prepop) = prepopulated_inputs {
@@ -250,27 +241,32 @@ pub async fn create(
                 Vec::new()
             };
 
-            let fallback = ProjectSpec {
-                name: project_name.clone(),
+            let fallback = ModuleSpec {
+                name: module_name.clone(),
                 author: author_default.clone(),
                 workflow: "workflow.nf".to_string(),
-                template: Some("dynamic-nextflow".to_string()),
+                description: None,
+                runtime: Some("nextflow".to_string()),
                 version: Some("0.1.0".to_string()),
+                datasites: None,
+                env: Default::default(),
                 assets: Vec::new(),
                 parameters: Vec::new(),
                 inputs: fallback_inputs,
                 outputs: fallback_outputs,
+                steps: Vec::new(),
+                runner: None,
             };
-            project_spec::scaffold_from_spec(fallback, project_path)?
+            module_spec::scaffold_from_spec(fallback, module_path)?
         };
-        print_project_summary(&spec_data, &project_folder);
+        print_module_summary(&spec_data, &module_folder);
     }
 
     Ok(())
 }
 
-fn print_project_summary(spec: &ProjectSpec, folder: &str) {
-    println!("\n✅ Created project '{}'", spec.name.bold());
+fn print_module_summary(spec: &ModuleSpec, folder: &str) {
+    println!("\n✅ Created module '{}'", spec.name.bold());
     println!("   Location: {}\n", folder);
 
     // ASCII diagram
@@ -340,7 +336,7 @@ fn print_project_summary(spec: &ProjectSpec, folder: &str) {
 
     // File TOC
     println!("📁 Files:");
-    println!("   ├─ {}", MODULE_YAML_FILE);
+    println!("   ├─ module.yaml");
     println!("   ├─ workflow.nf");
     if spec.assets.is_empty() {
         println!("   └─ assets/ (empty)");
@@ -358,8 +354,8 @@ fn print_project_summary(spec: &ProjectSpec, folder: &str) {
     println!("   3. Run with: bv run . --<input_name> <path>");
 }
 
-fn print_project_view(spec: &ProjectSpec, folder: &str) {
-    println!("\n📦 Project: {}", spec.name.bold());
+fn print_module_view(spec: &ModuleSpec, folder: &str) {
+    println!("\n📦 Module: {}", spec.name.bold());
     println!("   Location: {}\n", folder);
 
     // ASCII diagram
@@ -429,7 +425,7 @@ fn print_project_view(spec: &ProjectSpec, folder: &str) {
 
     // File TOC
     println!("📁 Files:");
-    println!("   ├─ {}", MODULE_YAML_FILE);
+    println!("   ├─ module.yaml");
     println!("   ├─ workflow.nf");
     if spec.assets.is_empty() {
         println!("   └─ assets/ (empty)");
@@ -556,23 +552,23 @@ fn prompt_optional_string(prompt: &str) -> Result<Option<String>> {
     }
 }
 
-fn run_project_spec_wizard(
-    project_name: &str,
+fn run_module_spec_wizard(
+    module_name: &str,
     default_author: &str,
     skip_name_prompt: bool,
     prepopulated_inputs: Option<Vec<OutputSpec>>,
     prepopulated_outputs: Option<Vec<InputSpec>>,
-) -> Result<ProjectSpec> {
+) -> Result<ModuleSpec> {
     let theme = ColorfulTheme::default();
 
-    println!("\n🧪 Project wizard — let's describe your Nextflow wrapper");
+    println!("\n🧪 Module wizard — let's describe your Nextflow wrapper");
 
     let name: String = if skip_name_prompt {
-        project_name.to_string()
+        module_name.to_string()
     } else {
         Input::with_theme(&theme)
-            .with_prompt("Project name (identifier)")
-            .default(project_name.to_string())
+            .with_prompt("Module name (identifier)")
+            .default(module_name.to_string())
             .interact_text()
             .cli_result()?
     };
@@ -591,7 +587,7 @@ fn run_project_spec_wizard(
 
     let version: Option<String> = {
         let value: String = Input::with_theme(&theme)
-            .with_prompt("Project version (semver)")
+            .with_prompt("Module version (semver)")
             .default("0.1.0".to_string())
             .interact_text()
             .cli_result()?;
@@ -609,7 +605,7 @@ fn run_project_spec_wizard(
     // Prepopulate inputs from --output_from (convert OutputSpec -> InputSpec)
     let mut inputs = if let Some(ref prepop) = prepopulated_inputs {
         println!(
-            "✨ Prepopulated {} input(s) from source project's outputs",
+            "✨ Prepopulated {} input(s) from source module's outputs",
             prepop.len()
         );
         prepop
@@ -647,7 +643,7 @@ fn run_project_spec_wizard(
                 .with_prompt("Input type (e.g. List[GenotypeRecord])")
                 .interact_text()
                 .cli_result()?;
-            match project_spec::validate_type_expr(&ty) {
+            match module_spec::validate_type_expr(&ty) {
                 Ok(_) => break ty.trim().to_string(),
                 Err(e) => {
                     println!("{}", format!("Invalid type: {}", e).red());
@@ -677,7 +673,7 @@ fn run_project_spec_wizard(
     // Prepopulate outputs from --input_to (convert InputSpec -> OutputSpec)
     let mut outputs = if let Some(ref prepop) = prepopulated_outputs {
         println!(
-            "✨ Prepopulated {} output(s) from source project's inputs",
+            "✨ Prepopulated {} output(s) from source module's inputs",
             prepop.len()
         );
         prepop
@@ -714,7 +710,7 @@ fn run_project_spec_wizard(
                 .with_prompt("Output type (e.g. File, ParticipantSheet)")
                 .interact_text()
                 .cli_result()?;
-            match project_spec::validate_type_expr(&ty) {
+            match module_spec::validate_type_expr(&ty) {
                 Ok(_) => break ty.trim().to_string(),
                 Err(e) => {
                     println!("{}", format!("Invalid type: {}", e).red());
@@ -880,16 +876,21 @@ fn run_project_spec_wizard(
         }
     }
 
-    Ok(ProjectSpec {
+    Ok(ModuleSpec {
         name,
         author,
         workflow,
-        template: Some("dynamic-nextflow".to_string()),
+        description: None,
+        runtime: Some("nextflow".to_string()),
         version,
+        datasites: None,
+        env: Default::default(),
         assets,
         parameters,
         inputs,
         outputs,
+        steps: Vec::new(),
+        runner: None,
     })
 }
 
@@ -898,7 +899,7 @@ fn display_concise_list(submissions: &[(String, InboxSubmission, PathBuf, String
         "{:<4} {:<12} {:<20} {:<25} {:<15} {:<30}",
         "#".bold(),
         "Date".bold(),
-        "Project".bold(),
+        "Module".bold(),
         "From".bold(),
         "Participants".bold(),
         "ID".bold()
@@ -925,7 +926,7 @@ fn display_concise_list(submissions: &[(String, InboxSubmission, PathBuf, String
             .and_then(|s| s.to_str())
             .unwrap_or("unknown");
 
-        let project_name = if submission.name.len() > 18 {
+        let module_name = if submission.name.len() > 18 {
             format!("{}...", &submission.name[..15])
         } else {
             submission.name.clone()
@@ -948,7 +949,7 @@ fn display_concise_list(submissions: &[(String, InboxSubmission, PathBuf, String
             format!("{}", i + 1),
             date,
             status_icon,
-            project_name,
+            module_name,
             sender_display.cyan(),
             participants_count,
             id_display.dimmed()
@@ -1078,7 +1079,7 @@ pub async fn show(reference: &str, show_all: bool) -> Result<()> {
     match matches.len() {
         0 => {
             println!("❌ No submission found matching: {}", reference);
-            println!("💡 Try using: index number (1,2,3...), partial hash, or project name");
+            println!("💡 Try using: index number (1,2,3...), partial hash, or module name");
         }
         1 => {
             show_submission_detail(matches[0]);
@@ -1681,7 +1682,7 @@ async fn test_submission(
 
             if download {
                 println!("📥 Downloading sample data for {}...", participant);
-                command("bv")
+                Command::new("bv")
                     .args(["sample-data", "fetch", participant])
                     .status()
                     .map_err(|e| anyhow::anyhow!("Failed to download sample data: {}", e))?;
@@ -1697,7 +1698,7 @@ async fn test_submission(
         println!("   Input: {}", mock_data_path.display());
         println!("   Output: {}", output_dir.display());
 
-        let status = command("nextflow")
+        let status = Command::new("nextflow")
             .arg("run")
             .arg(&workflow_file)
             .arg("--input")
@@ -1874,7 +1875,7 @@ status: {}
         std::fs::write(sub_dir.join("workflow.nf"), b"wf").unwrap();
         std::fs::write(sub_dir.join("assets/nested/file.txt"), b"x").unwrap();
         // The path stored in tuple points to a yaml file inside the submission dir
-        let path = sub_dir.join(MODULE_YAML_FILE);
+        let path = sub_dir.join("module.yaml");
         std::fs::write(&path, b"name: P\nauthor: A\nstatus: pending\nsyft_url: x\n").unwrap();
         let sub = InboxSubmission {
             name: "P".into(),
@@ -1916,7 +1917,7 @@ status: {}
         let home = tmp.path().join(".bv");
         crate::config::set_test_biovault_home(&home);
         let inbox = home.join("inbox");
-        // Two submissions with same project name to trigger multi-match
+        // Two submissions with same module name to trigger multi-match
         write_submission(
             &inbox,
             "alice@example.com",
@@ -1941,7 +1942,7 @@ status: {}
     }
 
     #[tokio::test]
-    async fn create_scaffold_project_without_example() {
+    async fn create_scaffold_module_without_example() {
         let tmp = TempDir::new().unwrap();
         let proj_dir = tmp.path().join("myproj");
         // Provide email via env var to avoid requiring a real config
@@ -1960,7 +1961,7 @@ status: {}
         .await
         .unwrap();
 
-        assert!(proj_dir.join(MODULE_YAML_FILE).exists());
+        assert!(proj_dir.join("module.yaml").exists());
         assert!(proj_dir.join("workflow.nf").exists());
         assert!(proj_dir.join("assets").is_dir());
 

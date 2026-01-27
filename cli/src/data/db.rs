@@ -44,9 +44,9 @@ impl BioVaultDb {
         if current_version.is_none() {
             conn.execute(
                 "INSERT INTO schema_version (version) VALUES (?1)",
-                ["2.0.0"],
+                ["3.0.0"],
             )?;
-            info!("Initialized schema version 2.0.0");
+            info!("Initialized schema version 3.0.0");
         }
 
         Ok(())
@@ -312,57 +312,6 @@ impl BioVaultDb {
             }
         }
 
-        // Migrate projects table to add version column and update unique constraint
-        let projects_version_exists = conn
-            .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('projects') WHERE name='version'",
-                [],
-                |row| row.get(0),
-            )
-            .map(|count: i32| count > 0)
-            .unwrap_or(false);
-
-        if !projects_version_exists {
-            info!("Migrating projects table to add version support");
-
-            // SQLite doesn't support DROP COLUMN or modifying constraints
-            // We need to recreate the table
-            conn.execute("BEGIN TRANSACTION", [])?;
-
-            // Create new projects table with version
-            conn.execute(
-                "CREATE TABLE projects_new (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    name TEXT NOT NULL,
-                    version TEXT NOT NULL DEFAULT '1.0.0',
-                    author TEXT NOT NULL,
-                    workflow TEXT NOT NULL,
-                    template TEXT NOT NULL,
-                    project_path TEXT UNIQUE NOT NULL,
-                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE(name, version)
-                )",
-                [],
-            )?;
-
-            // Copy data from old table, setting version to 1.0.0 for existing projects
-            conn.execute(
-                "INSERT INTO projects_new (id, name, version, author, workflow, template, project_path, created_at)
-                 SELECT id, name, '1.0.0', author, workflow, template, project_path, created_at
-                 FROM projects",
-                [],
-            )?;
-
-            // Drop old table
-            conn.execute("DROP TABLE projects", [])?;
-
-            // Rename new table
-            conn.execute("ALTER TABLE projects_new RENAME TO projects", [])?;
-
-            conn.execute("COMMIT", [])?;
-            info!("Migration complete: projects table now supports versions");
-        }
-
         // Drop source and grch_version columns from files table if they exist
         // (these should only be in genotype_metadata table)
         let source_exists = conn
@@ -557,21 +506,43 @@ impl BioVaultDb {
             info!("Migration complete: added jupyter_token column");
         }
 
-        // Add metadata column to runs if it doesn't exist
-        let metadata_exists = conn
-            .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('runs') WHERE name='metadata'",
-                [],
-                |row| row.get(0),
-            )
-            .map(|count: i32| count > 0)
-            .unwrap_or(false);
+        // Add metadata column to flow_runs if it doesn't exist
+        if table_exists(conn, "flow_runs")? {
+            let metadata_exists = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('flow_runs') WHERE name='metadata'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map(|count: i32| count > 0)
+                .unwrap_or(false);
 
-        if !metadata_exists {
-            info!("Adding metadata column to runs table");
-            conn.execute("ALTER TABLE runs ADD COLUMN metadata TEXT", [])?;
-            info!("Migration complete: added metadata column to runs");
+            if !metadata_exists {
+                info!("Adding metadata column to flow_runs table");
+                conn.execute("ALTER TABLE flow_runs ADD COLUMN metadata TEXT", [])?;
+                info!("Migration complete: added metadata column to flow_runs");
+            }
         }
+
+        // Legacy runs table (pre-migration)
+        if table_exists(conn, "runs")? {
+            let metadata_exists = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('runs') WHERE name='metadata'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map(|count: i32| count > 0)
+                .unwrap_or(false);
+
+            if !metadata_exists {
+                info!("Adding metadata column to runs table");
+                conn.execute("ALTER TABLE runs ADD COLUMN metadata TEXT", [])?;
+                info!("Migration complete: added metadata column to runs");
+            }
+        }
+
+        migrate_projects_pipelines_to_modules_flows(conn)?;
 
         Ok(())
     }
@@ -580,6 +551,142 @@ impl BioVaultDb {
     pub fn connection(&self) -> &Connection {
         &self.conn
     }
+}
+
+fn table_exists(conn: &Connection, table: &str) -> Result<bool> {
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name = ?1",
+        [table],
+        |row| row.get(0),
+    )?;
+    Ok(count > 0)
+}
+
+fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool> {
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name = ?2",
+        (table, column),
+        |row| row.get(0),
+    )?;
+    Ok(count > 0)
+}
+
+fn migrate_projects_pipelines_to_modules_flows(conn: &Connection) -> Result<()> {
+    let projects_exists = table_exists(conn, "projects")?;
+    let pipelines_exists = table_exists(conn, "pipelines")?;
+    let runs_exists = table_exists(conn, "runs")?;
+    let run_participants_exists = table_exists(conn, "run_participants")?;
+    let run_configs_exists = table_exists(conn, "run_configs")?;
+
+    if !(projects_exists
+        || pipelines_exists
+        || runs_exists
+        || run_participants_exists
+        || run_configs_exists)
+    {
+        return Ok(());
+    }
+
+    info!("Migrating projects/pipelines to modules/flows");
+
+    if column_exists(conn, "dev_envs", "project_path")?
+        && !column_exists(conn, "dev_envs", "module_path")?
+    {
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS dev_envs_new (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                module_path TEXT UNIQUE NOT NULL,
+                python_version TEXT NOT NULL,
+                env_type TEXT DEFAULT 'jupyter',
+                jupyter_installed INTEGER DEFAULT 0,
+                jupyter_port INTEGER,
+                jupyter_pid INTEGER,
+                jupyter_url TEXT,
+                jupyter_token TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                last_used_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )",
+            [],
+        )?;
+        conn.execute(
+            "INSERT INTO dev_envs_new (
+                id, module_path, python_version, env_type, jupyter_installed, jupyter_port,
+                jupyter_pid, jupyter_url, jupyter_token, created_at, last_used_at
+            )
+            SELECT id, project_path, python_version, env_type, jupyter_installed, jupyter_port,
+                   jupyter_pid, jupyter_url, jupyter_token, created_at, last_used_at
+            FROM dev_envs",
+            [],
+        )?;
+        conn.execute("DROP TABLE dev_envs", [])?;
+        conn.execute("ALTER TABLE dev_envs_new RENAME TO dev_envs", [])?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_dev_envs_module_path ON dev_envs(module_path)",
+            [],
+        )?;
+    }
+
+    if projects_exists {
+        conn.execute(
+            "INSERT OR IGNORE INTO modules (id, name, version, author, workflow, template, module_path, created_at)
+             SELECT id, name, version, author, workflow, template, project_path, created_at
+             FROM projects",
+            [],
+        )?;
+    }
+
+    if pipelines_exists {
+        conn.execute(
+            "INSERT OR IGNORE INTO flows (id, name, flow_path, created_at, updated_at)
+             SELECT id, name, pipeline_path, created_at, updated_at
+             FROM pipelines",
+            [],
+        )?;
+    }
+
+    if runs_exists {
+        conn.execute(
+            "INSERT OR IGNORE INTO flow_runs (
+                id, flow_id, module_id, status, work_dir, results_dir,
+                participant_count, metadata, created_at, completed_at
+            )
+            SELECT id, pipeline_id, step_id, status, work_dir, results_dir,
+                   participant_count, metadata, created_at, completed_at
+            FROM runs",
+            [],
+        )?;
+    }
+
+    if run_participants_exists {
+        conn.execute(
+            "INSERT OR IGNORE INTO flow_run_participants (run_id, participant_id)
+             SELECT run_id, participant_id FROM run_participants",
+            [],
+        )?;
+    }
+
+    if run_configs_exists {
+        conn.execute(
+            "INSERT OR IGNORE INTO flow_run_configs (id, flow_id, name, config_data, created_at, updated_at)
+             SELECT id, pipeline_id, name, config_data, created_at, updated_at
+             FROM run_configs",
+            [],
+        )?;
+    }
+
+    conn.execute("DROP TABLE IF EXISTS run_configs", [])?;
+    conn.execute("DROP TABLE IF EXISTS run_participants", [])?;
+    conn.execute("DROP TABLE IF EXISTS runs", [])?;
+    conn.execute("DROP TABLE IF EXISTS pipelines", [])?;
+    conn.execute("DROP TABLE IF EXISTS projects", [])?;
+
+    conn.execute(
+        "INSERT INTO schema_version (version) VALUES (?1)",
+        ["3.0.0"],
+    )?;
+    info!("Migration complete: projects/pipelines -> modules/flows");
+
+    Ok(())
 }
 
 fn get_biovault_db_path() -> Result<PathBuf> {
@@ -676,14 +783,14 @@ fn migrate_from_messages_db(target_path: &Path) -> Result<()> {
 
     // Desktop tables (optional - can be added later when desktop migrates)
     conn.execute(
-        "CREATE TABLE IF NOT EXISTS projects (
+        "CREATE TABLE IF NOT EXISTS modules (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
             version TEXT NOT NULL DEFAULT '1.0.0',
             author TEXT NOT NULL,
             workflow TEXT NOT NULL,
             template TEXT NOT NULL,
-            project_path TEXT UNIQUE NOT NULL,
+            module_path TEXT UNIQUE NOT NULL,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(name, version)
         )",
@@ -691,50 +798,70 @@ fn migrate_from_messages_db(target_path: &Path) -> Result<()> {
     )?;
 
     conn.execute(
-        "CREATE TABLE IF NOT EXISTS runs (
+        "CREATE TABLE IF NOT EXISTS flows (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            project_id INTEGER NOT NULL,
-            work_dir TEXT NOT NULL,
-            participant_count INTEGER NOT NULL,
-            status TEXT NOT NULL,
+            name TEXT NOT NULL UNIQUE,
+            flow_path TEXT NOT NULL,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )",
         [],
     )?;
 
     conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_runs_project_id ON runs(project_id)",
+        "CREATE TABLE IF NOT EXISTS flow_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            flow_id INTEGER,
+            module_id INTEGER,
+            status TEXT NOT NULL,
+            work_dir TEXT NOT NULL,
+            results_dir TEXT,
+            participant_count INTEGER,
+            metadata TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            completed_at DATETIME,
+            FOREIGN KEY (flow_id) REFERENCES flows(id) ON DELETE CASCADE,
+            FOREIGN KEY (module_id) REFERENCES modules(id) ON DELETE SET NULL,
+            CHECK ((flow_id IS NULL) != (module_id IS NULL))
+        )",
         [],
     )?;
 
     conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_runs_status ON runs(status)",
+        "CREATE INDEX IF NOT EXISTS idx_flow_runs_flow_id ON flow_runs(flow_id)",
         [],
     )?;
 
     conn.execute(
-        "CREATE TABLE IF NOT EXISTS run_participants (
+        "CREATE INDEX IF NOT EXISTS idx_flow_runs_module_id ON flow_runs(module_id)",
+        [],
+    )?;
+
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_flow_runs_status ON flow_runs(status)",
+        [],
+    )?;
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS flow_run_participants (
             run_id INTEGER NOT NULL,
             participant_id INTEGER NOT NULL,
-            FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE,
+            FOREIGN KEY (run_id) REFERENCES flow_runs(id) ON DELETE CASCADE,
             FOREIGN KEY (participant_id) REFERENCES participants(id) ON DELETE CASCADE,
             PRIMARY KEY (run_id, participant_id)
         )",
         [],
     )?;
 
-    // Note: Pipeline tables are now in schema.sql (base schema)
-
     // Mark schema version
     conn.execute(
         "INSERT INTO schema_version (version) VALUES (?1)",
-        ["2.0.0"],
+        ["3.0.0"],
     )?;
 
-    println!("✓ Schema upgraded to v2.0.0");
+    println!("✓ Schema upgraded to v3.0.0");
     println!("✅ Migration complete!");
-    info!("Migration complete - schema version 2.0.0");
+    info!("Migration complete - schema version 3.0.0");
 
     Ok(())
 }
@@ -773,7 +900,7 @@ mod tests {
             .ok();
 
         assert!(version.is_some());
-        assert_eq!(version.unwrap(), "2.0.0");
+        assert_eq!(version.unwrap(), "3.0.0");
 
         config::clear_test_biovault_home();
     }
@@ -799,9 +926,10 @@ mod tests {
         assert!(tables.contains(&"messages".to_string()));
         assert!(tables.contains(&"participants".to_string()));
         assert!(tables.contains(&"files".to_string()));
-        assert!(tables.contains(&"projects".to_string()));
-        assert!(tables.contains(&"runs".to_string()));
-        assert!(tables.contains(&"run_participants".to_string()));
+        assert!(tables.contains(&"modules".to_string()));
+        assert!(tables.contains(&"flows".to_string()));
+        assert!(tables.contains(&"flow_runs".to_string()));
+        assert!(tables.contains(&"flow_run_participants".to_string()));
 
         config::clear_test_biovault_home();
     }

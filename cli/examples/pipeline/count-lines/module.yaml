@@ -12,6 +12,7 @@ spec:
     template: dynamic-nextflow
   assets:
     - path: count_lines.py
+  parameters: []
   inputs:
     - name: samplesheet
       type: File
@@ -31,4 +32,3 @@ spec:
     - name: data_dir
       type: Directory
       description: Forwarded data directory for downstream steps
-  parameters: []

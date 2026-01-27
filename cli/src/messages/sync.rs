@@ -282,8 +282,8 @@ impl MessageSync {
             msg.parent_id = payload.parent_id;
             msg.subject = payload.subject;
             msg.message_type = match payload.message_type.as_str() {
-                "project" => MessageType::Project {
-                    project_name: String::new(),
+                "module" => MessageType::Module {
+                    module_name: String::new(),
                     submission_id: String::new(),
                     files_hash: None,
                 },

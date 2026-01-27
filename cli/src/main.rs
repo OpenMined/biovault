@@ -24,7 +24,6 @@ fn validate_example_name(s: &str) -> Result<String, String> {
 mod tests {
     use super::*;
     use clap::Parser;
-    use std::sync::{Mutex, MutexGuard};
     use tempfile::TempDir;
 
     struct EnvVarGuard {
@@ -50,43 +49,23 @@ mod tests {
         }
     }
 
-    static TEST_ENV_MUTEX: Mutex<()> = Mutex::new(());
-
     struct TestHomeGuard {
         _temp: TempDir,
-        _env_guard: MutexGuard<'static, ()>,
-        _data_guard: EnvVarGuard,
-        _vault_guard: EnvVarGuard,
     }
 
     impl TestHomeGuard {
         fn new() -> Self {
-            let env_guard = TEST_ENV_MUTEX
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
             let temp = TempDir::new().unwrap();
             let home = temp.path().join(".biovault");
             std::fs::create_dir_all(&home).unwrap();
             biovault::config::set_test_biovault_home(&home);
-            let data_dir = temp.path().join("syftbox");
-            std::fs::create_dir_all(&data_dir).unwrap();
-            biovault::config::set_test_syftbox_data_dir(&data_dir);
-            let data_guard = EnvVarGuard::set("SYFTBOX_DATA_DIR", &data_dir.to_string_lossy());
-            let vault_guard =
-                EnvVarGuard::set("SYC_VAULT", &data_dir.join(".syc").to_string_lossy());
-            Self {
-                _temp: temp,
-                _env_guard: env_guard,
-                _data_guard: data_guard,
-                _vault_guard: vault_guard,
-            }
+            Self { _temp: temp }
         }
     }
 
     impl Drop for TestHomeGuard {
         fn drop(&mut self) {
             biovault::config::clear_test_biovault_home();
-            biovault::config::clear_test_syftbox_data_dir();
         }
     }
 
@@ -124,19 +103,19 @@ mod tests {
             "--dry-run",
             "--results-dir",
             "out",
-            "project-dir",
+            "module-dir",
             "--rows",
             "data.csv",
         ]);
         match cli.command {
             Commands::Run {
-                project_folder,
+                module_folder,
                 args,
                 dry_run,
                 resume,
                 results_dir,
             } => {
-                assert_eq!(project_folder, "project-dir");
+                assert_eq!(module_folder, "module-dir");
                 assert_eq!(args, vec!["--rows", "data.csv"]);
                 assert!(dry_run);
                 assert!(!resume);
@@ -151,7 +130,7 @@ mod tests {
         let cli = Cli::parse_from([
             "bv",
             "run",
-            "project-dir",
+            "module-dir",
             "--rows",
             "data.csv",
             "--param.threshold",
@@ -159,11 +138,11 @@ mod tests {
         ]);
         match cli.command {
             Commands::Run {
-                project_folder,
+                module_folder,
                 args,
                 ..
             } => {
-                assert_eq!(project_folder, "project-dir");
+                assert_eq!(module_folder, "module-dir");
                 assert_eq!(args.len(), 4);
                 assert_eq!(args[0], "--rows");
                 assert_eq!(args[1], "data.csv");
@@ -191,19 +170,19 @@ mod tests {
         let cli = Cli::parse_from([
             "bv",
             "submit",
-            "./project",
+            "./module",
             "friend@example.com",
             "--non-interactive",
             "--force",
         ]);
         match cli.command {
             Commands::Submit {
-                project_path,
+                module_path,
                 destination,
                 non_interactive,
                 force,
             } => {
-                assert_eq!(project_path, "./project");
+                assert_eq!(module_path, "./module");
                 assert_eq!(destination, "friend@example.com");
                 assert!(non_interactive);
                 assert!(force);
@@ -220,7 +199,7 @@ mod tests {
             "--plain",
             "--sent",
             "--message-type",
-            "project",
+            "module",
             "--from",
             "alice@example.com",
             "--search",
@@ -234,7 +213,7 @@ mod tests {
                 sent,
                 all,
                 unread,
-                projects,
+                modules,
                 message_type,
                 from,
                 search,
@@ -245,8 +224,8 @@ mod tests {
                 assert!(sent);
                 assert!(!all);
                 assert!(!unread);
-                assert!(!projects);
-                assert_eq!(message_type.as_deref(), Some("project"));
+                assert!(!modules);
+                assert_eq!(message_type.as_deref(), Some("module"));
                 assert_eq!(from.as_deref(), Some("alice@example.com"));
                 assert_eq!(search.as_deref(), Some("urgent"));
             }
@@ -255,11 +234,11 @@ mod tests {
     }
 
     #[test]
-    fn clap_parses_project_examples_subcommand() {
-        let cli = Cli::parse_from(["bv", "project", "examples"]);
+    fn clap_parses_module_examples_subcommand() {
+        let cli = Cli::parse_from(["bv", "module", "examples"]);
         match cli.command {
-            Commands::Project { command } => match command {
-                ProjectCommands::Examples => {}
+            Commands::Module { command } => match command {
+                ModuleCommands::Examples => {}
                 _ => panic!("expected Examples variant"),
             },
             _ => panic!("unexpected command variant"),
@@ -322,14 +301,14 @@ mod tests {
     }
 
     #[test]
-    fn async_main_with_project_examples_executes() {
+    fn async_main_with_module_examples_executes() {
         let _home_guard = TestHomeGuard::new();
         let _skip_guard = EnvVarGuard::set("BIOVAULT_SKIP_UPDATE_CHECK", "1");
         let runtime = tokio::runtime::Runtime::new().unwrap();
 
         let cli = Cli {
-            command: Commands::Project {
-                command: ProjectCommands::Examples,
+            command: Commands::Module {
+                command: ModuleCommands::Examples,
             },
             verbose: false,
             config: None,
@@ -424,22 +403,34 @@ enum Commands {
         force: bool,
     },
 
-    #[command(about = "Project management commands")]
+    #[command(about = "Module management commands")]
+    Module {
+        #[command(subcommand)]
+        command: ModuleCommands,
+    },
+
+    #[command(about = "Project management commands (deprecated: use 'module')")]
     Project {
         #[command(subcommand)]
-        command: ProjectCommands,
+        command: ModuleCommands,
     },
 
-    #[command(about = "Pipeline authoring commands")]
+    #[command(about = "Flow authoring commands")]
+    Flow {
+        #[command(subcommand)]
+        command: FlowCommands,
+    },
+
+    #[command(about = "Pipeline authoring commands (deprecated: use 'flow')")]
     Pipeline {
         #[command(subcommand)]
-        command: PipelineCommands,
+        command: FlowCommands,
     },
 
-    #[command(about = "Run a project workflow with Nextflow")]
+    #[command(about = "Run a module workflow with Nextflow")]
     Run {
-        #[arg(help = "Path to project directory")]
-        project_folder: String,
+        #[arg(help = "Path to module directory")]
+        module_folder: String,
 
         #[arg(
             trailing_var_arg = true,
@@ -557,10 +548,10 @@ enum Commands {
         command: SqlCommands,
     },
 
-    #[command(about = "Submit a project to another biobank via SyftBox")]
+    #[command(about = "Submit a module to another biobank via SyftBox")]
     Submit {
-        #[arg(help = "Path to project directory (use '.' for current directory)")]
-        project_path: String,
+        #[arg(help = "Path to module directory (use '.' for current directory)")]
+        module_path: String,
 
         #[arg(
             help = "Destination: either a datasite email (e.g., user@domain.com) or full Syft URL (e.g., syft://user@domain.com/public/biovault/participants.yaml#participants.ID)"
@@ -570,10 +561,7 @@ enum Commands {
         #[arg(long, help = "Skip interactive prompts, use defaults")]
         non_interactive: bool,
 
-        #[arg(
-            long,
-            help = "Force resubmission even if project was already submitted"
-        )]
+        #[arg(long, help = "Force resubmission even if module was already submitted")]
         force: bool,
     },
 
@@ -603,13 +591,13 @@ enum Commands {
         #[arg(short = 'u', long, help = "Show only unread messages")]
         unread: bool,
 
-        #[arg(short = 'p', long, help = "Show project submissions")]
-        projects: bool,
+        #[arg(short = 'p', long, help = "Show module submissions")]
+        modules: bool,
 
         #[arg(
             short = 't',
             long,
-            help = "Filter by message type (text/project/request)"
+            help = "Filter by message type (text/module/request)"
         )]
         message_type: Option<String>,
 
@@ -644,7 +632,7 @@ enum Commands {
         command: PythonCommands,
     },
 
-    #[command(about = "Manage Jupyter Lab for projects")]
+    #[command(about = "Manage Jupyter Lab for modules")]
     Jupyter {
         #[command(subcommand)]
         command: JupyterCommands,
@@ -712,30 +700,30 @@ enum DaemonCommands {
 }
 
 #[derive(Subcommand)]
-enum ProjectCommands {
-    #[command(about = "Create a new project")]
+enum ModuleCommands {
+    #[command(about = "Create a new module")]
     Create {
-        #[arg(long, help = "Project name")]
+        #[arg(long, help = "Module name")]
         name: Option<String>,
 
         #[arg(long, help = "Folder path (defaults to ./{name})")]
         folder: Option<String>,
 
-        #[arg(long, value_parser = validate_example_name, help = "Use example template (use 'bv project examples' to list available)")]
+        #[arg(long, value_parser = validate_example_name, help = "Use example template (use 'bv module examples' to list available)")]
         example: Option<String>,
 
-        #[arg(long, help = "Scaffold from a project spec YAML file")]
+        #[arg(long, help = "Scaffold from a module spec YAML file")]
         spec: Option<String>,
 
         #[arg(
             long,
-            help = "Prepopulate outputs to feed into another project's inputs (pipeline composition)"
+            help = "Prepopulate outputs to feed into another module's inputs (flow composition)"
         )]
         input_to: Option<String>,
 
         #[arg(
             long,
-            help = "Prepopulate inputs from another project's outputs (pipeline composition)"
+            help = "Prepopulate inputs from another module's outputs (flow composition)"
         )]
         output_from: Option<String>,
     },
@@ -743,48 +731,48 @@ enum ProjectCommands {
     #[command(about = "List available example templates")]
     Examples,
 
-    #[command(about = "View project spec with ASCII diagram")]
+    #[command(about = "View module spec with ASCII diagram")]
     View {
-        #[arg(help = "Project directory path (defaults to current directory)")]
+        #[arg(help = "Module directory path (defaults to current directory)")]
         path: Option<String>,
     },
 
-    #[command(about = "Import a project from URL or register a local project")]
+    #[command(about = "Import a module from URL or register a local module")]
     Import {
         #[arg(help = "URL to module.yaml or local directory path")]
         source: String,
 
-        #[arg(long, help = "Override project name")]
+        #[arg(long, help = "Override module name")]
         name: Option<String>,
 
-        #[arg(long, help = "Overwrite existing project")]
+        #[arg(long, help = "Overwrite existing module")]
         overwrite: bool,
 
         #[arg(long, help = "Output format (json|table)", default_value = "table")]
         format: String,
     },
 
-    #[command(about = "List all registered projects")]
+    #[command(about = "List all registered modules")]
     List {
         #[arg(long, help = "Output format (json|table)", default_value = "table")]
         format: String,
     },
 
-    #[command(about = "Show detailed information about a project")]
+    #[command(about = "Show detailed information about a module")]
     Show {
-        #[arg(help = "Project name or ID")]
+        #[arg(help = "Module name or ID")]
         identifier: String,
 
         #[arg(long, help = "Output format (json|table)", default_value = "table")]
         format: String,
     },
 
-    #[command(about = "Delete a project")]
+    #[command(about = "Delete a module")]
     Delete {
-        #[arg(help = "Project name or ID")]
+        #[arg(help = "Module name or ID")]
         identifier: String,
 
-        #[arg(long, help = "Keep project files, only remove from database")]
+        #[arg(long, help = "Keep module files, only remove from database")]
         keep_files: bool,
 
         #[arg(long, help = "Output format (json|table)", default_value = "table")]
@@ -793,18 +781,18 @@ enum ProjectCommands {
 }
 
 #[derive(Subcommand)]
-enum PipelineCommands {
-    #[command(about = "Create a new pipeline interactively")]
+enum FlowCommands {
+    #[command(about = "Create a new flow interactively")]
     Create {
         #[arg(long, help = "Flow YAML file path (defaults to flow.yaml)")]
         file: Option<String>,
 
-        #[arg(long, help = "Pipeline name (non-interactive mode)")]
+        #[arg(long, help = "Flow name (non-interactive mode)")]
         name: Option<String>,
 
         #[arg(
-            long = "use-project",
-            help = "Project path or module.yaml to add as the first step (non-interactive)"
+            long = "use-module",
+            help = "Module path or module.yaml to add as the first step (non-interactive)"
         )]
         uses: Option<String>,
 
@@ -812,13 +800,13 @@ enum PipelineCommands {
         step_id: Option<String>,
     },
 
-    #[command(about = "Add a step to an existing pipeline")]
+    #[command(about = "Add a step to an existing flow")]
     AddStep {
         #[arg(long, help = "Flow YAML file path (defaults to flow.yaml)")]
         file: Option<String>,
     },
 
-    #[command(about = "Validate a pipeline spec")]
+    #[command(about = "Validate a flow spec")]
     Validate {
         #[arg(help = "Flow YAML file path")]
         file: String,
@@ -827,9 +815,9 @@ enum PipelineCommands {
         diagram: bool,
     },
 
-    #[command(about = "Print pipeline steps and bindings")]
+    #[command(about = "Print flow steps and bindings")]
     Inspect {
-        #[arg(help = "Pipeline YAML file path")]
+        #[arg(help = "Flow YAML file path")]
         file: String,
     },
 }
@@ -1470,8 +1458,8 @@ enum MessageCommands {
         #[arg(short = 's', long = "sent", help = "Show sent messages")]
         sent: bool,
 
-        #[arg(short = 'p', long = "projects", help = "Show only project messages")]
-        projects: bool,
+        #[arg(short = 'p', long = "modules", help = "Show only module messages")]
+        modules: bool,
 
         #[arg(long, help = "Output messages as JSON")]
         json: bool,
@@ -1492,9 +1480,9 @@ enum MessageCommands {
         no_cleanup: bool,
     },
 
-    #[command(about = "Process a project message (run test/real)")]
+    #[command(about = "Process a module message (run test/real)")]
     Process {
-        #[arg(help = "Message ID of the project to process")]
+        #[arg(help = "Message ID of the module to process")]
         message_id: String,
 
         #[arg(long, help = "Run with test data", conflicts_with = "real")]
@@ -1511,9 +1499,15 @@ enum MessageCommands {
 
         #[arg(long, help = "Non-interactive mode (skip prompts)")]
         non_interactive: bool,
+
+        #[arg(long, help = "Sync and wait for submission files before processing")]
+        sync: bool,
+
+        #[arg(long, help = "Max seconds to wait for sync (requires --sync)")]
+        sync_timeout: Option<u64>,
     },
 
-    #[command(about = "Archive a project message (revoke write permissions)")]
+    #[command(about = "Archive a module message (revoke write permissions)")]
     Archive {
         #[arg(help = "Message ID to archive")]
         message_id: String,
@@ -1622,10 +1616,10 @@ enum SqlCommands {
 
 #[derive(Subcommand)]
 enum JupyterCommands {
-    #[command(about = "Start Jupyter Lab for a project")]
+    #[command(about = "Start Jupyter Lab for a module")]
     Start {
-        #[arg(help = "Project directory path")]
-        project_path: String,
+        #[arg(help = "Module directory path")]
+        module_path: String,
 
         #[arg(long, default_value = "3.12", help = "Python version to use")]
         python: String,
@@ -1633,23 +1627,23 @@ enum JupyterCommands {
 
     #[command(about = "Stop Jupyter Lab")]
     Stop {
-        #[arg(help = "Project directory path")]
-        project_path: String,
+        #[arg(help = "Module directory path")]
+        module_path: String,
     },
 
     #[command(about = "Reset virtualenv and restart Jupyter")]
     Reset {
-        #[arg(help = "Project directory path")]
-        project_path: String,
+        #[arg(help = "Module directory path")]
+        module_path: String,
 
         #[arg(long, default_value = "3.12", help = "Python version to use")]
         python: String,
     },
 
-    #[command(about = "Show Jupyter status for projects")]
+    #[command(about = "Show Jupyter status for modules")]
     Status,
 
-    #[command(about = "List projects with Jupyter virtualenvs")]
+    #[command(about = "List modules with Jupyter virtualenvs")]
     List,
 }
 
@@ -1715,6 +1709,94 @@ fn main() -> Result<()> {
     runtime.block_on(async_main())
 }
 
+async fn handle_module_command(command: ModuleCommands) -> Result<()> {
+    match command {
+        ModuleCommands::Create {
+            name,
+            folder,
+            example,
+            spec,
+            input_to,
+            output_from,
+        } => {
+            commands::module::create(name, folder, example, spec, input_to, output_from).await?;
+        }
+        ModuleCommands::Examples => {
+            commands::module::list_examples()?;
+        }
+        ModuleCommands::View { path } => {
+            commands::module::view(path)?;
+        }
+        ModuleCommands::Import {
+            source,
+            name,
+            overwrite,
+            format,
+        } => {
+            let fmt = if format == "table" {
+                None
+            } else {
+                Some(format)
+            };
+            commands::module_management::import(source, name, overwrite, fmt).await?;
+        }
+        ModuleCommands::List { format } => {
+            let fmt = if format == "table" {
+                None
+            } else {
+                Some(format)
+            };
+            commands::module_management::list(fmt)?;
+        }
+        ModuleCommands::Show { identifier, format } => {
+            let fmt = if format == "table" {
+                None
+            } else {
+                Some(format)
+            };
+            commands::module_management::show(identifier, fmt)?;
+        }
+        ModuleCommands::Delete {
+            identifier,
+            keep_files,
+            format,
+        } => {
+            let fmt = if format == "table" {
+                None
+            } else {
+                Some(format)
+            };
+            commands::module_management::delete(identifier, keep_files, fmt)?;
+        }
+    }
+
+    Ok(())
+}
+
+async fn handle_flow_command(command: FlowCommands) -> Result<()> {
+    match command {
+        FlowCommands::Create {
+            file,
+            name,
+            uses,
+            step_id,
+        } => {
+            commands::flow::create(file, name, uses, step_id).await?;
+        }
+        FlowCommands::AddStep { file } => {
+            commands::flow::add_step(file).await?;
+        }
+        FlowCommands::Validate { file, diagram } => {
+            commands::flow::validate(&file, diagram)?;
+        }
+        FlowCommands::Inspect { file } => {
+            commands::flow::inspect(&file)?;
+        }
+    }
+
+    Ok(())
+}
+
 async fn async_main_with(cli: Cli) -> Result<()> {
     let filter_level = if cli.verbose { "debug" } else { "info" };
 
@@ -1724,7 +1806,7 @@ async fn async_main_with(cli: Cli) -> Result<()> {
         .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(filter_level)))
         .try_init();
 
-    // Require a single explicit Syft Crypto vault path.
+    // Ensure Syft Crypto uses the BioVault-managed vault path by default
     biovault::config::require_syc_vault_env()?;
 
     // Random version check on startup (10% chance)
@@ -1752,118 +1834,128 @@ async fn async_main_with(cli: Cli) -> Result<()> {
         } => {
             commands::setup::execute(dependencies, force).await?;
         }
-        Commands::Project { command } => match command {
-            ProjectCommands::Create {
-                name,
-                folder,
-                example,
-                spec,
-                input_to,
-                output_from,
-            } => {
-                commands::project::create(name, folder, example, spec, input_to, output_from)
-                    .await?;
-            }
-            ProjectCommands::Examples => {
-                commands::project::list_examples()?;
-            }
-            ProjectCommands::View { path } => {
-                commands::project::view(path)?;
-            }
-            ProjectCommands::Import {
-                source,
-                name,
-                overwrite,
-                format,
-            } => {
-                let fmt = if format == "table" {
-                    None
-                } else {
-                    Some(format)
-                };
-                commands::project_management::import(source, name, overwrite, fmt).await?;
-            }
-            ProjectCommands::List { format } => {
-                let fmt = if format == "table" {
-                    None
-                } else {
-                    Some(format)
-                };
-                commands::project_management::list(fmt)?;
-            }
-            ProjectCommands::Show { identifier, format } => {
-                let fmt = if format == "table" {
-                    None
-                } else {
-                    Some(format)
-                };
-                commands::project_management::show(identifier, fmt)?;
-            }
-            ProjectCommands::Delete {
-                identifier,
-                keep_files,
-                format,
-            } => {
-                let fmt = if format == "table" {
-                    None
-                } else {
-                    Some(format)
-                };
-                commands::project_management::delete(identifier, keep_files, fmt)?;
-            }
-        },
-        Commands::Pipeline { command } => match command {
-            PipelineCommands::Create {
-                file,
-                name,
-                uses,
-                step_id,
-            } => {
-                commands::pipeline::create(file, name, uses, step_id).await?;
-            }
-            PipelineCommands::AddStep { file } => {
-                commands::pipeline::add_step(file).await?;
-            }
-            PipelineCommands::Validate { file, diagram } => {
-                commands::pipeline::validate(&file, diagram)?;
-            }
-            PipelineCommands::Inspect { file } => {
-                commands::pipeline::inspect(&file)?;
-            }
-        },
+        Commands::Module { command } => {
+            handle_module_command(command).await?;
+        }
+        Commands::Project { command } => {
+            eprintln!(
+                "DEPRECATED: 'bv project' is now 'bv module'.\\nUse: bv module <subcommand> [options]"
+            );
+            handle_module_command(command).await?;
+        }
+        Commands::Flow { command } => {
+            handle_flow_command(command).await?;
+        }
+        Commands::Pipeline { command } => {
+            eprintln!(
+                "DEPRECATED: 'bv pipeline' is now 'bv flow'.\\nUse: bv flow <subcommand> [options]"
+            );
+            handle_flow_command(command).await?;
+        }
         Commands::Run {
-            project_folder,
+            module_folder,
             args,
             dry_run,
             resume,
             results_dir,
         } => {
-            if project_folder.ends_with(".yaml") || project_folder.ends_with(".yml") {
-                commands::pipeline::run_pipeline(
-                    &project_folder,
-                    args,
-                    dry_run,
-                    resume,
-                    results_dir,
-                )
-                .await?;
+            if module_folder.ends_with(".yaml") || module_folder.ends_with(".yml") {
+                commands::flow::run_flow(&module_folder, args, dry_run, resume, results_dir)
+                    .await?;
                 return Ok(());
             }
-
-            // Check project template to determine which run system to use
+            // Check module template to determine which run system to use
             use std::path::Path;
-            let project_path = Path::new(&project_folder);
-            let project_yaml_path = biovault::project_spec::resolve_project_spec_path(project_path);
+            let module_path = Path::new(&module_folder);
+            let module_yaml_path = module_path.join("module.yaml");
 
-            if project_yaml_path.exists() {
-                // Read module/project spec to check template
-                if let Ok(project) = biovault::project_spec::ProjectSpec::load(&project_yaml_path) {
-                    let template = project.template.as_deref().unwrap_or("default");
+            if module_yaml_path.exists() {
+                // Read module.yaml to check template
+                if let Ok(content) = std::fs::read_to_string(&module_yaml_path) {
+                    use biovault::module_spec::ModuleFile;
+                    if let Ok(module) = ModuleFile::parse_yaml(&content) {
+                        let runtime = module
+                            .spec
+                            .runner
+                            .as_ref()
+                            .and_then(|runner| runner.runtime.as_deref())
+                            .unwrap_or("nextflow");
 
-                    // Use dynamic run system for dynamic-nextflow template
-                    if template == "dynamic-nextflow" {
+                        // Use dynamic run system for nextflow, shell, and syqure runtimes
+                        if matches!(
+                            runtime,
+                            "nextflow" | "dynamic-nextflow" | "shell" | "syqure"
+                        ) {
+                            commands::run_dynamic::execute_dynamic(
+                                &module_folder,
+                                args,
+                                dry_run,
+                                resume,
+                                results_dir,
+                                commands::run_dynamic::RunSettings::default(),
+                            )
+                            .await?;
+                        } else {
+                            // Use old run system for legacy templates (snp, sheet, default)
+                            // Parse args in old format: [participant_source, flags...]
+                            let mut participant_source = String::new();
+                            let mut test = false;
+                            let mut download = false;
+                            let mut with_docker = true; // default to true for backward compatibility
+                            let mut work_dir = None;
+                            let mut nextflow_args = Vec::new();
+                            let template_override = None;
+
+                            // Parse args: first arg is participant_source, rest are flags
+                            let mut i = 0;
+                            while i < args.len() {
+                                let arg = &args[i];
+                                if arg.starts_with("--") {
+                                    match arg.as_str() {
+                                        "--test" => test = true,
+                                        "--download" => download = true,
+                                        "--with-docker" => with_docker = true,
+                                        "--no-docker" => with_docker = false,
+                                        "--work-dir" => {
+                                            if i + 1 < args.len() {
+                                                work_dir = Some(args[i + 1].clone());
+                                                i += 1;
+                                            }
+                                        }
+                                        _ => {
+                                            // Nextflow args
+                                            nextflow_args.push(arg.clone());
+                                            if !arg.starts_with("--") && i + 1 < args.len() {
+                                                nextflow_args.push(args[i + 1].clone());
+                                                i += 1;
+                                            }
+                                        }
+                                    }
+                                } else if participant_source.is_empty() {
+                                    participant_source = arg.clone();
+                                }
+                                i += 1;
+                            }
+
+                            commands::run::execute(commands::run::RunParams {
+                                module_folder: module_folder.clone(),
+                                participant_source,
+                                test,
+                                download,
+                                dry_run,
+                                with_docker,
+                                work_dir,
+                                resume,
+                                template: template_override,
+                                results_dir,
+                                nextflow_args,
+                            })
+                            .await?;
+                        }
+                    } else {
+                        // Couldn't parse module.yaml, default to dynamic
                         commands::run_dynamic::execute_dynamic(
-                            &project_folder,
+                            &module_folder,
                             args,
                             dry_run,
                             resume,
@@ -1871,67 +1963,11 @@ async fn async_main_with(cli: Cli) -> Result<()> {
                             commands::run_dynamic::RunSettings::default(),
                         )
                         .await?;
-                    } else {
-                        // Use old run system for legacy templates (snp, sheet, default)
-                        // Parse args in old format: [participant_source, flags...]
-                        let mut participant_source = String::new();
-                        let mut test = false;
-                        let mut download = false;
-                        let mut with_docker = true; // default to true for backward compatibility
-                        let mut work_dir = None;
-                        let mut nextflow_args = Vec::new();
-                        let template_override = None;
-
-                        // Parse args: first arg is participant_source, rest are flags
-                        let mut i = 0;
-                        while i < args.len() {
-                            let arg = &args[i];
-                            if arg.starts_with("--") {
-                                match arg.as_str() {
-                                    "--test" => test = true,
-                                    "--download" => download = true,
-                                    "--with-docker" => with_docker = true,
-                                    "--no-docker" => with_docker = false,
-                                    "--work-dir" => {
-                                        if i + 1 < args.len() {
-                                            work_dir = Some(args[i + 1].clone());
-                                            i += 1;
-                                        }
-                                    }
-                                    _ => {
-                                        // Nextflow args
-                                        nextflow_args.push(arg.clone());
-                                        if !arg.starts_with("--") && i + 1 < args.len() {
-                                            nextflow_args.push(args[i + 1].clone());
-                                            i += 1;
-                                        }
-                                    }
-                                }
-                            } else if participant_source.is_empty() {
-                                participant_source = arg.clone();
-                            }
-                            i += 1;
-                        }
-
-                        commands::run::execute(commands::run::RunParams {
-                            project_folder: project_folder.clone(),
-                            participant_source,
-                            test,
-                            download,
-                            dry_run,
-                            with_docker,
-                            work_dir,
-                            resume,
-                            template: template_override,
-                            results_dir,
-                            nextflow_args,
-                        })
-                        .await?;
                     }
                 } else {
-                    // Couldn't parse module spec, default to dynamic
+                    // Couldn't read module.yaml, default to dynamic
                     commands::run_dynamic::execute_dynamic(
-                        &project_folder,
+                        &module_folder,
                         args,
                         dry_run,
                         resume,
@@ -1943,7 +1979,7 @@ async fn async_main_with(cli: Cli) -> Result<()> {
             } else {
                 // No module.yaml, use dynamic
                 commands::run_dynamic::execute_dynamic(
-                    &project_folder,
+                    &module_folder,
                     args,
                     dry_run,
                     resume,
@@ -2291,12 +2327,12 @@ async fn async_main_with(cli: Cli) -> Result<()> {
             }
         },
         Commands::Submit {
-            project_path,
+            module_path,
             destination,
             non_interactive,
             force,
         } => {
-            commands::submit::submit(project_path, destination, non_interactive, force).await?;
+            commands::submit::submit(module_path, destination, non_interactive, force).await?;
         }
         Commands::Cleanup { all } => {
             let config = biovault::config::Config::load()?;
@@ -2309,7 +2345,7 @@ async fn async_main_with(cli: Cli) -> Result<()> {
             sent,
             all,
             unread,
-            projects,
+            modules,
             message_type,
             from,
             search,
@@ -2321,7 +2357,7 @@ async fn async_main_with(cli: Cli) -> Result<()> {
                     sent,
                     all,
                     unread,
-                    projects,
+                    modules,
                     message_type,
                     from,
                     search,
@@ -2365,11 +2401,11 @@ async fn async_main_with(cli: Cli) -> Result<()> {
             MessageCommands::List {
                 unread,
                 sent,
-                projects,
+                modules,
                 json,
             } => {
                 let config = biovault::config::Config::load()?;
-                commands::messages::list_messages(&config, unread, sent, projects, json)?;
+                commands::messages::list_messages(&config, unread, sent, modules, json)?;
             }
             MessageCommands::Thread { thread_id } => {
                 let config = biovault::config::Config::load()?;
@@ -2386,9 +2422,11 @@ async fn async_main_with(cli: Cli) -> Result<()> {
                 participant,
                 approve,
                 non_interactive,
+                sync,
+                sync_timeout,
             } => {
                 let config = biovault::config::Config::load()?;
-                commands::messages::process_project_message(
+                commands::messages::process_module_message(
                     &config,
                     &message_id,
                     test,
@@ -2396,6 +2434,8 @@ async fn async_main_with(cli: Cli) -> Result<()> {
                     participant,
                     approve,
                     non_interactive,
+                    sync,
+                    sync_timeout,
                 )
                 .await?;
             }
@@ -2487,15 +2527,7 @@ async fn async_main_with(cli: Cli) -> Result<()> {
             let config = if let Ok(config_json) = std::env::var("BV_SYFTBOXD_CONFIG") {
                 serde_json::from_str(&config_json)?
             } else {
-                match biovault::config::Config::load() {
-                    Ok(config) => config,
-                    Err(biovault::error::Error::NotInitialized) => {
-                        let email = std::env::var("SYFTBOX_EMAIL")
-                            .map_err(|_| biovault::error::Error::NotInitialized)?;
-                        biovault::config::Config::new(email)
-                    }
-                    Err(err) => return Err(err.into()),
-                }
+                biovault::config::Config::load()?
             };
 
             match command {
@@ -2529,19 +2561,19 @@ async fn async_main_with(cli: Cli) -> Result<()> {
         },
         Commands::Jupyter { command } => match command {
             JupyterCommands::Start {
-                project_path,
+                module_path,
                 python,
             } => {
-                commands::jupyter::start(&project_path, &python).await?;
+                commands::jupyter::start(&module_path, &python).await?;
             }
-            JupyterCommands::Stop { project_path } => {
-                commands::jupyter::stop(&project_path).await?;
+            JupyterCommands::Stop { module_path } => {
+                commands::jupyter::stop(&module_path).await?;
             }
             JupyterCommands::Reset {
-                project_path,
+                module_path,
                 python,
             } => {
-                commands::jupyter::reset(&project_path, &python).await?;
+                commands::jupyter::reset(&module_path, &python).await?;
             }
             JupyterCommands::Status => {
                 commands::jupyter::status().await?;

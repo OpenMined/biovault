@@ -1,0 +1,176 @@
+apiVersion: syftbox.openmined.org/v1alpha1
+kind: Flow
+metadata:
+  name: syqure-flow
+  version: 0.1.0
+  description: Multi-party rsid aggregation flow with privacy-preserving sharing.
+
+spec:
+  vars:
+    flow_path: "syft://{datasite.current}/shared/flows/{flow_name}"
+    run_path: "{vars.flow_path}/{run_id}"
+    step_path: "{vars.run_path}/{step.number}-{step.id}"
+
+  coordination:
+    url: "{vars.run_path}/_progress"
+    share_with: all
+
+  mpc:
+    url: "{vars.run_path}/_mpc"
+    topology: mesh  # everyone <-> everyone
+
+  inputs:
+    datasites:
+      default:
+        - aggregator@sandbox.local
+        - client1@sandbox.local
+        - client2@sandbox.local
+
+  datasites:
+    all: inputs.datasites
+    groups:
+      aggregator:
+        include:
+          - "{datasites[0]}"
+      clients:
+        include:
+          - "{datasites[1]}"
+          - "{datasites[2]}"
+
+  modules:
+    gen_variants:
+      source:
+        kind: local
+        path: ./modules/gen-variants
+      allow_dirty: true
+      interface:
+        outputs:
+          - name: rsids
+            type: File
+          - name: counts
+            type: File
+      assets:
+        - path: run.sh
+
+    build_master:
+      source:
+        kind: local
+        path: ./modules/build-master
+      allow_dirty: true
+      interface:
+        inputs:
+          - name: rsids_manifest
+            type: File
+        outputs:
+          - name: master_list
+            type: File
+          - name: count
+            type: String
+      assets:
+        - path: run.sh
+
+    align_counts:
+      source:
+        kind: local
+        path: ./modules/align-counts
+      allow_dirty: true
+      interface:
+        inputs:
+          - name: master_list
+            type: File
+          - name: counts
+            type: File
+        outputs:
+          - name: counts_array
+            type: File
+      assets:
+        - path: run.sh
+
+    # Secure MPC aggregation using Syqure runtime
+    secure_aggregate:
+      source:
+        kind: local
+        path: ./modules/secure-aggregate
+      allow_dirty: true
+      interface:
+        inputs:
+          - name: counts
+            type: File
+          - name: array_length
+            type: String
+        outputs:
+          - name: aggregated_counts
+            type: File
+      assets:
+        - path: secure_aggregate.codon
+
+  steps:
+    - id: gen_variants
+      uses: gen_variants
+      run:
+        targets: clients
+        strategy: parallel
+      share:
+        # Only share rsids with aggregator - not with other clients
+        rsids_shared:
+          source: self.outputs.rsids
+          url: "{vars.step_path}/rsids.txt"
+          permissions:
+            read: ["{datasites[0]}"]
+            write: ["{datasite.current}"]
+        # counts.json is NOT shared - stays private for local use in align_counts
+
+    - id: build_master
+      uses: build_master
+      run:
+        targets: aggregator
+      with:
+        rsids_manifest: step.gen_variants.share.rsids_shared.url_list
+      share:
+        # Master list is shared with everyone - clients need it
+        master_shared:
+          source: self.outputs.master_list
+          url: "{vars.step_path}/master_list.txt"
+          permissions:
+            read: ["{datasites[*]}"]
+            write: ["{datasites[0]}"]
+
+    - id: align_counts
+      uses: align_counts
+      run:
+        targets: clients
+        strategy: parallel
+      with:
+        master_list: step.build_master.share.master_shared
+        counts: step.gen_variants.outputs.counts
+
+    # MPC barrier - wait for all parties to complete align_counts before secure_aggregate
+    # This ensures JIT compilation happens for all before MPC starts
+    - id: mpc_barrier
+      barrier:
+        wait_for: align_counts
+        targets: clients  # Wait for clients to finish align_counts
+        timeout: 300
+
+    # Secure MPC aggregation - runs on ALL parties simultaneously
+    # The syqure runtime auto-injects party_id and party_emails from BV_DATASITE_INDEX and BV_DATASITES
+    - id: secure_aggregate
+      uses: secure_aggregate
+      run:
+        targets: all
+        strategy: parallel  # All parties run simultaneously for MPC
+      with:
+        counts:
+          value: step.align_counts.outputs.counts_array
+          only: clients
+        array_length:
+          value: step.build_master.outputs.count
+          only: aggregator
+      share:
+        # All parties share their result for transparency/verification
+        result_shared:
+          source: self.outputs.aggregated_counts
+          url: "{vars.step_path}/aggregated.json"
+          permissions:
+            read: ["{datasites[*]}"]
+            write: ["{datasite.current}"]

@@ -1,0 +1,70 @@
+setup:
+  server:
+    - "./tests/scripts/devstack.sh --reset --clients client1@sandbox.local,client2@sandbox.local,aggregator@sandbox.local"
+
+steps:
+  - name: Initialize BioVault for client1
+    datasite: client1@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv init client1@sandbox.local --quiet
+
+  - name: Initialize BioVault for client2
+    datasite: client2@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv init client2@sandbox.local --quiet
+
+  - name: Initialize BioVault for aggregator
+    datasite: aggregator@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv init aggregator@sandbox.local --quiet
+
+  - name: Run syqure flow (all datasites in sandbox mode)
+    run: |
+      cd {{workspace}}
+      env BIOVAULT_SANDBOX_ROOT="{{sandbox}}" BIOVAULT_FLOW_RUN_ALL=1 \
+        ./cli/target/release/bv run tests/scenarios/syqure-flow/flow.yaml
+
+  - name: Verify aggregated results
+    run: |
+      cd {{workspace}}
+      python3 - <<'PY'
+      import json
+      from pathlib import Path
+      import glob
+
+      # Find the run directory (most recent)
+      results_base = Path("results/flows/syqure-flow")
+      if not results_base.exists():
+        print(f"ERROR: Results directory not found at {results_base}")
+        exit(1)
+
+      # Find aggregated counts
+      agg_files = list(results_base.glob("aggregate/*/aggregated_counts.json"))
+      if not agg_files:
+        print("ERROR: No aggregated_counts.json found")
+        exit(1)
+
+      agg_file = agg_files[0]
+      aggregated = json.loads(agg_file.read_text())
+
+      # Find client arrays
+      client_files = list(results_base.glob("align_counts/*/counts_array.json"))
+      if len(client_files) < 2:
+        print(f"ERROR: Expected 2 client arrays, found {len(client_files)}")
+        exit(1)
+
+      arrays = [json.loads(f.read_text()) for f in client_files]
+      expected = [sum(vals) for vals in zip(*arrays)]
+
+      print("=" * 50)
+      print("FLOW VERIFICATION")
+      print("=" * 50)
+      for i, f in enumerate(client_files):
+        print(f"Client {i+1} array: {arrays[i]}")
+      print(f"Expected sum:    {expected}")
+      print(f"Actual sum:      {aggregated}")
+
+      assert aggregated == expected, f"Mismatch! Expected {expected}, got {aggregated}"
+      print("SUCCESS: Aggregated counts match expected sum!")
+      print("=" * 50)
+      PY

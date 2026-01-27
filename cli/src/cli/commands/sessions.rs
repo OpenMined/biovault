@@ -9,6 +9,7 @@ use crate::data::sessions::{
 };
 use crate::data::BioVaultDb;
 use crate::messages::{Message, MessageDb, MessageStatus};
+use crate::subscriptions;
 use anyhow::{Context, Result};
 use chrono::Utc;
 use clap::Subcommand;
@@ -229,6 +230,39 @@ fn get_my_rpc_session_dir(config: &Config) -> Result<PathBuf> {
     get_rpc_session_dir(config, &config.email)
 }
 
+fn add_session_subscription(config: &Config, peer_email: &str, session_id: &str) -> Result<()> {
+    if peer_email.trim().is_empty() || !peer_email.contains('@') {
+        return Ok(());
+    }
+
+    let data_dir = config.get_syftbox_data_dir()?;
+    let syftsub_path = data_dir.join(".data").join("syft.sub.yaml");
+    let mut cfg =
+        subscriptions::load(&syftsub_path).unwrap_or_else(|_| subscriptions::default_config());
+    let path = format!("shared/biovault/sessions/{}/**", session_id);
+
+    let exists = cfg.rules.iter().any(|rule| {
+        rule.action == subscriptions::Action::Allow
+            && rule
+                .datasite
+                .as_deref()
+                .map(|ds| ds.eq_ignore_ascii_case(peer_email))
+                .unwrap_or(false)
+            && rule.path == path
+    });
+
+    if !exists {
+        cfg.rules.push(subscriptions::Rule {
+            action: subscriptions::Action::Allow,
+            datasite: Some(peer_email.to_string()),
+            path,
+        });
+        subscriptions::save(&syftsub_path, &cfg)?;
+    }
+
+    Ok(())
+}
+
 /// Create a new session
 fn create_session(
     config: &Config,
@@ -309,6 +343,9 @@ fn create_session(
     if let Some(peer_email) = &peer {
         send_session_invitation(config, &session_id, name, &owner, peer_email, &description)?;
         println!("   📨 Invitation sent to: {}", peer_email.cyan());
+        if let Err(err) = add_session_subscription(config, peer_email, &session_id) {
+            eprintln!("⚠️  Warning: failed to add subscription: {}", err);
+        }
     }
 
     println!(
@@ -596,6 +633,9 @@ fn invite_peer(config: &Config, session_id: &str, peer: &str) -> Result<()> {
 
     // Send invitation
     send_session_invitation(config, session_id, &name, &owner, peer, &description)?;
+    if let Err(err) = add_session_subscription(config, peer, session_id) {
+        eprintln!("⚠️  Warning: failed to add subscription: {}", err);
+    }
 
     println!("\n📨 Invitation sent to: {}", peer.green());
     println!("   Session: {} [{}]", name, session_id.cyan());
@@ -815,6 +855,10 @@ fn accept_invitation(config: &Config, session_id: &str, datasets: Vec<String>) -
         session_path.join("session.json"),
         serde_json::to_string_pretty(&session_config)?,
     )?;
+
+    if let Err(err) = add_session_subscription(config, &invitation.requester, session_id) {
+        eprintln!("⚠️  Warning: failed to add subscription: {}", err);
+    }
 
     // Send acceptance response via RPC
     let requester_rpc = get_rpc_session_dir(config, &invitation.requester)?;
@@ -1191,6 +1235,7 @@ mod tests {
             agent_bridge_http_port: None,
             agent_bridge_token: None,
             agent_bridge_blocklist: None,
+            syqure: None,
         }
     }
 

@@ -725,6 +725,7 @@ mod tests {
             agent_bridge_http_port: None,
             agent_bridge_token: None,
             agent_bridge_blocklist: None,
+            syqure: None,
         };
 
         let config_path = config_dir.join("config.yaml");
@@ -794,6 +795,7 @@ mod tests {
             agent_bridge_http_port: None,
             agent_bridge_token: None,
             agent_bridge_blocklist: None,
+            syqure: None,
         });
 
         let app = SyftBoxApp::new(temp_dir.path(), email, "biovault").unwrap();
@@ -1057,6 +1059,7 @@ participants:
             agent_bridge_http_port: None,
             agent_bridge_token: None,
             agent_bridge_blocklist: None,
+            syqure: None,
         };
         config.save(config_dir.join("config.yaml"))?;
 

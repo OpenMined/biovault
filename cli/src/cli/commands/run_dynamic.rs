@@ -1,16 +1,53 @@
 use super::run::execute_with_logging;
+use crate::data::module_yaml_hash;
 use crate::error::Result;
-use crate::project_spec::ProjectSpec;
+use crate::module_spec::{ModuleSpec, ModuleStepSpec};
 use anyhow::Context;
 use chrono::Local;
 use colored::Colorize;
 use serde_json::{json, Value as JsonValue};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::env;
 use std::ffi::OsStr;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::thread;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+fn count_mpc_files(dir: &Path) -> (usize, Option<u64>) {
+    let mut count = 0usize;
+    let mut latest_modified: Option<u64> = None;
+
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() {
+                count += 1;
+                if let Ok(metadata) = path.metadata() {
+                    if let Ok(modified) = metadata.modified() {
+                        let secs = modified
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs();
+                        latest_modified = Some(latest_modified.map_or(secs, |lm| lm.max(secs)));
+                    }
+                }
+            } else if path.is_dir() {
+                let (sub_count, sub_latest) = count_mpc_files(&path);
+                count += sub_count;
+                if let Some(sl) = sub_latest {
+                    latest_modified = Some(latest_modified.map_or(sl, |lm| lm.max(sl)));
+                }
+            }
+        }
+    }
+
+    (count, latest_modified)
+}
 
 fn append_desktop_log(message: &str) {
     if let Ok(path) = std::env::var("BIOVAULT_DESKTOP_LOG_FILE") {
@@ -127,6 +164,43 @@ impl Default for RunSettings {
 /// Check if we should use Docker to run Nextflow (Windows only)
 fn should_use_docker_for_nextflow() -> bool {
     cfg!(target_os = "windows")
+}
+
+/// Find Git Bash on Windows, falling back to "bash" if not found.
+#[cfg(target_os = "windows")]
+fn resolve_git_bash() -> String {
+    let candidates = [
+        r"C:\Program Files\Git\bin\bash.exe",
+        r"C:\Program Files\Git\usr\bin\bash.exe",
+        r"C:\Program Files (x86)\Git\bin\bash.exe",
+        r"C:\Program Files (x86)\Git\usr\bin\bash.exe",
+    ];
+    for candidate in candidates {
+        if Path::new(candidate).exists() {
+            return candidate.to_string();
+        }
+    }
+    // Fallback to PATH lookup
+    "bash".to_string()
+}
+
+#[cfg(not(target_os = "windows"))]
+fn resolve_git_bash() -> String {
+    "bash".to_string()
+}
+
+/// Strip the Windows extended path prefix (\\?\) for use with Docker volume mounts.
+/// Docker Desktop on Windows expects standard Windows paths like C:\Users\foo,
+/// not extended paths like \\?\C:\Users\foo.
+#[cfg(target_os = "windows")]
+fn strip_extended_path_prefix(path: &str) -> String {
+    let stripped = path.trim_start_matches(r"\\?\").trim_start_matches(r"//?/");
+    stripped.to_string()
+}
+
+#[cfg(not(target_os = "windows"))]
+fn strip_extended_path_prefix(path: &str) -> String {
+    path.to_string()
 }
 
 /// Convert a Windows path to a container-compatible path for volume mounts.
@@ -281,6 +355,20 @@ fn remap_json_paths_for_flat_dir(value: &JsonValue, flat_data_dir: &str) -> Json
 }
 
 #[cfg(target_os = "windows")]
+fn env_var_truthy(name: &str) -> bool {
+    match std::env::var(name) {
+        Ok(value) => {
+            let normalized = value.trim().to_ascii_lowercase();
+            !normalized.is_empty()
+                && normalized != "0"
+                && normalized != "false"
+                && normalized != "no"
+        }
+        Err(_) => false,
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
 fn env_var_truthy(name: &str) -> bool {
     match std::env::var(name) {
         Ok(value) => {
@@ -1108,14 +1196,45 @@ pub async fn execute_dynamic(
         .into());
     }
 
-    let spec = ProjectSpec::load(&spec_path)?;
+    let spec = ModuleSpec::load(&spec_path)?;
+    let runtime = spec.runtime.as_deref().unwrap_or("nextflow");
 
-    if spec.template.as_deref() != Some("dynamic-nextflow") {
-        return Err(anyhow::anyhow!(
-            "This project uses template '{}'. Only 'dynamic-nextflow' is supported by the new run system.",
-            spec.template.as_deref().unwrap_or("(none)")
-        ).into());
+    match runtime {
+        "shell" => {
+            return execute_shell(
+                &spec,
+                project_path,
+                args,
+                dry_run,
+                results_dir,
+                run_settings,
+            )
+            .await;
+        }
+        "syqure" => {
+            return execute_syqure(
+                &spec,
+                project_path,
+                args,
+                dry_run,
+                results_dir,
+                run_settings,
+            )
+            .await;
+        }
+        "nextflow" | "dynamic-nextflow" => {
+            // Fall through to nextflow execution below
+        }
+        _ => {
+            return Err(anyhow::anyhow!(
+                "Unknown runtime '{}'. Supported: nextflow, shell, syqure",
+                runtime
+            )
+            .into());
+        }
     }
+
+    let current_datasite = resolve_current_datasite();
 
     println!("🚀 Running project: {}", spec.name.bold());
 
@@ -1153,6 +1272,29 @@ pub async fn execute_dynamic(
     #[cfg(not(target_os = "windows"))]
     let results_path_for_run = results_path_buf.clone();
 
+    let datasites_override = resolve_datasites_override();
+    let template_datasites = if let Some(override_list) = datasites_override {
+        override_list
+    } else if spec.datasites.as_ref().is_some_and(|d| !d.is_empty()) {
+        spec.datasites.clone().unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let datasite_index = resolve_datasite_index(&template_datasites, current_datasite.as_deref());
+    let context = DatasiteContext {
+        datasites: template_datasites,
+        current: current_datasite.clone(),
+        index: datasite_index,
+    };
+    let env_map = build_shell_env(
+        &spec.env,
+        &BTreeMap::new(),
+        &context,
+        project_path,
+        &results_path_buf,
+        "workflow",
+    );
+
     // Check user workflow exists
     let workflow_path = project_path.join(&spec.workflow);
     if !workflow_path.exists() {
@@ -1169,11 +1311,14 @@ pub async fn execute_dynamic(
     let biovault_home_abs = biovault_home
         .canonicalize()
         .unwrap_or_else(|_| biovault_home.clone());
-    let template_name = spec.template.as_deref().unwrap_or("dynamic-nextflow");
+    let template_name = match spec.runtime.as_deref() {
+        Some("nextflow") | Some("dynamic-nextflow") | None => "dynamic-nextflow",
+        Some(other) => other,
+    };
     let env_dir = biovault_home_abs.join("env").join(template_name);
     let template_path = env_dir.join("template.nf");
 
-    if template_name == "dynamic-nextflow" {
+    if matches!(template_name, "dynamic-nextflow" | "nextflow") {
         install_dynamic_template(&biovault_home_abs)?;
     }
 
@@ -1285,6 +1430,9 @@ pub async fn execute_dynamic(
     #[cfg(not(target_os = "windows"))]
     let vm_results_dir: Option<String> = None;
 
+    #[cfg(target_os = "windows")]
+    let mut vm_project_path: Option<String> = None;
+
     // Track Hyper-V host mount temp dir for optional results copy-back
     #[cfg(target_os = "windows")]
     let mut hyperv_flat_dir: Option<PathBuf> = None;
@@ -1374,6 +1522,11 @@ pub async fn execute_dynamic(
             let vm_workflow =
                 format!("{}/{}", vm_project, workflow_rel.display()).replace('\\', "/");
             let vm_spec = format!("{}/{}", vm_project, spec_rel.display()).replace('\\', "/");
+
+            #[cfg(target_os = "windows")]
+            {
+                vm_project_path = Some(vm_project.clone());
+            }
 
             (
                 vm_biovault_home,
@@ -1864,7 +2017,7 @@ pub async fn execute_dynamic(
 
         // For Hyper-V mode: use VM-local paths. For normal mode: use container mount paths.
         #[cfg(target_os = "windows")]
-        let (docker_inputs_json, docker_params_json) = if let Some(ref vm_data) = vm_data_dir {
+        let (docker_inputs_json, mut docker_params_json) = if let Some(ref vm_data) = vm_data_dir {
             (
                 remap_json_paths_for_vm(&inputs_json_value, vm_data),
                 remap_json_paths_for_vm(&params_json_value, vm_data),
@@ -1882,6 +2035,18 @@ pub async fn execute_dynamic(
             remap_json_paths_for_container(&params_json_value, using_podman),
         );
 
+        #[cfg(target_os = "windows")]
+        if vm_data_dir.is_some() {
+            if let Some(ref vm_project) = vm_project_path {
+                if let JsonValue::Object(ref mut map) = docker_params_json {
+                    map.insert(
+                        "assets_dir".to_string(),
+                        JsonValue::String(format!("{}/assets", vm_project)),
+                    );
+                }
+            }
+        }
+
         let docker_inputs_json_str = serde_json::to_string(&docker_inputs_json)
             .context("Failed to encode Docker inputs metadata to JSON")?;
         let docker_params_json_str = serde_json::to_string(&docker_params_json)
@@ -1890,7 +2055,7 @@ pub async fn execute_dynamic(
         docker_cmd
             .arg("--work_flow_file")
             .arg(&docker_workflow)
-            .arg("--project_spec")
+            .arg("--module_spec")
             .arg(&docker_project_spec)
             .arg("--inputs_json")
             .arg(docker_inputs_json_str)
@@ -1971,7 +2136,7 @@ pub async fn execute_dynamic(
         native_cmd
             .arg("--work_flow_file")
             .arg(&workflow_abs)
-            .arg("--project_spec")
+            .arg("--module_spec")
             .arg(&project_spec_abs)
             .arg("--inputs_json")
             .arg(inputs_json_str)
@@ -1982,6 +2147,10 @@ pub async fn execute_dynamic(
 
         native_cmd
     };
+
+    for (key, value) in &env_map {
+        cmd.env(key, value);
+    }
 
     let display_cmd = format_command(&cmd);
 
@@ -2086,6 +2255,919 @@ pub async fn execute_dynamic(
 
     println!("\n✅ Workflow completed successfully!");
     append_desktop_log("[Pipeline] Workflow completed successfully!");
+    Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct DatasiteContext {
+    datasites: Vec<String>,
+    current: Option<String>,
+    index: Option<usize>,
+}
+
+fn resolve_current_datasite() -> Option<String> {
+    if let Ok(env_override) = env::var("BIOVAULT_DATASITE_OVERRIDE") {
+        if !env_override.trim().is_empty() {
+            return Some(env_override.trim().to_string());
+        }
+    }
+    if let Ok(cfg) = crate::config::Config::load() {
+        if !cfg.email.trim().is_empty() {
+            return Some(cfg.email);
+        }
+    }
+    if let Ok(env_email) = env::var("SYFTBOX_EMAIL") {
+        if !env_email.trim().is_empty() {
+            return Some(env_email.trim().to_string());
+        }
+    }
+    if let Ok(env_email) = env::var("BIOVAULT_DATASITE") {
+        if !env_email.trim().is_empty() {
+            return Some(env_email.trim().to_string());
+        }
+    }
+    None
+}
+
+fn resolve_datasites_override() -> Option<Vec<String>> {
+    let raw = env::var("BIOVAULT_DATASITES_OVERRIDE").ok()?;
+    let list: Vec<String> = raw
+        .split(',')
+        .map(|entry| entry.trim())
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| entry.to_string())
+        .collect();
+    if list.is_empty() {
+        None
+    } else {
+        Some(list)
+    }
+}
+
+fn resolve_datasite_index(datasites: &[String], current: Option<&str>) -> Option<usize> {
+    let current = current?;
+    datasites.iter().position(|site| site == current)
+}
+
+fn render_template(value: &str, ctx: &DatasiteContext) -> String {
+    let mut rendered = value.to_string();
+    if let Some(current) = &ctx.current {
+        rendered = rendered.replace("{current_datasite}", current);
+    }
+    if let Some(index) = ctx.index {
+        rendered = rendered.replace("{datasites.index}", &index.to_string());
+        rendered = rendered.replace("{datasite.index}", &index.to_string());
+    }
+    rendered.replace("{datasites}", &ctx.datasites.join(","))
+}
+
+fn env_key_suffix(name: &str) -> String {
+    name.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn build_shell_env(
+    spec_env: &BTreeMap<String, String>,
+    step_env: &BTreeMap<String, String>,
+    ctx: &DatasiteContext,
+    project_path: &Path,
+    results_path: &Path,
+    step_id: &str,
+) -> BTreeMap<String, String> {
+    let mut env_map = spec_env.clone();
+    for (key, value) in step_env {
+        env_map.insert(key.clone(), value.clone());
+    }
+
+    let mut rendered = BTreeMap::new();
+    for (key, value) in env_map {
+        rendered.insert(key, render_template(&value, ctx));
+    }
+
+    if let Ok(bv_bin) = env::var("BV_BIN") {
+        if !bv_bin.trim().is_empty() {
+            rendered.insert("BV_BIN".to_string(), bv_bin);
+        }
+    }
+
+    rendered.insert(
+        "BV_PROJECT_DIR".to_string(),
+        project_path.to_string_lossy().to_string(),
+    );
+    rendered.insert(
+        "BV_RESULTS_DIR".to_string(),
+        results_path.to_string_lossy().to_string(),
+    );
+    rendered.insert(
+        "BV_ASSETS_DIR".to_string(),
+        project_path.join("assets").to_string_lossy().to_string(),
+    );
+    rendered.insert("BV_STEP_ID".to_string(), step_id.to_string());
+    rendered.insert("BV_DATASITES".to_string(), ctx.datasites.join(","));
+
+    if let Some(current) = &ctx.current {
+        rendered.insert("BV_CURRENT_DATASITE".to_string(), current.clone());
+    }
+    if let Some(index) = ctx.index {
+        rendered.insert("BV_DATASITE_INDEX".to_string(), index.to_string());
+    }
+
+    rendered
+}
+
+fn shell_passthrough_args(args: &[String]) -> Vec<String> {
+    args.iter()
+        .position(|arg| arg == "--")
+        .map(|idx| args[idx + 1..].to_vec())
+        .unwrap_or_default()
+}
+
+fn default_shell_step(spec: &ModuleSpec) -> ModuleStepSpec {
+    ModuleStepSpec {
+        id: "run".to_string(),
+        foreach: spec.datasites.clone(),
+        order: None,
+        env: BTreeMap::new(),
+        inputs: Vec::new(),
+        outputs: Vec::new(),
+    }
+}
+
+async fn execute_shell(
+    spec: &ModuleSpec,
+    project_path: &Path,
+    args: Vec<String>,
+    dry_run: bool,
+    results_dir: Option<String>,
+    _run_settings: RunSettings,
+) -> Result<()> {
+    let workflow_path = project_path.join(&spec.workflow);
+    if !workflow_path.exists() {
+        return Err(anyhow::anyhow!("Workflow file not found: {}", workflow_path.display()).into());
+    }
+
+    let results_path = if let Some(dir) = results_dir {
+        let path = PathBuf::from(&dir);
+        if path.is_absolute() {
+            path
+        } else {
+            project_path.join(dir)
+        }
+    } else {
+        project_path.join("results")
+    };
+    if !dry_run {
+        fs::create_dir_all(&results_path)?;
+    }
+
+    let current_datasite = resolve_current_datasite();
+    if spec.datasites.is_some() && current_datasite.is_none() {
+        return Err(anyhow::anyhow!(
+            "datasites specified in project.yaml but current datasite could not be determined"
+        )
+        .into());
+    }
+
+    let parsed_args = parse_cli_args(&args)?;
+    let steps = if spec.steps.is_empty() {
+        vec![default_shell_step(spec)]
+    } else {
+        spec.steps.clone()
+    };
+
+    for step in steps {
+        let passthrough_args = shell_passthrough_args(&args);
+        let step_targets = step
+            .foreach
+            .clone()
+            .or_else(|| spec.datasites.clone())
+            .unwrap_or_default();
+
+        let should_run = if step_targets.is_empty() {
+            true
+        } else if let Some(current) = current_datasite.as_ref() {
+            step_targets.iter().any(|site| site == current)
+        } else {
+            false
+        };
+
+        if !should_run {
+            println!(
+                "⏭️  Skipping step '{}' (current datasite not in foreach list)",
+                step.id
+            );
+            continue;
+        }
+
+        let template_datasites = if let Some(override_list) = resolve_datasites_override() {
+            override_list
+        } else if let Some(spec_datasites) = &spec.datasites {
+            if spec_datasites.is_empty() {
+                step_targets.clone()
+            } else {
+                spec_datasites.clone()
+            }
+        } else {
+            step_targets.clone()
+        };
+        let index = resolve_datasite_index(&template_datasites, current_datasite.as_deref());
+
+        let ctx = DatasiteContext {
+            datasites: template_datasites,
+            current: current_datasite.clone(),
+            index,
+        };
+
+        let mut env_map = build_shell_env(
+            &spec.env,
+            &step.env,
+            &ctx,
+            project_path,
+            &results_path,
+            &step.id,
+        );
+        if !env_map.contains_key("BV_RUN_ID") {
+            if let Ok(Some(hash)) = module_yaml_hash(project_path) {
+                env_map.insert("BV_RUN_ID".to_string(), hash);
+            }
+        }
+        if let Ok(cfg) = crate::config::Config::load() {
+            if let Ok(data_dir) = cfg.get_syftbox_data_dir() {
+                env_map
+                    .entry("BV_SYFTBOX_DATA_DIR".to_string())
+                    .or_insert_with(|| data_dir.to_string_lossy().to_string());
+                let datasites_root = data_dir.join("datasites");
+                env_map
+                    .entry("BV_DATASITES_ROOT".to_string())
+                    .or_insert_with(|| datasites_root.to_string_lossy().to_string());
+            }
+        }
+        let input_specs = if step.inputs.is_empty() {
+            &spec.inputs
+        } else {
+            &step.inputs
+        };
+        for input in input_specs {
+            let env_key = format!("BV_INPUT_{}", env_key_suffix(&input.name));
+            if let Some(arg) = parsed_args.inputs.get(&input.name) {
+                let rendered_value = render_template(&arg.value, &ctx);
+                let input_path = if Path::new(&rendered_value).is_absolute() {
+                    PathBuf::from(rendered_value)
+                } else {
+                    project_path.join(rendered_value)
+                };
+                env_map.insert(env_key, input_path.to_string_lossy().to_string());
+                continue;
+            }
+            if let Some(path_template) = input.path.as_deref() {
+                let rendered_path = render_template(path_template, &ctx);
+                let input_path = if Path::new(&rendered_path).is_absolute() {
+                    PathBuf::from(rendered_path)
+                } else {
+                    project_path.join(rendered_path)
+                };
+                env_map
+                    .entry(env_key)
+                    .or_insert_with(|| input_path.to_string_lossy().to_string());
+            }
+        }
+        let output_specs = if step.outputs.is_empty() {
+            &spec.outputs
+        } else {
+            &step.outputs
+        };
+        for output in output_specs {
+            let raw_path = output.path.as_deref().unwrap_or(&output.name);
+            let rendered_path = render_template(raw_path, &ctx);
+            let output_path = if Path::new(&rendered_path).is_absolute() {
+                PathBuf::from(rendered_path)
+            } else {
+                results_path.join(rendered_path)
+            };
+            let env_key = format!("BV_OUTPUT_{}", env_key_suffix(&output.name));
+            env_map.insert(env_key, output_path.to_string_lossy().to_string());
+        }
+
+        let mut cmd = Command::new(resolve_git_bash());
+        // Convert Windows path to Unix-style for Git Bash
+        #[cfg(target_os = "windows")]
+        let bash_workflow_path = windows_path_to_container(&workflow_path, false);
+        #[cfg(not(target_os = "windows"))]
+        let bash_workflow_path = workflow_path.to_string_lossy().to_string();
+        cmd.arg(&bash_workflow_path);
+        if !passthrough_args.is_empty() {
+            cmd.args(&passthrough_args);
+        }
+        cmd.current_dir(project_path);
+        for (key, value) in &env_map {
+            cmd.env(key, value);
+        }
+
+        let display_cmd = format_command(&cmd);
+        if dry_run {
+            println!("\n🔍 Dry run - would execute:");
+            println!("  {}", display_cmd.dimmed());
+            continue;
+        }
+
+        println!("\n▶️  Executing shell workflow for step '{}'...", step.id);
+        println!("  {}", display_cmd.dimmed());
+        let status = cmd.status().context("Failed to execute shell workflow")?;
+        if !status.success() {
+            return Err(
+                anyhow::anyhow!("Shell workflow exited with code: {:?}", status.code()).into(),
+            );
+        }
+    }
+
+    println!("\n✅ Shell workflow completed successfully!");
+    Ok(())
+}
+
+async fn execute_syqure(
+    spec: &ModuleSpec,
+    module_path: &Path,
+    args: Vec<String>,
+    dry_run: bool,
+    results_dir: Option<String>,
+    _run_settings: RunSettings,
+) -> Result<()> {
+    println!("🔐 Running syqure module: {}", spec.name.bold());
+
+    let current_datasite = resolve_current_datasite();
+
+    let results_path = if let Some(dir) = results_dir {
+        let path = PathBuf::from(&dir);
+        if path.is_absolute() {
+            path
+        } else {
+            module_path.join(dir)
+        }
+    } else {
+        module_path.join("results")
+    };
+    if !dry_run {
+        fs::create_dir_all(&results_path)?;
+    }
+
+    let (syqure_binary, use_docker) = resolve_syqure_backend(spec)?;
+
+    let run_id = env::var("BV_RUN_ID")
+        .unwrap_or_else(|_| chrono::Local::now().format("%Y%m%d%H%M%S").to_string());
+
+    let datasites_root = env::var("BV_DATASITES_ROOT")
+        .or_else(|_| {
+            env::var("SYFTBOX_DATA_DIR").map(|dir| {
+                // Use PathBuf::join to properly handle path separators on all platforms
+                PathBuf::from(&dir)
+                    .join("datasites")
+                    .to_string_lossy()
+                    .to_string()
+            })
+        })
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "Syqure runtime requires BV_DATASITES_ROOT or SYFTBOX_DATA_DIR environment variable"
+            )
+        })?;
+
+    let entrypoint = spec
+        .runner
+        .as_ref()
+        .and_then(|r| r.entrypoint.as_ref())
+        .cloned()
+        .unwrap_or_else(|| spec.workflow.clone());
+
+    let entrypoint_path = module_path.join(&entrypoint);
+    if !entrypoint_path.exists() {
+        return Err(
+            anyhow::anyhow!("Syqure entrypoint not found: {}", entrypoint_path.display()).into(),
+        );
+    }
+
+    let poll_ms = spec
+        .runner
+        .as_ref()
+        .and_then(|r| r.syqure.as_ref())
+        .and_then(|s| s.poll_ms)
+        .unwrap_or(50);
+
+    let transport = spec
+        .runner
+        .as_ref()
+        .and_then(|r| r.syqure.as_ref())
+        .and_then(|s| s.transport.as_ref())
+        .cloned()
+        .unwrap_or_else(|| "file".to_string());
+
+    let docker_platform = spec
+        .runner
+        .as_ref()
+        .and_then(|r| r.syqure.as_ref())
+        .and_then(|s| s.platform.as_ref())
+        .cloned()
+        .unwrap_or_else(|| "linux/amd64".to_string());
+
+    let parsed_args = parse_cli_args(&args)?;
+
+    // Build datasite context - same pattern as execute_shell
+    let datasites_list = resolve_datasites_override()
+        .or_else(|| spec.datasites.clone())
+        .unwrap_or_default();
+    let datasite_index_ctx = resolve_datasite_index(&datasites_list, current_datasite.as_deref());
+    let ctx = DatasiteContext {
+        datasites: datasites_list.clone(),
+        current: current_datasite.clone(),
+        index: datasite_index_ctx,
+    };
+
+    // MPC party info - derived from context, not env vars
+    let party_emails = if datasites_list.is_empty() {
+        env::var("BV_DATASITES").unwrap_or_default()
+    } else {
+        datasites_list.join(",")
+    };
+
+    if party_emails.is_empty() {
+        return Err(anyhow::anyhow!(
+            "Syqure runtime requires datasites in module spec or BV_DATASITES environment variable"
+        )
+        .into());
+    }
+
+    let party_count = party_emails.split(',').count();
+    let current_email = current_datasite.clone().unwrap_or_default();
+    let party_id = datasite_index_ctx.unwrap_or(0);
+
+    let mut env_map = build_shell_env(
+        &spec.env,
+        &BTreeMap::new(),
+        &ctx,
+        module_path,
+        &results_path,
+        "syqure",
+    );
+
+    // MPC file dir must match flow.yaml mpc.url pattern: shared/flows/{flow_name}/{run_id}/_mpc
+    let flow_name = env::var("BV_FLOW_NAME").unwrap_or_else(|_| "syqure-flow".to_string());
+    let file_dir = format!("shared/flows/{}/{}/_mpc", flow_name, run_id);
+
+    env_map.insert("SEQURE_TRANSPORT".to_string(), transport);
+    env_map.insert("SEQURE_FILE_DIR".to_string(), file_dir);
+    env_map.insert("SEQURE_FILE_POLL_MS".to_string(), poll_ms.to_string());
+    env_map.insert("SEQURE_CP_COUNT".to_string(), party_count.to_string());
+    env_map.insert("SEQURE_PARTY_EMAILS".to_string(), party_emails.clone());
+    env_map.insert("SEQURE_DATASITES_ROOT".to_string(), datasites_root.clone());
+    env_map.insert("SEQURE_LOCAL_EMAIL".to_string(), current_email.clone());
+    env_map.insert("SEQURE_FILE_KEEP".to_string(), "1".to_string());
+    env_map.insert("SEQURE_FILE_DEBUG".to_string(), "1".to_string());
+    if env::var("SYQURE_BUNDLE_CACHE").is_err() {
+        let cache_dir = PathBuf::from(&datasites_root)
+            .join(".syqure-cache")
+            .join(&run_id)
+            .join(format!("party-{}", party_id));
+        env_map.insert(
+            "SYQURE_BUNDLE_CACHE".to_string(),
+            cache_dir.to_string_lossy().to_string(),
+        );
+    }
+
+    for input in &spec.inputs {
+        let env_key = format!("BV_INPUT_{}", env_key_suffix(&input.name));
+        let sequre_env_key = format!("SEQURE_INPUT_{}", env_key_suffix(&input.name));
+        if let Some(arg) = parsed_args.inputs.get(&input.name) {
+            let rendered_value = render_template(&arg.value, &ctx);
+            let final_value = if input.raw_type == "File" {
+                let input_path = if Path::new(&rendered_value).is_absolute() {
+                    PathBuf::from(rendered_value)
+                } else {
+                    module_path.join(rendered_value)
+                };
+                input_path.to_string_lossy().to_string()
+            } else {
+                rendered_value
+            };
+            env_map.insert(env_key.clone(), final_value.clone());
+            env_map.insert(sequre_env_key, final_value);
+        } else if let Some(path_template) = input.path.as_deref() {
+            let rendered_path = render_template(path_template, &ctx);
+            let input_path = if Path::new(&rendered_path).is_absolute() {
+                PathBuf::from(rendered_path)
+            } else {
+                module_path.join(rendered_path)
+            };
+            let path_str = input_path.to_string_lossy().to_string();
+            env_map.insert(env_key, path_str.clone());
+            env_map.insert(sequre_env_key, path_str);
+        }
+    }
+
+    for output in &spec.outputs {
+        let env_key = format!("BV_OUTPUT_{}", env_key_suffix(&output.name));
+        let sequre_env_key = format!("SEQURE_OUTPUT_{}", env_key_suffix(&output.name));
+        if let Some(path_template) = output.path.as_deref() {
+            let rendered_path = render_template(path_template, &ctx);
+            let output_path = results_path.join(&rendered_path);
+            let path_str = output_path.to_string_lossy().to_string();
+            env_map.insert(env_key, path_str.clone());
+            env_map.insert(sequre_env_key, path_str);
+        }
+    }
+
+    if dry_run {
+        println!("\n📋 [DRY RUN] Syqure execution plan:");
+        println!(
+            "  Backend: {}",
+            if use_docker { "docker" } else { "native" }
+        );
+        println!("  Binary/Image: {}", syqure_binary);
+        println!("  Entrypoint: {}", entrypoint_path.display());
+        println!("  Party ID: {}", party_id);
+        println!("  Party count: {}", party_count);
+        println!("  Run ID: {}", run_id);
+        println!("\n  Environment:");
+        for (k, v) in env_map
+            .iter()
+            .filter(|(k, _)| k.starts_with("SEQURE_") || k.starts_with("BV_"))
+        {
+            println!("    {}={}", k, v);
+        }
+        return Ok(());
+    }
+
+    fs::create_dir_all(&datasites_root)?;
+
+    if use_docker {
+        execute_syqure_docker(
+            &syqure_binary,
+            &entrypoint_path,
+            party_id,
+            &env_map,
+            module_path,
+            &datasites_root,
+            &run_id,
+            &docker_platform,
+        )?;
+    } else {
+        execute_syqure_native(&syqure_binary, &entrypoint_path, party_id, &env_map)?;
+    }
+
+    println!("\n✅ Syqure execution completed successfully!");
+    Ok(())
+}
+
+fn resolve_syqure_backend(spec: &ModuleSpec) -> Result<(String, bool)> {
+    let syqure_opts = spec.runner.as_ref().and_then(|r| r.syqure.as_ref());
+
+    let force_docker_env = env::var("BV_SYQURE_USE_DOCKER")
+        .map(|v| v == "1" || v.to_lowercase() == "true")
+        .unwrap_or(false);
+
+    let force_docker_spec = syqure_opts.and_then(|s| s.use_docker).unwrap_or(false);
+
+    let is_windows = cfg!(target_os = "windows");
+    let use_docker = force_docker_env || force_docker_spec || is_windows;
+
+    if use_docker {
+        let docker_image = syqure_opts
+            .and_then(|s| s.docker_image.as_ref())
+            .cloned()
+            .or_else(|| {
+                crate::config::Config::load()
+                    .ok()
+                    .and_then(|c| c.syqure.and_then(|s| s.docker_image))
+            })
+            .unwrap_or_else(|| "ghcr.io/madhavajay/syqure-cli:latest".to_string());
+        return Ok((docker_image, true));
+    }
+
+    if let Some(binary) = syqure_opts.and_then(|s| s.binary.as_ref()) {
+        if Path::new(binary).exists() {
+            return Ok((binary.clone(), false));
+        }
+    }
+
+    if let Ok(bin) = env::var("SEQURE_NATIVE_BIN") {
+        if Path::new(&bin).exists() {
+            return Ok((bin, false));
+        }
+    }
+
+    if let Ok(config) = crate::config::Config::load() {
+        if let Some(syqure_cfg) = config.syqure {
+            if let Some(use_docker_cfg) = syqure_cfg.use_docker {
+                if use_docker_cfg {
+                    let image = syqure_cfg
+                        .docker_image
+                        .unwrap_or_else(|| "ghcr.io/madhavajay/syqure-cli:latest".to_string());
+                    return Ok((image, true));
+                }
+            }
+            if let Some(binary) = syqure_cfg.binary {
+                if Path::new(&binary).exists() {
+                    return Ok((binary, false));
+                }
+            }
+        }
+        if let Some(paths) = config.binary_paths {
+            if let Some(syqure_path) = paths.syqure {
+                if Path::new(&syqure_path).exists() {
+                    return Ok((syqure_path, false));
+                }
+            }
+        }
+    }
+
+    if let Ok(which_output) = Command::new("which").arg("syqure").output() {
+        if which_output.status.success() {
+            let path = String::from_utf8_lossy(&which_output.stdout)
+                .trim()
+                .to_string();
+            if !path.is_empty() && Path::new(&path).exists() {
+                return Ok((path, false));
+            }
+        }
+    }
+
+    Err(anyhow::anyhow!(
+        "Syqure binary not found. Set SEQURE_NATIVE_BIN environment variable, \
+         configure binary path in biovault config, or use Docker mode (use_docker: true)"
+    )
+    .into())
+}
+
+fn execute_syqure_native(
+    binary: &str,
+    entrypoint: &Path,
+    party_id: usize,
+    env_map: &BTreeMap<String, String>,
+) -> Result<()> {
+    println!("  Using native syqure: {}", binary);
+
+    let mut cmd = Command::new(binary);
+    cmd.arg(entrypoint);
+    cmd.arg("--");
+    cmd.arg(party_id.to_string());
+
+    for (k, v) in env_map {
+        cmd.env(k, v);
+    }
+    if env::var("BV_SYQURE_BACKTRACE")
+        .map(|v| v == "1" || v.to_lowercase() == "true")
+        .unwrap_or(false)
+    {
+        cmd.env("RUST_BACKTRACE", "1");
+    }
+
+    let display_cmd = format_command(&cmd);
+    println!("\n▶️  Executing syqure...");
+    println!("  {}", display_cmd.dimmed());
+
+    let datasites_root = env_map
+        .get("SEQURE_DATASITES_ROOT")
+        .cloned()
+        .unwrap_or_default();
+    let file_dir = env_map.get("SEQURE_FILE_DIR").cloned().unwrap_or_default();
+    let party_emails: Vec<String> = env_map
+        .get("SEQURE_PARTY_EMAILS")
+        .map(|s| s.split(',').map(|e| e.to_string()).collect())
+        .unwrap_or_default();
+    let _local_email = env_map
+        .get("SEQURE_LOCAL_EMAIL")
+        .cloned()
+        .unwrap_or_default();
+
+    let stop_flag = Arc::new(AtomicBool::new(false));
+    let stop_flag_clone = stop_flag.clone();
+
+    let datasites_root_clone = datasites_root.clone();
+    let file_dir_clone = file_dir.clone();
+    let party_emails_clone = party_emails.clone();
+
+    let monitor_handle = thread::spawn(move || {
+        let mut last_status = String::new();
+        while !stop_flag_clone.load(Ordering::Relaxed) {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+
+            let mut status_parts = Vec::new();
+            for party in &party_emails_clone {
+                let channel_path = PathBuf::from(&datasites_root_clone)
+                    .join(party)
+                    .join(&file_dir_clone);
+                let (count, last_mod) = count_mpc_files(&channel_path);
+                let ago = last_mod.map(|lm| now.saturating_sub(lm)).unwrap_or(999);
+                let short_party = party.split('@').next().unwrap_or(party);
+                status_parts.push(format!("{}:{}f/{}s", short_party, count, ago));
+            }
+
+            let status = status_parts.join(" | ");
+            if status != last_status {
+                println!("  📡 MPC channels: {}", status);
+                last_status = status;
+            }
+
+            thread::sleep(Duration::from_secs(5));
+        }
+    });
+
+    let mut child = cmd.spawn().context("Failed to spawn syqure")?;
+    let status = child.wait().context("Failed to wait for syqure")?;
+
+    stop_flag.store(true, Ordering::Relaxed);
+    let _ = monitor_handle.join();
+
+    if !status.success() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::ExitStatusExt;
+            if let Some(signal) = status.signal() {
+                return Err(anyhow::anyhow!("Syqure exited due to signal: {}", signal).into());
+            }
+        }
+        return Err(anyhow::anyhow!("Syqure exited with code: {:?}", status.code()).into());
+    }
+
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_syqure_docker(
+    image: &str,
+    entrypoint: &Path,
+    party_id: usize,
+    env_map: &BTreeMap<String, String>,
+    module_path: &Path,
+    datasites_root: &str,
+    run_id: &str,
+    platform: &str,
+) -> Result<()> {
+    fn to_container_path(path: &Path) -> String {
+        path.to_string_lossy().replace('\\', "/")
+    }
+
+    fn map_env_path(
+        value: &str,
+        module_root: &Path,
+        results_root: &Path,
+        datasites_root: &Path,
+    ) -> Option<String> {
+        if value.starts_with('/') {
+            return Some(value.replace('\\', "/"));
+        }
+        let stripped = strip_extended_path_prefix(value);
+        let value_path = PathBuf::from(&stripped);
+        if let Ok(rel_path) = value_path.strip_prefix(results_root) {
+            return Some(format!("/results/{}", to_container_path(&rel_path)));
+        }
+        if let Ok(rel_path) = value_path.strip_prefix(module_root) {
+            return Some(format!(
+                "/workspace/project/{}",
+                to_container_path(&rel_path)
+            ));
+        }
+        if let Ok(rel_path) = value_path.strip_prefix(datasites_root) {
+            return Some(format!("/datasites/{}", to_container_path(&rel_path)));
+        }
+        None
+    }
+
+    // Use podman if BIOVAULT_CONTAINER_RUNTIME is set to "podman"
+    let container_runtime =
+        env::var("BIOVAULT_CONTAINER_RUNTIME").unwrap_or_else(|_| "docker".to_string());
+
+    println!(
+        "  Using {} image: {}",
+        if container_runtime == "podman" {
+            "Podman"
+        } else {
+            "Docker"
+        },
+        image
+    );
+
+    let container_name = format!("syqure-{}-pid{}", run_id, party_id);
+    let keep_containers = env_var_truthy("BIOVAULT_SYQURE_KEEP_CONTAINERS")
+        || env_var_truthy("BV_SYQURE_KEEP_CONTAINERS");
+
+    let _ = Command::new(&container_runtime)
+        .args(["rm", "-f", &container_name])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+
+    let module_path_abs = module_path
+        .canonicalize()
+        .unwrap_or_else(|_| module_path.to_path_buf());
+
+    let datasites_in_container = "/datasites";
+    let results_in_container = "/results";
+
+    let shared_datasites_root = env::var("BV_SHARED_DATASITES_ROOT").ok();
+    let effective_datasites_mount = shared_datasites_root.as_deref().unwrap_or(datasites_root);
+
+    let entrypoint_rel = entrypoint.strip_prefix(module_path).unwrap_or(entrypoint);
+    let container_entrypoint = format!("/workspace/project/{}", to_container_path(entrypoint_rel));
+
+    let results_root = env_map
+        .get("BV_RESULTS_DIR")
+        .and_then(|p| {
+            let path = PathBuf::from(p);
+            path.parent()
+                .and_then(|p| p.parent())
+                .map(|p| p.to_path_buf())
+        })
+        .unwrap_or_else(|| module_path.join("results"));
+
+    let module_root_for_match = PathBuf::from(strip_extended_path_prefix(
+        &module_path_abs.to_string_lossy().to_string(),
+    ));
+    let results_root_for_match = PathBuf::from(strip_extended_path_prefix(
+        &results_root.to_string_lossy().to_string(),
+    ));
+    let datasites_root_for_match = PathBuf::from(strip_extended_path_prefix(
+        effective_datasites_mount,
+    ));
+
+    let mut cmd = Command::new(&container_runtime);
+    cmd.args(["run", "--name", &container_name]);
+    if !keep_containers {
+        cmd.arg("--rm");
+    }
+
+    // Only add --platform for docker (podman handles this differently)
+    if container_runtime == "docker" {
+        cmd.args(["--platform", platform]);
+    }
+
+    for (k, v) in env_map {
+        if k == "SEQURE_DATASITES_ROOT" {
+            cmd.args(["-e", &format!("{}={}", k, datasites_in_container)]);
+        } else if let Some(mapped) = map_env_path(
+            v,
+            &module_root_for_match,
+            &results_root_for_match,
+            &datasites_root_for_match,
+        ) {
+            cmd.args(["-e", &format!("{}={}", k, mapped)]);
+        } else {
+            cmd.args(["-e", &format!("{}={}", k, v)]);
+        }
+    }
+
+    // Strip Windows extended path prefix for Docker volume mounts
+    let module_mount_path = strip_extended_path_prefix(module_path_abs.to_string_lossy().as_ref());
+    let datasites_mount_path = strip_extended_path_prefix(effective_datasites_mount);
+    let results_mount_path = strip_extended_path_prefix(results_root.to_string_lossy().as_ref());
+
+    cmd.args(["-v", &format!("{}:/workspace/project", module_mount_path)]);
+    cmd.args([
+        "-v",
+        &format!("{}:{}", datasites_mount_path, datasites_in_container),
+    ]);
+    cmd.args([
+        "-v",
+        &format!("{}:{}", results_mount_path, results_in_container),
+    ]);
+
+    cmd.arg(image);
+    cmd.arg("syqure");
+    cmd.arg(&container_entrypoint);
+    cmd.args(["--", &party_id.to_string()]);
+
+    let display_cmd = format_command(&cmd);
+    println!("\n▶️  Executing syqure in Docker...");
+    println!("  {}", display_cmd.dimmed());
+
+    let status = cmd.status().context("Failed to execute syqure in Docker")?;
+    if !status.success() {
+        if keep_containers {
+            eprintln!("Syqure container {} failed; dumping logs:", container_name);
+            let _ = Command::new(&container_runtime)
+                .args(["logs", "--tail", "200", &container_name])
+                .status();
+        } else {
+            eprintln!(
+                "Syqure container exited with code {:?}. Re-run with BIOVAULT_SYQURE_KEEP_CONTAINERS=1 to keep containers for logs.",
+                status.code()
+            );
+        }
+        return Err(anyhow::anyhow!(
+            "Syqure Docker container exited with code: {:?}",
+            status.code()
+        )
+        .into());
+    }
+
     Ok(())
 }
 
@@ -2227,7 +3309,7 @@ fn parse_cli_args(args: &[String]) -> Result<ParsedArgs> {
     })
 }
 
-fn validate_no_clashes(spec: &ProjectSpec, parsed: &ParsedArgs) -> Result<()> {
+fn validate_no_clashes(spec: &ModuleSpec, parsed: &ParsedArgs) -> Result<()> {
     let input_names: Vec<&str> = spec.inputs.iter().map(|i| i.name.as_str()).collect();
     let output_names: Vec<&str> = spec.outputs.iter().map(|o| o.name.as_str()).collect();
 
@@ -2264,7 +3346,7 @@ fn validate_no_clashes(spec: &ProjectSpec, parsed: &ParsedArgs) -> Result<()> {
 }
 
 fn build_inputs_json(
-    spec: &ProjectSpec,
+    spec: &ModuleSpec,
     parsed: &ParsedArgs,
     _project_path: &Path,
 ) -> Result<HashMap<String, JsonValue>> {
@@ -2305,10 +3387,7 @@ fn build_inputs_json(
     Ok(inputs_json)
 }
 
-fn build_params_json(
-    spec: &ProjectSpec,
-    parsed: &ParsedArgs,
-) -> Result<HashMap<String, JsonValue>> {
+fn build_params_json(spec: &ModuleSpec, parsed: &ParsedArgs) -> Result<HashMap<String, JsonValue>> {
     let mut params_json = HashMap::new();
 
     for param_spec in &spec.parameters {
@@ -2798,16 +3877,19 @@ fn install_dynamic_template(biovault_home: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::project_spec::{InputSpec, ProjectSpec};
+    use crate::module_spec::{InputSpec, ModuleSpec};
     use tempfile::TempDir;
 
-    fn sample_project_spec() -> ProjectSpec {
-        ProjectSpec {
+    fn sample_project_spec() -> ModuleSpec {
+        ModuleSpec {
             name: "test".to_string(),
             author: "author".to_string(),
             workflow: "workflow.nf".to_string(),
-            template: Some("dynamic-nextflow".to_string()),
+            description: None,
+            runtime: Some("nextflow".to_string()),
             version: None,
+            datasites: None,
+            env: Default::default(),
             assets: vec![],
             parameters: vec![],
             inputs: vec![
@@ -2829,6 +3911,8 @@ mod tests {
                 },
             ],
             outputs: vec![],
+            steps: Vec::new(),
+            runner: None,
         }
     }
 

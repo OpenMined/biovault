@@ -158,6 +158,7 @@ mod tests {
             agent_bridge_http_port: None,
             agent_bridge_token: None,
             agent_bridge_blocklist: None,
+            syqure: None,
         };
         initial_config.save(config_dir.join("config.yaml"))?;
 
@@ -205,6 +206,7 @@ mod tests {
             agent_bridge_http_port: None,
             agent_bridge_token: None,
             agent_bridge_blocklist: None,
+            syqure: None,
         };
         cfg.save(tmp.path().join(".bv/config.yaml"))?;
 
@@ -252,6 +254,7 @@ mod tests {
             agent_bridge_http_port: None,
             agent_bridge_token: None,
             agent_bridge_blocklist: None,
+            syqure: None,
         };
         config.save(config_dir.join("config.yaml"))?;
 
@@ -284,6 +287,7 @@ mod tests {
             agent_bridge_http_port: None,
             agent_bridge_token: None,
             agent_bridge_blocklist: None,
+            syqure: None,
         };
         initial_config.save(config_dir.join("config.yaml"))?;
 

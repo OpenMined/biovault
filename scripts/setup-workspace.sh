@@ -10,6 +10,7 @@ set -euo pipefail
 #   - biovault-beaver (for notebooks)
 #   - sbenv (for environment)
 #   - bioscript (for scripts)
+#   - syqure (for secure MPC runtime)
 #
 # In a repo-managed parent workspace (biovault-desktop), dependencies
 # are already synced - this script detects that and exits early.
@@ -64,6 +65,13 @@ clone_if_missing "syftbox" "https://github.com/OpenMined/syftbox.git" "madhava/b
 clone_if_missing "biovault-beaver" "https://github.com/OpenMined/biovault-beaver.git"
 clone_if_missing "sbenv" "https://github.com/OpenMined/sbenv.git"
 clone_if_missing "bioscript" "https://github.com/OpenMined/bioscript.git"
+clone_if_missing "syqure" "https://github.com/madhavajay/syqure.git"
+
+# Ensure syqure submodules are initialized (codon, sequre, llvm)
+if [[ -d "$PARENT_DIR/syqure/.git" ]]; then
+    echo "Initializing syqure submodules..."
+    git -C "$PARENT_DIR/syqure" submodule update --init --recursive
+fi
 
 # Setup syftbox-sdk's own dependencies (syft-crypto-core)
 if [[ -f "$PARENT_DIR/syftbox-sdk/scripts/setup-workspace.sh" ]]; then
@@ -86,6 +94,7 @@ create_symlink "syftbox"
 create_symlink "biovault-beaver"
 create_symlink "sbenv"
 create_symlink "bioscript"
+create_symlink "syqure"
 
 echo ""
 echo "Workspace setup complete!"
@@ -95,3 +104,4 @@ echo "  $PARENT_DIR/syftbox"
 echo "  $PARENT_DIR/biovault-beaver"
 echo "  $PARENT_DIR/sbenv"
 echo "  $PARENT_DIR/bioscript"
+echo "  $PARENT_DIR/syqure"

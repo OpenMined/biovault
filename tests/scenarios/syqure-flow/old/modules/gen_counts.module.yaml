@@ -1,0 +1,20 @@
+apiVersion: syftbox.openmined.org/v1alpha1
+kind: Module
+metadata:
+  name: gen_counts
+  version: 0.1.0
+  description: Generate rsids and counts for a client datasite.
+spec:
+  runner:
+    kind: shell
+    template: shell
+    entrypoint: gen_counts.sh
+  outputs:
+    - name: rsids
+      type: File
+      format: { kind: txt }
+      path: rsids.txt
+    - name: counts
+      type: File
+      format: { kind: json }
+      path: counts.json

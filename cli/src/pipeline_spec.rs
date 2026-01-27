@@ -27,6 +27,34 @@ pub struct PipelineContextSpec {
     pub from_json: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum RunsOnSpec {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl RunsOnSpec {
+    pub fn as_vec(&self) -> Vec<String> {
+        match self {
+            RunsOnSpec::One(value) => vec![value.clone()],
+            RunsOnSpec::Many(values) => values.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PipelineShareSpec {
+    pub source: String,
+    pub path: String,
+    #[serde(default)]
+    pub read: Vec<String>,
+    #[serde(default)]
+    pub write: Vec<String>,
+    #[serde(default)]
+    pub admin: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PipelineStepSpec {
     pub id: String,
@@ -34,10 +62,18 @@ pub struct PipelineStepSpec {
     pub uses: Option<String>,
     #[serde(rename = "where", default, skip_serializing_if = "Option::is_none")]
     pub where_exec: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub foreach: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runs_on: Option<RunsOnSpec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order: Option<String>,
     #[serde(default)]
     pub with: BTreeMap<String, YamlValue>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub publish: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub share: BTreeMap<String, PipelineShareSpec>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub store: BTreeMap<String, PipelineStoreSpec>,
 }

@@ -98,8 +98,8 @@ impl Message {
 pub enum MessageType {
     #[default]
     Text,
-    Project {
-        project_name: String,
+    Module {
+        module_name: String,
         submission_id: String,
         files_hash: Option<String>,
     },
@@ -127,9 +127,9 @@ pub struct MessageThreadSummary {
     pub last_message_status: MessageStatus,
     pub unread_count: usize,
     pub total_messages: usize,
-    pub has_project: bool,
+    pub has_module: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub project_name: Option<String>,
+    pub module_name: Option<String>,
 }
 
 impl MessageThreadSummary {
@@ -142,7 +142,7 @@ impl std::fmt::Display for MessageType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             MessageType::Text => write!(f, "text"),
-            MessageType::Project { .. } => write!(f, "project"),
+            MessageType::Module { .. } => write!(f, "module"),
             MessageType::Request { .. } => write!(f, "request"),
         }
     }
@@ -346,12 +346,12 @@ mod tests {
     fn messages_display_impls() {
         let t1 = MessageType::Text;
         assert_eq!(t1.to_string(), "text");
-        let t2 = MessageType::Project {
-            project_name: "p".into(),
+        let t2 = MessageType::Module {
+            module_name: "p".into(),
             submission_id: "s".into(),
             files_hash: None,
         };
-        assert_eq!(t2.to_string(), "project");
+        assert_eq!(t2.to_string(), "module");
         let t3 = MessageType::Request {
             request_type: "x".into(),
             params: None,

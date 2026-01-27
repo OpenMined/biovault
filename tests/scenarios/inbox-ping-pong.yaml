@@ -45,9 +45,9 @@ steps:
         --non-interactive \
         --force
 
-  - name: Wait for module files to sync
+  - name: Wait for module request to arrive
     datasite: client2@sandbox.local
-    wait_for: datasites/client1@sandbox.local/shared/biovault/submissions/*/module.yaml
+    wait_for: datasites/client2@sandbox.local/app_data/biovault/rpc/message/*.request
     timeout: 30
 
   - name: Client2 syncs inbox
@@ -64,16 +64,18 @@ steps:
   - name: Extract module message ID
     datasite: client2@sandbox.local
     run: |
-      jq -r '.messages[] | select(.message_type.Project != null) | .id' <<< '{{inbox_json}}' | head -n 1
-    capture: project_msg
+      jq -r '.messages[] | select(.message_type.Module != null) | .id' <<< '{{inbox_json}}' | head -n 1
+    capture: module_msg
 
   - name: Client2 processes module (test mode, approve)
     datasite: client2@sandbox.local
     run: |
-      {{workspace}}/cli/target/release/bv message process "{{project_msg}}" \
+      {{workspace}}/cli/target/release/bv message process "{{module_msg}}" \
         --test \
         --participant ALL \
         --approve \
+        --sync \
+        --sync-timeout 120 \
         --non-interactive
 
   - name: Assert Client2 has module file shadows

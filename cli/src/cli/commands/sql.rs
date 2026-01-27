@@ -613,7 +613,7 @@ fn is_protected_table(table: &str) -> bool {
     let protected = [
         "participants",
         "files",
-        "projects",
+        "modules",
         "runs",
         "run_participants",
         "messages",

@@ -1,0 +1,20 @@
+name: share-collect
+author: madhava@openmined.org
+workflow: workflow.sh
+template: shell
+version: 0.1.0
+description: Aggregator collects shared hello files from clients.
+inputs:
+  - name: shared_paths
+    type: File
+    description: Manifest of shared hello files (datasite\tpath)
+    format: txt
+  - name: wait_seconds
+    type: String
+    description: How long to wait for shared files
+outputs:
+  - name: combined
+    type: File
+    description: Combined hello output
+    format: txt
+    path: combined_hello.txt
