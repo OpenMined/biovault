@@ -546,14 +546,34 @@ mod tests {
 
 fn ensure_default_syft_subscriptions(data_root: &Path) -> Result<()> {
     let sub_path = data_root.join(".data").join("syft.sub.yaml");
-    if sub_path.exists() {
+    let mut cfg = if sub_path.exists() {
+        subscriptions::load(&sub_path)
+            .unwrap_or_else(|_| subscriptions::default_config())
+    } else {
+        if let Some(parent) = sub_path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("Failed to create {}", parent.display()))?;
+        }
+        subscriptions::default_config()
+    };
+
+    let mut changed = false;
+    for rule in subscriptions::default_rules() {
+        let exists = cfg.rules.iter().any(|existing| {
+            existing.action == rule.action
+                && existing.datasite == rule.datasite
+                && existing.path == rule.path
+        });
+        if !exists {
+            cfg.rules.push(rule);
+            changed = true;
+        }
+    }
+
+    if sub_path.exists() && !changed {
         return Ok(());
     }
-    if let Some(parent) = sub_path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("Failed to create {}", parent.display()))?;
-    }
-    let contents = serde_yaml::to_string(&subscriptions::default_config())
+    let contents = serde_yaml::to_string(&cfg)
         .with_context(|| "Failed to serialize default syft.sub.yaml")?;
     fs::write(&sub_path, contents)
         .with_context(|| format!("Failed to write {}", sub_path.display()))?;

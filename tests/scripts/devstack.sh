@@ -399,41 +399,6 @@ start_syftboxd() {
   done
 }
 
-write_public_subscriptions() {
-  local email="$1"
-  local sub_path="$SANDBOX_DIR/$email/.data/syft.sub.yaml"
-  mkdir -p "$(dirname "$sub_path")"
-  cat >"$sub_path" <<'EOF'
-version: 1
-defaults:
-  action: block
-rules:
-  - action: allow
-    datasite: "*"
-    path: "public/crypto/did.json"
-  - action: allow
-    datasite: "*"
-    path: "public/biovault/datasets.yaml"
-  - action: allow
-    datasite: "*"
-    path: "public/biovault/datasets/*/dataset.yaml"
-  - action: allow
-    datasite: "*"
-    path: "app_data/biovault/*.yaml"
-  - action: allow
-    datasite: "*"
-    path: "**/syft.pub.yaml"
-  - action: allow
-    datasite: "*"
-    path: "**/*.request"
-  - action: allow
-    datasite: "*"
-    path: "**/*.response"
-  - action: allow
-    datasite: "*"
-    path: "shared/biovault/**/flow.yaml"
-EOF
-}
 
 start_stack() {
   require_bin go
@@ -519,12 +484,6 @@ PY
 
   if (( EMBEDDED_MODE )); then
     start_syftboxd
-  fi
-
-  if (( ALLOW_PUBLIC_SUBS )); then
-    for email in "${CLIENTS[@]}"; do
-      write_public_subscriptions "$email"
-    done
   fi
 
   echo ""

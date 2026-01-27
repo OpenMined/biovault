@@ -27,25 +27,22 @@ steps:
           'rules:' \
           '  - action: allow' \
           '    datasite: "*"' \
-          '    path: "public/crypto/did.json"' \
-          '  - action: allow' \
-          '    datasite: "*"' \
           '    path: "public/biovault/datasets.yaml"' \
           '  - action: allow' \
           '    datasite: "*"' \
           '    path: "public/biovault/datasets/*/dataset.yaml"' \
           '  - action: allow' \
           '    datasite: "*"' \
-          '    path: "app_data/biovault/*.yaml"' \
+          '    path: "public/crypto/did*.json"' \
           '  - action: allow' \
           '    datasite: "*"' \
           '    path: "**/syft.pub.yaml"' \
           '  - action: allow' \
           '    datasite: "*"' \
-          '    path: "**/*.request"' \
+          '    path: "app_data/biovault/rpc/**/*.request"' \
           '  - action: allow' \
           '    datasite: "*"' \
-          '    path: "**/*.response"' \
+          '    path: "app_data/biovault/rpc/**/*.response"' \
           '  - action: allow' \
           '    datasite: "*"' \
           '    path: "shared/biovault/**/flow.yaml"' \

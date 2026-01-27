@@ -70,7 +70,7 @@ pub fn default_rules() -> Vec<Rule> {
         Rule {
             action: Action::Allow,
             datasite: Some("*".to_string()),
-            path: "public/crypto/did.json".to_string(),
+            path: "public/crypto/did*.json".to_string(),
         },
         Rule {
             action: Action::Allow,
@@ -85,37 +85,22 @@ pub fn default_rules() -> Vec<Rule> {
         Rule {
             action: Action::Allow,
             datasite: Some("*".to_string()),
-            path: "app_data/biovault/*.yaml".to_string(),
-        },
-        Rule {
-            action: Action::Allow,
-            datasite: Some("*".to_string()),
             path: "**/syft.pub.yaml".to_string(),
         },
         Rule {
             action: Action::Allow,
             datasite: Some("*".to_string()),
-            path: "**/*.request".to_string(),
+            path: "app_data/biovault/rpc/**/*.request".to_string(),
         },
         Rule {
             action: Action::Allow,
             datasite: Some("*".to_string()),
-            path: "**/*.response".to_string(),
+            path: "app_data/biovault/rpc/**/*.response".to_string(),
         },
         Rule {
             action: Action::Allow,
             datasite: Some("*".to_string()),
             path: "shared/biovault/**/flow.yaml".to_string(),
-        },
-        Rule {
-            action: Action::Allow,
-            datasite: Some("*".to_string()),
-            path: "shared/flows/**".to_string(),
-        },
-        Rule {
-            action: Action::Allow,
-            datasite: Some("*".to_string()),
-            path: "shared/syqure/**".to_string(),
         },
     ]
 }
