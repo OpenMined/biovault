@@ -203,7 +203,7 @@ fn strip_extended_path_prefix(path: &str) -> String {
     path.to_string()
 }
 
-/// Convert a Windows path to a container-compatible path for volume mounts.
+/// Convert a Windows path to a container-compatible path for use *inside* the container.
 /// - Docker Desktop: C:\Users\foo -> /c/Users/foo
 /// - Podman on WSL: C:\Users\foo -> /mnt/c/Users/foo
 #[cfg(target_os = "windows")]
@@ -247,9 +247,22 @@ fn windows_path_to_container(path: &Path, use_podman_format: bool) -> String {
     }
 }
 
+/// Convert a Windows path to a host-side mount source.
+/// For Windows runtimes, the host side should be a Windows path.
+#[cfg(target_os = "windows")]
+fn windows_path_to_mount_source(path: &Path, _use_podman_format: bool) -> String {
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    strip_extended_path_prefix(canonical.to_string_lossy().as_ref())
+}
+
 #[cfg(not(target_os = "windows"))]
 fn windows_path_to_container(_path: &Path, _use_podman_format: bool) -> String {
     _path.to_string_lossy().to_string()
+}
+
+#[cfg(not(target_os = "windows"))]
+fn windows_path_to_mount_source(path: &Path, _use_podman_format: bool) -> String {
+    path.to_string_lossy().to_string()
 }
 
 /// Recursively remap Windows paths in JSON values to container-compatible paths
@@ -321,6 +334,35 @@ fn normalize_windows_path_str(s: &str) -> String {
         .strip_prefix("\\\\?\\")
         .or_else(|| s.strip_prefix("//?/"))
         .unwrap_or(s);
+    // Handle MSYS/Git Bash style paths like /c/Users/... or /mnt/c/Users/...
+    if let Some(rest) = stripped.strip_prefix("/mnt/") {
+        if rest.len() >= 3 && rest.as_bytes()[1] == b'/' {
+            let drive = rest
+                .chars()
+                .next()
+                .unwrap_or('c')
+                .to_ascii_uppercase();
+            let remainder = &rest[2..];
+            return format!(
+                "{}:\\{}",
+                drive,
+                remainder.replace('/', "\\").trim_start_matches("\\")
+            );
+        }
+    }
+    if stripped.len() >= 3 && stripped.starts_with('/') && stripped.as_bytes()[2] == b'/' {
+        let drive = stripped
+            .chars()
+            .nth(1)
+            .unwrap_or('c')
+            .to_ascii_uppercase();
+        let remainder = &stripped[3..];
+        return format!(
+            "{}:\\{}",
+            drive,
+            remainder.replace('/', "\\").trim_start_matches("\\")
+        );
+    }
     // Convert forward slashes to backslashes
     stripped.replace('/', "\\")
 }
@@ -491,6 +533,18 @@ fn looks_like_windows_absolute_path(s: &str) -> bool {
         .strip_prefix("\\\\?\\")
         .or_else(|| s.strip_prefix("//?/"))
         .unwrap_or(s);
+
+    // Accept MSYS/Git Bash style: /c/... or /mnt/c/...
+    if let Some(rest) = stripped.strip_prefix("/mnt/") {
+        if rest.len() >= 3 && rest.as_bytes()[1] == b'/' {
+            let drive = rest.chars().next().unwrap_or('c');
+            return drive.is_ascii_alphabetic();
+        }
+    }
+    if stripped.len() >= 3 && stripped.starts_with('/') && stripped.as_bytes()[2] == b'/' {
+        let drive = stripped.chars().nth(1).unwrap_or('c');
+        return drive.is_ascii_alphabetic();
+    }
 
     if stripped.len() < 3 {
         return false;
@@ -1913,20 +1967,21 @@ pub async fn execute_dynamic(
                 .arg("-v")
                 .arg(format!(
                     "{}:{}",
-                    windows_path_to_container(&biovault_home, using_podman),
+                    windows_path_to_mount_source(&biovault_home, using_podman),
                     docker_biovault_home
                 ))
                 // Mount the project path (may be same as above, Docker handles duplicates)
                 .arg("-v")
                 .arg(format!(
                     "{}:{}",
-                    windows_path_to_container(project_path, using_podman),
+                    windows_path_to_mount_source(project_path, using_podman),
                     docker_project_path
                 ));
 
             // Mount additional data directories discovered from inputs
             for mount_path in &mount_roots {
                 let container_mount = windows_path_to_container(mount_path, using_podman);
+                let host_mount = windows_path_to_mount_source(mount_path, using_podman);
                 append_desktop_log(&format!(
                     "[Pipeline] Adding mount: {} -> {}",
                     mount_path.display(),
@@ -1934,14 +1989,15 @@ pub async fn execute_dynamic(
                 ));
                 docker_cmd
                     .arg("-v")
-                    .arg(format!("{}:{}", container_mount, container_mount));
+                    .arg(format!("{}:{}", host_mount, container_mount));
             }
         }
 
         // Generate runtime-specific Nextflow config (Docker vs Podman)
         let runtime_config_path = if !dry_run {
-            let config_path =
-                generate_runtime_config(&project_abs, using_podman, hyperv_host_mount)?;
+            // On Windows with Podman, prefer copying inputs to avoid broken symlinks on /mnt/c mounts.
+            let stage_in_copy = hyperv_host_mount || (cfg!(target_os = "windows") && using_podman);
+            let config_path = generate_runtime_config(&project_abs, using_podman, stage_in_copy)?;
             // For Hyper-V mode, the config file was copied to VM along with project
             // Reference it via the VM project path
             #[cfg(target_os = "windows")]
