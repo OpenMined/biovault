@@ -3027,16 +3027,16 @@ fn execute_syqure_docker(
         let stripped = strip_extended_path_prefix(value);
         let value_path = PathBuf::from(&stripped);
         if let Ok(rel_path) = value_path.strip_prefix(results_root) {
-            return Some(format!("/results/{}", to_container_path(&rel_path)));
+            return Some(format!("/results/{}", to_container_path(rel_path)));
         }
         if let Ok(rel_path) = value_path.strip_prefix(module_root) {
             return Some(format!(
                 "/workspace/project/{}",
-                to_container_path(&rel_path)
+                to_container_path(rel_path)
             ));
         }
         if let Ok(rel_path) = value_path.strip_prefix(datasites_root) {
-            return Some(format!("/datasites/{}", to_container_path(&rel_path)));
+            return Some(format!("/datasites/{}", to_container_path(rel_path)));
         }
         None
     }
@@ -3089,14 +3089,13 @@ fn execute_syqure_docker(
         .unwrap_or_else(|| module_path.join("results"));
 
     let module_root_for_match = PathBuf::from(strip_extended_path_prefix(
-        &module_path_abs.to_string_lossy().to_string(),
+        module_path_abs.to_string_lossy().as_ref(),
     ));
     let results_root_for_match = PathBuf::from(strip_extended_path_prefix(
-        &results_root.to_string_lossy().to_string(),
+        results_root.to_string_lossy().as_ref(),
     ));
-    let datasites_root_for_match = PathBuf::from(strip_extended_path_prefix(
-        effective_datasites_mount,
-    ));
+    let datasites_root_for_match =
+        PathBuf::from(strip_extended_path_prefix(effective_datasites_mount));
 
     let mut cmd = Command::new(&container_runtime);
     cmd.args(["run", "--name", &container_name]);

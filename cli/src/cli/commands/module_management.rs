@@ -1196,7 +1196,7 @@ pub async fn resolve_flow_dependencies(
     Ok(any_rewritten)
 }
 
-/// Import a flow from URL with all its step dependencies
+/// Import a flow from URL or local path with all its step dependencies
 pub async fn import_flow_with_deps(
     url: &str,
     name_override: Option<String>,
@@ -1205,16 +1205,58 @@ pub async fn import_flow_with_deps(
     use crate::flow_spec::FlowSpec;
     use colored::Colorize;
 
-    // Convert GitHub URL to raw URL
-    let raw_url = url
-        .replace("github.com", "raw.githubusercontent.com")
-        .replace("/blob/", "/");
+    // Check if this is a local path (starts with / or file://)
+    let is_local = url.starts_with('/') || url.starts_with("file://");
+    let local_path = if url.starts_with("file://") {
+        url.strip_prefix("file://").unwrap_or(url)
+    } else {
+        url
+    };
 
-    println!("{} Downloading flow from {}", "📥".cyan(), url.cyan());
+    let (yaml_str, dependency_context) = if is_local {
+        // Local file path
+        let path = PathBuf::from(local_path);
+        println!(
+            "{} Loading flow from {}",
+            "📥".cyan(),
+            path.display().to_string().cyan()
+        );
 
-    // Download flow YAML
-    let yaml_content = download_file(&raw_url).await?;
-    let yaml_str = String::from_utf8(yaml_content).context("Invalid UTF-8 in flow.yaml")?;
+        if !path.exists() {
+            return Err(anyhow::anyhow!("Local flow file not found: {}", path.display()).into());
+        }
+
+        let yaml_str = fs::read_to_string(&path).context("Failed to read flow.yaml")?;
+
+        // Extract base path for resolving relative module paths
+        let base_path = path
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("."));
+
+        (yaml_str, DependencyContext::Local { base_path })
+    } else {
+        // Remote URL
+        // Convert GitHub URL to raw URL
+        let raw_url = url
+            .replace("github.com", "raw.githubusercontent.com")
+            .replace("/blob/", "/");
+
+        println!("{} Downloading flow from {}", "📥".cyan(), url.cyan());
+
+        // Download flow YAML
+        let yaml_content = download_file(&raw_url).await?;
+        let yaml_str = String::from_utf8(yaml_content).context("Invalid UTF-8 in flow.yaml")?;
+
+        // Extract base URL for resolving relative module paths
+        let base_url = if let Some(idx) = url.rfind('/') {
+            url[..idx].to_string()
+        } else {
+            url.to_string()
+        };
+
+        (yaml_str, DependencyContext::GitHub { base_url })
+    };
 
     // Parse flow spec
     let mut spec: FlowSpec =
@@ -1248,17 +1290,10 @@ pub async fn import_flow_with_deps(
 
     let flow_yaml_path = flow_dir.join(FLOW_YAML_FILE);
 
-    // Extract base URL for resolving relative module paths
-    let base_url = if let Some(idx) = url.rfind('/') {
-        url[..idx].to_string()
-    } else {
-        url.to_string()
-    };
-
     // Import each step's module and rewrite YAML to use registered names
     resolve_flow_dependencies(
         &mut spec,
-        &DependencyContext::GitHub { base_url },
+        &dependency_context,
         &flow_yaml_path,
         overwrite,
         false, // quiet = false for CLI output
@@ -1345,11 +1380,22 @@ mod tests {
         fs::create_dir_all(&module_dir).unwrap();
 
         let yaml_content = r#"
-name: test-module
-author: test@example.com
-workflow: workflow.nf
-template: default
-assets: []
+apiVersion: syftbox.openmined.org/v1alpha1
+kind: Module
+metadata:
+  name: test-module
+  version: 0.1.0
+  authors:
+    - test@example.com
+spec:
+  runner:
+    kind: nextflow
+    template: default
+    entrypoint: workflow.nf
+  inputs: []
+  outputs: []
+  parameters: []
+  assets: []
 "#;
         fs::write(module_dir.join(MODULE_YAML_FILE), yaml_content).unwrap();
         fs::write(module_dir.join("workflow.nf"), "// workflow").unwrap();

@@ -51,6 +51,8 @@ mod tests {
 
     struct TestHomeGuard {
         _temp: TempDir,
+        _syftbox_data_dir_prev: Option<String>,
+        _syc_vault_prev: Option<String>,
     }
 
     impl TestHomeGuard {
@@ -59,13 +61,35 @@ mod tests {
             let home = temp.path().join(".biovault");
             std::fs::create_dir_all(&home).unwrap();
             biovault::config::set_test_biovault_home(&home);
-            Self { _temp: temp }
+            // Save previous env vars
+            let syftbox_data_dir_prev = std::env::var("SYFTBOX_DATA_DIR").ok();
+            let syc_vault_prev = std::env::var("SYC_VAULT").ok();
+            // Set SYFTBOX_DATA_DIR and clear SYC_VAULT to avoid conflicts
+            std::env::set_var("SYFTBOX_DATA_DIR", temp.path());
+            std::env::remove_var("SYC_VAULT");
+            Self {
+                _temp: temp,
+                _syftbox_data_dir_prev: syftbox_data_dir_prev,
+                _syc_vault_prev: syc_vault_prev,
+            }
         }
     }
 
     impl Drop for TestHomeGuard {
         fn drop(&mut self) {
             biovault::config::clear_test_biovault_home();
+            // Restore previous SYFTBOX_DATA_DIR
+            if let Some(prev) = &self._syftbox_data_dir_prev {
+                std::env::set_var("SYFTBOX_DATA_DIR", prev);
+            } else {
+                std::env::remove_var("SYFTBOX_DATA_DIR");
+            }
+            // Restore previous SYC_VAULT
+            if let Some(prev) = &self._syc_vault_prev {
+                std::env::set_var("SYC_VAULT", prev);
+            } else {
+                std::env::remove_var("SYC_VAULT");
+            }
         }
     }
 
