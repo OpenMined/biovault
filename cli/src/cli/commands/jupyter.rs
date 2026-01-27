@@ -592,7 +592,11 @@ fn link_uv_into_venv(venv_path: &Path, uv_bin: &str) {
         return;
     }
 
-    let target = venv_path.join("bin").join("uv");
+    let target = if cfg!(windows) {
+        venv_path.join("Scripts").join("uv.exe")
+    } else {
+        venv_path.join("bin").join("uv")
+    };
     if target.exists() {
         return;
     }
@@ -938,6 +942,24 @@ pub async fn start(module_path: &str, python_version: &str) -> Result<()> {
 
     use std::process::Stdio;
 
+    let venv_bin_dir = if cfg!(windows) {
+        venv_path.join("Scripts")
+    } else {
+        venv_path.join("bin")
+    };
+    let existing_path = std::env::var("PATH").unwrap_or_default();
+    let path_sep = if cfg!(windows) { ";" } else { ":" };
+    let combined_path = if existing_path.is_empty() {
+        venv_bin_dir.to_string_lossy().to_string()
+    } else {
+        format!(
+            "{}{}{}",
+            venv_bin_dir.to_string_lossy(),
+            path_sep,
+            existing_path
+        )
+    };
+
     let mut args: Vec<String> = vec![
         "run",
         "--python",
@@ -966,6 +988,8 @@ pub async fn start(module_path: &str, python_version: &str) -> Result<()> {
         .current_dir(&module_dir)
         .env("JUPYTER_RUNTIME_DIR", &runtime_dir)
         .env("XDG_RUNTIME_DIR", &runtime_dir)
+        .env("VIRTUAL_ENV", &venv_path)
+        .env("PATH", &combined_path)
         // Ensure the runner's Python environment doesn't bleed into uv/venv processes.
         .env_remove("PYTHONHOME")
         .env_remove("PYTHONPATH")

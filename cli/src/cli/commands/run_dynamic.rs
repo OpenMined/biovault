@@ -203,6 +203,24 @@ fn strip_extended_path_prefix(path: &str) -> String {
     path.to_string()
 }
 
+/// Detect when "docker" is actually a Podman shim (common on Windows).
+#[cfg(target_os = "windows")]
+fn is_podman_shim(binary: &str) -> bool {
+    let output = Command::new(binary).arg("--version").output();
+    if let Ok(output) = output {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let combined = format!("{}{}", stdout, stderr).to_lowercase();
+        return combined.contains("podman");
+    }
+    false
+}
+
+#[cfg(not(target_os = "windows"))]
+fn is_podman_shim(_binary: &str) -> bool {
+    false
+}
+
 /// Convert a Windows path to a container-compatible path for use *inside* the container.
 /// - Docker Desktop: C:\Users\foo -> /c/Users/foo
 /// - Podman on WSL: C:\Users\foo -> /mnt/c/Users/foo
@@ -654,6 +672,7 @@ fn extract_paths_from_csv(content: &str, paths: &mut Vec<PathBuf>) {
 
     let mut reader = csv::ReaderBuilder::new()
         .has_headers(false)
+        .flexible(true)
         .from_reader(content.as_bytes());
     for result in reader.records() {
         if let Ok(record) = result {
@@ -709,6 +728,7 @@ fn rewrite_csv_with_container_paths(csv_path: &Path, use_podman_format: bool) ->
 
     let mut reader = csv::ReaderBuilder::new()
         .has_headers(false)
+        .flexible(true)
         .from_path(csv_path)
         .with_context(|| format!("Failed to open CSV: {}", csv_path.display()))?;
     let mut writer = csv::WriterBuilder::new()
@@ -845,6 +865,7 @@ fn rewrite_csv_for_vm(
 
     let mut reader = csv::ReaderBuilder::new()
         .has_headers(false)
+        .flexible(true)
         .from_path(csv_path)
         .with_context(|| format!("Failed to open CSV: {}", csv_path.display()))?;
     let mut writer = csv::WriterBuilder::new()
@@ -1570,10 +1591,20 @@ pub async fn execute_dynamic(
         println!("✅ {} daemon is running", docker_bin);
     }
 
+    #[cfg(target_os = "windows")]
+    let docker_is_podman = is_podman_shim(&docker_bin);
+    #[cfg(not(target_os = "windows"))]
+    let docker_is_podman = false;
+
+    if docker_is_podman {
+        append_desktop_log("[Runtime] Detected Docker binary is a Podman shim; enabling Podman mode");
+    }
+
     // Track Hyper-V mode for post-run cleanup (need to capture before if-else block)
     #[cfg(target_os = "windows")]
-    let using_hyperv_mode =
-        use_docker && docker_bin.contains("podman") && is_podman_hyperv(&docker_bin);
+    let using_hyperv_mode = use_docker
+        && (docker_bin.contains("podman") || docker_is_podman)
+        && is_podman_hyperv(&docker_bin, docker_bin.contains("podman") || docker_is_podman);
     #[cfg(not(target_os = "windows"))]
     let using_hyperv_mode = false;
 
@@ -1603,8 +1634,6 @@ pub async fn execute_dynamic(
     #[cfg(target_os = "windows")]
     let mut hyperv_flat_results_dir: Option<PathBuf> = None;
     #[cfg(target_os = "windows")]
-    let mut hyperv_path_map: Option<BTreeMap<String, String>> = None;
-    #[cfg(target_os = "windows")]
     let mut vm_path_map: Option<BTreeMap<String, String>> = None;
 
     // Build command - use Docker on Windows, native Nextflow elsewhere
@@ -1621,10 +1650,10 @@ pub async fn execute_dynamic(
 
         // Detect if we're using Podman early so we can use correct path format
         // Podman on WSL uses /mnt/c/... while Docker Desktop uses /c/...
-        let using_podman = docker_bin.contains("podman");
+        let using_podman = docker_bin.contains("podman") || docker_is_podman;
 
         // Check if using Podman with Hyper-V backend (which has broken 9P mounts)
-        let using_hyperv = using_podman && is_podman_hyperv(&docker_bin);
+        let using_hyperv = using_podman && is_podman_hyperv(&docker_bin, using_podman);
         let hyperv_mount_mode = using_hyperv && hyperv_host_mount;
         if using_hyperv {
             if hyperv_mount_mode {
@@ -1868,7 +1897,7 @@ pub async fn execute_dynamic(
 
             hyperv_flat_dir = Some(flat_root);
             hyperv_flat_results_dir = Some(flat_results_dir.clone());
-            hyperv_path_map = Some(path_map);
+            let _ = path_map;
             results_path_for_run = flat_results_dir;
         }
 
@@ -3728,8 +3757,8 @@ fn detect_format(path: &Path) -> Option<&'static str> {
 /// This is detected by checking the CONTAINERS_MACHINE_PROVIDER env var
 /// or by running `podman machine inspect` to check the VM type.
 #[cfg(target_os = "windows")]
-fn is_podman_hyperv(docker_bin: &str) -> bool {
-    if !docker_bin.contains("podman") {
+fn is_podman_hyperv(docker_bin: &str, using_podman: bool) -> bool {
+    if !using_podman {
         return false;
     }
 
@@ -3739,7 +3768,11 @@ fn is_podman_hyperv(docker_bin: &str) -> bool {
     }
 
     // Try to detect from podman machine info
-    let mut cmd = Command::new(docker_bin);
+    let mut cmd = if docker_bin.contains("podman") {
+        Command::new(docker_bin)
+    } else {
+        Command::new("podman")
+    };
     super::configure_child_process(&mut cmd);
     let output = cmd.arg("machine").arg("inspect").output();
 
@@ -3753,7 +3786,7 @@ fn is_podman_hyperv(docker_bin: &str) -> bool {
 }
 
 #[cfg(not(target_os = "windows"))]
-fn is_podman_hyperv(_docker_bin: &str) -> bool {
+fn is_podman_hyperv(_docker_bin: &str, _using_podman: bool) -> bool {
     false
 }
 
@@ -3823,6 +3856,7 @@ fn rewrite_csv_for_flat_dir(
 
     let mut reader = csv::ReaderBuilder::new()
         .has_headers(false)
+        .flexible(true)
         .from_path(csv_path)
         .with_context(|| format!("Failed to open CSV: {}", csv_path.display()))?;
     let mut writer = csv::WriterBuilder::new()
@@ -3887,6 +3921,7 @@ fn rewrite_csv_for_flat_dir(
 fn extract_files_from_csv(content: &str, files: &mut Vec<PathBuf>) {
     let mut reader = csv::ReaderBuilder::new()
         .has_headers(false)
+        .flexible(true)
         .from_reader(content.as_bytes());
     for result in reader.records() {
         if let Ok(record) = result {
