@@ -160,7 +160,9 @@ $extraPath = ($unixToolPaths -join ':')
 # Use a clean Docker config to avoid credential helper failures on Windows.
 $dockerConfigDir = Join-Path $env:TEMP ("docker-nocreds-" + [System.Guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Force -Path $dockerConfigDir | Out-Null
-@'{"auths":{}}'@ | Set-Content -Encoding ascii (Join-Path $dockerConfigDir "config.json")
+@'
+{"auths":{}}
+'@ | Set-Content -Encoding ascii (Join-Path $dockerConfigDir "config.json")
 $dockerConfigUnix = $dockerConfigDir -replace '\\', '/' -replace '^([A-Za-z]):', '/$1'
 $dockerConfigUnix = $dockerConfigUnix.ToLower() -replace '^/([a-z])', '/$1'
 
