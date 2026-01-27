@@ -1235,19 +1235,27 @@ impl ModuleFile {
             .spec
             .inputs
             .iter()
-            .map(|input| InputSpec {
-                name: input.name.clone(),
-                raw_type: input.raw_type.clone(),
-                description: input.description.clone(),
-                format: input.format.as_ref().and_then(|fmt| fmt.kind.clone()),
-                path: None,
-                mapping: input.format.as_ref().and_then(|fmt| {
-                    if fmt.mapping.is_empty() {
-                        None
-                    } else {
-                        Some(fmt.mapping.clone().into_iter().collect())
-                    }
-                }),
+            .map(|input| {
+                // If optional: true is set and type doesn't already end with ?, append ?
+                let raw_type = if input.optional == Some(true) && !input.raw_type.ends_with('?') {
+                    format!("{}?", input.raw_type)
+                } else {
+                    input.raw_type.clone()
+                };
+                InputSpec {
+                    name: input.name.clone(),
+                    raw_type,
+                    description: input.description.clone(),
+                    format: input.format.as_ref().and_then(|fmt| fmt.kind.clone()),
+                    path: None,
+                    mapping: input.format.as_ref().and_then(|fmt| {
+                        if fmt.mapping.is_empty() {
+                            None
+                        } else {
+                            Some(fmt.mapping.clone().into_iter().collect())
+                        }
+                    }),
+                }
             })
             .collect();
 
