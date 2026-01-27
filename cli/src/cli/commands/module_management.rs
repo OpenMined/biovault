@@ -1260,13 +1260,12 @@ pub async fn import_flow_with_deps(
 
     // Parse flow spec via FlowFile to support Flow schema shapes
     let flow_file = FlowFile::parse_yaml(&yaml_str)
-        .map_err(|e| {
+        .inspect_err(|e| {
             eprintln!(
                 "Failed to parse flow.yaml from {}. First 200 chars:\n{}",
                 url,
                 truncate(&yaml_str, 200)
             );
-            e
         })
         .context("Failed to parse flow.yaml")?;
     let mut spec: FlowSpec = flow_file

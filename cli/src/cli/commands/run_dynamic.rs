@@ -3928,16 +3928,14 @@ fn extract_files_from_csv(content: &str, files: &mut Vec<PathBuf>) {
         .has_headers(false)
         .flexible(true)
         .from_reader(content.as_bytes());
-    for result in reader.records() {
-        if let Ok(record) = result {
-            for field in record.iter() {
-                let field = field.trim();
-                if looks_like_windows_absolute_path(field) {
-                    let normalized = normalize_windows_path_str(field);
-                    let path = Path::new(&normalized);
-                    if path.exists() {
-                        files.push(path.to_path_buf());
-                    }
+    for record in reader.records().flatten() {
+        for field in record.iter() {
+            let field = field.trim();
+            if looks_like_windows_absolute_path(field) {
+                let normalized = normalize_windows_path_str(field);
+                let path = Path::new(&normalized);
+                if path.exists() {
+                    files.push(path.to_path_buf());
                 }
             }
         }
