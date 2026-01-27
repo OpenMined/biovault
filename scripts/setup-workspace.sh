@@ -26,6 +26,19 @@ echo "  PARENT_DIR: $PARENT_DIR"
 # Configure git to use HTTPS instead of SSH for GitHub (needed for CI)
 git config --global url."https://github.com/".insteadOf "git@github.com:"
 
+should_include_syqure() {
+    if [[ "${BV_SKIP_SYQURE:-}" == "1" ]]; then
+        return 1
+    fi
+    if [[ "${BV_INCLUDE_SYQURE:-}" == "1" ]]; then
+        return 0
+    fi
+    if [[ -n "${CI:-}" || -n "${GITHUB_ACTIONS:-}" ]]; then
+        return 1
+    fi
+    return 0
+}
+
 # Check if we're in a repo-managed workspace (parent has .repo)
 if [[ -d "$PARENT_DIR/.repo" ]]; then
     echo "Detected repo-managed parent workspace - dependencies already synced"
@@ -65,10 +78,14 @@ clone_if_missing "syftbox" "https://github.com/OpenMined/syftbox.git" "madhava/b
 clone_if_missing "biovault-beaver" "https://github.com/OpenMined/biovault-beaver.git"
 clone_if_missing "sbenv" "https://github.com/OpenMined/sbenv.git"
 clone_if_missing "bioscript" "https://github.com/OpenMined/bioscript.git"
-clone_if_missing "syqure" "https://github.com/madhavajay/syqure.git"
+if should_include_syqure; then
+    clone_if_missing "syqure" "https://github.com/madhavajay/syqure.git"
+else
+    echo "Skipping syqure clone (set BV_INCLUDE_SYQURE=1 to enable)."
+fi
 
 # Ensure syqure submodules are initialized (codon, sequre, llvm)
-if [[ -d "$PARENT_DIR/syqure/.git" ]]; then
+if should_include_syqure && [[ -d "$PARENT_DIR/syqure/.git" ]]; then
     echo "Initializing syqure submodules..."
     git -C "$PARENT_DIR/syqure" submodule update --init --recursive
 fi
@@ -94,7 +111,9 @@ create_symlink "syftbox"
 create_symlink "biovault-beaver"
 create_symlink "sbenv"
 create_symlink "bioscript"
-create_symlink "syqure"
+if should_include_syqure; then
+    create_symlink "syqure"
+fi
 
 echo ""
 echo "Workspace setup complete!"
@@ -104,4 +123,6 @@ echo "  $PARENT_DIR/syftbox"
 echo "  $PARENT_DIR/biovault-beaver"
 echo "  $PARENT_DIR/sbenv"
 echo "  $PARENT_DIR/bioscript"
-echo "  $PARENT_DIR/syqure"
+if should_include_syqure; then
+    echo "  $PARENT_DIR/syqure"
+fi
