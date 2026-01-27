@@ -2141,6 +2141,11 @@ pub async fn execute_dynamic(
 
         docker_cmd.arg("run").arg("--rm");
 
+        #[cfg(target_os = "windows")]
+        if !using_podman {
+            docker_cmd.args(["--platform", "linux/amd64"]);
+        }
+
         // When using Podman, add flags to fix permission issues with mounted volumes
         if using_podman {
             // Handle .nextflow directory permissions
@@ -4190,6 +4195,8 @@ process.shell = ['/bin/sh', '-ue']
 podman.runOptions = '--security-opt label=disable'
 "#
         .to_string();
+        // Note: we intentionally do not add --platform for podman yet because it is harder to
+        // validate across environments. Add it once we can test reliably.
         if stage_in_copy {
             config.push_str("\nprocess.stageInMode = 'copy'\n");
         }
@@ -4198,7 +4205,7 @@ podman.runOptions = '--security-opt label=disable'
         // Docker configuration
         r#"process.executor = 'local'
 docker.enabled = true
-docker.runOptions = '-u $(id -u):$(id -g)'
+docker.runOptions = '--platform linux/amd64 -u $(id -u):$(id -g)'
 "#
         .to_string()
     };
