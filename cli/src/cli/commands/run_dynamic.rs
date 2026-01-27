@@ -1430,6 +1430,9 @@ pub async fn execute_dynamic(
     #[cfg(not(target_os = "windows"))]
     let vm_results_dir: Option<String> = None;
 
+    #[cfg(target_os = "windows")]
+    let mut vm_project_path: Option<String> = None;
+
     // Track Hyper-V host mount temp dir for optional results copy-back
     #[cfg(target_os = "windows")]
     let mut hyperv_flat_dir: Option<PathBuf> = None;
@@ -1519,6 +1522,11 @@ pub async fn execute_dynamic(
             let vm_workflow =
                 format!("{}/{}", vm_project, workflow_rel.display()).replace('\\', "/");
             let vm_spec = format!("{}/{}", vm_project, spec_rel.display()).replace('\\', "/");
+
+            #[cfg(target_os = "windows")]
+            {
+                vm_project_path = Some(vm_project.clone());
+            }
 
             (
                 vm_biovault_home,
@@ -2009,7 +2017,7 @@ pub async fn execute_dynamic(
 
         // For Hyper-V mode: use VM-local paths. For normal mode: use container mount paths.
         #[cfg(target_os = "windows")]
-        let (docker_inputs_json, docker_params_json) = if let Some(ref vm_data) = vm_data_dir {
+        let (docker_inputs_json, mut docker_params_json) = if let Some(ref vm_data) = vm_data_dir {
             (
                 remap_json_paths_for_vm(&inputs_json_value, vm_data),
                 remap_json_paths_for_vm(&params_json_value, vm_data),
@@ -2026,6 +2034,18 @@ pub async fn execute_dynamic(
             remap_json_paths_for_container(&inputs_json_value, using_podman),
             remap_json_paths_for_container(&params_json_value, using_podman),
         );
+
+        #[cfg(target_os = "windows")]
+        if vm_data_dir.is_some() {
+            if let Some(ref vm_project) = vm_project_path {
+                if let JsonValue::Object(ref mut map) = docker_params_json {
+                    map.insert(
+                        "assets_dir".to_string(),
+                        JsonValue::String(format!("{}/assets", vm_project)),
+                    );
+                }
+            }
+        }
 
         let docker_inputs_json_str = serde_json::to_string(&docker_inputs_json)
             .context("Failed to encode Docker inputs metadata to JSON")?;

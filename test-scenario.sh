@@ -178,6 +178,13 @@ if (( IS_WINDOWS )) && (( NEEDS_CONTAINER )); then
     podman info >/dev/null 2>&1
   }
 
+  if [[ "$RUNTIME_PREF" == "podman" ]] || { [[ -z "$RUNTIME_PREF" ]] && check_podman && ! check_docker; }; then
+    export BIOVAULT_CONTAINER_RUNTIME="podman"
+    export CONTAINERS_MACHINE_PROVIDER="${CONTAINERS_MACHINE_PROVIDER:-hyperv}"
+    # Hyper-V mounts are unreliable on Windows; force VM-copy mode.
+    export BIOVAULT_HYPERV_MOUNT="0"
+  fi
+
   case "$RUNTIME_PREF" in
     podman)
       if ! check_podman; then
