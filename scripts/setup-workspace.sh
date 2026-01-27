@@ -24,6 +24,9 @@ echo "  REPO_ROOT: $REPO_ROOT"
 echo "  PARENT_DIR: $PARENT_DIR"
 
 # Configure git to use HTTPS instead of SSH for GitHub (needed for CI)
+if [[ -n "${CI:-}" || -n "${GITHUB_ACTIONS:-}" ]]; then
+    export GIT_CONFIG_GLOBAL="${PARENT_DIR}/.gitconfig-ci-$$"
+fi
 git config --global url."https://github.com/".insteadOf "git@github.com:"
 
 should_include_syqure() {
