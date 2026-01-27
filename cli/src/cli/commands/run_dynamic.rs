@@ -1597,14 +1597,19 @@ pub async fn execute_dynamic(
     let docker_is_podman = false;
 
     if docker_is_podman {
-        append_desktop_log("[Runtime] Detected Docker binary is a Podman shim; enabling Podman mode");
+        append_desktop_log(
+            "[Runtime] Detected Docker binary is a Podman shim; enabling Podman mode",
+        );
     }
 
     // Track Hyper-V mode for post-run cleanup (need to capture before if-else block)
     #[cfg(target_os = "windows")]
     let using_hyperv_mode = use_docker
         && (docker_bin.contains("podman") || docker_is_podman)
-        && is_podman_hyperv(&docker_bin, docker_bin.contains("podman") || docker_is_podman);
+        && is_podman_hyperv(
+            &docker_bin,
+            docker_bin.contains("podman") || docker_is_podman,
+        );
     #[cfg(not(target_os = "windows"))]
     let using_hyperv_mode = false;
 
