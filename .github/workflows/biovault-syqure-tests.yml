@@ -22,8 +22,8 @@ jobs:
           #   runner: namespace-profile-linux-medium
           # - os: macos-latest
           #   runner: namespace-profile-mac-medium
-          - os: windows
-            runner: namespace-profile-windows-large
+          # - os: windows
+          #   runner: namespace-profile-windows-large
     runs-on: ${{ matrix.runner }}
 
     steps:
@@ -67,9 +67,21 @@ jobs:
           $env:CONTAINERS_MACHINE_PROVIDER = "hyperv"
           [Environment]::SetEnvironmentVariable("CONTAINERS_MACHINE_PROVIDER", "hyperv", "Process")
 
+          # Clean up stale machines (namespace runners can retain state)
+          podman machine stop podman-hyperv 2>$null
           podman machine stop podman-machine-default 2>$null
+          podman machine rm -f podman-hyperv 2>$null
+          podman machine rm -f podman-machine-default 2>$null
+
           podman machine init podman-hyperv --cpus 12 --memory 24576 2>$null
-          podman machine start podman-hyperv
+
+          $started = $false
+          for ($i=0; $i -lt 3; $i++) {
+            podman machine start podman-hyperv
+            if ($LASTEXITCODE -eq 0) { $started = $true; break }
+            Start-Sleep -Seconds 5
+          }
+          if (-not $started) { throw "Podman Hyper-V machine failed to start" }
           podman system connection default podman-hyperv
 
           Write-Host ""

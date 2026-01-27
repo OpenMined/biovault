@@ -21,31 +21,31 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # - os: linux
-          #   runner: namespace-profile-linux-medium
-          #   client_mode: rust
-          #   scenario: tests/scenarios/inbox-ping-pong.yaml
-          #   needs_container: true
-          # - os: linux
-          #   runner: namespace-profile-linux-medium
-          #   client_mode: rust
-          #   scenario: tests/scenarios/import-and-run.yaml
-          #   needs_container: true
-          # - os: linux
-          #   runner: namespace-profile-linux-medium
-          #   client_mode: rust
-          #   scenario: tests/scenarios/messaging-core.yaml
-          #   needs_container: false
-          # - os: linux
-          #   runner: namespace-profile-linux-medium
-          #   client_mode: rust
-          #   scenario: tests/scenarios/break-nextflow.yaml
-          #   needs_container: true
-          # - os: linux
-          #   runner: namespace-profile-linux-medium
-          #   client_mode: rust
-          #   scenario: tests/scenarios/key-management.yaml
-          #   needs_container: false
+          - os: linux
+            runner: namespace-profile-linux-medium
+            client_mode: rust
+            scenario: tests/scenarios/inbox-ping-pong.yaml
+            needs_container: true
+          - os: linux
+            runner: namespace-profile-linux-medium
+            client_mode: rust
+            scenario: tests/scenarios/import-and-run.yaml
+            needs_container: true
+          - os: linux
+            runner: namespace-profile-linux-medium
+            client_mode: rust
+            scenario: tests/scenarios/messaging-core.yaml
+            needs_container: false
+          - os: linux
+            runner: namespace-profile-linux-medium
+            client_mode: rust
+            scenario: tests/scenarios/break-nextflow.yaml
+            needs_container: true
+          - os: linux
+            runner: namespace-profile-linux-medium
+            client_mode: rust
+            scenario: tests/scenarios/key-management.yaml
+            needs_container: false
           - os: windows
             runner: namespace-profile-windows-medium
             client_mode: rust
@@ -113,9 +113,21 @@ jobs:
           $env:CONTAINERS_MACHINE_PROVIDER = "hyperv"
           [Environment]::SetEnvironmentVariable("CONTAINERS_MACHINE_PROVIDER", "hyperv", "Process")
 
+          # Clean up stale machines (namespace runners can retain state)
+          podman machine stop podman-hyperv 2>$null
           podman machine stop podman-machine-default 2>$null
+          podman machine rm -f podman-hyperv 2>$null
+          podman machine rm -f podman-machine-default 2>$null
+
           podman machine init podman-hyperv --cpus 8 --memory 12288 2>$null
-          podman machine start podman-hyperv
+
+          $started = $false
+          for ($i=0; $i -lt 3; $i++) {
+            podman machine start podman-hyperv
+            if ($LASTEXITCODE -eq 0) { $started = $true; break }
+            Start-Sleep -Seconds 5
+          }
+          if (-not $started) { throw "Podman Hyper-V machine failed to start" }
           podman system connection default podman-hyperv
 
           Write-Host ""
