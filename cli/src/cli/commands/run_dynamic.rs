@@ -326,6 +326,47 @@ fn remap_json_paths_for_vm(value: &JsonValue, vm_data_dir: &str) -> JsonValue {
     }
 }
 
+#[cfg(target_os = "windows")]
+/// Remap paths in JSON to VM-local paths using an explicit staging map.
+fn remap_json_paths_for_vm_with_map(
+    value: &JsonValue,
+    vm_data_dir: &str,
+    path_map: &BTreeMap<String, String>,
+) -> JsonValue {
+    match value {
+        JsonValue::String(s) => {
+            if looks_like_windows_absolute_path(s) {
+                let normalized = normalize_windows_path_str(s).to_ascii_lowercase();
+                if let Some(mapped) = path_map.get(&normalized) {
+                    JsonValue::String(mapped.replace('\\', "/"))
+                } else {
+                    let path = Path::new(s);
+                    let file_name = path.file_name().unwrap_or_default().to_string_lossy();
+                    JsonValue::String(format!("{}/{}", vm_data_dir, file_name))
+                }
+            } else {
+                value.clone()
+            }
+        }
+        JsonValue::Object(map) => {
+            let mut new_map = serde_json::Map::new();
+            for (k, v) in map {
+                new_map.insert(
+                    k.clone(),
+                    remap_json_paths_for_vm_with_map(v, vm_data_dir, path_map),
+                );
+            }
+            JsonValue::Object(new_map)
+        }
+        JsonValue::Array(arr) => JsonValue::Array(
+            arr.iter()
+                .map(|v| remap_json_paths_for_vm_with_map(v, vm_data_dir, path_map))
+                .collect(),
+        ),
+        _ => value.clone(),
+    }
+}
+
 /// Normalize a Windows path string (strip extended prefix, convert to backslashes)
 #[cfg(target_os = "windows")]
 fn normalize_windows_path_str(s: &str) -> String {
@@ -337,11 +378,7 @@ fn normalize_windows_path_str(s: &str) -> String {
     // Handle MSYS/Git Bash style paths like /c/Users/... or /mnt/c/Users/...
     if let Some(rest) = stripped.strip_prefix("/mnt/") {
         if rest.len() >= 3 && rest.as_bytes()[1] == b'/' {
-            let drive = rest
-                .chars()
-                .next()
-                .unwrap_or('c')
-                .to_ascii_uppercase();
+            let drive = rest.chars().next().unwrap_or('c').to_ascii_uppercase();
             let remainder = &rest[2..];
             return format!(
                 "{}:\\{}",
@@ -351,11 +388,7 @@ fn normalize_windows_path_str(s: &str) -> String {
         }
     }
     if stripped.len() >= 3 && stripped.starts_with('/') && stripped.as_bytes()[2] == b'/' {
-        let drive = stripped
-            .chars()
-            .nth(1)
-            .unwrap_or('c')
-            .to_ascii_uppercase();
+        let drive = stripped.chars().nth(1).unwrap_or('c').to_ascii_uppercase();
         let remainder = &stripped[3..];
         return format!(
             "{}:\\{}",
@@ -367,15 +400,24 @@ fn normalize_windows_path_str(s: &str) -> String {
     stripped.replace('/', "\\")
 }
 
-/// Remap Windows paths in JSON to a host-local flat directory (e.g., C:/bvtemp/...).
 #[cfg(target_os = "windows")]
-fn remap_json_paths_for_flat_dir(value: &JsonValue, flat_data_dir: &str) -> JsonValue {
+/// Remap paths in JSON to a flat staging dir using an explicit staging map.
+fn remap_json_paths_for_flat_dir_with_map(
+    value: &JsonValue,
+    flat_data_dir: &str,
+    path_map: &BTreeMap<String, String>,
+) -> JsonValue {
     match value {
         JsonValue::String(s) => {
             if looks_like_windows_absolute_path(s) {
-                let path = Path::new(s);
-                let file_name = path.file_name().unwrap_or_default().to_string_lossy();
-                JsonValue::String(format!("{}/{}", flat_data_dir, file_name))
+                let normalized = normalize_windows_path_str(s).to_ascii_lowercase();
+                if let Some(mapped) = path_map.get(&normalized) {
+                    JsonValue::String(mapped.replace('\\', "/"))
+                } else {
+                    let path = Path::new(s);
+                    let file_name = path.file_name().unwrap_or_default().to_string_lossy();
+                    JsonValue::String(format!("{}/{}", flat_data_dir, file_name))
+                }
             } else {
                 value.clone()
             }
@@ -383,17 +425,55 @@ fn remap_json_paths_for_flat_dir(value: &JsonValue, flat_data_dir: &str) -> Json
         JsonValue::Object(map) => {
             let mut new_map = serde_json::Map::new();
             for (k, v) in map {
-                new_map.insert(k.clone(), remap_json_paths_for_flat_dir(v, flat_data_dir));
+                new_map.insert(
+                    k.clone(),
+                    remap_json_paths_for_flat_dir_with_map(v, flat_data_dir, path_map),
+                );
             }
             JsonValue::Object(new_map)
         }
         JsonValue::Array(arr) => JsonValue::Array(
             arr.iter()
-                .map(|v| remap_json_paths_for_flat_dir(v, flat_data_dir))
+                .map(|v| remap_json_paths_for_flat_dir_with_map(v, flat_data_dir, path_map))
                 .collect(),
         ),
         _ => value.clone(),
     }
+}
+
+#[cfg(target_os = "windows")]
+fn normalize_windows_path_key(path: &Path) -> String {
+    normalize_windows_path_str(&path.to_string_lossy()).to_ascii_lowercase()
+}
+
+#[cfg(target_os = "windows")]
+fn sanitize_filename(name: &str) -> String {
+    let mut out = String::new();
+    for c in name.chars() {
+        if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' {
+            out.push(c);
+        } else {
+            out.push('_');
+        }
+    }
+    if out.is_empty() {
+        "file".to_string()
+    } else {
+        out
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn stage_name_for_path(path: &Path) -> String {
+    let normalized = normalize_windows_path_str(&path.to_string_lossy());
+    let hash = blake3::hash(normalized.as_bytes()).to_hex().to_string();
+    let base = path
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+    let base = sanitize_filename(&base);
+    format!("{}_{}", &hash[..10], base)
 }
 
 #[cfg(target_os = "windows")]
@@ -572,38 +652,43 @@ fn extract_paths_from_csv(content: &str, paths: &mut Vec<PathBuf>) {
     let mut found_count = 0;
     let mut added_count = 0;
 
-    for line in content.lines() {
-        for field in line.split(',') {
-            let field = field.trim().trim_matches('"');
-            // Accept both backslash (C:\) and forward slash (C:/) Windows paths
-            if looks_like_windows_absolute_path(field) {
-                found_count += 1;
-                // Normalize: strip extended prefix and convert forward slashes to backslashes
-                let normalized = normalize_windows_path_str(field);
-                let path = Path::new(&normalized);
-                append_desktop_log(&format!(
-                    "[CSV Extract] Found path: {} (normalized: {}, exists: {})",
-                    field,
-                    normalized,
-                    path.exists()
-                ));
-                if path.exists() {
-                    if path.is_file() {
-                        if let Some(parent) = path.parent() {
+    let mut reader = csv::ReaderBuilder::new()
+        .has_headers(false)
+        .from_reader(content.as_bytes());
+    for result in reader.records() {
+        if let Ok(record) = result {
+            for field in record.iter() {
+                let field = field.trim();
+                // Accept both backslash (C:\) and forward slash (C:/) Windows paths
+                if looks_like_windows_absolute_path(field) {
+                    found_count += 1;
+                    // Normalize: strip extended prefix and convert forward slashes to backslashes
+                    let normalized = normalize_windows_path_str(field);
+                    let path = Path::new(&normalized);
+                    append_desktop_log(&format!(
+                        "[CSV Extract] Found path: {} (normalized: {}, exists: {})",
+                        field,
+                        normalized,
+                        path.exists()
+                    ));
+                    if path.exists() {
+                        if path.is_file() {
+                            if let Some(parent) = path.parent() {
+                                append_desktop_log(&format!(
+                                    "[CSV Extract] Adding parent dir: {}",
+                                    parent.display()
+                                ));
+                                paths.push(parent.to_path_buf());
+                                added_count += 1;
+                            }
+                        } else {
                             append_desktop_log(&format!(
-                                "[CSV Extract] Adding parent dir: {}",
-                                parent.display()
+                                "[CSV Extract] Adding directory: {}",
+                                path.display()
                             ));
-                            paths.push(parent.to_path_buf());
+                            paths.push(path.to_path_buf());
                             added_count += 1;
                         }
-                    } else {
-                        append_desktop_log(&format!(
-                            "[CSV Extract] Adding directory: {}",
-                            path.display()
-                        ));
-                        paths.push(path.to_path_buf());
-                        added_count += 1;
                     }
                 }
             }
@@ -619,38 +704,35 @@ fn extract_paths_from_csv(content: &str, paths: &mut Vec<PathBuf>) {
 /// Rewrite a CSV file converting Windows paths to container-compatible paths
 #[cfg(target_os = "windows")]
 fn rewrite_csv_with_container_paths(csv_path: &Path, use_podman_format: bool) -> Result<()> {
-    let content = fs::read_to_string(csv_path)
-        .with_context(|| format!("Failed to read CSV: {}", csv_path.display()))?;
-
     append_desktop_log(&format!("[CSV Rewrite] Processing: {}", csv_path.display()));
     let mut converted_count = 0;
 
-    let mut new_lines = Vec::new();
-    for line in content.lines() {
-        let mut new_fields = Vec::new();
-        for field in line.split(',') {
-            let trimmed = field.trim();
-            let (was_quoted, inner) = if trimmed.starts_with('"') && trimmed.ends_with('"') {
-                (true, &trimmed[1..trimmed.len() - 1])
-            } else {
-                (false, trimmed)
-            };
+    let mut reader = csv::ReaderBuilder::new()
+        .has_headers(false)
+        .from_path(csv_path)
+        .with_context(|| format!("Failed to open CSV: {}", csv_path.display()))?;
+    let mut writer = csv::WriterBuilder::new()
+        .has_headers(false)
+        .from_writer(vec![]);
 
-            // Check if it's a Windows path (with backslash or forward slash)
-            let new_value = if looks_like_windows_absolute_path(inner) {
+    for result in reader.records() {
+        let record = result
+            .with_context(|| format!("Failed to parse CSV record: {}", csv_path.display()))?;
+        let mut out: Vec<String> = Vec::with_capacity(record.len());
+        for field in record.iter() {
+            if looks_like_windows_absolute_path(field) {
                 converted_count += 1;
-                windows_path_to_container(Path::new(inner), use_podman_format)
+                out.push(windows_path_to_container(
+                    Path::new(field),
+                    use_podman_format,
+                ));
             } else {
-                inner.to_string()
-            };
-
-            if was_quoted {
-                new_fields.push(format!("\"{}\"", new_value));
-            } else {
-                new_fields.push(new_value);
+                out.push(field.to_string());
             }
         }
-        new_lines.push(new_fields.join(","));
+        writer
+            .write_record(out)
+            .with_context(|| format!("Failed to write CSV record: {}", csv_path.display()))?;
     }
 
     append_desktop_log(&format!(
@@ -659,7 +741,12 @@ fn rewrite_csv_with_container_paths(csv_path: &Path, use_podman_format: bool) ->
         csv_path.display()
     ));
 
-    let new_content = new_lines.join("\n");
+    let new_content = String::from_utf8(
+        writer
+            .into_inner()
+            .map_err(|e| anyhow::anyhow!("Failed to finalize CSV writer: {}", e))?,
+    )
+    .context("Failed to encode rewritten CSV")?;
     fs::write(csv_path, new_content)
         .with_context(|| format!("Failed to write converted CSV: {}", csv_path.display()))?;
 
@@ -711,25 +798,29 @@ fn rewrite_input_csvs_for_container(value: &JsonValue, use_podman_format: bool) 
 /// Find and rewrite all CSV files referenced in inputs JSON to use VM-local paths.
 /// This is used for Hyper-V mode where Windows paths can't be mounted directly.
 #[cfg(target_os = "windows")]
-fn rewrite_input_csvs_for_vm(value: &JsonValue, vm_data_dir: &str) -> Result<()> {
+fn rewrite_input_csvs_for_vm(
+    value: &JsonValue,
+    vm_data_dir: &str,
+    path_map: &BTreeMap<String, String>,
+) -> Result<()> {
     match value {
         JsonValue::String(s) => {
             if is_windows_path(s) && s.to_lowercase().ends_with(".csv") {
                 let path = Path::new(s);
                 if path.exists() && path.is_file() {
                     append_desktop_log(&format!("[Pipeline] Rewriting CSV for VM: {}", s));
-                    rewrite_csv_for_vm(path, vm_data_dir)?;
+                    rewrite_csv_for_vm(path, vm_data_dir, path_map)?;
                 }
             }
         }
         JsonValue::Object(map) => {
             for v in map.values() {
-                rewrite_input_csvs_for_vm(v, vm_data_dir)?;
+                rewrite_input_csvs_for_vm(v, vm_data_dir, path_map)?;
             }
         }
         JsonValue::Array(arr) => {
             for v in arr {
-                rewrite_input_csvs_for_vm(v, vm_data_dir)?;
+                rewrite_input_csvs_for_vm(v, vm_data_dir, path_map)?;
             }
         }
         _ => {}
@@ -740,45 +831,66 @@ fn rewrite_input_csvs_for_vm(value: &JsonValue, vm_data_dir: &str) -> Result<()>
 /// Rewrite a CSV file to use VM-local paths instead of Windows paths.
 /// Windows paths like C:/Users/foo/data/file.txt become /tmp/biovault-xxx/data/file.txt
 #[cfg(target_os = "windows")]
-fn rewrite_csv_for_vm(csv_path: &Path, vm_data_dir: &str) -> Result<()> {
-    let content = fs::read_to_string(csv_path)
-        .with_context(|| format!("Failed to read CSV: {}", csv_path.display()))?;
-
+fn rewrite_csv_for_vm(
+    csv_path: &Path,
+    vm_data_dir: &str,
+    path_map: &BTreeMap<String, String>,
+) -> Result<()> {
     append_desktop_log(&format!(
         "[CSV Rewrite VM] Processing: {}",
         csv_path.display()
     ));
     let mut converted_count = 0;
+    let mut missing_count = 0;
 
-    let mut new_lines = Vec::new();
-    for line in content.lines() {
-        let mut new_fields = Vec::new();
-        for field in line.split(',') {
-            let trimmed = field.trim();
-            let (was_quoted, inner) = if trimmed.starts_with('"') && trimmed.ends_with('"') {
-                (true, &trimmed[1..trimmed.len() - 1])
-            } else {
-                (false, trimmed)
-            };
+    let mut reader = csv::ReaderBuilder::new()
+        .has_headers(false)
+        .from_path(csv_path)
+        .with_context(|| format!("Failed to open CSV: {}", csv_path.display()))?;
+    let mut writer = csv::WriterBuilder::new()
+        .has_headers(false)
+        .from_writer(vec![]);
 
-            // Check if it's a Windows path - convert to VM-local path
-            let new_value = if looks_like_windows_absolute_path(inner) {
-                converted_count += 1;
-                // Extract just the filename and put it in the VM data directory
-                let path = Path::new(inner);
-                let file_name = path.file_name().unwrap_or_default().to_string_lossy();
-                format!("{}/{}", vm_data_dir, file_name)
+    for result in reader.records() {
+        let record = result
+            .with_context(|| format!("Failed to parse CSV record: {}", csv_path.display()))?;
+        let mut out: Vec<String> = Vec::with_capacity(record.len());
+        for field in record.iter() {
+            if looks_like_windows_absolute_path(field) {
+                let normalized = normalize_windows_path_str(field);
+                if let Some(mapped) = path_map.get(&normalized) {
+                    converted_count += 1;
+                    out.push(mapped.replace('\\', "/"));
+                } else {
+                    missing_count += 1;
+                    let file_name = Path::new(&normalized)
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy();
+                    out.push(format!("{}/{}", vm_data_dir, file_name));
+                }
             } else {
-                inner.to_string()
-            };
-
-            if was_quoted {
-                new_fields.push(format!("\"{}\"", new_value));
-            } else {
-                new_fields.push(new_value);
+                out.push(field.to_string());
             }
         }
-        new_lines.push(new_fields.join(","));
+        writer
+            .write_record(out)
+            .with_context(|| format!("Failed to write CSV record: {}", csv_path.display()))?;
+    }
+
+    let new_content = String::from_utf8(
+        writer
+            .into_inner()
+            .map_err(|e| anyhow::anyhow!("Failed to finalize CSV writer: {}", e))?,
+    )
+    .context("Failed to encode rewritten CSV")?;
+
+    if missing_count > 0 {
+        append_desktop_log(&format!(
+            "[CSV Rewrite VM] Warning: {} paths not in staging map for {}",
+            missing_count,
+            csv_path.display()
+        ));
     }
 
     append_desktop_log(&format!(
@@ -786,8 +898,6 @@ fn rewrite_csv_for_vm(csv_path: &Path, vm_data_dir: &str) -> Result<()> {
         converted_count,
         csv_path.display()
     ));
-
-    let new_content = new_lines.join("\n");
     fs::write(csv_path, new_content)
         .with_context(|| format!("Failed to write converted CSV: {}", csv_path.display()))?;
 
@@ -1492,6 +1602,10 @@ pub async fn execute_dynamic(
     let mut hyperv_flat_dir: Option<PathBuf> = None;
     #[cfg(target_os = "windows")]
     let mut hyperv_flat_results_dir: Option<PathBuf> = None;
+    #[cfg(target_os = "windows")]
+    let mut hyperv_path_map: Option<BTreeMap<String, String>> = None;
+    #[cfg(target_os = "windows")]
+    let mut vm_path_map: Option<BTreeMap<String, String>> = None;
 
     // Build command - use Docker on Windows, native Nextflow elsewhere
     let mut cmd = if use_docker {
@@ -1669,43 +1783,92 @@ pub async fn execute_dynamic(
             let mut data_files: Vec<PathBuf> = Vec::new();
             extract_files_from_json(&inputs_json_value, &mut data_files);
 
-            let mut seen_names: BTreeSet<String> = BTreeSet::new();
             let flat_data_dir_str = flat_data_dir.to_string_lossy().replace('\\', "/");
+            let mut path_map: BTreeMap<String, String> = BTreeMap::new();
+            let mut stage_pairs: Vec<(PathBuf, PathBuf)> = Vec::new();
+            let mut missing_paths: Vec<PathBuf> = Vec::new();
 
             for data_path in &data_files {
                 if !data_path.exists() {
+                    missing_paths.push(data_path.clone());
                     continue;
                 }
-                let file_name = data_path
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .to_string();
-                if !seen_names.insert(file_name.clone()) {
+                let key = normalize_windows_path_key(data_path);
+                if path_map.contains_key(&key) {
                     append_desktop_log(&format!(
-                        "[Pipeline] Warning: duplicate filename {} for {} (skipping)",
-                        file_name,
+                        "[Pipeline] Duplicate input path (already staged): {}",
                         data_path.display()
                     ));
                     continue;
                 }
-                let copied_path = copy_path_to_dir(data_path, &flat_data_dir)?;
-                if copied_path
+                let staged_name = stage_name_for_path(data_path);
+                let staged_path = flat_data_dir.join(&staged_name);
+                let staged_path_str = staged_path.to_string_lossy().replace('\\', "/");
+                path_map.insert(key, staged_path_str);
+                stage_pairs.push((data_path.clone(), staged_path));
+            }
+
+            append_desktop_log(&format!(
+                "[Pipeline] Hyper-V staging (flat) inputs: total={}, unique={}, missing={}",
+                data_files.len(),
+                stage_pairs.len(),
+                missing_paths.len()
+            ));
+            if !path_map.is_empty() {
+                let sample = path_map
+                    .iter()
+                    .take(5)
+                    .map(|(k, v)| format!("{} -> {}", k, v))
+                    .collect::<Vec<_>>()
+                    .join(" | ");
+                append_desktop_log(&format!(
+                    "[Pipeline] Hyper-V staging map (flat) sample: {}",
+                    sample
+                ));
+            }
+            if !missing_paths.is_empty() {
+                let sample = missing_paths
+                    .iter()
+                    .take(5)
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(" | ");
+                append_desktop_log(&format!(
+                    "[Pipeline] Warning: missing {} input paths (sample): {}",
+                    missing_paths.len(),
+                    sample
+                ));
+                if env_var_truthy("BIOVAULT_HYPERV_REQUIRE_ALL_INPUTS") {
+                    return Err(anyhow::anyhow!(
+                        "Missing {} input paths in Hyper-V host mount staging",
+                        missing_paths.len()
+                    )
+                    .into());
+                }
+            }
+
+            for (src, dst) in &stage_pairs {
+                copy_path_to_path(src, dst)?;
+                if dst
                     .extension()
                     .and_then(|s| s.to_str())
                     .map(|s| s.eq_ignore_ascii_case("csv"))
                     .unwrap_or(false)
                 {
-                    rewrite_csv_for_flat_dir(&copied_path, &flat_data_dir_str)?;
+                    rewrite_csv_for_flat_dir(dst, &flat_data_dir_str, &path_map)?;
                 }
             }
 
             // Remap inputs JSON to the flat data dir so mounts stay junction-free
-            inputs_json_value =
-                remap_json_paths_for_flat_dir(&inputs_json_value, &flat_data_dir_str);
+            inputs_json_value = remap_json_paths_for_flat_dir_with_map(
+                &inputs_json_value,
+                &flat_data_dir_str,
+                &path_map,
+            );
 
             hyperv_flat_dir = Some(flat_root);
             hyperv_flat_results_dir = Some(flat_results_dir.clone());
+            hyperv_path_map = Some(path_map);
             results_path_for_run = flat_results_dir;
         }
 
@@ -1716,11 +1879,66 @@ pub async fn execute_dynamic(
             extract_files_from_json(&inputs_json_value, &mut data_paths);
 
             let vm_data = format!("{}/data", vm_dir);
+            let mut path_map: BTreeMap<String, String> = BTreeMap::new();
+            let mut missing_paths: Vec<PathBuf> = Vec::new();
+
+            for data_path in &data_paths {
+                if !data_path.exists() {
+                    missing_paths.push(data_path.clone());
+                    continue;
+                }
+                let key = normalize_windows_path_key(data_path);
+                if path_map.contains_key(&key) {
+                    continue;
+                }
+                let staged_name = stage_name_for_path(data_path);
+                let vm_file_path = format!("{}/{}", vm_data, staged_name);
+                path_map.insert(key, vm_file_path);
+            }
+
+            append_desktop_log(&format!(
+                "[Pipeline] Hyper-V staging (VM) inputs: total={}, unique={}, missing={}",
+                data_paths.len(),
+                path_map.len(),
+                missing_paths.len()
+            ));
+            if !path_map.is_empty() {
+                let sample = path_map
+                    .iter()
+                    .take(5)
+                    .map(|(k, v)| format!("{} -> {}", k, v))
+                    .collect::<Vec<_>>()
+                    .join(" | ");
+                append_desktop_log(&format!(
+                    "[Pipeline] Hyper-V staging map (VM) sample: {}",
+                    sample
+                ));
+            }
+            if !missing_paths.is_empty() {
+                let sample = missing_paths
+                    .iter()
+                    .take(5)
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(" | ");
+                append_desktop_log(&format!(
+                    "[Pipeline] Warning: missing {} input paths (sample): {}",
+                    missing_paths.len(),
+                    sample
+                ));
+                if env_var_truthy("BIOVAULT_HYPERV_REQUIRE_ALL_INPUTS") {
+                    return Err(anyhow::anyhow!(
+                        "Missing {} input paths in Hyper-V VM staging",
+                        missing_paths.len()
+                    )
+                    .into());
+                }
+            }
 
             // Rewrite CSV files to use VM-local paths before copying them into the VM
             if !dry_run {
                 append_desktop_log("[Pipeline] Rewriting CSV files with VM-local paths...");
-                rewrite_input_csvs_for_vm(&inputs_json_value, &vm_data)?;
+                rewrite_input_csvs_for_vm(&inputs_json_value, &vm_data, &path_map)?;
             }
 
             if !dry_run && !data_paths.is_empty() {
@@ -1738,8 +1956,17 @@ pub async fn execute_dynamic(
                 // Copy each data file
                 for data_path in &data_paths {
                     if data_path.exists() {
-                        let file_name = data_path.file_name().unwrap_or_default().to_string_lossy();
-                        let vm_file_path = format!("{}/{}", vm_data, file_name);
+                        let key = normalize_windows_path_key(data_path);
+                        let vm_file_path = match path_map.get(&key) {
+                            Some(path) => path.clone(),
+                            None => {
+                                append_desktop_log(&format!(
+                                    "[Pipeline] Warning: no VM staging path for {}",
+                                    data_path.display()
+                                ));
+                                continue;
+                            }
+                        };
                         let result = if data_path.is_dir() {
                             copy_dir_to_vm(&docker_bin, data_path, &vm_file_path)
                         } else {
@@ -1761,6 +1988,7 @@ pub async fn execute_dynamic(
                     .status();
             }
 
+            vm_path_map = Some(path_map);
             (Vec::new(), Some(vm_data))
         } else {
             // Normal mode: extract and mount Windows paths
@@ -2074,10 +2302,17 @@ pub async fn execute_dynamic(
         // For Hyper-V mode: use VM-local paths. For normal mode: use container mount paths.
         #[cfg(target_os = "windows")]
         let (docker_inputs_json, mut docker_params_json) = if let Some(ref vm_data) = vm_data_dir {
-            (
-                remap_json_paths_for_vm(&inputs_json_value, vm_data),
-                remap_json_paths_for_vm(&params_json_value, vm_data),
-            )
+            if let Some(ref map) = vm_path_map {
+                (
+                    remap_json_paths_for_vm_with_map(&inputs_json_value, vm_data, map),
+                    remap_json_paths_for_vm_with_map(&params_json_value, vm_data, map),
+                )
+            } else {
+                (
+                    remap_json_paths_for_vm(&inputs_json_value, vm_data),
+                    remap_json_paths_for_vm(&params_json_value, vm_data),
+                )
+            }
         } else {
             (
                 remap_json_paths_for_container(&inputs_json_value, using_podman),
@@ -3549,13 +3784,19 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
 }
 
 #[cfg(target_os = "windows")]
-fn copy_path_to_dir(src: &Path, dst_dir: &Path) -> Result<PathBuf> {
-    let file_name = src.file_name().unwrap_or_else(|| OsStr::new("data"));
-    let dest_path = dst_dir.join(file_name);
+fn copy_path_to_path(src: &Path, dest_path: &Path) -> Result<()> {
+    if let Some(parent) = dest_path.parent() {
+        fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "Failed to create destination dir for {}",
+                dest_path.display()
+            )
+        })?;
+    }
     if src.is_dir() {
-        copy_dir_recursive(src, &dest_path)?;
+        copy_dir_recursive(src, dest_path)?;
     } else {
-        fs::copy(src, &dest_path).with_context(|| {
+        fs::copy(src, dest_path).with_context(|| {
             format!(
                 "Failed to copy file: {} -> {}",
                 src.display(),
@@ -3563,48 +3804,71 @@ fn copy_path_to_dir(src: &Path, dst_dir: &Path) -> Result<PathBuf> {
             )
         })?;
     }
-    Ok(dest_path)
+    Ok(())
 }
 
 /// Rewrite a CSV file to use host-local flat paths (e.g., C:/bvtemp/...).
 #[cfg(target_os = "windows")]
-fn rewrite_csv_for_flat_dir(csv_path: &Path, flat_data_dir: &str) -> Result<()> {
-    let content = fs::read_to_string(csv_path)
-        .with_context(|| format!("Failed to read CSV: {}", csv_path.display()))?;
-
+fn rewrite_csv_for_flat_dir(
+    csv_path: &Path,
+    flat_data_dir: &str,
+    path_map: &BTreeMap<String, String>,
+) -> Result<()> {
     append_desktop_log(&format!(
         "[CSV Rewrite Flat] Processing: {}",
         csv_path.display()
     ));
     let mut converted_count = 0;
+    let mut missing_count = 0;
 
-    let mut new_lines = Vec::new();
-    for line in content.lines() {
-        let mut new_fields = Vec::new();
-        for field in line.split(',') {
-            let trimmed = field.trim();
-            let (was_quoted, inner) = if trimmed.starts_with('"') && trimmed.ends_with('"') {
-                (true, &trimmed[1..trimmed.len() - 1])
-            } else {
-                (false, trimmed)
-            };
+    let mut reader = csv::ReaderBuilder::new()
+        .has_headers(false)
+        .from_path(csv_path)
+        .with_context(|| format!("Failed to open CSV: {}", csv_path.display()))?;
+    let mut writer = csv::WriterBuilder::new()
+        .has_headers(false)
+        .from_writer(vec![]);
 
-            let new_value = if looks_like_windows_absolute_path(inner) {
-                converted_count += 1;
-                let path = Path::new(inner);
-                let file_name = path.file_name().unwrap_or_default().to_string_lossy();
-                format!("{}/{}", flat_data_dir, file_name)
+    for result in reader.records() {
+        let record = result
+            .with_context(|| format!("Failed to parse CSV record: {}", csv_path.display()))?;
+        let mut out: Vec<String> = Vec::with_capacity(record.len());
+        for field in record.iter() {
+            if looks_like_windows_absolute_path(field) {
+                let normalized = normalize_windows_path_str(field);
+                if let Some(mapped) = path_map.get(&normalized) {
+                    converted_count += 1;
+                    out.push(mapped.replace('\\', "/"));
+                } else {
+                    missing_count += 1;
+                    let file_name = Path::new(&normalized)
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy();
+                    out.push(format!("{}/{}", flat_data_dir, file_name));
+                }
             } else {
-                inner.to_string()
-            };
-
-            if was_quoted {
-                new_fields.push(format!("\"{}\"", new_value));
-            } else {
-                new_fields.push(new_value);
+                out.push(field.to_string());
             }
         }
-        new_lines.push(new_fields.join(","));
+        writer
+            .write_record(out)
+            .with_context(|| format!("Failed to write CSV record: {}", csv_path.display()))?;
+    }
+
+    let new_content = String::from_utf8(
+        writer
+            .into_inner()
+            .map_err(|e| anyhow::anyhow!("Failed to finalize CSV writer: {}", e))?,
+    )
+    .context("Failed to encode rewritten CSV")?;
+
+    if missing_count > 0 {
+        append_desktop_log(&format!(
+            "[CSV Rewrite Flat] Warning: {} paths not in staging map for {}",
+            missing_count,
+            csv_path.display()
+        ));
     }
 
     append_desktop_log(&format!(
@@ -3612,8 +3876,6 @@ fn rewrite_csv_for_flat_dir(csv_path: &Path, flat_data_dir: &str) -> Result<()> 
         converted_count,
         csv_path.display()
     ));
-
-    let new_content = new_lines.join("\n");
     fs::write(csv_path, new_content)
         .with_context(|| format!("Failed to write converted CSV: {}", csv_path.display()))?;
 
@@ -3623,14 +3885,19 @@ fn rewrite_csv_for_flat_dir(csv_path: &Path, flat_data_dir: &str) -> Result<()> 
 /// Extract Windows file paths from CSV content (keeps file paths, not parent dirs).
 #[cfg(target_os = "windows")]
 fn extract_files_from_csv(content: &str, files: &mut Vec<PathBuf>) {
-    for line in content.lines() {
-        for field in line.split(',') {
-            let field = field.trim().trim_matches('"');
-            if looks_like_windows_absolute_path(field) {
-                let normalized = normalize_windows_path_str(field);
-                let path = Path::new(&normalized);
-                if path.exists() {
-                    files.push(path.to_path_buf());
+    let mut reader = csv::ReaderBuilder::new()
+        .has_headers(false)
+        .from_reader(content.as_bytes());
+    for result in reader.records() {
+        if let Ok(record) = result {
+            for field in record.iter() {
+                let field = field.trim();
+                if looks_like_windows_absolute_path(field) {
+                    let normalized = normalize_windows_path_str(field);
+                    let path = Path::new(&normalized);
+                    if path.exists() {
+                        files.push(path.to_path_buf());
+                    }
                 }
             }
         }
