@@ -1,8 +1,8 @@
 use crate::config::{get_biovault_home, is_syftbox_env, Config};
+use crate::subscriptions;
 use crate::syftbox::syc;
 use crate::Result;
 use anyhow::Context;
-use crate::subscriptions;
 use dialoguer::{theme::ColorfulTheme, Confirm, Input, Select};
 use serde_yaml;
 use std::env;
@@ -547,8 +547,7 @@ mod tests {
 fn ensure_default_syft_subscriptions(data_root: &Path) -> Result<()> {
     let sub_path = data_root.join(".data").join("syft.sub.yaml");
     let mut cfg = if sub_path.exists() {
-        subscriptions::load(&sub_path)
-            .unwrap_or_else(|_| subscriptions::default_config())
+        subscriptions::load(&sub_path).unwrap_or_else(|_| subscriptions::default_config())
     } else {
         if let Some(parent) = sub_path.parent() {
             fs::create_dir_all(parent)
@@ -573,8 +572,8 @@ fn ensure_default_syft_subscriptions(data_root: &Path) -> Result<()> {
     if sub_path.exists() && !changed {
         return Ok(());
     }
-    let contents = serde_yaml::to_string(&cfg)
-        .with_context(|| "Failed to serialize default syft.sub.yaml")?;
+    let contents =
+        serde_yaml::to_string(&cfg).with_context(|| "Failed to serialize default syft.sub.yaml")?;
     fs::write(&sub_path, contents)
         .with_context(|| format!("Failed to write {}", sub_path.display()))?;
     Ok(())

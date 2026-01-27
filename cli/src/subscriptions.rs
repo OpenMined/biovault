@@ -38,19 +38,16 @@ pub struct Rule {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum Action {
     Allow,
     Pause,
+    #[default]
     Block,
     #[serde(other)]
     Unknown,
 }
 
-impl Default for Action {
-    fn default() -> Self {
-        Action::Block
-    }
-}
 
 impl Action {
     fn normalize(self) -> Action {
@@ -118,9 +115,7 @@ pub fn default_config() -> Subscriptions {
 pub fn load(path: &Path) -> Result<Subscriptions> {
     let raw = match std::fs::read_to_string(path) {
         Ok(raw) => raw,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(default_config())
-        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(default_config()),
         Err(err) => return Err(err.into()),
     };
     let mut cfg: Subscriptions = serde_yaml::from_str(&raw)

@@ -237,8 +237,8 @@ fn add_session_subscription(config: &Config, peer_email: &str, session_id: &str)
 
     let data_dir = config.get_syftbox_data_dir()?;
     let syftsub_path = data_dir.join(".data").join("syft.sub.yaml");
-    let mut cfg = subscriptions::load(&syftsub_path)
-        .unwrap_or_else(|_| subscriptions::default_config());
+    let mut cfg =
+        subscriptions::load(&syftsub_path).unwrap_or_else(|_| subscriptions::default_config());
     let path = format!("shared/biovault/sessions/{}/**", session_id);
 
     let exists = cfg.rules.iter().any(|rule| {

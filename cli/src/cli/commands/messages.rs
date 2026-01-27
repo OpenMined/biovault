@@ -18,9 +18,9 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
-use std::sync::{Mutex, OnceLock};
 
 const MESSAGE_ENDPOINT: &str = "/message";
 
@@ -767,9 +767,7 @@ fn wait_for_submission_sync(
     let start = Instant::now();
 
     while start.elapsed() < Duration::from_secs(timeout_secs) {
-        if module_yaml.exists()
-            && expected_paths.iter().all(|rel| root.join(rel).exists())
-        {
+        if module_yaml.exists() && expected_paths.iter().all(|rel| root.join(rel).exists()) {
             return Ok(());
         }
         thread::sleep(Duration::from_secs(1));
@@ -809,8 +807,8 @@ fn add_subscription_for_syft_url(config: &Config, url: &str) -> anyhow::Result<(
     let data_dir = config.get_syftbox_data_dir()?;
     let syftsub_path = data_dir.join(".data").join("syft.sub.yaml");
 
-    let mut cfg = subscriptions::load(&syftsub_path)
-        .unwrap_or_else(|_| subscriptions::default_config());
+    let mut cfg =
+        subscriptions::load(&syftsub_path).unwrap_or_else(|_| subscriptions::default_config());
 
     let mut path = parsed.path.trim_start_matches('/').to_string();
     let path_obj = Path::new(&path);

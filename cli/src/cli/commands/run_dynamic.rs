@@ -194,9 +194,7 @@ fn resolve_git_bash() -> String {
 /// not extended paths like \\?\C:\Users\foo.
 #[cfg(target_os = "windows")]
 fn strip_extended_path_prefix(path: &str) -> String {
-    let stripped = path
-        .trim_start_matches(r"\\?\")
-        .trim_start_matches(r"//?/");
+    let stripped = path.trim_start_matches(r"\\?\").trim_start_matches(r"//?/");
     stripped.to_string()
 }
 
@@ -2993,8 +2991,8 @@ fn execute_syqure_docker(
     platform: &str,
 ) -> Result<()> {
     // Use podman if BIOVAULT_CONTAINER_RUNTIME is set to "podman"
-    let container_runtime = env::var("BIOVAULT_CONTAINER_RUNTIME")
-        .unwrap_or_else(|_| "docker".to_string());
+    let container_runtime =
+        env::var("BIOVAULT_CONTAINER_RUNTIME").unwrap_or_else(|_| "docker".to_string());
 
     println!(
         "  Using {} image: {}",
@@ -3007,9 +3005,8 @@ fn execute_syqure_docker(
     );
 
     let container_name = format!("syqure-{}-pid{}", run_id, party_id);
-    let keep_containers =
-        env_var_truthy("BIOVAULT_SYQURE_KEEP_CONTAINERS")
-            || env_var_truthy("BV_SYQURE_KEEP_CONTAINERS");
+    let keep_containers = env_var_truthy("BIOVAULT_SYQURE_KEEP_CONTAINERS")
+        || env_var_truthy("BV_SYQURE_KEEP_CONTAINERS");
 
     let _ = Command::new(&container_runtime)
         .args(["rm", "-f", &container_name])
@@ -3085,10 +3082,10 @@ fn execute_syqure_docker(
 
     // Strip Windows extended path prefix for Docker volume mounts
     let module_mount_path =
-        strip_extended_path_prefix(&module_path_abs.to_string_lossy().to_string());
+        strip_extended_path_prefix(module_path_abs.to_string_lossy().as_ref());
     let datasites_mount_path = strip_extended_path_prefix(effective_datasites_mount);
     let results_mount_path =
-        strip_extended_path_prefix(&results_root.to_string_lossy().to_string());
+        strip_extended_path_prefix(results_root.to_string_lossy().as_ref());
 
     cmd.args(["-v", &format!("{}:/workspace/project", module_mount_path)]);
     cmd.args([
