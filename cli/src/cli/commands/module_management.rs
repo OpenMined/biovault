@@ -1202,7 +1202,7 @@ pub async fn import_flow_with_deps(
     name_override: Option<String>,
     overwrite: bool,
 ) -> Result<String> {
-    use crate::flow_spec::FlowSpec;
+    use crate::flow_spec::{FlowFile, FlowSpec};
     use colored::Colorize;
 
     // Check if this is a local path (starts with / or file://)
@@ -1258,9 +1258,20 @@ pub async fn import_flow_with_deps(
         (yaml_str, DependencyContext::GitHub { base_url })
     };
 
-    // Parse flow spec
-    let mut spec: FlowSpec =
-        serde_yaml::from_str(&yaml_str).context("Failed to parse flow.yaml")?;
+    // Parse flow spec via FlowFile to support Flow schema shapes
+    let flow_file = FlowFile::parse_yaml(&yaml_str)
+        .map_err(|e| {
+            eprintln!(
+                "Failed to parse flow.yaml from {}. First 200 chars:\n{}",
+                url,
+                truncate(&yaml_str, 200)
+            );
+            e
+        })
+        .context("Failed to parse flow.yaml")?;
+    let mut spec: FlowSpec = flow_file
+        .to_flow_spec()
+        .context("Failed to convert flow spec")?;
 
     let flow_name = name_override.unwrap_or_else(|| spec.name.clone());
 
