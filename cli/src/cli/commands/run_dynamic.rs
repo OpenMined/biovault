@@ -241,7 +241,9 @@ fn strip_extended_path_prefix(path: &str) -> String {
 /// Detect when "docker" is actually a Podman shim (common on Windows).
 #[cfg(target_os = "windows")]
 fn is_podman_shim(binary: &str) -> bool {
-    let output = Command::new(binary).arg("--version").output();
+    let mut cmd = Command::new(binary);
+    super::configure_child_process(&mut cmd);
+    let output = cmd.arg("--version").output();
     if let Ok(output) = output {
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1178,6 +1180,7 @@ fn ensure_nextflow_runner_image(docker_bin: &str) -> Result<&'static str> {
 
         // Check if image exists locally
         let mut check_cmd = Command::new(docker_bin);
+        super::configure_child_process(&mut check_cmd);
         check_cmd
             .arg("image")
             .arg("inspect")
@@ -1197,7 +1200,9 @@ fn ensure_nextflow_runner_image(docker_bin: &str) -> Result<&'static str> {
                 nextflow_runner_image
             );
 
-            let pull_status = Command::new(docker_bin)
+            let mut pull_cmd = Command::new(docker_bin);
+            super::configure_child_process(&mut pull_cmd);
+            let pull_status = pull_cmd
                 .args(["pull", nextflow_runner_image])
                 .status()
                 .context("Failed to pull Nextflow runner image")?;
@@ -3009,6 +3014,7 @@ async fn execute_shell(
         }
 
         let mut cmd = Command::new(resolve_git_bash());
+        super::configure_child_process(&mut cmd);
         // Convert Windows path to Unix-style for Git Bash
         #[cfg(target_os = "windows")]
         let bash_workflow_path = windows_path_to_container(&workflow_path, false);
@@ -3341,7 +3347,9 @@ fn resolve_syqure_backend(spec: &ModuleSpec) -> Result<(String, bool)> {
         }
     }
 
-    if let Ok(which_output) = Command::new("which").arg("syqure").output() {
+    let mut which_cmd = Command::new("which");
+    super::configure_child_process(&mut which_cmd);
+    if let Ok(which_output) = which_cmd.arg("syqure").output() {
         if which_output.status.success() {
             let path = String::from_utf8_lossy(&which_output.stdout)
                 .trim()
@@ -3368,6 +3376,7 @@ fn execute_syqure_native(
     println!("  Using native syqure: {}", binary);
 
     let mut cmd = Command::new(binary);
+    super::configure_child_process(&mut cmd);
     cmd.arg(entrypoint);
     cmd.arg("--");
     cmd.arg(party_id.to_string());
@@ -3515,7 +3524,9 @@ fn execute_syqure_docker(
     let keep_containers = env_var_truthy("BIOVAULT_SYQURE_KEEP_CONTAINERS")
         || env_var_truthy("BV_SYQURE_KEEP_CONTAINERS");
 
-    let _ = Command::new(&container_runtime)
+    let mut rm_cmd = Command::new(&container_runtime);
+    super::configure_child_process(&mut rm_cmd);
+    let _ = rm_cmd
         .args(["rm", "-f", &container_name])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -3554,6 +3565,7 @@ fn execute_syqure_docker(
         PathBuf::from(strip_extended_path_prefix(effective_datasites_mount));
 
     let mut cmd = Command::new(&container_runtime);
+    super::configure_child_process(&mut cmd);
     cmd.args(["run", "--name", &container_name]);
     if !keep_containers {
         cmd.arg("--rm");
@@ -3609,7 +3621,9 @@ fn execute_syqure_docker(
     if !status.success() {
         if keep_containers {
             eprintln!("Syqure container {} failed; dumping logs:", container_name);
-            let _ = Command::new(&container_runtime)
+            let mut logs_cmd = Command::new(&container_runtime);
+            super::configure_child_process(&mut logs_cmd);
+            let _ = logs_cmd
                 .args(["logs", "--tail", "200", &container_name])
                 .status();
         } else {
