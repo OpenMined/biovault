@@ -3611,7 +3611,7 @@ fn parse_cli_args(args: &[String]) -> Result<ParsedArgs> {
         }
 
         if key.starts_with("nxf-max-forks=") || key.starts_with("nextflow-max-forks=") {
-            let value = key.splitn(2, '=').nth(1).unwrap_or("").trim();
+            let value = key.split_once('=').map(|x| x.1).unwrap_or("").trim();
             let parsed = value.parse::<u32>().ok().filter(|v| *v > 0);
             if parsed.is_none() {
                 return Err(anyhow::anyhow!(
