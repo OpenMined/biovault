@@ -251,6 +251,7 @@ fn is_podman_shim(binary: &str) -> bool {
 }
 
 #[cfg(not(target_os = "windows"))]
+#[allow(dead_code)]
 fn is_podman_shim(_binary: &str) -> bool {
     false
 }
@@ -1528,6 +1529,12 @@ pub async fn execute_dynamic(
 
     let parsed_args = parse_cli_args(&args)?;
     let nextflow_args = parsed_args.passthrough.clone();
+    let nextflow_max_forks = parsed_args
+        .nextflow_max_forks
+        .or(parse_nextflow_max_forks_env()?);
+    if let Some(value) = nextflow_max_forks {
+        append_desktop_log(&format!("[Pipeline] Nextflow maxForks set to {}", value));
+    }
 
     validate_no_clashes(&spec, &parsed_args)?;
 
@@ -2369,7 +2376,12 @@ pub async fn execute_dynamic(
         let runtime_config_path = if !dry_run {
             // On Windows with Podman, prefer copying inputs to avoid broken symlinks on /mnt/c mounts.
             let stage_in_copy = hyperv_host_mount || (cfg!(target_os = "windows") && using_podman);
-            let config_path = generate_runtime_config(&project_abs, using_podman, stage_in_copy)?;
+            let config_path = generate_runtime_config(
+                &project_abs,
+                using_podman,
+                stage_in_copy,
+                nextflow_max_forks,
+            )?;
             // For Hyper-V mode, the config file was copied to VM along with project
             // Reference it via the VM project path
             #[cfg(target_os = "windows")]
@@ -2510,7 +2522,12 @@ pub async fn execute_dynamic(
         // Generate runtime config for native Docker execution
         // This config sets docker.enabled = true so Nextflow uses Docker for process containers
         let native_runtime_config = if !dry_run && run_settings.require_docker {
-            Some(generate_runtime_config(&project_abs, false, false)?)
+            Some(generate_runtime_config(
+                &project_abs,
+                false,
+                false,
+                nextflow_max_forks,
+            )?)
         } else {
             None
         };
@@ -3615,6 +3632,7 @@ struct ParsedArgs {
     inputs: HashMap<String, InputArg>,
     params: HashMap<String, String>,
     passthrough: Vec<String>,
+    nextflow_max_forks: Option<u32>,
 }
 
 #[derive(Debug)]
@@ -3628,6 +3646,7 @@ fn parse_cli_args(args: &[String]) -> Result<ParsedArgs> {
     let mut params = HashMap::new();
     let mut format_overrides = HashMap::new();
     let mut passthrough = Vec::new();
+    let mut nextflow_max_forks: Option<u32> = None;
 
     let mut i = 0;
     while i < args.len() {
@@ -3679,6 +3698,41 @@ fn parse_cli_args(args: &[String]) -> Result<ParsedArgs> {
                 .into());
             }
             i += 2;
+            continue;
+        }
+
+        if key == "nxf-max-forks" || key == "nextflow-max-forks" {
+            if i + 1 >= args.len() {
+                return Err(anyhow::anyhow!("Missing value for argument: {}", arg).into());
+            }
+            let value = args[i + 1].trim();
+            let parsed = value.parse::<u32>().ok().filter(|v| *v > 0);
+            if parsed.is_none() {
+                return Err(anyhow::anyhow!(
+                    "Invalid value for {} (expected positive integer): {}",
+                    arg,
+                    value
+                )
+                .into());
+            }
+            nextflow_max_forks = parsed;
+            i += 2;
+            continue;
+        }
+
+        if key.starts_with("nxf-max-forks=") || key.starts_with("nextflow-max-forks=") {
+            let value = key.split_once('=').map(|x| x.1).unwrap_or("").trim();
+            let parsed = value.parse::<u32>().ok().filter(|v| *v > 0);
+            if parsed.is_none() {
+                return Err(anyhow::anyhow!(
+                    "Invalid value for {} (expected positive integer): {}",
+                    arg,
+                    value
+                )
+                .into());
+            }
+            nextflow_max_forks = parsed;
+            i += 1;
             continue;
         }
 
@@ -3745,7 +3799,28 @@ fn parse_cli_args(args: &[String]) -> Result<ParsedArgs> {
         inputs,
         params,
         passthrough,
+        nextflow_max_forks,
     })
+}
+
+fn parse_nextflow_max_forks_env() -> Result<Option<u32>> {
+    let raw = match env::var("BIOVAULT_NXF_MAX_FORKS") {
+        Ok(value) => value,
+        Err(_) => return Ok(None),
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let parsed = trimmed.parse::<u32>().ok().filter(|v| *v > 0);
+    if parsed.is_none() {
+        return Err(anyhow::anyhow!(
+            "Invalid BIOVAULT_NXF_MAX_FORKS (expected positive integer): {}",
+            trimmed
+        )
+        .into());
+    }
+    Ok(parsed)
 }
 
 fn validate_no_clashes(spec: &ModuleSpec, parsed: &ParsedArgs) -> Result<()> {
@@ -4295,6 +4370,7 @@ fn generate_runtime_config(
     project_path: &Path,
     using_podman: bool,
     stage_in_copy: bool,
+    max_forks: Option<u32>,
 ) -> Result<PathBuf> {
     let config_path = project_path.join(".biovault-runtime.config");
 
@@ -4317,12 +4393,15 @@ podman.runOptions = '--security-opt label=disable'
         if stage_in_copy {
             config.push_str("\nprocess.stageInMode = 'copy'\n");
         }
+        if let Some(value) = max_forks {
+            config.push_str(&format!("\nprocess.maxForks = {}\n", value));
+        }
         config
     } else {
         // Docker configuration
         // On ARM64: Don't force platform - let Docker auto-select (native if available, emulate if not)
         // On x86_64 or when forced: Use --platform linux/amd64 for compatibility
-        if force_x86 {
+        let mut config = if force_x86 {
             r#"process.executor = 'local'
 docker.enabled = true
 docker.runOptions = '--platform linux/amd64 -u $(id -u):$(id -g)'
@@ -4336,7 +4415,11 @@ docker.enabled = true
 docker.runOptions = '-u $(id -u):$(id -g)'
 "#
             .to_string()
+        };
+        if let Some(value) = max_forks {
+            config.push_str(&format!("\nprocess.maxForks = {}\n", value));
         }
+        config
     };
 
     fs::write(&config_path, config_contents).context("Failed to write runtime nextflow.config")?;
@@ -4441,6 +4524,7 @@ mod tests {
             ]),
             params: HashMap::new(),
             passthrough: Vec::new(),
+            nextflow_max_forks: None,
         };
 
         let project_spec = sample_project_spec();
