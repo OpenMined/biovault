@@ -452,6 +452,9 @@ pub(crate) fn execute_with_logging(
     configure_child_process(&mut cmd);
 
     let mut child = cmd.spawn().context("Failed to execute Nextflow")?;
+    if let Ok(pid_path) = std::env::var("BIOVAULT_FLOW_PID_FILE") {
+        let _ = fs::write(pid_path, child.id().to_string());
+    }
 
     let log_path = std::env::var("BIOVAULT_DESKTOP_LOG_FILE").ok();
 

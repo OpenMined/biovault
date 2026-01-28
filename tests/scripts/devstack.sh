@@ -200,6 +200,28 @@ require_file() {
   [[ -f "$1" ]] || { echo "Missing required file: $1" >&2; exit 1; }
 }
 
+check_disk_space() {
+  local path="$1"
+  local threshold_kb=$((10 * 1024 * 1024)) # 10 GB in KB
+  local avail_kb=""
+  local resolved_path=""
+
+  if ! command -v df >/dev/null 2>&1; then
+    return 0
+  fi
+
+  avail_kb="$(df -Pk "$path" 2>/dev/null | awk 'NR==2 {print $4}')"
+  if [[ -z "$avail_kb" ]]; then
+    return 0
+  fi
+
+  if (( avail_kb < threshold_kb )); then
+    local avail_gb=$((avail_kb / 1024 / 1024))
+    resolved_path="$(abs_path "$path")"
+    echo "WARNING: Low disk space on ${resolved_path} (~${avail_gb}GB free). MinIO can stop working below ~10GB free." >&2
+  fi
+}
+
 is_windows() {
   case "$(uname -s)" in
     MINGW*|MSYS*|CYGWIN*) return 0 ;;
@@ -405,6 +427,7 @@ start_stack() {
   [[ -d "$SYFTBOX_DIR" ]] || { echo "Missing syftbox checkout at $SYFTBOX_DIR" >&2; exit 1; }
 
   mkdir -p "$SANDBOX_DIR"
+  check_disk_space "$SANDBOX_DIR"
 
   # Resolve client-mode first because it may force --skip-client-daemons (embedded mode).
   # This must happen before we build the sbdev argument list below.

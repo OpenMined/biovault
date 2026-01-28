@@ -307,6 +307,14 @@ impl BioVaultDb {
         self.update_run_status(run_id, status, completed)
     }
 
+    pub fn update_flow_run_metadata(&self, run_id: i64, metadata: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE flow_runs SET metadata = ?1 WHERE id = ?2",
+            params![metadata, run_id],
+        )?;
+        Ok(())
+    }
+
     /// Delete a run (flow or module)
     pub fn delete_run(&self, run_id: i64) -> Result<()> {
         self.conn
