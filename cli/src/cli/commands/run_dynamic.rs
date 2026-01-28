@@ -192,6 +192,7 @@ fn should_force_x86_containers() -> bool {
 /// Returns None if Docker should auto-select (preferred for multi-arch images)
 /// Returns Some("linux/amd64") if x86 emulation is needed
 /// Returns Some("linux/arm64") only when explicitly required
+#[allow(dead_code)]
 fn get_container_platform(force_x86: bool) -> Option<&'static str> {
     if force_x86 || should_force_x86_containers() {
         return Some("linux/amd64");
