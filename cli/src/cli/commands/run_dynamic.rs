@@ -161,9 +161,43 @@ impl Default for RunSettings {
     }
 }
 
-/// Check if we should use Docker to run Nextflow (Windows only)
+/// Check if we should use Docker to run Nextflow
+/// - Windows: Always (no native Nextflow)
+/// - Linux/macOS ARM64: When forced via env var (native Nextflow works)
+/// - Linux/macOS x86: Never by default (native Nextflow works)
 fn should_use_docker_for_nextflow() -> bool {
+    // Allow forcing container mode for testing on non-Windows platforms
+    if std::env::var("BIOVAULT_FORCE_CONTAINER_NEXTFLOW")
+        .map(|v| !v.is_empty() && v != "0" && v.to_lowercase() != "false")
+        .unwrap_or(false)
+    {
+        return true;
+    }
     cfg!(target_os = "windows")
+}
+
+/// Detect if running on ARM64 architecture
+fn is_arm64() -> bool {
+    std::env::consts::ARCH == "aarch64"
+}
+
+/// Check if x86 container emulation should be forced for all containers
+fn should_force_x86_containers() -> bool {
+    std::env::var("BIOVAULT_FORCE_X86_CONTAINERS")
+        .map(|v| !v.is_empty() && v != "0" && v.to_lowercase() != "false")
+        .unwrap_or(false)
+}
+
+/// Get the appropriate platform flag for Docker containers
+/// Returns None if Docker should auto-select (preferred for multi-arch images)
+/// Returns Some("linux/amd64") if x86 emulation is needed
+/// Returns Some("linux/arm64") only when explicitly required
+fn get_container_platform(force_x86: bool) -> Option<&'static str> {
+    if force_x86 || should_force_x86_containers() {
+        return Some("linux/amd64");
+    }
+    // Let Docker auto-select - it will use native if available, emulate if not
+    None
 }
 
 /// Find Git Bash on Windows, falling back to "bash" if not found.
@@ -1042,10 +1076,13 @@ fn pull_docker_image_if_needed(docker_bin: &str, image: &str) -> Result<()> {
     apply_docker_config_arg(&mut pull_cmd);
     pull_cmd.arg("pull");
 
-    // On Windows, explicitly specify linux/amd64 platform to avoid manifest resolution issues
-    // when Docker daemon might be misconfigured or in Windows container mode
+    // On Windows, specify platform to avoid manifest resolution issues
+    // when Docker daemon might be misconfigured or in Windows container mode.
+    // On ARM64, we let Docker auto-select to get native images when available.
     #[cfg(target_os = "windows")]
-    pull_cmd.arg("--platform=linux/amd64");
+    if !is_arm64() || should_force_x86_containers() {
+        pull_cmd.arg("--platform=linux/amd64");
+    }
 
     pull_cmd.arg(image);
 
@@ -1065,6 +1102,20 @@ fn pull_docker_image_if_needed(docker_bin: &str, image: &str) -> Result<()> {
     Ok(())
 }
 
+/// Select the appropriate Nextflow runner image based on architecture
+/// - ARM64: Use ARM64-native image (avoids Go runtime crashes under QEMU)
+/// - x86_64: Use standard image with modern Docker CLI
+fn get_nextflow_runner_image() -> &'static str {
+    // ARM64 needs native image to avoid Go runtime crashes in Docker CLI
+    if is_arm64() {
+        // Multi-arch image that includes arm64
+        "ghcr.io/openmined/nextflow-runner:25.10.2"
+    } else {
+        // x86_64 image with modern Docker CLI
+        "ghcr.io/openmined/nextflow-runner:25.10.2"
+    }
+}
+
 #[cfg(target_os = "windows")]
 fn ensure_nextflow_runner_image(docker_bin: &str) -> Result<&'static str> {
     // The stock `nextflow/nextflow` image includes an outdated Docker CLI (17.x), which cannot
@@ -1073,7 +1124,8 @@ fn ensure_nextflow_runner_image(docker_bin: &str) -> Result<&'static str> {
     //   "client version 1.32 is too old. Minimum supported API version is 1.44"
     //
     // We use a pre-built image from GitHub Container Registry that includes a modern docker client.
-    const NEXTFLOW_RUNNER_IMAGE: &str = "ghcr.io/openmined/nextflow-runner:25.10.2";
+    // On ARM64, we need native images to avoid Go runtime crashes under QEMU emulation.
+    let nextflow_runner_image: &'static str = get_nextflow_runner_image();
 
     // Check if runner image exists locally
     let mut check_cmd = Command::new(docker_bin);
@@ -1082,7 +1134,7 @@ fn ensure_nextflow_runner_image(docker_bin: &str) -> Result<&'static str> {
     check_cmd
         .arg("image")
         .arg("inspect")
-        .arg(NEXTFLOW_RUNNER_IMAGE)
+        .arg(nextflow_runner_image)
         .stdout(Stdio::null())
         .stderr(Stdio::null());
 
@@ -1092,29 +1144,80 @@ fn ensure_nextflow_runner_image(docker_bin: &str) -> Result<&'static str> {
 
     if check_cmd.status().map(|s| s.success()).unwrap_or(false) {
         append_desktop_log(&format!(
-            "[Pipeline] Using Nextflow runner image: {}",
-            NEXTFLOW_RUNNER_IMAGE
+            "[Pipeline] Using Nextflow runner image: {} (arch: {})",
+            nextflow_runner_image,
+            std::env::consts::ARCH
         ));
-        return Ok(NEXTFLOW_RUNNER_IMAGE);
+        return Ok(nextflow_runner_image);
     }
 
     // Pull the pre-built image from GitHub Container Registry
     append_desktop_log(&format!(
-        "[Pipeline] Pulling Nextflow runner image from {}",
-        NEXTFLOW_RUNNER_IMAGE
+        "[Pipeline] Pulling Nextflow runner image from {} (arch: {})",
+        nextflow_runner_image,
+        std::env::consts::ARCH
     ));
 
-    pull_docker_image_if_needed(docker_bin, NEXTFLOW_RUNNER_IMAGE)?;
+    pull_docker_image_if_needed(docker_bin, nextflow_runner_image)?;
 
     append_desktop_log(&format!(
         "[Pipeline] Nextflow runner image {} ready",
-        NEXTFLOW_RUNNER_IMAGE
+        nextflow_runner_image
     ));
-    Ok(NEXTFLOW_RUNNER_IMAGE)
+    Ok(nextflow_runner_image)
 }
 
 #[cfg(not(target_os = "windows"))]
-fn ensure_nextflow_runner_image(_docker_bin: &str) -> Result<&'static str> {
+fn ensure_nextflow_runner_image(docker_bin: &str) -> Result<&'static str> {
+    // On non-Windows, if we're using container mode (forced), we need the runner image
+    // Otherwise this function shouldn't be called, but return a sensible default
+    if should_use_docker_for_nextflow() {
+        let nextflow_runner_image: &'static str = get_nextflow_runner_image();
+
+        // Check if image exists locally
+        let mut check_cmd = Command::new(docker_bin);
+        check_cmd
+            .arg("image")
+            .arg("inspect")
+            .arg(nextflow_runner_image)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+
+        if !check_cmd.status().map(|s| s.success()).unwrap_or(false) {
+            // Pull the image
+            append_desktop_log(&format!(
+                "[Pipeline] Pulling Nextflow runner image: {} (arch: {})",
+                nextflow_runner_image,
+                std::env::consts::ARCH
+            ));
+            println!(
+                "📦 Pulling Nextflow runner image: {}",
+                nextflow_runner_image
+            );
+
+            let pull_status = Command::new(docker_bin)
+                .args(["pull", nextflow_runner_image])
+                .status()
+                .context("Failed to pull Nextflow runner image")?;
+
+            if !pull_status.success() {
+                return Err(anyhow::anyhow!(
+                    "Failed to pull Nextflow runner image: {}",
+                    nextflow_runner_image
+                )
+                .into());
+            }
+        }
+
+        append_desktop_log(&format!(
+            "[Pipeline] Using Nextflow runner image: {} (arch: {})",
+            nextflow_runner_image,
+            std::env::consts::ARCH
+        ));
+        return Ok(nextflow_runner_image);
+    }
+
+    // Fallback for native Nextflow execution (image not used)
     Ok("nextflow/nextflow:25.10.2")
 }
 
@@ -2141,8 +2244,10 @@ pub async fn execute_dynamic(
 
         docker_cmd.arg("run").arg("--rm");
 
+        // On Windows with Docker (not Podman), specify platform.
+        // On ARM64, we don't force amd64 since we use ARM64-native images for the runner.
         #[cfg(target_os = "windows")]
-        if !using_podman {
+        if !using_podman && (!is_arm64() || should_force_x86_containers()) {
             docker_cmd.args(["--platform", "linux/amd64"]);
         }
 
@@ -2997,6 +3102,9 @@ async fn execute_syqure(
         .cloned()
         .unwrap_or_else(|| "file".to_string());
 
+    // Get platform from spec, defaulting to linux/amd64
+    // Syqure containers are x86-only for now, so we always force amd64
+    // This will use QEMU emulation on ARM64 systems
     let docker_platform = spec
         .runner
         .as_ref()
@@ -3433,8 +3541,10 @@ fn execute_syqure_docker(
         cmd.arg("--rm");
     }
 
-    // Only add --platform for docker (podman handles this differently)
-    if container_runtime == "docker" {
+    // Add --platform for docker when specified (podman handles this differently)
+    // Syqure containers are x86-only, so platform will typically be "linux/amd64"
+    // This uses QEMU emulation on ARM64 systems
+    if container_runtime == "docker" && !platform.is_empty() {
         cmd.args(["--platform", platform]);
     }
 
@@ -4177,12 +4287,19 @@ fn cleanup_vm_dir(docker_bin: &str, vm_dir: &str) {
 
 /// Generate a Nextflow config file for the specified container runtime.
 /// Returns the path to the generated config file.
+///
+/// Platform handling:
+/// - ARM64 without force flag: No --platform (Docker auto-selects native if available)
+/// - x86_64 or force flag set: --platform linux/amd64 for compatibility
 fn generate_runtime_config(
     project_path: &Path,
     using_podman: bool,
     stage_in_copy: bool,
 ) -> Result<PathBuf> {
     let config_path = project_path.join(".biovault-runtime.config");
+
+    // Determine if we should force x86 platform for task containers
+    let force_x86 = should_force_x86_containers() || !is_arm64();
 
     let config_contents = if using_podman {
         // Podman configuration
@@ -4203,19 +4320,33 @@ podman.runOptions = '--security-opt label=disable'
         config
     } else {
         // Docker configuration
-        r#"process.executor = 'local'
+        // On ARM64: Don't force platform - let Docker auto-select (native if available, emulate if not)
+        // On x86_64 or when forced: Use --platform linux/amd64 for compatibility
+        if force_x86 {
+            r#"process.executor = 'local'
 docker.enabled = true
 docker.runOptions = '--platform linux/amd64 -u $(id -u):$(id -g)'
 "#
-        .to_string()
+            .to_string()
+        } else {
+            // ARM64: Let Docker auto-select the best platform
+            // Multi-arch images will use arm64, x86-only images will be emulated
+            r#"process.executor = 'local'
+docker.enabled = true
+docker.runOptions = '-u $(id -u):$(id -g)'
+"#
+            .to_string()
+        }
     };
 
     fs::write(&config_path, config_contents).context("Failed to write runtime nextflow.config")?;
 
     append_desktop_log(&format!(
-        "[Pipeline] Generated runtime config at {} (podman={})",
+        "[Pipeline] Generated runtime config at {} (podman={}, force_x86={}, arch={})",
         config_path.display(),
-        using_podman
+        using_podman,
+        force_x86,
+        std::env::consts::ARCH
     ));
 
     Ok(config_path)
