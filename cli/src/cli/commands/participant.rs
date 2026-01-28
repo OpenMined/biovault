@@ -141,7 +141,12 @@ fn get_index_file_path(file_path: &str, is_aligned: bool) -> String {
 
 fn expand_tilde(path: &str) -> String {
     if path.starts_with("~/") {
-        if let Ok(home) = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")) {
+        #[cfg(windows)]
+        let home = std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME"));
+        #[cfg(not(windows))]
+        let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE"));
+
+        if let Ok(home) = home {
             return path.replacen("~", &home, 1);
         }
     }
