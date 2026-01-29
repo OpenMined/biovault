@@ -2257,6 +2257,24 @@ pub async fn execute_dynamic(
 
         docker_cmd.arg("run").arg("--rm");
 
+        // Add container name for graceful stop support
+        // Use BIOVAULT_FLOW_RUN_ID if available, otherwise generate a timestamp
+        let container_name = std::env::var("BIOVAULT_FLOW_RUN_ID")
+            .unwrap_or_else(|_| chrono::Utc::now().format("%Y%m%d%H%M%S").to_string());
+        let container_name = format!("bv-nf-{}", container_name);
+        docker_cmd.args(["--name", &container_name]);
+
+        // Save container name to file for pause/stop to use
+        if let Some(ref results) = results_dir {
+            let container_file = Path::new(results).join("flow.container");
+            let _ = std::fs::write(&container_file, &container_name);
+            append_desktop_log(&format!(
+                "[Pipeline] Nextflow container name: {} (saved to {})",
+                container_name,
+                container_file.display()
+            ));
+        }
+
         // On Windows with Docker (not Podman), specify platform.
         // On ARM64, we don't force amd64 since we use ARM64-native images for the runner.
         #[cfg(target_os = "windows")]
