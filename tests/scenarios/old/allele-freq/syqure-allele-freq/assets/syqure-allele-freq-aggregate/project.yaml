@@ -1,0 +1,45 @@
+name: syqure-allele-freq-aggregate
+author: madhava@openmined.org
+workflow: aggregate.sh
+template: shell
+version: 0.1.0
+env:
+  SEQURE_SYFT_WAIT_STRICT: "1"
+  SEQURE_SYFT_WAIT_TIMEOUT: "600"
+  SEQURE_FILE_DEBUG: "1"
+  SEQURE_FILE_KEEP: "1"
+  SEQURE_LOG_DIR: "syqure-logs"
+  SEQURE_FILE_POLL_MS: "50"
+assets:
+  - assets/allele_freq_sum.codon
+  - assets/allele_freq_utils.py
+description: Securely aggregate allele frequency arrays via Syqure.
+datasites: &datasites
+  - aggregator@sandbox.local
+  - client1@sandbox.local
+  - client2@sandbox.local
+inputs:
+  - name: allele_freq_npz
+    type: File
+    description: Allele frequency numpy arrays (ac/an/n_samples)
+    format: npz
+  - name: locus_index
+    type: File
+    description: Locus index JSON for allele frequency arrays
+    format: json
+outputs:
+  - name: sum_ac
+    type: File
+    description: Securely aggregated allele counts
+    format: txt
+    path: sum_ac.txt
+  - name: sum_an
+    type: File
+    description: Securely aggregated allele numbers
+    format: txt
+    path: sum_an.txt
+  - name: union_index
+    type: File
+    description: Union locus index used for alignment
+    format: json
+    path: union_locus_index.json

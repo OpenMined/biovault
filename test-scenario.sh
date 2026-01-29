@@ -21,6 +21,9 @@ Options:
   --sandbox DIR        Sandbox root (default: ./sandbox)
   --rust-client-bin P  Path to Rust client binary (optional)
   --skip-rust-build    Do not build Rust client (requires binary exists)
+  --no-reset           Do not reset devstack/sandbox (reuse existing state)
+  --force              Force scenario steps to re-run (overrides skip-done)
+  --allele-count N     Override allele-freq synthetic file count (default: 10)
   --docker             Force Docker mode for syqure runtime
   --podman             Force Podman runtime (sets BIOVAULT_CONTAINER_RUNTIME=podman)
   --keep-containers    Keep syqure containers on failure (for logs/debugging)
@@ -34,6 +37,7 @@ Examples:
   ./test-scenario.sh --docker tests/scenarios/syqure-distributed.yaml
   ./test-scenario.sh --podman tests/scenarios/syqure-distributed.yaml
   ./test-scenario.sh --podman --keep-containers tests/scenarios/syqure-distributed.yaml
+  ./test-scenario.sh --no-reset tests/scenarios/allele-freq-syqure.yaml
 EOF
 }
 
@@ -44,6 +48,9 @@ SKIP_RUST_BUILD=0
 USE_DOCKER=0
 USE_PODMAN=0
 KEEP_CONTAINERS=0
+NO_RESET=0
+FORCE_RUN=0
+ALLELE_COUNT=""
 SCENARIO=""
 
 while [[ $# -gt 0 ]]; do
@@ -65,6 +72,17 @@ while [[ $# -gt 0 ]]; do
       ;;
     --skip-rust-build)
       SKIP_RUST_BUILD=1
+      ;;
+    --no-reset)
+      NO_RESET=1
+      ;;
+    --force)
+      FORCE_RUN=1
+      ;;
+    --allele-count)
+      [[ $# -lt 2 ]] && { echo "Missing value for --allele-count" >&2; usage; exit 1; }
+      ALLELE_COUNT="${2:-}"
+      shift
       ;;
     --docker)
       USE_DOCKER=1
@@ -126,6 +144,16 @@ fi
 if (( USE_DOCKER )); then
   # Ensure syqure.yaml switches into Docker mode when --docker/--podman is used.
   export SEQURE_MODE="${SEQURE_MODE:-docker}"
+fi
+
+if (( NO_RESET )); then
+  export BV_DEVSTACK_RESET=0
+fi
+if (( FORCE_RUN )); then
+  export BV_FLOW_FORCE=1
+fi
+if [[ -n "$ALLELE_COUNT" ]]; then
+  export ALLELE_FREQ_COUNT="$ALLELE_COUNT"
 fi
 
 # Let tests/scripts/devstack.sh decide which syftbox client to run.

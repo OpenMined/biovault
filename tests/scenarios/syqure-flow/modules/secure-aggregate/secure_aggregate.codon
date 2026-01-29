@@ -1,4 +1,5 @@
 from sequre import sequre, mpc, Sharetensor as ST
+from numpy.create import array, zeros, zeros_like
 import os
 
 
@@ -60,20 +61,26 @@ def main():
     m.comms.sync_parties()
     print(f"CP{m.pid}: All parties synced!")
 
-    # Secure sum: each client contributes data[i], aggregator contributes 0
-    # Note: aggregator never accesses data[i] - the ternary short-circuits to 0
+    # Secure sum: vectorized add for performance (single MPC op per vector)
     print(f"CP{m.pid}: Starting MPC with n={n}, data_len={len(data)}")
+    if len(data) == 0:
+        data_vec = zeros((n,), dtype=int)
+    else:
+        data_vec = array(data, dtype=int)
+        if len(data_vec) != n:
+            n = len(data_vec)
+    zero_vec = zeros_like(data_vec)
+
+    v1 = data_vec if m.pid == 1 else zero_vec
+    v2 = data_vec if m.pid == 2 else zero_vec
+
+    s1 = ST.enc(m, v1, 1, m.default_mpc_modulus)
+    s2 = ST.enc(m, v2, 2, m.default_mpc_modulus)
+    total = add(m, s1, s2)
+    revealed = total.reveal(m).tolist()
     result: List[int] = []
-    for i in range(n):
-        v1 = data[i] if m.pid == 1 else 0
-        v2 = data[i] if m.pid == 2 else 0
-        print(f"CP{m.pid}: i={i} v1={v1} v2={v2}")
-        s1 = ST.enc(m, v1, 1, m.default_mpc_modulus)
-        s2 = ST.enc(m, v2, 2, m.default_mpc_modulus)
-        total = add(m, s1, s2)
-        revealed = int(total.reveal(m))
-        print(f"CP{m.pid}: i={i} revealed={revealed}")
-        result.append(revealed)
+    for x in revealed:
+        result.append(int(x))
 
     save_json(os.getenv("SEQURE_OUTPUT_AGGREGATED_COUNTS", "out.json"), result)
     m.done()

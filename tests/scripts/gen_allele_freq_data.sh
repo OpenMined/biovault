@@ -112,12 +112,16 @@ if [[ -z "$GENOSTATS_DB" ]]; then
     done
 fi
 
-if [[ -z "$GENOSTATS_DB" ]] || [[ ! -f "$GENOSTATS_DB" ]]; then
-    error "genostats.sqlite not found!"
+if [[ -n "$GENOSTATS_DB" && ! -f "$GENOSTATS_DB" ]]; then
+    error "genostats.sqlite not found at: $GENOSTATS_DB"
     exit 1
 fi
 
-info "Using database: $GENOSTATS_DB"
+if [[ -n "$GENOSTATS_DB" ]]; then
+    info "Using database: $GENOSTATS_DB"
+else
+    info "No genostats.sqlite found; bvs will auto-download to data/genostats.sqlite"
+fi
 
 EXISTING_COUNT=0
 if [[ -d "$DATA_DIR" ]]; then
@@ -129,12 +133,15 @@ if [[ "$FORCE_REGEN" == "1" ]] || [[ "$EXISTING_COUNT" -lt "$FILE_COUNT" ]]; the
     rm -rf "$DATA_DIR"/*
 
     SYNTH_ARGS=(
-        --sqlite "$GENOSTATS_DB"
         --output "$DATA_DIR/{id}.txt"
         --count "$FILE_COUNT"
         --threads 4
         --seed "$SEED"
     )
+
+    if [[ -n "$GENOSTATS_DB" ]]; then
+        SYNTH_ARGS+=(--sqlite "$GENOSTATS_DB")
+    fi
 
     if [[ -n "$APOL1_FREQ" || -n "$THAL_FREQ" ]]; then
         OVERLAY_JSON=$(build_overlay_json)

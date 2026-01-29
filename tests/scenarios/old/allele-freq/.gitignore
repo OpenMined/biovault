@@ -1,0 +1,6 @@
+work/*
+results/*
+.nextflow/*
+data/genostats.sqlite
+test-samplesheet.csv
+test-data/*
