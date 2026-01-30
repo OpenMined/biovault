@@ -1,0 +1,88 @@
+# Run with: ./test-scenario.sh tests/scenarios/import-files.yaml
+
+setup:
+  server:
+    - "./tests/scripts/devstack.sh --reset --clients client1@sandbox.local"
+
+steps:
+  - name: Fetch NA06985-chrY sample data (cached)
+    datasite: client1@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv sample-data fetch NA06985-chrY
+
+  - name: Fetch 23andme sample data (cached)
+    datasite: client1@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv sample-data fetch 23andme
+
+  - name: Create tiny VCF fixture
+    datasite: client1@sandbox.local
+    run: |
+      mkdir -p "$BIOVAULT_HOME/data/test-import"
+      cat >"$BIOVAULT_HOME/data/test-import/P1.vcf" <<'EOF'
+      ##fileformat=VCFv4.2
+      ##source=biovault-test
+      #CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	s1
+      1	10177	rs367896724	A	AC	.	PASS	.	GT	0/1
+      EOF
+
+  - name: Create import CSV (vcf + raw + 23andme)
+    datasite: client1@sandbox.local
+    run: |
+      cat >"$BIOVAULT_HOME/data/test-import/import-files.csv" <<EOF
+      file_path,participant_id,data_type,source,grch_version
+      $BIOVAULT_HOME/data/test-import/P1.vcf,P1,Variants,Test,GRCh38
+      $BIOVAULT_HOME/data/sample/reference/GRCh38_chrY.fa,NA06985-chrY,Reference,GRCh38,GRCh38
+      $BIOVAULT_HOME/data/sample/reference/GRCh38_chrY.fa.fai,NA06985-chrY,ReferenceIndex,GRCh38,GRCh38
+      $BIOVAULT_HOME/data/sample/NA06985-chrY/NA06985.final.chrY.cram,NA06985-chrY,Aligned,GRCh38,GRCh38
+      $BIOVAULT_HOME/data/sample/NA06985-chrY/NA06985.final.chrY.cram.crai,NA06985-chrY,AlignedIndex,GRCh38,GRCh38
+      $BIOVAULT_HOME/data/sample/23andme/genome_Zeeshan_Usamani_v4_Full.txt,23andme,Genotype,23andMe,GRCh37
+      EOF
+
+  - name: Import files as pending (no queue processing)
+    datasite: client1@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv files import-pending "$BIOVAULT_HOME/data/test-import/import-files.csv" --format json
+
+  - name: Assert VCF/raw/23andme entries present
+    datasite: client1@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv files list --format json >"$BIOVAULT_HOME/data/test-import/import-files.json"
+      python3 - "$BIOVAULT_HOME/data/test-import/import-files.json" <<'PY'
+      import json, sys
+      data = json.load(open(sys.argv[1]))
+      files = data.get("data", {}).get("files", [])
+      def has(dt, pid):
+          return any(f.get("data_type") == dt and f.get("participant_id") == pid for f in files)
+      needed = [
+          ("Variants", "P1"),
+          ("Reference", "NA06985-chrY"),
+          ("ReferenceIndex", "NA06985-chrY"),
+          ("Aligned", "NA06985-chrY"),
+          ("AlignedIndex", "NA06985-chrY"),
+          ("Genotype", "23andme"),
+      ]
+      missing = [f"{dt}:{pid}" for dt, pid in needed if not has(dt, pid)]
+      if missing:
+          raise SystemExit("Missing entries: " + ", ".join(missing))
+      print("OK")
+      PY
+
+  - name: Verify 23andme genotype file exists
+    datasite: client1@sandbox.local
+    run: |
+      test -s "$BIOVAULT_HOME/data/sample/23andme/genome_Zeeshan_Usamani_v4_Full.txt"
+
+  - name: Validate VCF and CRAM with tools (if installed)
+    datasite: client1@sandbox.local
+    run: |
+      if command -v bcftools >/dev/null 2>&1; then
+        bcftools view -H "$BIOVAULT_HOME/data/test-import/P1.vcf" >/dev/null
+      else
+        echo "bcftools not installed; skipping"
+      fi
+      if command -v samtools >/dev/null 2>&1; then
+        samtools view -H "$BIOVAULT_HOME/data/sample/NA06985-chrY/NA06985.final.chrY.cram" >/dev/null
+      else
+        echo "samtools not installed; skipping"
+      fi
