@@ -49,7 +49,7 @@ steps:
           cd {{workspace}}
           BIOVAULT_FLOW_VERBOSE=1 BIOVAULT_FLOW_RUN_ID={{run_id}} \
           BV_SYQURE_USE_DOCKER=${BV_SYQURE_USE_DOCKER:-} \
-            {{workspace}}/cli/target/release/bv run tests/scenarios/syqure-flow/flow.yaml
+            {{workspace}}/cli/target/release/bv run tests/scenarios/syqure-flow/flow-he.yaml
 
       - name: client2-flow
         datasite: client2@sandbox.local
@@ -57,7 +57,7 @@ steps:
           cd {{workspace}}
           BIOVAULT_FLOW_VERBOSE=1 BIOVAULT_FLOW_RUN_ID={{run_id}} \
           BV_SYQURE_USE_DOCKER=${BV_SYQURE_USE_DOCKER:-} \
-            {{workspace}}/cli/target/release/bv run tests/scenarios/syqure-flow/flow.yaml
+            {{workspace}}/cli/target/release/bv run tests/scenarios/syqure-flow/flow-he.yaml
 
       - name: aggregator-flow
         datasite: aggregator@sandbox.local
@@ -65,7 +65,7 @@ steps:
           cd {{workspace}}
           BIOVAULT_FLOW_VERBOSE=1 BIOVAULT_FLOW_RUN_ID={{run_id}} \
           BV_SYQURE_USE_DOCKER=${BV_SYQURE_USE_DOCKER:-} \
-            {{workspace}}/cli/target/release/bv run tests/scenarios/syqure-flow/flow.yaml
+            {{workspace}}/cli/target/release/bv run tests/scenarios/syqure-flow/flow-he.yaml
     timeout: 900
 
   - name: Verify flow completion
@@ -99,15 +99,10 @@ steps:
       echo ""
       echo "=== DISTRIBUTED FLOW TEST COMPLETE ==="
 
-  - name: Verify aggregation result
+  - name: Verify MPC aggregation result
     shell: bash
     run: |
-      if [[ "${BV_SYQURE_HE:-0}" = "1" ]]; then
-        RESULT_LABEL="HE"
-      else
-        RESULT_LABEL="MPC"
-      fi
-      echo "=== Verifying ${RESULT_LABEL} aggregation result ==="
+      echo "=== Verifying MPC aggregation result ==="
 
       # Read inputs
       CLIENT1_COUNTS=$(cat {{workspace}}/results/flows/syqure-flow/align_counts/client1_sandbox_local/counts_array.json | tr -d '[:space:]')
@@ -137,9 +132,9 @@ steps:
 
       # Both clients should have the same correct result
       if [ "$RESULT_CLIENT1" = "$EXPECTED" ] && [ "$RESULT_CLIENT2" = "$EXPECTED" ]; then
-        echo "✓ ${RESULT_LABEL} aggregation result is correct!"
+        echo "✓ MPC aggregation result is correct!"
       else
-        echo "✗ ERROR: ${RESULT_LABEL} result does not match expected sum"
+        echo "✗ ERROR: MPC result does not match expected sum"
         echo "  Client1 got: $RESULT_CLIENT1"
         echo "  Client2 got: $RESULT_CLIENT2"
         exit 1

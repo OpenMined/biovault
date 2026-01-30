@@ -3340,7 +3340,7 @@ fn execute_syqure_native(
 
             let status = status_parts.join(" | ");
             if status != last_status {
-                println!("  📡 MPC channels: {}", status);
+                println!("  📡 Syqure channels: {}", status);
                 last_status = status;
             }
 

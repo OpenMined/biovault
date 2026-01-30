@@ -24,6 +24,7 @@ Options:
   --no-reset           Do not reset devstack/sandbox (reuse existing state)
   --force              Force scenario steps to re-run (overrides skip-done)
   --allele-count N     Override allele-freq synthetic file count (default: 10)
+  --he                 Use HE aggregation path in syqure-flow (manual ciphertext exchange)
   --docker             Force Docker mode for syqure runtime
   --podman             Force Podman runtime (sets BIOVAULT_CONTAINER_RUNTIME=podman)
   --keep-containers    Keep syqure containers on failure (for logs/debugging)
@@ -51,6 +52,7 @@ KEEP_CONTAINERS=0
 NO_RESET=0
 FORCE_RUN=0
 ALLELE_COUNT=""
+USE_HE=0
 SCENARIO=""
 
 while [[ $# -gt 0 ]]; do
@@ -84,6 +86,9 @@ while [[ $# -gt 0 ]]; do
       ALLELE_COUNT="${2:-}"
       shift
       ;;
+    --he)
+      USE_HE=1
+      ;;
     --docker)
       USE_DOCKER=1
       ;;
@@ -116,6 +121,19 @@ if [[ -z "$SCENARIO" ]]; then
 fi
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+if (( USE_HE )); then
+  if [[ -f "$SCENARIO" ]]; then
+    if grep -q "syqure-flow/flow.yaml" "$SCENARIO"; then
+      mkdir -p "$ROOT_DIR/logs"
+      SCENARIO_HE="$ROOT_DIR/logs/$(basename "$SCENARIO" .yaml).he.yaml"
+      sed 's#syqure-flow/flow.yaml#syqure-flow/flow-he.yaml#g' "$SCENARIO" >"$SCENARIO_HE"
+      SCENARIO="$SCENARIO_HE"
+    else
+      echo "Warning: --he set but scenario does not reference syqure-flow/flow.yaml" >&2
+    fi
+  fi
+fi
 
 echo "Building BioVault CLI (release)..."
 (cd "$ROOT_DIR/cli" && cargo build --release)
@@ -154,6 +172,9 @@ if (( FORCE_RUN )); then
 fi
 if [[ -n "$ALLELE_COUNT" ]]; then
   export ALLELE_FREQ_COUNT="$ALLELE_COUNT"
+fi
+if (( USE_HE )); then
+  export BV_SYQURE_HE=1
 fi
 
 # Let tests/scripts/devstack.sh decide which syftbox client to run.
