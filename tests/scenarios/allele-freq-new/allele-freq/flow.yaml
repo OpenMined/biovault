@@ -1,0 +1,24 @@
+apiVersion: syftbox.openmined.org/v1alpha1
+kind: Flow
+metadata:
+  name: allele-freq-new
+  version: 0.1.0
+spec:
+  inputs:
+    samplesheet:
+      type: List[GenotypeRecord]
+  steps:
+    - id: allele_freq
+      uses:
+        source:
+          kind: local
+          path: ./
+      with:
+        participants: inputs.samplesheet
+      publish:
+        dosage_matrix_tsv: File(dosage_matrix.tsv)
+        dosage_matrix_npz: File(dosage_matrix.npz)
+        locus_index: File(locus_index.txt)
+        participants: File(participants.txt)
+        allele_freq: File(allele_freq.tsv)
+        vcf_results: File(vcf_conversion_results.tsv)

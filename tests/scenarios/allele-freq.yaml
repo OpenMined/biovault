@@ -1,0 +1,45 @@
+setup:
+  server:
+    - "./tests/scripts/devstack.sh --reset --clients client1@sandbox.local"
+
+steps:
+  - name: Initialize BioVault for client1
+    datasite: client1@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv init client1@sandbox.local --quiet
+
+  - name: Generate synthetic genotype data for client1
+    run: |
+      {{workspace}}/tests/scripts/gen_allele_freq_data.sh \
+        --output-dir {{workspace}}/sandbox/client1@sandbox.local/private/app_data/biovault/allele-freq-data \
+        --count ${ALLELE_FREQ_COUNT:-10} \
+        --seed 42 \
+        --apol1-het ${ALLELE_FREQ_APOL1_HET:-0.6} \
+        --apol1-hom-alt ${ALLELE_FREQ_APOL1_HOM_ALT:-0.2} \
+        --thal-het ${ALLELE_FREQ_THAL_HET:-0.5} \
+        --thal-hom-alt ${ALLELE_FREQ_THAL_HOM_ALT:-0.3} \
+        --no-call-frequency ${ALLELE_FREQ_NO_CALL_FREQ:-0.2} \
+        --no-call-token ${ALLELE_FREQ_NO_CALL_TOKEN:--} \
+        --force
+
+  - name: Import genotype data into BioVault
+    run: |
+      {{workspace}}/tests/scripts/import-data.sh \
+        --csv {{workspace}}/sandbox/client1@sandbox.local/private/app_data/biovault/allele-freq-data/samplesheet.csv \
+        --clients client1@sandbox.local \
+        --path-column genotype_file
+
+  - name: Run allele-freq standalone flow
+    run: |
+      RESULTS_DIR={{workspace}}/sandbox/client1@sandbox.local/.sandbox-run/results/allele-freq-new
+      BV_RUN_KEEP_HOME=1 {{workspace}}/tests/scripts/run.sh \
+        --datasite client1@sandbox.local \
+        --project {{workspace}}/tests/scenarios/allele-freq-new/allele-freq/flow.yaml \
+        --data all \
+        --results "$RESULTS_DIR"
+
+  - name: Validate allele-freq outputs
+    datasite: client1@sandbox.local
+    run: |
+      RESULTS_DIR={{workspace}}/sandbox/client1@sandbox.local/.sandbox-run/results/allele-freq-new
+      python3 {{workspace}}/tests/scenarios/allele-freq-new/validate_outputs.py "$RESULTS_DIR"

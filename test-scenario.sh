@@ -24,7 +24,7 @@ Options:
   --no-reset           Do not reset devstack/sandbox (reuse existing state)
   --force              Force scenario steps to re-run (overrides skip-done)
   --allele-count N     Override allele-freq synthetic file count (default: 10)
-  --he                 Use HE aggregation path in syqure-flow (manual ciphertext exchange)
+  --syqure-agg MODE    Syqure aggregation mode: smpc|he (default: smpc)
   --docker             Force Docker mode for syqure runtime
   --podman             Force Podman runtime (sets BIOVAULT_CONTAINER_RUNTIME=podman)
   --keep-containers    Keep syqure containers on failure (for logs/debugging)
@@ -38,6 +38,7 @@ Examples:
   ./test-scenario.sh --docker tests/scenarios/syqure-distributed.yaml
   ./test-scenario.sh --podman tests/scenarios/syqure-distributed.yaml
   ./test-scenario.sh --podman --keep-containers tests/scenarios/syqure-distributed.yaml
+  ./test-scenario.sh --syqure-agg he tests/scenarios/syqure-distributed.yaml
   ./test-scenario.sh --no-reset tests/scenarios/allele-freq-syqure.yaml
 EOF
 }
@@ -52,7 +53,7 @@ KEEP_CONTAINERS=0
 NO_RESET=0
 FORCE_RUN=0
 ALLELE_COUNT=""
-USE_HE=0
+SYQURE_AGG_MODE="smpc"
 SCENARIO=""
 
 while [[ $# -gt 0 ]]; do
@@ -86,8 +87,10 @@ while [[ $# -gt 0 ]]; do
       ALLELE_COUNT="${2:-}"
       shift
       ;;
-    --he)
-      USE_HE=1
+    --syqure-agg)
+      [[ $# -lt 2 ]] && { echo "Missing value for --syqure-agg" >&2; usage; exit 1; }
+      SYQURE_AGG_MODE="${2:-}"
+      shift
       ;;
     --docker)
       USE_DOCKER=1
@@ -121,19 +124,6 @@ if [[ -z "$SCENARIO" ]]; then
 fi
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
-if (( USE_HE )); then
-  if [[ -f "$SCENARIO" ]]; then
-    if grep -q "syqure-flow/flow.yaml" "$SCENARIO"; then
-      mkdir -p "$ROOT_DIR/logs"
-      SCENARIO_HE="$ROOT_DIR/logs/$(basename "$SCENARIO" .yaml).he.yaml"
-      sed 's#syqure-flow/flow.yaml#syqure-flow/flow-he.yaml#g' "$SCENARIO" >"$SCENARIO_HE"
-      SCENARIO="$SCENARIO_HE"
-    else
-      echo "Warning: --he set but scenario does not reference syqure-flow/flow.yaml" >&2
-    fi
-  fi
-fi
 
 echo "Building BioVault CLI (release)..."
 (cd "$ROOT_DIR/cli" && cargo build --release)
@@ -173,8 +163,16 @@ fi
 if [[ -n "$ALLELE_COUNT" ]]; then
   export ALLELE_FREQ_COUNT="$ALLELE_COUNT"
 fi
-if (( USE_HE )); then
-  export BV_SYQURE_HE=1
+if [[ -n "$SYQURE_AGG_MODE" ]]; then
+  case "$SYQURE_AGG_MODE" in
+    smpc|he)
+      export BV_SYQURE_AGG_MODE="$SYQURE_AGG_MODE"
+      ;;
+    *)
+      echo "Unknown --syqure-agg mode: $SYQURE_AGG_MODE (expected smpc|he)" >&2
+      exit 1
+      ;;
+  esac
 fi
 
 # Let tests/scripts/devstack.sh decide which syftbox client to run.

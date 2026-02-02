@@ -1,0 +1,112 @@
+
+[Genotype inputs]
+# p1 genotype file
+rs33985472	11	5225485	TC	0.50	0.10	0.01
+rs73885319	22	36265860	GG	0.70	0.30	0.03
+rs60910145	22	36265988	CG	0.80	0.40	0.04
+# p2 genotype file
+rs33985472	11	5225485	TT	0.40	0.20	0.02
+rs73885319	22	36265860	AA	0.60	0.10	0.01
+rs60910145	22	36265988	--	0.90	0.50	0.05
+
+[VCF outputs]
+##fileformat=VCFv4.2
+##source=DynamicDNA
+##reference=hg38
+##INFO=<ID=GQ,Number=1,Type=Integer,Description="Genotype Quality">
+##INFO=<ID=DP,Number=1,Type=Integer,Description="Read Depth">
+##INFO=<ID=FORCE_RSID,Number=1,Type=String,Description="Forced RSID">
+##INFO=<ID=UNRESOLVED,Number=0,Type=Flag,Description="Non-ACGT or missing genotype">
+##FILTER=<ID=PASS,Description="All filters passed">
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+##FORMAT=<ID=GQ,Number=1,Type=Integer,Description="Genotype Quality">
+##FORMAT=<ID=DP,Number=1,Type=Integer,Description="Read Depth">
+##contig=<ID=1>
+##contig=<ID=2>
+##contig=<ID=3>
+##contig=<ID=4>
+##contig=<ID=5>
+##contig=<ID=6>
+##contig=<ID=7>
+##contig=<ID=8>
+##contig=<ID=9>
+##contig=<ID=10>
+##contig=<ID=11>
+##contig=<ID=12>
+##contig=<ID=13>
+##contig=<ID=14>
+##contig=<ID=15>
+##contig=<ID=16>
+##contig=<ID=17>
+##contig=<ID=18>
+##contig=<ID=19>
+##contig=<ID=20>
+##contig=<ID=21>
+##contig=<ID=22>
+##contig=<ID=X>
+##contig=<ID=Y>
+##contig=<ID=MT>
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	p1
+11	5225485	rs33985472	T	A,C	.	PASS	GQ=10;DP=10;FORCE_RSID=rs33985472	GT:GQ:DP	0/2:10:10
+22	36265860	rs73885319	A	G	.	PASS	GQ=10;DP=10;FORCE_RSID=rs73885319	GT:GQ:DP	1/1:10:10
+22	36265988	rs60910145	T	C,G	.	PASS	GQ=10;DP=10;FORCE_RSID=rs60910145	GT:GQ:DP	1/2:10:10
+
+##fileformat=VCFv4.2
+##source=DynamicDNA
+##reference=hg38
+##INFO=<ID=GQ,Number=1,Type=Integer,Description="Genotype Quality">
+##INFO=<ID=DP,Number=1,Type=Integer,Description="Read Depth">
+##INFO=<ID=FORCE_RSID,Number=1,Type=String,Description="Forced RSID">
+##INFO=<ID=UNRESOLVED,Number=0,Type=Flag,Description="Non-ACGT or missing genotype">
+##FILTER=<ID=PASS,Description="All filters passed">
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+##FORMAT=<ID=GQ,Number=1,Type=Integer,Description="Genotype Quality">
+##FORMAT=<ID=DP,Number=1,Type=Integer,Description="Read Depth">
+##contig=<ID=1>
+##contig=<ID=2>
+##contig=<ID=3>
+##contig=<ID=4>
+##contig=<ID=5>
+##contig=<ID=6>
+##contig=<ID=7>
+##contig=<ID=8>
+##contig=<ID=9>
+##contig=<ID=10>
+##contig=<ID=11>
+##contig=<ID=12>
+##contig=<ID=13>
+##contig=<ID=14>
+##contig=<ID=15>
+##contig=<ID=16>
+##contig=<ID=17>
+##contig=<ID=18>
+##contig=<ID=19>
+##contig=<ID=20>
+##contig=<ID=21>
+##contig=<ID=22>
+##contig=<ID=X>
+##contig=<ID=Y>
+##contig=<ID=MT>
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	p2
+11	5225485	rs33985472	T	A,C	.	PASS	GQ=10;DP=10;FORCE_RSID=rs33985472	GT:GQ:DP	0/0:10:10
+22	36265860	rs73885319	A	G	.	PASS	GQ=10;DP=10;FORCE_RSID=rs73885319	GT:GQ:DP	0/0:10:10
+22	36265988	rs60910145	T	C,G	.	PASS	GQ=10;DP=10;FORCE_RSID=rs60910145;UNRESOLVED	GT:GQ:DP	./.:10:10
+
+
+[Counts matrix]
+locus_key	p1	p2
+11-5225485-T-A	0	0
+11-5225485-T-C	1	0
+22-36265860-A-G	2	0
+22-36265988-T-C	1	-1
+22-36265988-T-G	1	-1
+
+
+[Allele frequencies]
+locus_key	allele_count	allele_number	num_homo	allele_freq
+11-5225485-T-A	0	4	0	0.000000
+11-5225485-T-C	1	4	0	0.250000
+22-36265860-A-G	2	4	1	0.500000
+22-36265988-T-C	1	2	0	0.500000
+22-36265988-T-G	1	2	0	0.500000
+
