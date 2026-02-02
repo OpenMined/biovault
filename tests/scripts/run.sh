@@ -134,6 +134,14 @@ else
   echo "Project path not found: $PROJECT_PATH" >&2
   exit 1
 fi
+MODULE_DIR="$PROJECT_PATH"
+if [[ -f "$PROJECT_PATH" ]]; then
+  MODULE_DIR="$(dirname "$PROJECT_PATH")"
+fi
+ASSETS_DIR=""
+if [[ -d "$MODULE_DIR/assets" ]]; then
+  ASSETS_DIR="$MODULE_DIR/assets"
+fi
 
 ensure_bv_binary() {
   local target="$CLI_DIR/target/release/bv"
@@ -154,11 +162,16 @@ run_bv() {
   local config_path="$client_dir/.syftbox/config.json"
   local config_yaml="$client_dir/config.yaml"
   [[ -f "$config_path" ]] || { echo "Missing SyftBox config for $email at $config_path" >&2; exit 1; }
-  HOME="$client_dir" \
+  local home_override="$client_dir"
+  if [[ "${BV_RUN_KEEP_HOME:-0}" == "1" ]]; then
+    home_override="$HOME"
+  fi
+  HOME="$home_override" \
   BIOVAULT_HOME="$([[ -f "$config_yaml" ]] && printf '%s' "$client_dir" || printf '%s' "$client_dir/.biovault")" \
   SYFTBOX_EMAIL="$email" \
   SYFTBOX_DATA_DIR="$data_dir" \
   SYFTBOX_CONFIG_PATH="$config_path" \
+  BV_ASSETS_DIR="$ASSETS_DIR" \
   "$BV_BIN" "$@"
 }
 

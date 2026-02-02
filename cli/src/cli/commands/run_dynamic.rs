@@ -253,12 +253,6 @@ fn is_podman_shim(binary: &str) -> bool {
     false
 }
 
-#[cfg(not(target_os = "windows"))]
-#[allow(dead_code)]
-fn is_podman_shim(_binary: &str) -> bool {
-    false
-}
-
 /// Convert a Windows path to a container-compatible path for use *inside* the container.
 /// - Docker Desktop: C:\Users\foo -> /c/Users/foo
 /// - Podman on WSL: C:\Users\foo -> /mnt/c/Users/foo
@@ -3261,6 +3255,30 @@ async fn execute_syqure(
         }
     }
 
+    if !dry_run {
+        let skip_done = env::var("BV_FLOW_SKIP_DONE").unwrap_or_default() == "1";
+        let force_run = env::var("BV_FLOW_FORCE").unwrap_or_default() == "1";
+        if skip_done && !force_run && !spec.outputs.is_empty() {
+            let mut all_outputs_present = true;
+            for output in &spec.outputs {
+                let env_key = format!("BV_OUTPUT_{}", env_key_suffix(&output.name));
+                if let Some(path) = env_map.get(&env_key) {
+                    if fs::metadata(path).is_err() {
+                        all_outputs_present = false;
+                        break;
+                    }
+                } else {
+                    all_outputs_present = false;
+                    break;
+                }
+            }
+            if all_outputs_present {
+                println!("⏭️  Skipping syqure step (outputs present; BV_FLOW_SKIP_DONE=1)");
+                return Ok(());
+            }
+        }
+    }
+
     if dry_run {
         println!("\n📋 [DRY RUN] Syqure execution plan:");
         println!(
@@ -3413,6 +3431,23 @@ fn execute_syqure_native(
     println!("\n▶️  Executing syqure...");
     println!("  {}", display_cmd.dimmed());
 
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // SAFETY: pre_exec is unsafe because it runs in the child after fork.
+        // We only call async-signal-safe libc here.
+        unsafe {
+            cmd.pre_exec(|| {
+                // Start a new process group so we can terminate syqure and its children together.
+                let rc = libc::setpgid(0, 0);
+                if rc != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+
     let datasites_root = env_map
         .get("SEQURE_DATASITES_ROOT")
         .cloned()
@@ -3455,7 +3490,7 @@ fn execute_syqure_native(
 
             let status = status_parts.join(" | ");
             if status != last_status {
-                println!("  📡 MPC channels: {}", status);
+                println!("  📡 Syqure channels: {}", status);
                 last_status = status;
             }
 
@@ -3463,11 +3498,96 @@ fn execute_syqure_native(
         }
     });
 
+    let start_time = std::time::Instant::now();
     let mut child = cmd.spawn().context("Failed to spawn syqure")?;
-    let status = child.wait().context("Failed to wait for syqure")?;
+
+    #[cfg(unix)]
+    fn kill_process_group(pid: u32) {
+        let pgid = -(pid as i32);
+        unsafe {
+            libc::kill(pgid, libc::SIGTERM);
+        }
+        // Give it a moment to exit gracefully, then force kill.
+        std::thread::sleep(Duration::from_millis(250));
+        unsafe {
+            libc::kill(pgid, libc::SIGKILL);
+        }
+    }
+
+    #[cfg(unix)]
+    struct SyqureKillGuard {
+        pid: u32,
+        child_ptr: *mut std::process::Child,
+    }
+
+    #[cfg(unix)]
+    impl Drop for SyqureKillGuard {
+        fn drop(&mut self) {
+            unsafe {
+                if let Ok(None) = (*self.child_ptr).try_wait() {
+                    kill_process_group(self.pid);
+                }
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    static SYQURE_SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+    #[cfg(unix)]
+    unsafe extern "C" fn syqure_signal_handler(_: libc::c_int) {
+        SYQURE_SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
+    }
+
+    #[cfg(unix)]
+    {
+        unsafe {
+            libc::signal(libc::SIGINT, syqure_signal_handler as libc::sighandler_t);
+            libc::signal(libc::SIGTERM, syqure_signal_handler as libc::sighandler_t);
+        }
+    }
+
+    #[cfg(unix)]
+    let _kill_guard = SyqureKillGuard {
+        pid: child.id(),
+        child_ptr: &mut child as *mut std::process::Child,
+    };
+
+    #[cfg(unix)]
+    let shutdown_handle = {
+        let pid = child.id();
+        thread::spawn(move || {
+            while !SYQURE_SHUTDOWN_REQUESTED.load(Ordering::SeqCst) {
+                thread::sleep(Duration::from_millis(100));
+            }
+            kill_process_group(pid);
+        })
+    };
+
+    let status = loop {
+        match child.try_wait().context("Failed to poll syqure")? {
+            Some(status) => break status,
+            None => {
+                thread::sleep(Duration::from_millis(200));
+            }
+        }
+    };
+
+    #[cfg(unix)]
+    {
+        SYQURE_SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst); // Signal thread to exit
+        let _ = shutdown_handle.join();
+    }
 
     stop_flag.store(true, Ordering::Relaxed);
     let _ = monitor_handle.join();
+
+    let elapsed = start_time.elapsed();
+    println!(
+        "  ⏱️  Syqure step duration: {}.{:03}s",
+        elapsed.as_secs(),
+        elapsed.subsec_millis()
+    );
 
     if !status.success() {
         #[cfg(unix)]

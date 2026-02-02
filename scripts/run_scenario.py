@@ -468,7 +468,6 @@ def run_shell(
 
         env.update(
             {
-                "HOME": str(client_dir),
                 "SYFTBOX_EMAIL": datasite,
                 "SYFTBOX_DATA_DIR": str(data_dir),
                 "SYFTBOX_CONFIG_PATH": str(config_path),
@@ -632,7 +631,6 @@ def run_shell_background(
 
         env.update(
             {
-                "HOME": str(client_dir),
                 "SYFTBOX_EMAIL": datasite,
                 "SYFTBOX_DATA_DIR": str(data_dir),
                 "SYFTBOX_CONFIG_PATH": str(config_path),

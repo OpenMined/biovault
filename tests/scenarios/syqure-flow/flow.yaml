@@ -102,7 +102,8 @@ spec:
           - name: aggregated_counts
             type: File
       assets:
-        - path: secure_aggregate.codon
+        - path: smpc_aggregate.codon
+        - path: he_aggregate.codon
 
   steps:
     - id: gen_variants

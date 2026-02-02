@@ -1,0 +1,28 @@
+apiVersion: syftbox.openmined.org/v1alpha1
+kind: Module
+metadata:
+  name: gen-allele-freq
+  version: 0.1.0
+spec:
+  runner:
+    template: shell
+    entrypoint: run.sh
+  assets:
+    - path: run.sh
+  outputs:
+    - name: allele_freq_npz
+      type: File
+      format: { kind: npz }
+      path: allele_freq.npz
+    - name: locus_index
+      type: File
+      format: { kind: json }
+      path: locus_index.json
+    - name: allele_freq_tsv
+      type: File
+      format: { kind: tsv }
+      path: allele_freq.tsv
+    - name: vcf_results
+      type: File
+      format: { kind: tsv }
+      path: vcf_conversion_results.tsv

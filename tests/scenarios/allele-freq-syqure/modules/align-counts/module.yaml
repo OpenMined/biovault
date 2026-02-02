@@ -1,0 +1,27 @@
+apiVersion: syftbox.openmined.org/v1alpha1
+kind: Module
+metadata:
+  name: align-counts
+  version: 0.1.0
+spec:
+  runner:
+    template: shell
+    entrypoint: run.sh
+  assets:
+    - path: run.sh
+    - path: align_counts.py
+  inputs:
+    - name: union_index
+      type: File
+      format: { kind: json }
+    - name: allele_freq_npz
+      type: File
+      format: { kind: npz }
+    - name: locus_index
+      type: File
+      format: { kind: json }
+  outputs:
+    - name: aligned_ac
+      type: File
+      format: { kind: json }
+      path: aligned_ac.json
