@@ -42,4 +42,4 @@ steps:
     datasite: client1@sandbox.local
     run: |
       RESULTS_DIR={{workspace}}/sandbox/client1@sandbox.local/.sandbox-run/results/allele-freq-new
-      python3 {{workspace}}/tests/scenarios/allele-freq-new/validate_outputs.py "$RESULTS_DIR"
+      python3 {{workspace}}/tests/scenarios/allele-freq/validate_outputs.py "$RESULTS_DIR"
