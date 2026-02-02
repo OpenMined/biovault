@@ -23,6 +23,7 @@ def main() -> int:
     participant_ids = set()
     loci_set = set()
     values = defaultdict(dict)
+    rsid_map = {}
 
     for bf in batch_files:
         if not os.path.exists(bf):
@@ -31,13 +32,17 @@ def main() -> int:
             next(fh, None)
             for line in fh:
                 parts = line.strip().split("\t")
-                if len(parts) < 3:
+                if len(parts) < 4:
                     continue
                 locus = parts[0]
-                participant_id = parts[1]
-                dosage = int(parts[2])
+                rsid = parts[1]
+                participant_id = parts[2]
+                dosage = int(parts[3])
                 participant_ids.add(participant_id)
                 loci_set.add(locus)
+                if rsid and rsid != ".":
+                    if not rsid_map.get(locus):
+                        rsid_map[locus] = rsid
                 existing = values.get(locus, {}).get(participant_id)
                 if existing is None or (existing == -1 and dosage != -1):
                     values.setdefault(locus, {})[participant_id] = dosage
@@ -59,10 +64,11 @@ def main() -> int:
             matrix[i, j] = dosage
 
     with open(args.matrix_tsv, "w", encoding="utf-8") as out:
-        out.write("locus_key\t" + "\t".join(participants) + "\n")
+        out.write("locus_key\trsid\t" + "\t".join(participants) + "\n")
         for locus in sorted_loci:
             i = idx[locus]
-            out.write(locus)
+            rsid = rsid_map.get(locus, "")
+            out.write(f"{locus}\t{rsid}")
             for j in range(n_participants):
                 out.write(f"\t{int(matrix[i, j])}")
             out.write("\n")
@@ -78,7 +84,7 @@ def main() -> int:
         out.write("#format=loci-v1\n")
         out.write("#genome=GRCh38\n")
         out.write(f"#n_loci={n_loci}\n")
-        out.write("#key=CHROM:POS:REF:ALT\n")
+        out.write("#key=CHROM-POS-REF-ALT\n")
         out.write("locus_key\n")
         for locus in sorted_loci:
             out.write(f"{locus}\n")

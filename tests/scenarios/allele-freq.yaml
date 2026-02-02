@@ -34,7 +34,7 @@ steps:
       RESULTS_DIR={{workspace}}/sandbox/client1@sandbox.local/.sandbox-run/results/allele-freq-new
       BV_RUN_KEEP_HOME=1 {{workspace}}/tests/scripts/run.sh \
         --datasite client1@sandbox.local \
-        --project {{workspace}}/tests/scenarios/allele-freq-new/allele-freq/flow.yaml \
+        --project {{workspace}}/flows/allele-freq/flow.yaml \
         --data all \
         --results "$RESULTS_DIR"
 

@@ -7,7 +7,6 @@ import os
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Extract SNP genotype class counts from a VCF.")
-    parser.add_argument("--mode", choices=["dosage", "carrier"], default="dosage")
     parser.add_argument("--vcf", required=True)
     parser.add_argument("--participant", required=True)
     parser.add_argument("--output", required=True)
@@ -56,7 +55,7 @@ def main() -> int:
     debug = args.debug or ("ALLELE_FREQ_DEBUG" in os.environ)
     try:
         with open(args.output, "w", encoding="utf-8") as out:
-            out.write("locus_key\tparticipant_id\tdosage\n")
+            out.write("locus_key\trsid\tparticipant_id\tdosage\n")
             with open_vcf(args.vcf) as fh:
                 for line in fh:
                     if line.startswith("#"):
@@ -75,6 +74,7 @@ def main() -> int:
 
                     gt = sample.split(":")[0]
                     alt_keys = [f"{chrom}-{pos}-{ref}-{alt}" for alt in alts]
+                    rsid_val = "" if rsid in (".", "") else rsid
 
                     if not alt_keys:
                         continue
@@ -84,12 +84,12 @@ def main() -> int:
                     if alt_dosages is None:
                         for locus in alt_keys:
                             log(f"{locus} missing=-1", debug)
-                            out.write(f"{locus}\t{args.participant}\t-1\n")
+                            out.write(f"{locus}\t{rsid_val}\t{args.participant}\t-1\n")
                         continue
 
                     for alt_key, dosage in zip(alt_keys, alt_dosages):
                         log(f"{alt_key} dosage={dosage}", debug)
-                        out.write(f"{alt_key}\t{args.participant}\t{dosage}\n")
+                        out.write(f"{alt_key}\t{rsid_val}\t{args.participant}\t{dosage}\n")
 
     except FileNotFoundError:
         print(f"Missing VCF: {args.vcf}", file=sys.stderr)

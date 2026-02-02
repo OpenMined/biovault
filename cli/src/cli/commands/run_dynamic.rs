@@ -216,11 +216,6 @@ fn is_podman_shim(binary: &str) -> bool {
     false
 }
 
-#[cfg(not(target_os = "windows"))]
-fn is_podman_shim(_binary: &str) -> bool {
-    false
-}
-
 /// Convert a Windows path to a container-compatible path for use *inside* the container.
 /// - Docker Desktop: C:\Users\foo -> /c/Users/foo
 /// - Podman on WSL: C:\Users\foo -> /mnt/c/Users/foo

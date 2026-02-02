@@ -1,7 +1,7 @@
 apiVersion: syftbox.openmined.org/v1alpha1
 kind: Flow
 metadata:
-  name: allele-freq-new
+  name: allele-freq
   version: 0.1.0
 spec:
   inputs:

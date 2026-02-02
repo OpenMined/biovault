@@ -4,7 +4,6 @@
 nextflow.enable.dsl=2
 
 def BATCH_SIZE = 10
-def MODE = "dosage"  // "dosage" (0/1/2) or "carrier" (0/1)
 
 workflow USER {
     take:
@@ -127,10 +126,8 @@ process extract_counts {
         tuple val(participant_id), path("snp_counts_${participant_id}.tsv")
 
     script:
-    def mode = MODE
     """
     python3 ${extract_script} \
-      --mode "${mode}" \
       --vcf "${vcf_file}" \
       --participant "${participant_id}" \
       --output "snp_counts_${participant_id}.tsv"

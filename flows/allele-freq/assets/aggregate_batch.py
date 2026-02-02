@@ -16,7 +16,7 @@ def main() -> int:
     count_files = args.counts.split()
 
     with open(args.output, "w", encoding="utf-8") as out:
-        out.write("locus_key\tparticipant_id\tdosage\n")
+        out.write("locus_key\trsid\tparticipant_id\tdosage\n")
         for cf in count_files:
             if not os.path.exists(cf):
                 continue

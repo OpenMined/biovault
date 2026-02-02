@@ -1,7 +1,7 @@
 apiVersion: syftbox.openmined.org/v1alpha1
 kind: Module
 metadata:
-  name: allele-freq-new
+  name: allele-freq
   version: 0.1.0
   description: Standalone allele frequency pipeline (genotype to VCF, counts, frequency outputs).
   authors:
