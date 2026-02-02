@@ -12,12 +12,11 @@ spec:
     entrypoint: workflow.nf
     template: dynamic-nextflow
   assets:
-    - path: workflow.nf
-    - path: assets/extract_counts.py
-    - path: assets/aggregate_batch.py
-    - path: assets/merge_all_batches.py
-    - path: assets/aggregate_conversion_stats.py
-    - path: assets/calc_allele_freq.py
+    - path: extract_counts.py
+    - path: aggregate_batch.py
+    - path: merge_all_batches.py
+    - path: aggregate_conversion_stats.py
+    - path: calc_allele_freq.py
   inputs:
     - name: participants
       type: List[GenotypeRecord]
