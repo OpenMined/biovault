@@ -76,7 +76,6 @@ process genotype_to_vcf {
 
     input:
         tuple val(participant_id), path(input_file)
-
     output:
         tuple val(participant_id), path("${participant_id}.vcf.gz"), path("${participant_id}_stats.tsv")
 
