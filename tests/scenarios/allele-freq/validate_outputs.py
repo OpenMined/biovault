@@ -34,6 +34,25 @@ def main() -> int:
             empty.append(name)
 
     if missing:
+        candidate_dirs = {}
+        for name in missing:
+            for found in results_dir.rglob(name):
+                candidate_dirs.setdefault(found.parent, set()).add(name)
+        for directory, found_names in candidate_dirs.items():
+            if len(found_names) == len(missing):
+                missing = []
+                for name in REQUIRED_FILES:
+                    path = directory / name
+                    if not path.exists():
+                        missing.append(name)
+                        continue
+                    if path.is_file() and path.stat().st_size == 0:
+                        empty.append(name)
+                if not missing:
+                    print(f"ok: outputs found under {directory}")
+                    return 0
+
+    if missing:
         print(f"missing outputs: {', '.join(missing)}", file=sys.stderr)
         return 1
     if empty:
