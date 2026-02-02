@@ -3119,9 +3119,7 @@ async fn execute_syqure(
                 }
             }
             if all_outputs_present {
-                println!(
-                    "⏭️  Skipping syqure step (outputs present; BV_FLOW_SKIP_DONE=1)"
-                );
+                println!("⏭️  Skipping syqure step (outputs present; BV_FLOW_SKIP_DONE=1)");
                 return Ok(());
             }
         }
@@ -3420,7 +3418,7 @@ fn execute_syqure_native(
 
     #[cfg(unix)]
     {
-        SYQURE_SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);  // Signal thread to exit
+        SYQURE_SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst); // Signal thread to exit
         let _ = shutdown_handle.join();
     }
 

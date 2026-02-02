@@ -582,7 +582,7 @@ pub async fn run_flow(
                         &run_id,
                     )?;
                 }
-            } else if let (Some(ref data_root), Some(current)) =
+            } else if let (Some(data_root), Some(current)) =
                 (syftbox_data_dir.as_ref(), current_datasite.as_deref())
             {
                 ensure_flow_subscription(
@@ -593,7 +593,7 @@ pub async fn run_flow(
                     &run_id,
                 )?;
             }
-        } else if let (Some(ref data_root), Some(current)) =
+        } else if let (Some(data_root), Some(current)) =
             (syftbox_data_dir.as_ref(), current_datasite.as_deref())
         {
             ensure_flow_subscription(
@@ -603,7 +603,7 @@ pub async fn run_flow(
                 &spec.name,
                 &run_id,
             )?;
-        } else if let (Some(ref root), Some(current)) =
+        } else if let (Some(root), Some(current)) =
             (sandbox_root.as_ref(), current_datasite.as_deref())
         {
             let data_root = root.join(current);
