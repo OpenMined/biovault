@@ -11,12 +11,16 @@ workflow USER {
         participants  // Channel emitting records with participant_id and input_file
 
     main:
-        def ASSETS_DIR = System.getenv('BV_ASSETS_DIR') ?: "${projectDir}/assets"
-        def extract_script = file("${ASSETS_DIR}/extract_counts.py")
-        def aggregate_batch_script = file("${ASSETS_DIR}/aggregate_batch.py")
-        def merge_batches_script = file("${ASSETS_DIR}/merge_all_batches.py")
-        def conversion_stats_script = file("${ASSETS_DIR}/aggregate_conversion_stats.py")
-        def allele_freq_script = file("${ASSETS_DIR}/calc_allele_freq.py")
+        def assetsDir = context.params.assets_dir
+        if (!assetsDir) {
+            throw new IllegalStateException("Missing assets directory in context params")
+        }
+        def assetsDirPath = file(assetsDir)
+        def extract_script = file("${assetsDirPath}/extract_counts.py")
+        def aggregate_batch_script = file("${assetsDirPath}/aggregate_batch.py")
+        def merge_batches_script = file("${assetsDirPath}/merge_all_batches.py")
+        def conversion_stats_script = file("${assetsDirPath}/aggregate_conversion_stats.py")
+        def allele_freq_script = file("${assetsDirPath}/calc_allele_freq.py")
         def extract_script_ch = Channel.value(extract_script)
         def aggregate_batch_script_ch = Channel.value(aggregate_batch_script)
         def merge_batches_script_ch = Channel.value(merge_batches_script)
