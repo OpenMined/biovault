@@ -161,9 +161,44 @@ impl Default for RunSettings {
     }
 }
 
-/// Check if we should use Docker to run Nextflow (Windows only)
+/// Check if we should use Docker to run Nextflow
+/// - Windows: Always (no native Nextflow)
+/// - Linux/macOS ARM64: When forced via env var (native Nextflow works)
+/// - Linux/macOS x86: Never by default (native Nextflow works)
 fn should_use_docker_for_nextflow() -> bool {
+    // Allow forcing container mode for testing on non-Windows platforms
+    if std::env::var("BIOVAULT_FORCE_CONTAINER_NEXTFLOW")
+        .map(|v| !v.is_empty() && v != "0" && v.to_lowercase() != "false")
+        .unwrap_or(false)
+    {
+        return true;
+    }
     cfg!(target_os = "windows")
+}
+
+/// Detect if running on ARM64 architecture
+fn is_arm64() -> bool {
+    std::env::consts::ARCH == "aarch64"
+}
+
+/// Check if x86 container emulation should be forced for all containers
+fn should_force_x86_containers() -> bool {
+    std::env::var("BIOVAULT_FORCE_X86_CONTAINERS")
+        .map(|v| !v.is_empty() && v != "0" && v.to_lowercase() != "false")
+        .unwrap_or(false)
+}
+
+/// Get the appropriate platform flag for Docker containers
+/// Returns None if Docker should auto-select (preferred for multi-arch images)
+/// Returns Some("linux/amd64") if x86 emulation is needed
+/// Returns Some("linux/arm64") only when explicitly required
+#[allow(dead_code)]
+fn get_container_platform(force_x86: bool) -> Option<&'static str> {
+    if force_x86 || should_force_x86_containers() {
+        return Some("linux/amd64");
+    }
+    // Let Docker auto-select - it will use native if available, emulate if not
+    None
 }
 
 /// Find Git Bash on Windows, falling back to "bash" if not found.
@@ -206,7 +241,9 @@ fn strip_extended_path_prefix(path: &str) -> String {
 /// Detect when "docker" is actually a Podman shim (common on Windows).
 #[cfg(target_os = "windows")]
 fn is_podman_shim(binary: &str) -> bool {
-    let output = Command::new(binary).arg("--version").output();
+    let mut cmd = Command::new(binary);
+    super::configure_child_process(&mut cmd);
+    let output = cmd.arg("--version").output();
     if let Ok(output) = output {
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1037,10 +1074,13 @@ fn pull_docker_image_if_needed(docker_bin: &str, image: &str) -> Result<()> {
     apply_docker_config_arg(&mut pull_cmd);
     pull_cmd.arg("pull");
 
-    // On Windows, explicitly specify linux/amd64 platform to avoid manifest resolution issues
-    // when Docker daemon might be misconfigured or in Windows container mode
+    // On Windows, specify platform to avoid manifest resolution issues
+    // when Docker daemon might be misconfigured or in Windows container mode.
+    // On ARM64, we let Docker auto-select to get native images when available.
     #[cfg(target_os = "windows")]
-    pull_cmd.arg("--platform=linux/amd64");
+    if !is_arm64() || should_force_x86_containers() {
+        pull_cmd.arg("--platform=linux/amd64");
+    }
 
     pull_cmd.arg(image);
 
@@ -1060,6 +1100,20 @@ fn pull_docker_image_if_needed(docker_bin: &str, image: &str) -> Result<()> {
     Ok(())
 }
 
+/// Select the appropriate Nextflow runner image based on architecture
+/// - ARM64: Use ARM64-native image (avoids Go runtime crashes under QEMU)
+/// - x86_64: Use standard image with modern Docker CLI
+fn get_nextflow_runner_image() -> &'static str {
+    // ARM64 needs native image to avoid Go runtime crashes in Docker CLI
+    if is_arm64() {
+        // Multi-arch image that includes arm64
+        "ghcr.io/openmined/nextflow-runner:25.10.2"
+    } else {
+        // x86_64 image with modern Docker CLI
+        "ghcr.io/openmined/nextflow-runner:25.10.2"
+    }
+}
+
 #[cfg(target_os = "windows")]
 fn ensure_nextflow_runner_image(docker_bin: &str) -> Result<&'static str> {
     // The stock `nextflow/nextflow` image includes an outdated Docker CLI (17.x), which cannot
@@ -1068,7 +1122,8 @@ fn ensure_nextflow_runner_image(docker_bin: &str) -> Result<&'static str> {
     //   "client version 1.32 is too old. Minimum supported API version is 1.44"
     //
     // We use a pre-built image from GitHub Container Registry that includes a modern docker client.
-    const NEXTFLOW_RUNNER_IMAGE: &str = "ghcr.io/openmined/nextflow-runner:25.10.2";
+    // On ARM64, we need native images to avoid Go runtime crashes under QEMU emulation.
+    let nextflow_runner_image: &'static str = get_nextflow_runner_image();
 
     // Check if runner image exists locally
     let mut check_cmd = Command::new(docker_bin);
@@ -1077,7 +1132,7 @@ fn ensure_nextflow_runner_image(docker_bin: &str) -> Result<&'static str> {
     check_cmd
         .arg("image")
         .arg("inspect")
-        .arg(NEXTFLOW_RUNNER_IMAGE)
+        .arg(nextflow_runner_image)
         .stdout(Stdio::null())
         .stderr(Stdio::null());
 
@@ -1087,29 +1142,83 @@ fn ensure_nextflow_runner_image(docker_bin: &str) -> Result<&'static str> {
 
     if check_cmd.status().map(|s| s.success()).unwrap_or(false) {
         append_desktop_log(&format!(
-            "[Pipeline] Using Nextflow runner image: {}",
-            NEXTFLOW_RUNNER_IMAGE
+            "[Pipeline] Using Nextflow runner image: {} (arch: {})",
+            nextflow_runner_image,
+            std::env::consts::ARCH
         ));
-        return Ok(NEXTFLOW_RUNNER_IMAGE);
+        return Ok(nextflow_runner_image);
     }
 
     // Pull the pre-built image from GitHub Container Registry
     append_desktop_log(&format!(
-        "[Pipeline] Pulling Nextflow runner image from {}",
-        NEXTFLOW_RUNNER_IMAGE
+        "[Pipeline] Pulling Nextflow runner image from {} (arch: {})",
+        nextflow_runner_image,
+        std::env::consts::ARCH
     ));
 
-    pull_docker_image_if_needed(docker_bin, NEXTFLOW_RUNNER_IMAGE)?;
+    pull_docker_image_if_needed(docker_bin, nextflow_runner_image)?;
 
     append_desktop_log(&format!(
         "[Pipeline] Nextflow runner image {} ready",
-        NEXTFLOW_RUNNER_IMAGE
+        nextflow_runner_image
     ));
-    Ok(NEXTFLOW_RUNNER_IMAGE)
+    Ok(nextflow_runner_image)
 }
 
 #[cfg(not(target_os = "windows"))]
-fn ensure_nextflow_runner_image(_docker_bin: &str) -> Result<&'static str> {
+fn ensure_nextflow_runner_image(docker_bin: &str) -> Result<&'static str> {
+    // On non-Windows, if we're using container mode (forced), we need the runner image
+    // Otherwise this function shouldn't be called, but return a sensible default
+    if should_use_docker_for_nextflow() {
+        let nextflow_runner_image: &'static str = get_nextflow_runner_image();
+
+        // Check if image exists locally
+        let mut check_cmd = Command::new(docker_bin);
+        super::configure_child_process(&mut check_cmd);
+        check_cmd
+            .arg("image")
+            .arg("inspect")
+            .arg(nextflow_runner_image)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+
+        if !check_cmd.status().map(|s| s.success()).unwrap_or(false) {
+            // Pull the image
+            append_desktop_log(&format!(
+                "[Pipeline] Pulling Nextflow runner image: {} (arch: {})",
+                nextflow_runner_image,
+                std::env::consts::ARCH
+            ));
+            println!(
+                "📦 Pulling Nextflow runner image: {}",
+                nextflow_runner_image
+            );
+
+            let mut pull_cmd = Command::new(docker_bin);
+            super::configure_child_process(&mut pull_cmd);
+            let pull_status = pull_cmd
+                .args(["pull", nextflow_runner_image])
+                .status()
+                .context("Failed to pull Nextflow runner image")?;
+
+            if !pull_status.success() {
+                return Err(anyhow::anyhow!(
+                    "Failed to pull Nextflow runner image: {}",
+                    nextflow_runner_image
+                )
+                .into());
+            }
+        }
+
+        append_desktop_log(&format!(
+            "[Pipeline] Using Nextflow runner image: {} (arch: {})",
+            nextflow_runner_image,
+            std::env::consts::ARCH
+        ));
+        return Ok(nextflow_runner_image);
+    }
+
+    // Fallback for native Nextflow execution (image not used)
     Ok("nextflow/nextflow:25.10.2")
 }
 
@@ -1420,6 +1529,12 @@ pub async fn execute_dynamic(
 
     let parsed_args = parse_cli_args(&args)?;
     let nextflow_args = parsed_args.passthrough.clone();
+    let nextflow_max_forks = parsed_args
+        .nextflow_max_forks
+        .or(parse_nextflow_max_forks_env()?);
+    if let Some(value) = nextflow_max_forks {
+        append_desktop_log(&format!("[Pipeline] Nextflow maxForks set to {}", value));
+    }
 
     validate_no_clashes(&spec, &parsed_args)?;
 
@@ -2136,6 +2251,31 @@ pub async fn execute_dynamic(
 
         docker_cmd.arg("run").arg("--rm");
 
+        // Add container name for graceful stop support
+        // Use BIOVAULT_FLOW_RUN_ID if available, otherwise generate a timestamp
+        let container_name = std::env::var("BIOVAULT_FLOW_RUN_ID")
+            .unwrap_or_else(|_| chrono::Utc::now().format("%Y%m%d%H%M%S").to_string());
+        let container_name = format!("bv-nf-{}", container_name);
+        docker_cmd.args(["--name", &container_name]);
+
+        // Save container name to file for pause/stop to use
+        if let Some(ref results) = results_dir {
+            let container_file = Path::new(results).join("flow.container");
+            let _ = std::fs::write(&container_file, &container_name);
+            append_desktop_log(&format!(
+                "[Pipeline] Nextflow container name: {} (saved to {})",
+                container_name,
+                container_file.display()
+            ));
+        }
+
+        // On Windows with Docker (not Podman), specify platform.
+        // On ARM64, we don't force amd64 since we use ARM64-native images for the runner.
+        #[cfg(target_os = "windows")]
+        if !using_podman && (!is_arm64() || should_force_x86_containers()) {
+            docker_cmd.args(["--platform", "linux/amd64"]);
+        }
+
         // When using Podman, add flags to fix permission issues with mounted volumes
         if using_podman {
             // Handle .nextflow directory permissions
@@ -2254,7 +2394,12 @@ pub async fn execute_dynamic(
         let runtime_config_path = if !dry_run {
             // On Windows with Podman, prefer copying inputs to avoid broken symlinks on /mnt/c mounts.
             let stage_in_copy = hyperv_host_mount || (cfg!(target_os = "windows") && using_podman);
-            let config_path = generate_runtime_config(&project_abs, using_podman, stage_in_copy)?;
+            let config_path = generate_runtime_config(
+                &project_abs,
+                using_podman,
+                stage_in_copy,
+                nextflow_max_forks,
+            )?;
             // For Hyper-V mode, the config file was copied to VM along with project
             // Reference it via the VM project path
             #[cfg(target_os = "windows")]
@@ -2395,7 +2540,12 @@ pub async fn execute_dynamic(
         // Generate runtime config for native Docker execution
         // This config sets docker.enabled = true so Nextflow uses Docker for process containers
         let native_runtime_config = if !dry_run && run_settings.require_docker {
-            Some(generate_runtime_config(&project_abs, false, false)?)
+            Some(generate_runtime_config(
+                &project_abs,
+                false,
+                false,
+                nextflow_max_forks,
+            )?)
         } else {
             None
         };
@@ -2876,6 +3026,7 @@ async fn execute_shell(
         }
 
         let mut cmd = Command::new(resolve_git_bash());
+        super::configure_child_process(&mut cmd);
         // Convert Windows path to Unix-style for Git Bash
         #[cfg(target_os = "windows")]
         let bash_workflow_path = windows_path_to_container(&workflow_path, false);
@@ -2987,6 +3138,9 @@ async fn execute_syqure(
         .cloned()
         .unwrap_or_else(|| "file".to_string());
 
+    // Get platform from spec, defaulting to linux/amd64
+    // Syqure containers are x86-only for now, so we always force amd64
+    // This will use QEMU emulation on ARM64 systems
     let docker_platform = spec
         .runner
         .as_ref()
@@ -3229,7 +3383,9 @@ fn resolve_syqure_backend(spec: &ModuleSpec) -> Result<(String, bool)> {
         }
     }
 
-    if let Ok(which_output) = Command::new("which").arg("syqure").output() {
+    let mut which_cmd = Command::new("which");
+    super::configure_child_process(&mut which_cmd);
+    if let Ok(which_output) = which_cmd.arg("syqure").output() {
         if which_output.status.success() {
             let path = String::from_utf8_lossy(&which_output.stdout)
                 .trim()
@@ -3256,6 +3412,7 @@ fn execute_syqure_native(
     println!("  Using native syqure: {}", binary);
 
     let mut cmd = Command::new(binary);
+    super::configure_child_process(&mut cmd);
     cmd.arg(entrypoint);
     cmd.arg("--");
     cmd.arg(party_id.to_string());
@@ -3505,7 +3662,9 @@ fn execute_syqure_docker(
     let keep_containers = env_var_truthy("BIOVAULT_SYQURE_KEEP_CONTAINERS")
         || env_var_truthy("BV_SYQURE_KEEP_CONTAINERS");
 
-    let _ = Command::new(&container_runtime)
+    let mut rm_cmd = Command::new(&container_runtime);
+    super::configure_child_process(&mut rm_cmd);
+    let _ = rm_cmd
         .args(["rm", "-f", &container_name])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -3544,13 +3703,16 @@ fn execute_syqure_docker(
         PathBuf::from(strip_extended_path_prefix(effective_datasites_mount));
 
     let mut cmd = Command::new(&container_runtime);
+    super::configure_child_process(&mut cmd);
     cmd.args(["run", "--name", &container_name]);
     if !keep_containers {
         cmd.arg("--rm");
     }
 
-    // Only add --platform for docker (podman handles this differently)
-    if container_runtime == "docker" {
+    // Add --platform for docker when specified (podman handles this differently)
+    // Syqure containers are x86-only, so platform will typically be "linux/amd64"
+    // This uses QEMU emulation on ARM64 systems
+    if container_runtime == "docker" && !platform.is_empty() {
         cmd.args(["--platform", platform]);
     }
 
@@ -3597,7 +3759,9 @@ fn execute_syqure_docker(
     if !status.success() {
         if keep_containers {
             eprintln!("Syqure container {} failed; dumping logs:", container_name);
-            let _ = Command::new(&container_runtime)
+            let mut logs_cmd = Command::new(&container_runtime);
+            super::configure_child_process(&mut logs_cmd);
+            let _ = logs_cmd
                 .args(["logs", "--tail", "200", &container_name])
                 .status();
         } else {
@@ -3621,6 +3785,7 @@ struct ParsedArgs {
     inputs: HashMap<String, InputArg>,
     params: HashMap<String, String>,
     passthrough: Vec<String>,
+    nextflow_max_forks: Option<u32>,
 }
 
 #[derive(Debug)]
@@ -3634,6 +3799,7 @@ fn parse_cli_args(args: &[String]) -> Result<ParsedArgs> {
     let mut params = HashMap::new();
     let mut format_overrides = HashMap::new();
     let mut passthrough = Vec::new();
+    let mut nextflow_max_forks: Option<u32> = None;
 
     let mut i = 0;
     while i < args.len() {
@@ -3685,6 +3851,41 @@ fn parse_cli_args(args: &[String]) -> Result<ParsedArgs> {
                 .into());
             }
             i += 2;
+            continue;
+        }
+
+        if key == "nxf-max-forks" || key == "nextflow-max-forks" {
+            if i + 1 >= args.len() {
+                return Err(anyhow::anyhow!("Missing value for argument: {}", arg).into());
+            }
+            let value = args[i + 1].trim();
+            let parsed = value.parse::<u32>().ok().filter(|v| *v > 0);
+            if parsed.is_none() {
+                return Err(anyhow::anyhow!(
+                    "Invalid value for {} (expected positive integer): {}",
+                    arg,
+                    value
+                )
+                .into());
+            }
+            nextflow_max_forks = parsed;
+            i += 2;
+            continue;
+        }
+
+        if key.starts_with("nxf-max-forks=") || key.starts_with("nextflow-max-forks=") {
+            let value = key.split_once('=').map(|x| x.1).unwrap_or("").trim();
+            let parsed = value.parse::<u32>().ok().filter(|v| *v > 0);
+            if parsed.is_none() {
+                return Err(anyhow::anyhow!(
+                    "Invalid value for {} (expected positive integer): {}",
+                    arg,
+                    value
+                )
+                .into());
+            }
+            nextflow_max_forks = parsed;
+            i += 1;
             continue;
         }
 
@@ -3751,7 +3952,28 @@ fn parse_cli_args(args: &[String]) -> Result<ParsedArgs> {
         inputs,
         params,
         passthrough,
+        nextflow_max_forks,
     })
+}
+
+fn parse_nextflow_max_forks_env() -> Result<Option<u32>> {
+    let raw = match env::var("BIOVAULT_NXF_MAX_FORKS") {
+        Ok(value) => value,
+        Err(_) => return Ok(None),
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let parsed = trimmed.parse::<u32>().ok().filter(|v| *v > 0);
+    if parsed.is_none() {
+        return Err(anyhow::anyhow!(
+            "Invalid BIOVAULT_NXF_MAX_FORKS (expected positive integer): {}",
+            trimmed
+        )
+        .into());
+    }
+    Ok(parsed)
 }
 
 fn validate_no_clashes(spec: &ModuleSpec, parsed: &ParsedArgs) -> Result<()> {
@@ -4293,12 +4515,20 @@ fn cleanup_vm_dir(docker_bin: &str, vm_dir: &str) {
 
 /// Generate a Nextflow config file for the specified container runtime.
 /// Returns the path to the generated config file.
+///
+/// Platform handling:
+/// - ARM64 without force flag: No --platform (Docker auto-selects native if available)
+/// - x86_64 or force flag set: --platform linux/amd64 for compatibility
 fn generate_runtime_config(
     project_path: &Path,
     using_podman: bool,
     stage_in_copy: bool,
+    max_forks: Option<u32>,
 ) -> Result<PathBuf> {
     let config_path = project_path.join(".biovault-runtime.config");
+
+    // Determine if we should force x86 platform for task containers
+    let force_x86 = should_force_x86_containers() || !is_arm64();
 
     let config_contents = if using_podman {
         // Podman configuration
@@ -4311,25 +4541,48 @@ process.shell = ['/bin/sh', '-ue']
 podman.runOptions = '--security-opt label=disable'
 "#
         .to_string();
+        // Note: we intentionally do not add --platform for podman yet because it is harder to
+        // validate across environments. Add it once we can test reliably.
         if stage_in_copy {
             config.push_str("\nprocess.stageInMode = 'copy'\n");
+        }
+        if let Some(value) = max_forks {
+            config.push_str(&format!("\nprocess.maxForks = {}\n", value));
         }
         config
     } else {
         // Docker configuration
-        r#"process.executor = 'local'
+        // On ARM64: Don't force platform - let Docker auto-select (native if available, emulate if not)
+        // On x86_64 or when forced: Use --platform linux/amd64 for compatibility
+        let mut config = if force_x86 {
+            r#"process.executor = 'local'
+docker.enabled = true
+docker.runOptions = '--platform linux/amd64 -u $(id -u):$(id -g)'
+"#
+            .to_string()
+        } else {
+            // ARM64: Let Docker auto-select the best platform
+            // Multi-arch images will use arm64, x86-only images will be emulated
+            r#"process.executor = 'local'
 docker.enabled = true
 docker.runOptions = '-u $(id -u):$(id -g)'
 "#
-        .to_string()
+            .to_string()
+        };
+        if let Some(value) = max_forks {
+            config.push_str(&format!("\nprocess.maxForks = {}\n", value));
+        }
+        config
     };
 
     fs::write(&config_path, config_contents).context("Failed to write runtime nextflow.config")?;
 
     append_desktop_log(&format!(
-        "[Pipeline] Generated runtime config at {} (podman={})",
+        "[Pipeline] Generated runtime config at {} (podman={}, force_x86={}, arch={})",
         config_path.display(),
-        using_podman
+        using_podman,
+        force_x86,
+        std::env::consts::ARCH
     ));
 
     Ok(config_path)
@@ -4424,6 +4677,7 @@ mod tests {
             ]),
             params: HashMap::new(),
             passthrough: Vec::new(),
+            nextflow_max_forks: None,
         };
 
         let project_spec = sample_project_spec();
