@@ -67,7 +67,9 @@ steps:
       if [[ -f "$out_dir/samplesheet.csv" && "${ALLELE_FREQ_FORCE_REGEN:-0}" != "1" ]]; then
         echo "[allele-freq] client1 samplesheet exists; skipping regeneration"
       else
-        "$script" --output-dir "$out_dir" --count "$count" --seed 42 --apol1 0.8 --force
+        "$script" --output-dir "$out_dir" --count "$count" --seed 42 \
+          --apol1-het 0.6 --apol1-hom-alt 0.2 \
+          --no-call-frequency 0.2 --no-call-token - --force
       fi
 
   - name: Generate genotype data for client2
@@ -79,7 +81,9 @@ steps:
       if [[ -f "$out_dir/samplesheet.csv" && "${ALLELE_FREQ_FORCE_REGEN:-0}" != "1" ]]; then
         echo "[allele-freq] client2 samplesheet exists; skipping regeneration"
       else
-        "$script" --output-dir "$out_dir" --count "$count" --seed 43 --thal 0.8 --force
+        "$script" --output-dir "$out_dir" --count "$count" --seed 43 \
+          --thal-het 0.5 --thal-hom-alt 0.3 \
+          --no-call-frequency 0.2 --no-call-token - --force
       fi
 
   - name: Run allele-freq Syqure flow (parallel)
