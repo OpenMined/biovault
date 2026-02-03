@@ -17,12 +17,14 @@ concurrency:
 
 jobs:
   syqure-distributed:
+    # TEMPORARILY DISABLED - empty matrix causes workflow validation error
+    if: false
     strategy:
       fail-fast: false
       matrix:
         include:
-          # - os: ubuntu-latest
-          #   runner: namespace-profile-linux-medium
+          - os: ubuntu-latest
+            runner: namespace-profile-linux-medium
           # - os: macos-latest
           #   runner: namespace-profile-mac-medium
           # - os: windows
