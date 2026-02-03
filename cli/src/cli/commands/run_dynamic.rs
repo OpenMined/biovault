@@ -765,6 +765,7 @@ fn rewrite_csv_with_container_paths(csv_path: &Path, use_podman_format: bool) ->
         .with_context(|| format!("Failed to open CSV: {}", csv_path.display()))?;
     let mut writer = csv::WriterBuilder::new()
         .has_headers(false)
+        .flexible(true)
         .from_writer(vec![]);
 
     for result in reader.records() {
@@ -902,6 +903,7 @@ fn rewrite_csv_for_vm(
         .with_context(|| format!("Failed to open CSV: {}", csv_path.display()))?;
     let mut writer = csv::WriterBuilder::new()
         .has_headers(false)
+        .flexible(true)
         .from_writer(vec![]);
 
     for result in reader.records() {
@@ -4209,6 +4211,7 @@ fn rewrite_csv_for_flat_dir(
         .with_context(|| format!("Failed to open CSV: {}", csv_path.display()))?;
     let mut writer = csv::WriterBuilder::new()
         .has_headers(false)
+        .flexible(true)
         .from_writer(vec![]);
 
     for result in reader.records() {

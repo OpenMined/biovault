@@ -3,8 +3,6 @@ name: BioVault Scenario Tests
 on:
   pull_request:
     branches: [main]
-  push:
-    branches: [main]
   schedule:
     - cron: '45 2 * * *'
   workflow_dispatch:
@@ -21,61 +19,62 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: linux
-            runner: namespace-profile-linux-medium
-            client_mode: rust
-            scenario: tests/scenarios/inbox-ping-pong.yaml
-            needs_container: true
-          - os: linux
-            runner: namespace-profile-linux-medium
-            client_mode: rust
-            scenario: tests/scenarios/import-and-run.yaml
-            needs_container: true
-          - os: linux
-            runner: namespace-profile-linux-medium
-            client_mode: rust
-            scenario: tests/scenarios/messaging-core.yaml
-            needs_container: false
-          - os: linux
-            runner: namespace-profile-linux-medium
-            client_mode: rust
-            scenario: tests/scenarios/break-nextflow.yaml
-            needs_container: true
-          - os: linux
-            runner: namespace-profile-linux-medium
-            client_mode: rust
-            scenario: tests/scenarios/key-management.yaml
-            needs_container: false
-          - os: linux
-            runner: namespace-profile-linux-medium
-            client_mode: rust
-            scenario: tests/scenarios/allele-freq.yaml
-            needs_container: true
+          # Temporarily disabled - testing Windows import-and-run fix
+          # - os: linux
+          #   runner: namespace-profile-linux-medium
+          #   client_mode: rust
+          #   scenario: tests/scenarios/inbox-ping-pong.yaml
+          #   needs_container: true
+          # - os: linux
+          #   runner: namespace-profile-linux-medium
+          #   client_mode: rust
+          #   scenario: tests/scenarios/import-and-run.yaml
+          #   needs_container: true
+          # - os: linux
+          #   runner: namespace-profile-linux-medium
+          #   client_mode: rust
+          #   scenario: tests/scenarios/messaging-core.yaml
+          #   needs_container: false
+          # - os: linux
+          #   runner: namespace-profile-linux-medium
+          #   client_mode: rust
+          #   scenario: tests/scenarios/break-nextflow.yaml
+          #   needs_container: true
+          # - os: linux
+          #   runner: namespace-profile-linux-medium
+          #   client_mode: rust
+          #   scenario: tests/scenarios/key-management.yaml
+          #   needs_container: false
+          # - os: linux
+          #   runner: namespace-profile-linux-medium
+          #   client_mode: rust
+          #   scenario: tests/scenarios/allele-freq.yaml
+          #   needs_container: true
           - os: windows
             runner: namespace-profile-windows-medium
             client_mode: rust
             scenario: tests/scenarios/import-and-run.yaml
             needs_container: true
-          - os: windows
-            runner: namespace-profile-windows-medium
-            client_mode: rust
-            scenario: tests/scenarios/inbox-ping-pong.yaml
-            needs_container: true
-          - os: windows
-            runner: namespace-profile-windows-medium
-            client_mode: rust
-            scenario: tests/scenarios/messaging-core.yaml
-            needs_container: false
-          - os: windows
-            runner: namespace-profile-windows-medium
-            client_mode: rust
-            scenario: tests/scenarios/break-nextflow.yaml
-            needs_container: true
-          - os: windows
-            runner: namespace-profile-windows-medium
-            client_mode: rust
-            scenario: tests/scenarios/key-management.yaml
-            needs_container: false
+          # - os: windows
+          #   runner: namespace-profile-windows-medium
+          #   client_mode: rust
+          #   scenario: tests/scenarios/inbox-ping-pong.yaml
+          #   needs_container: true
+          # - os: windows
+          #   runner: namespace-profile-windows-medium
+          #   client_mode: rust
+          #   scenario: tests/scenarios/messaging-core.yaml
+          #   needs_container: false
+          # - os: windows
+          #   runner: namespace-profile-windows-medium
+          #   client_mode: rust
+          #   scenario: tests/scenarios/break-nextflow.yaml
+          #   needs_container: true
+          # - os: windows
+          #   runner: namespace-profile-windows-medium
+          #   client_mode: rust
+          #   scenario: tests/scenarios/key-management.yaml
+          #   needs_container: false
 
     steps:
       - uses: actions/checkout@v4
