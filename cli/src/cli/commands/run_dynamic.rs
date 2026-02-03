@@ -4476,6 +4476,8 @@ fn extract_files_from_csv(content: &str, files: &mut Vec<PathBuf>) {
             if is_win_path {
                 found_count += 1;
                 let normalized = normalize_windows_path_str(field);
+                // Also normalize slashes - replace forward slashes with backslashes for Windows
+                let normalized = normalized.replace('/', "\\");
                 let path = PathBuf::from(&normalized);
                 let exists = path.exists();
                 if exists {
@@ -4508,6 +4510,8 @@ fn extract_files_from_json(value: &JsonValue, files: &mut Vec<PathBuf>) {
             let is_win_path = looks_like_windows_absolute_path(s);
             if is_win_path {
                 let normalized = normalize_windows_path_str(s);
+                // Normalize slashes for Windows
+                let normalized = normalized.replace('/', "\\");
                 let path = PathBuf::from(&normalized);
                 println!(
                     "[DEBUG JSON] Found path: {} -> {} (exists={})",
