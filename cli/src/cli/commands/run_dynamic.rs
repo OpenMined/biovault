@@ -2359,6 +2359,30 @@ pub async fn execute_dynamic(
                 vm_dir
             ));
             docker_cmd.arg("-v").arg(format!("{}:{}", vm_dir, vm_dir));
+        } else if hyperv_host_mount {
+            // Hyper-V host mount mode: only mount project dir and flat staging dirs
+            // Don't mount biovault_home - template is in project dir, data is in flat staging dir
+            docker_cmd
+                .arg("-v")
+                .arg(format!(
+                    "{}:{}",
+                    windows_path_to_mount_source(project_path, using_podman),
+                    docker_project_path
+                ));
+
+            // Mount the flat staging directories (data + results)
+            for mount_path in &mount_roots {
+                let container_mount = windows_path_to_container(mount_path, using_podman);
+                let host_mount = windows_path_to_mount_source(mount_path, using_podman);
+                append_desktop_log(&format!(
+                    "[Pipeline] Adding Hyper-V host mount: {} -> {}",
+                    mount_path.display(),
+                    container_mount
+                ));
+                docker_cmd
+                    .arg("-v")
+                    .arg(format!("{}:{}", host_mount, container_mount));
+            }
         } else {
             // Normal mode: mount Windows paths
             docker_cmd
