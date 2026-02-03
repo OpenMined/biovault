@@ -1995,8 +1995,60 @@ pub async fn execute_dynamic(
                 }
             }
 
+            // Before copying, also extract files referenced inside CSVs
+            // These need to be staged too, otherwise the CSV paths point to non-existent files
+            let csv_files: Vec<PathBuf> = stage_pairs
+                .iter()
+                .filter(|(src, _)| {
+                    src.extension()
+                        .and_then(|s| s.to_str())
+                        .map(|s| s.eq_ignore_ascii_case("csv"))
+                        .unwrap_or(false)
+                })
+                .map(|(src, _)| src.clone())
+                .collect();
+
+            for csv_path in &csv_files {
+                if let Ok(content) = fs::read_to_string(csv_path) {
+                    let mut csv_files_vec: Vec<PathBuf> = Vec::new();
+                    extract_files_from_csv(&content, &mut csv_files_vec);
+                    append_desktop_log(&format!(
+                        "[Pipeline] Extracted {} files from CSV: {}",
+                        csv_files_vec.len(),
+                        csv_path.display()
+                    ));
+                    for data_path in csv_files_vec {
+                        if !data_path.exists() {
+                            append_desktop_log(&format!(
+                                "[Pipeline] CSV-referenced file missing: {}",
+                                data_path.display()
+                            ));
+                            continue;
+                        }
+                        let key = normalize_windows_path_key(&data_path);
+                        if path_map.contains_key(&key) {
+                            continue; // Already staged
+                        }
+                        let staged_name = stage_name_for_path(&data_path);
+                        let staged_path = flat_data_dir.join(&staged_name);
+                        let staged_path_str = staged_path.to_string_lossy().replace('\\', "/");
+                        path_map.insert(key, staged_path_str);
+                        stage_pairs.push((data_path, staged_path));
+                    }
+                }
+            }
+
+            append_desktop_log(&format!(
+                "[Pipeline] Total files to stage (including CSV-referenced): {}",
+                stage_pairs.len()
+            ));
+
             for (src, dst) in &stage_pairs {
                 copy_path_to_path(src, dst)?;
+            }
+
+            // Now rewrite CSVs after all files are staged
+            for (_, dst) in &stage_pairs {
                 if dst
                     .extension()
                     .and_then(|s| s.to_str())
