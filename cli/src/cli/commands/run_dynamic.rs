@@ -1929,7 +1929,18 @@ pub async fn execute_dynamic(
             println!("Staging inputs in: {}", flat_root.display());
 
             let mut data_files: Vec<PathBuf> = Vec::new();
+            append_desktop_log(&format!(
+                "[Pipeline] Extracting files from inputs_json: {}",
+                serde_json::to_string(&inputs_json_value).unwrap_or_default()
+            ));
             extract_files_from_json(&inputs_json_value, &mut data_files);
+            append_desktop_log(&format!(
+                "[Pipeline] Extracted {} files from JSON (includes CSV contents)",
+                data_files.len()
+            ));
+            for (i, f) in data_files.iter().enumerate().take(20) {
+                append_desktop_log(&format!("[Pipeline]   File {}: {}", i, f.display()));
+            }
 
             let flat_data_dir_str = flat_data_dir.to_string_lossy().replace('\\', "/");
             let mut path_map: BTreeMap<String, String> = BTreeMap::new();
@@ -4441,6 +4452,14 @@ fn rewrite_csv_for_flat_dir(
 /// Extract Windows file paths from CSV content (keeps file paths, not parent dirs).
 #[cfg(target_os = "windows")]
 fn extract_files_from_csv(content: &str, files: &mut Vec<PathBuf>) {
+    append_desktop_log(&format!(
+        "[CSV Extract Files] Processing CSV ({} bytes, {} lines)",
+        content.len(),
+        content.lines().count()
+    ));
+    let mut found_count = 0;
+    let mut exists_count = 0;
+    let mut not_exists: Vec<String> = Vec::new();
     let mut reader = csv::ReaderBuilder::new()
         .has_headers(false)
         .flexible(true)
@@ -4449,13 +4468,31 @@ fn extract_files_from_csv(content: &str, files: &mut Vec<PathBuf>) {
         for field in record.iter() {
             let field = field.trim();
             if looks_like_windows_absolute_path(field) {
+                found_count += 1;
                 let normalized = normalize_windows_path_str(field);
                 let path = Path::new(&normalized);
                 if path.exists() {
+                    exists_count += 1;
                     files.push(path.to_path_buf());
+                } else {
+                    if not_exists.len() < 5 {
+                        not_exists.push(format!("{} -> {}", field, normalized));
+                    }
                 }
             }
         }
+    }
+    append_desktop_log(&format!(
+        "[CSV Extract Files] Found {} Windows paths, {} exist, {} missing",
+        found_count,
+        exists_count,
+        found_count - exists_count
+    ));
+    if !not_exists.is_empty() {
+        append_desktop_log(&format!(
+            "[CSV Extract Files] Sample missing paths: {:?}",
+            not_exists
+        ));
     }
 }
 
