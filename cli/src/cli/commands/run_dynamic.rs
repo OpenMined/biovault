@@ -1751,6 +1751,8 @@ pub async fn execute_dynamic(
     #[cfg(target_os = "windows")]
     let mut hyperv_flat_results_dir: Option<PathBuf> = None;
     #[cfg(target_os = "windows")]
+    let mut _hyperv_flat_project_dir: Option<PathBuf> = None;
+    #[cfg(target_os = "windows")]
     let mut vm_path_map: Option<BTreeMap<String, String>> = None;
 
     // Build command - use Docker on Windows, native Nextflow elsewhere
@@ -1804,10 +1806,10 @@ pub async fn execute_dynamic(
         // For Hyper-V mode, paths will be in the VM temp directory
         let (
             docker_biovault_home,
-            docker_project_path,
-            docker_template,
-            docker_workflow,
-            docker_project_spec,
+            mut docker_project_path,
+            mut docker_template,
+            mut docker_workflow,
+            mut docker_project_spec,
             docker_results,
             docker_log_path,
         ) = if let Some(ref vm_dir) = vm_temp_dir {
@@ -2012,10 +2014,77 @@ pub async fn execute_dynamic(
                 &path_map,
             );
 
-            hyperv_flat_dir = Some(flat_root);
+            // Also stage the project directory so it's accessible in Hyper-V
+            let flat_project_dir = flat_root.join("project");
+            fs::create_dir_all(&flat_project_dir).with_context(|| {
+                format!(
+                    "Failed to create Hyper-V flat project dir: {}",
+                    flat_project_dir.display()
+                )
+            })?;
+            append_desktop_log(&format!(
+                "[Pipeline] Copying project to flat staging: {} -> {}",
+                project_abs.display(),
+                flat_project_dir.display()
+            ));
+            copy_dir_recursive(&project_abs, &flat_project_dir)?;
+
+            // Also copy the template directory if it's outside the project
+            let template_in_project = is_path_within(&project_abs, &template_abs);
+            if !template_in_project {
+                let flat_template_dir = flat_root.join("template");
+                fs::create_dir_all(&flat_template_dir).with_context(|| {
+                    format!(
+                        "Failed to create Hyper-V flat template dir: {}",
+                        flat_template_dir.display()
+                    )
+                })?;
+                // Copy just the template file
+                let template_dest = flat_template_dir.join("template.nf");
+                fs::copy(&template_abs, &template_dest).with_context(|| {
+                    format!(
+                        "Failed to copy template to flat staging: {} -> {}",
+                        template_abs.display(),
+                        template_dest.display()
+                    )
+                })?;
+                append_desktop_log(&format!(
+                    "[Pipeline] Copied template to flat staging: {} -> {}",
+                    template_abs.display(),
+                    template_dest.display()
+                ));
+            }
+
+            hyperv_flat_dir = Some(flat_root.clone());
             hyperv_flat_results_dir = Some(flat_results_dir.clone());
+            _hyperv_flat_project_dir = Some(flat_project_dir.clone());
             let _ = path_map;
             results_path_for_run = flat_results_dir;
+
+            // Update docker paths to use flat staging locations
+            let flat_project_container = windows_path_to_container(&flat_project_dir, using_podman);
+            docker_project_path = flat_project_container.clone();
+
+            // Template path: if template was in project, use project-relative path; otherwise use flat template dir
+            let template_in_project = is_path_within(&project_abs, &template_abs);
+            if template_in_project {
+                let template_rel = relative_to_base(&project_abs, &template_abs);
+                docker_template = format!("{}/{}", flat_project_container, template_rel.display()).replace('\\', "/");
+            } else {
+                let flat_template_path = flat_root.join("template").join("template.nf");
+                docker_template = windows_path_to_container(&flat_template_path, using_podman);
+            }
+
+            // Workflow and spec are relative to project
+            let workflow_rel = relative_to_base(&project_abs, &workflow_abs);
+            let spec_rel = relative_to_base(&project_abs, &project_spec_abs);
+            docker_workflow = format!("{}/{}", flat_project_container, workflow_rel.display()).replace('\\', "/");
+            docker_project_spec = format!("{}/{}", flat_project_container, spec_rel.display()).replace('\\', "/");
+
+            append_desktop_log(&format!(
+                "[Pipeline] Hyper-V flat staging paths: project={}, template={}, workflow={}",
+                docker_project_path, docker_template, docker_workflow
+            ));
         }
 
         #[cfg(target_os = "windows")]
@@ -2360,28 +2429,19 @@ pub async fn execute_dynamic(
             ));
             docker_cmd.arg("-v").arg(format!("{}:{}", vm_dir, vm_dir));
         } else if hyperv_host_mount {
-            // Hyper-V host mount mode: only mount project dir and flat staging dirs
-            // Don't mount biovault_home - template is in project dir, data is in flat staging dir
-            docker_cmd
-                .arg("-v")
-                .arg(format!(
-                    "{}:{}",
-                    windows_path_to_mount_source(project_path, using_podman),
-                    docker_project_path
-                ));
-
-            // Mount the flat staging directories (data + results)
-            for mount_path in &mount_roots {
-                let container_mount = windows_path_to_container(mount_path, using_podman);
-                let host_mount = windows_path_to_mount_source(mount_path, using_podman);
+            // Hyper-V host mount mode: mount the flat staging root which contains project, data, results
+            // All paths have been rewritten to point to locations under this root
+            if let Some(ref flat_root) = hyperv_flat_dir {
+                let flat_root_host = windows_path_to_mount_source(flat_root, using_podman);
+                let flat_root_container = windows_path_to_container(flat_root, using_podman);
                 append_desktop_log(&format!(
-                    "[Pipeline] Adding Hyper-V host mount: {} -> {}",
-                    mount_path.display(),
-                    container_mount
+                    "[Pipeline] Hyper-V host mount: {} -> {}",
+                    flat_root.display(),
+                    flat_root_container
                 ));
                 docker_cmd
                     .arg("-v")
-                    .arg(format!("{}:{}", host_mount, container_mount));
+                    .arg(format!("{}:{}", flat_root_host, flat_root_container));
             }
         } else {
             // Normal mode: mount Windows paths
