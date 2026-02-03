@@ -2431,6 +2431,7 @@ pub async fn execute_dynamic(
         } else if hyperv_host_mount {
             // Hyper-V host mount mode: mount the flat staging root which contains project, data, results
             // All paths have been rewritten to point to locations under this root
+            #[cfg(target_os = "windows")]
             if let Some(ref flat_root) = hyperv_flat_dir {
                 let flat_root_host = windows_path_to_mount_source(flat_root, using_podman);
                 let flat_root_container = windows_path_to_container(flat_root, using_podman);
@@ -2489,42 +2490,44 @@ pub async fn execute_dynamic(
             // For Hyper-V mode, the config file was copied to VM along with project
             // Reference it via the VM project path
             #[cfg(target_os = "windows")]
-            if let Some(ref vm_dir) = vm_temp_dir {
-                // Copy the config file to VM if it wasn't part of the project copy
-                let config_name = config_path
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy();
-                let vm_config_path = format!("{}/project/{}", vm_dir, config_name);
-                if let Err(e) = copy_file_to_vm(&docker_bin, &config_path, &vm_config_path) {
-                    append_desktop_log(&format!(
-                        "[Pipeline] Warning: Failed to copy config to VM: {}",
-                        e
-                    ));
-                }
-                Some(vm_config_path)
-            } else if let Some(ref flat_root) = hyperv_flat_dir {
-                // Hyper-V host mount mode: config generated AFTER project copy, must copy it now
-                let config_name = config_path
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy();
-                let flat_config_path = flat_root.join("project").join(config_name.as_ref());
-                // Copy the generated config to the flat staging directory
-                if let Err(e) = std::fs::copy(&config_path, &flat_config_path) {
-                    append_desktop_log(&format!(
-                        "[Pipeline] Warning: Failed to copy config to flat staging: {}",
-                        e
-                    ));
+            {
+                if let Some(ref vm_dir) = vm_temp_dir {
+                    // Copy the config file to VM if it wasn't part of the project copy
+                    let config_name = config_path
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy();
+                    let vm_config_path = format!("{}/project/{}", vm_dir, config_name);
+                    if let Err(e) = copy_file_to_vm(&docker_bin, &config_path, &vm_config_path) {
+                        append_desktop_log(&format!(
+                            "[Pipeline] Warning: Failed to copy config to VM: {}",
+                            e
+                        ));
+                    }
+                    Some(vm_config_path)
+                } else if let Some(ref flat_root) = hyperv_flat_dir {
+                    // Hyper-V host mount mode: config generated AFTER project copy, must copy it now
+                    let config_name = config_path
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy();
+                    let flat_config_path = flat_root.join("project").join(config_name.as_ref());
+                    // Copy the generated config to the flat staging directory
+                    if let Err(e) = std::fs::copy(&config_path, &flat_config_path) {
+                        append_desktop_log(&format!(
+                            "[Pipeline] Warning: Failed to copy config to flat staging: {}",
+                            e
+                        ));
+                    } else {
+                        append_desktop_log(&format!(
+                            "[Pipeline] Copied runtime config to flat staging: {}",
+                            flat_config_path.display()
+                        ));
+                    }
+                    Some(windows_path_to_container(&flat_config_path, using_podman))
                 } else {
-                    append_desktop_log(&format!(
-                        "[Pipeline] Copied runtime config to flat staging: {}",
-                        flat_config_path.display()
-                    ));
+                    Some(windows_path_to_container(&config_path, using_podman))
                 }
-                Some(windows_path_to_container(&flat_config_path, using_podman))
-            } else {
-                Some(windows_path_to_container(&config_path, using_podman))
             }
             #[cfg(not(target_os = "windows"))]
             Some(config_path.to_string_lossy().to_string())
