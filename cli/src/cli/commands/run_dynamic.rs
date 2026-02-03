@@ -4450,6 +4450,8 @@ fn rewrite_csv_for_flat_dir(
 }
 
 /// Extract Windows file paths from CSV content (keeps file paths, not parent dirs).
+/// Now extracts ALL paths that look like Windows paths, even if they don't exist yet.
+/// The staging code will handle missing files.
 #[cfg(target_os = "windows")]
 fn extract_files_from_csv(content: &str, files: &mut Vec<PathBuf>) {
     append_desktop_log(&format!(
@@ -4459,7 +4461,6 @@ fn extract_files_from_csv(content: &str, files: &mut Vec<PathBuf>) {
     ));
     let mut found_count = 0;
     let mut exists_count = 0;
-    let mut not_exists: Vec<String> = Vec::new();
     let mut reader = csv::ReaderBuilder::new()
         .has_headers(false)
         .flexible(true)
@@ -4470,46 +4471,46 @@ fn extract_files_from_csv(content: &str, files: &mut Vec<PathBuf>) {
             if looks_like_windows_absolute_path(field) {
                 found_count += 1;
                 let normalized = normalize_windows_path_str(field);
-                let path = Path::new(&normalized);
+                let path = PathBuf::from(&normalized);
                 if path.exists() {
                     exists_count += 1;
-                    files.push(path.to_path_buf());
-                } else {
-                    if not_exists.len() < 5 {
-                        not_exists.push(format!("{} -> {}", field, normalized));
-                    }
                 }
+                // Add ALL paths, not just existing ones - staging will filter
+                files.push(path);
             }
         }
     }
     append_desktop_log(&format!(
-        "[CSV Extract Files] Found {} Windows paths, {} exist, {} missing",
+        "[CSV Extract Files] Found {} Windows paths, {} exist",
         found_count,
-        exists_count,
-        found_count - exists_count
+        exists_count
     ));
-    if !not_exists.is_empty() {
-        append_desktop_log(&format!(
-            "[CSV Extract Files] Sample missing paths: {:?}",
-            not_exists
-        ));
-    }
 }
 
 /// Extract Windows file paths from a JSON value (includes CSV files and entries inside them).
+/// Now extracts paths even if they don't exist, and always tries to read CSV contents.
 #[cfg(target_os = "windows")]
 fn extract_files_from_json(value: &JsonValue, files: &mut Vec<PathBuf>) {
     match value {
         JsonValue::String(s) => {
             if looks_like_windows_absolute_path(s) {
                 let normalized = normalize_windows_path_str(s);
-                let path = Path::new(&normalized);
-                if path.exists() {
-                    files.push(path.to_path_buf());
-                    if s.to_lowercase().ends_with(".csv") {
-                        if let Ok(content) = fs::read_to_string(path) {
-                            extract_files_from_csv(&content, files);
-                        }
+                let path = PathBuf::from(&normalized);
+                // Add path even if it doesn't exist - staging will filter
+                files.push(path.clone());
+                // Always try to read CSV content to extract nested paths
+                if s.to_lowercase().ends_with(".csv") {
+                    if let Ok(content) = fs::read_to_string(&path) {
+                        append_desktop_log(&format!(
+                            "[Extract JSON] Found CSV at {}, extracting nested paths",
+                            path.display()
+                        ));
+                        extract_files_from_csv(&content, files);
+                    } else {
+                        append_desktop_log(&format!(
+                            "[Extract JSON] Could not read CSV at {}",
+                            path.display()
+                        ));
                     }
                 }
             }
