@@ -1948,25 +1948,41 @@ pub async fn execute_dynamic(
             let mut missing_paths: Vec<PathBuf> = Vec::new();
 
             for data_path in &data_files {
-                if !data_path.exists() {
+                let exists = data_path.exists();
+                if !exists {
+                    if missing_paths.len() < 5 {
+                        println!(
+                            "[DEBUG STAGING] Path missing: {} (normalized from data_files)",
+                            data_path.display()
+                        );
+                    }
                     missing_paths.push(data_path.clone());
                     continue;
                 }
                 let key = normalize_windows_path_key(data_path);
                 if path_map.contains_key(&key) {
-                    append_desktop_log(&format!(
-                        "[Pipeline] Duplicate input path (already staged): {}",
-                        data_path.display()
-                    ));
                     continue;
                 }
                 let staged_name = stage_name_for_path(data_path);
                 let staged_path = flat_data_dir.join(&staged_name);
                 let staged_path_str = staged_path.to_string_lossy().replace('\\', "/");
+                if stage_pairs.len() < 5 {
+                    println!(
+                        "[DEBUG STAGING] Staging: {} -> {}",
+                        data_path.display(),
+                        staged_path_str
+                    );
+                }
                 path_map.insert(key, staged_path_str);
                 stage_pairs.push((data_path.clone(), staged_path));
             }
 
+            println!(
+                "[DEBUG STAGING] Summary: total={}, staged={}, missing={}",
+                data_files.len(),
+                stage_pairs.len(),
+                missing_paths.len()
+            );
             append_desktop_log(&format!(
                 "[Pipeline] Hyper-V staging (flat) inputs: total={}, unique={}, missing={}",
                 data_files.len(),
