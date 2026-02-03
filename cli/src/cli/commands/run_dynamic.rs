@@ -2504,12 +2504,24 @@ pub async fn execute_dynamic(
                 }
                 Some(vm_config_path)
             } else if let Some(ref flat_root) = hyperv_flat_dir {
-                // Hyper-V host mount mode: config was copied with project to flat staging
+                // Hyper-V host mount mode: config generated AFTER project copy, must copy it now
                 let config_name = config_path
                     .file_name()
                     .unwrap_or_default()
                     .to_string_lossy();
                 let flat_config_path = flat_root.join("project").join(config_name.as_ref());
+                // Copy the generated config to the flat staging directory
+                if let Err(e) = std::fs::copy(&config_path, &flat_config_path) {
+                    append_desktop_log(&format!(
+                        "[Pipeline] Warning: Failed to copy config to flat staging: {}",
+                        e
+                    ));
+                } else {
+                    append_desktop_log(&format!(
+                        "[Pipeline] Copied runtime config to flat staging: {}",
+                        flat_config_path.display()
+                    ));
+                }
                 Some(windows_path_to_container(&flat_config_path, using_podman))
             } else {
                 Some(windows_path_to_container(&config_path, using_podman))
