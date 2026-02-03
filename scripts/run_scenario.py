@@ -574,10 +574,11 @@ def run_shell(
     variables: Dict[str, str],
     capture: bool = False,
 ) -> subprocess.CompletedProcess:
-    use_bash = os.name == "nt"
+    # Always use bash to support set -o pipefail and other bash-specific features
+    use_bash = True
     shell_vars = variables
-    # On Windows, always convert paths to MSYS format
-    if use_bash:
+    # On Windows, convert paths to MSYS format
+    if os.name == "nt":
         shell_vars = dict(variables)
         shell_vars["workspace"] = to_msys_path(variables.get("workspace", ""))
         shell_vars["sandbox"] = to_msys_path(variables.get("sandbox", ""))
@@ -738,10 +739,11 @@ def run_shell_background(
     name: str = "background",
 ) -> subprocess.Popen:
     """Run a shell command in the background, returning the process handle."""
-    use_bash = os.name == "nt"
+    # Always use bash to support set -o pipefail and other bash-specific features
+    use_bash = True
     shell_vars = variables
-    # On Windows, always convert paths to MSYS format
-    if use_bash:
+    # On Windows, convert paths to MSYS format
+    if os.name == "nt":
         shell_vars = dict(variables)
         shell_vars["workspace"] = to_msys_path(variables.get("workspace", ""))
         shell_vars["sandbox"] = to_msys_path(variables.get("sandbox", ""))
