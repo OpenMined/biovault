@@ -2503,6 +2503,14 @@ pub async fn execute_dynamic(
                     ));
                 }
                 Some(vm_config_path)
+            } else if let Some(ref flat_root) = hyperv_flat_dir {
+                // Hyper-V host mount mode: config was copied with project to flat staging
+                let config_name = config_path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy();
+                let flat_config_path = flat_root.join("project").join(config_name.as_ref());
+                Some(windows_path_to_container(&flat_config_path, using_podman))
             } else {
                 Some(windows_path_to_container(&config_path, using_podman))
             }
@@ -2595,6 +2603,18 @@ pub async fn execute_dynamic(
                         JsonValue::String(format!("{}/assets", vm_project)),
                     );
                 }
+            }
+        }
+
+        // For Hyper-V host mount mode: update assets_dir to use flat staging path
+        #[cfg(target_os = "windows")]
+        if hyperv_flat_dir.is_some() {
+            if let JsonValue::Object(ref mut map) = docker_params_json {
+                // docker_project_path was already updated to point to flat staging
+                map.insert(
+                    "assets_dir".to_string(),
+                    JsonValue::String(format!("{}/assets", docker_project_path)),
+                );
             }
         }
 
