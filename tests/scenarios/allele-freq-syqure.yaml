@@ -50,7 +50,7 @@ steps:
         echo "Syqure binary not found for analyze. Skipping." >&2
         exit 0
       fi
-      PROGRAM="{{workspace}}/tests/scenarios/syqure-flow/modules/secure-aggregate/secure_aggregate.codon"
+      PROGRAM="{{workspace}}/tests/scenarios/allele-freq-syqure/modules/secure-aggregate/secure_aggregate.codon"
       if [[ ! -f "$PROGRAM" ]]; then
         echo "Missing codon program: $PROGRAM" >&2
         exit 1
@@ -89,6 +89,7 @@ steps:
         run: |
           cd {{workspace}}
           RESULTS_DIR="{{sandbox}}/results/flows/allele-freq-syqure/{{run_id}}"
+          BV_BIN={{workspace}}/cli/target/release/bv \
           BIOVAULT_FLOW_VERBOSE=1 BIOVAULT_FLOW_RUN_ID={{run_id}} BIOVAULT_FLOW_AWAIT_TIMEOUT=600 \
           BV_FLOW_SKIP_DONE=1 \
           BV_SYQURE_USE_DOCKER=${BV_SYQURE_USE_DOCKER:-} \
@@ -100,6 +101,7 @@ steps:
         run: |
           cd {{workspace}}
           RESULTS_DIR="{{sandbox}}/results/flows/allele-freq-syqure/{{run_id}}"
+          BV_BIN={{workspace}}/cli/target/release/bv \
           BIOVAULT_FLOW_VERBOSE=1 BIOVAULT_FLOW_RUN_ID={{run_id}} BIOVAULT_FLOW_AWAIT_TIMEOUT=600 \
           BV_FLOW_SKIP_DONE=1 \
           BV_SYQURE_USE_DOCKER=${BV_SYQURE_USE_DOCKER:-} \
@@ -111,6 +113,7 @@ steps:
         run: |
           cd {{workspace}}
           RESULTS_DIR="{{sandbox}}/results/flows/allele-freq-syqure/{{run_id}}"
+          BV_BIN={{workspace}}/cli/target/release/bv \
           BIOVAULT_FLOW_VERBOSE=1 BIOVAULT_FLOW_RUN_ID={{run_id}} BIOVAULT_FLOW_AWAIT_TIMEOUT=600 \
           BV_FLOW_SKIP_DONE=1 \
           BV_SYQURE_USE_DOCKER=${BV_SYQURE_USE_DOCKER:-} \
@@ -167,4 +170,10 @@ steps:
       python3 {{workspace}}/tests/scenarios/allele-freq-syqure/scripts/decode_stats.py \
         --workspace "{{workspace}}" \
         --run-id "{{run_id}}" \
+        --results-dir "{{sandbox}}/results/flows/allele-freq-syqure/{{run_id}}"
+
+  - name: Verify aggregation correctness (assert client1 + client2 == aggregated)
+    run: |
+      python3 {{workspace}}/tests/scenarios/allele-freq-syqure/scripts/verify_aggregation.py \
+        --workspace "{{workspace}}" \
         --results-dir "{{sandbox}}/results/flows/allele-freq-syqure/{{run_id}}"

@@ -14,7 +14,7 @@ spec:
     - name: union_index
       type: File
       format: { kind: json }
-    - name: aligned_ac
+    - name: local_counts
       type: File
       format: { kind: json }
     - name: aggregated_counts
@@ -29,3 +29,7 @@ spec:
       type: File
       format: { kind: tsv }
       path: report.tsv
+    - name: aggregated_allele_freq_tsv
+      type: File
+      format: { kind: tsv }
+      path: aggregated_allele_freq.tsv

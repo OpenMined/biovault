@@ -1,0 +1,124 @@
+name: Allele Freq Syqure Test
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: allele-freq-syqure-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  allele-freq-syqure:
+    runs-on: namespace-profile-linux-medium
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup workspace dependencies (with syqure)
+        shell: bash
+        env:
+          BV_INCLUDE_SYQURE: "1"
+        run: |
+          chmod +x scripts/setup-workspace.sh
+          ./scripts/setup-workspace.sh
+
+      - name: Init syqure submodules
+        shell: bash
+        run: |
+          if [ -d ../syqure/.git ]; then
+            git -C ../syqure submodule sync --recursive
+            git -C ../syqure submodule update --init --recursive
+          else
+            echo "syqure directory not found"
+            exit 1
+          fi
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.91.0
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            cli -> target
+            syftbox/rust -> target
+            ../syqure -> target
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v2
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: syftbox/go.mod
+
+      - name: Install Nextflow
+        shell: bash
+        run: |
+          curl -fsSL https://get.nextflow.io | bash
+          sudo mv nextflow /usr/local/bin/
+          chmod +x /usr/local/bin/nextflow
+          nextflow -version
+
+      - name: Install syqure deps (Linux)
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y llvm-17 llvm-17-dev zstd libgmp-dev
+
+      - name: Build syqure
+        shell: bash
+        env:
+          SYQURE_LLVM_INCLUDE: /usr/lib/llvm-17/include
+        run: |
+          cd ../syqure
+          chmod +x syqure_bins.sh
+          ./syqure_bins.sh
+          ls -la target/release/syqure || ls -la target/debug/syqure
+
+      - name: Build BioVault CLI
+        run: cd cli && cargo build --release
+
+      - name: Run allele-freq-syqure scenario
+        env:
+          SEQURE_NATIVE_BIN: ${{ github.workspace }}/../syqure/target/release/syqure
+        run: |
+          # Fall back to debug build if release doesn't exist
+          if [ ! -f "../syqure/target/release/syqure" ]; then
+            export SEQURE_NATIVE_BIN="${{ github.workspace }}/../syqure/target/debug/syqure"
+          fi
+          echo "Using syqure binary: $SEQURE_NATIVE_BIN"
+          ./test-scenario.sh --client-mode rust tests/scenarios/allele-freq-syqure.yaml
+
+      - name: Show logs on failure
+        if: failure()
+        shell: bash
+        run: |
+          echo "=== Sandbox Directory Structure ==="
+          find sandbox -type d -maxdepth 3 2>/dev/null || true
+          echo ""
+          echo "=== Client Logs ==="
+          find sandbox -name "*.log" -exec echo "--- {} ---" \; -exec tail -100 {} \; 2>/dev/null || true
+          echo ""
+          echo "=== MPC Channel Files ==="
+          find sandbox -path "*/_mpc/*" -type f 2>/dev/null | head -50 || true
+          echo ""
+          echo "=== Flow Results ==="
+          find sandbox/results -type f -name "*.json" 2>/dev/null | head -20 || true
+
+      - name: Cleanup devstack
+        if: always()
+        shell: bash
+        run: |
+          chmod +x ./tests/scripts/devstack.sh
+          ./tests/scripts/devstack.sh --stop --reset || true
