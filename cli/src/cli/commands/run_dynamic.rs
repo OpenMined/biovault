@@ -913,7 +913,9 @@ fn rewrite_csv_for_vm(
         for field in record.iter() {
             if looks_like_windows_absolute_path(field) {
                 let normalized = normalize_windows_path_str(field);
-                if let Some(mapped) = path_map.get(&normalized) {
+                // path_map keys are lowercase (via normalize_windows_path_key), so lowercase for lookup
+                let lookup_key = normalized.to_ascii_lowercase();
+                if let Some(mapped) = path_map.get(&lookup_key) {
                     converted_count += 1;
                     out.push(mapped.replace('\\', "/"));
                 } else {
@@ -4419,7 +4421,9 @@ fn rewrite_csv_for_flat_dir(
         for field in record.iter() {
             if looks_like_windows_absolute_path(field) {
                 let normalized = normalize_windows_path_str(field);
-                if let Some(mapped) = path_map.get(&normalized) {
+                // path_map keys are lowercase (via normalize_windows_path_key), so lowercase for lookup
+                let lookup_key = normalized.to_ascii_lowercase();
+                if let Some(mapped) = path_map.get(&lookup_key) {
                     converted_count += 1;
                     out.push(mapped.replace('\\', "/"));
                 } else {
