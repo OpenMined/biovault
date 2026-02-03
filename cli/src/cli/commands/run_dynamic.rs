@@ -4564,6 +4564,7 @@ fn generate_runtime_config(
         // - Add security-opt to disable SELinux labeling for nested containers
         let mut config = r#"process.executor = 'local'
 podman.enabled = true
+podman.pullPolicy = 'always'
 process.shell = ['/bin/sh', '-ue']
 podman.runOptions = '--security-opt label=disable'
 "#
@@ -4584,6 +4585,7 @@ podman.runOptions = '--security-opt label=disable'
         let mut config = if force_x86 {
             r#"process.executor = 'local'
 docker.enabled = true
+docker.pullPolicy = 'always'
 docker.runOptions = '--platform linux/amd64 -u $(id -u):$(id -g)'
 "#
             .to_string()
@@ -4592,6 +4594,7 @@ docker.runOptions = '--platform linux/amd64 -u $(id -u):$(id -g)'
             // Multi-arch images will use arm64, x86-only images will be emulated
             r#"process.executor = 'local'
 docker.enabled = true
+docker.pullPolicy = 'always'
 docker.runOptions = '-u $(id -u):$(id -g)'
 "#
             .to_string()
