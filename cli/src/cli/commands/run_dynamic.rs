@@ -1929,17 +1929,17 @@ pub async fn execute_dynamic(
             println!("Staging inputs in: {}", flat_root.display());
 
             let mut data_files: Vec<PathBuf> = Vec::new();
-            append_desktop_log(&format!(
-                "[Pipeline] Extracting files from inputs_json: {}",
+            println!(
+                "[DEBUG] Extracting files from inputs_json: {}",
                 serde_json::to_string(&inputs_json_value).unwrap_or_default()
-            ));
+            );
             extract_files_from_json(&inputs_json_value, &mut data_files);
-            append_desktop_log(&format!(
-                "[Pipeline] Extracted {} files from JSON (includes CSV contents)",
+            println!(
+                "[DEBUG] Extracted {} files from JSON (includes CSV contents)",
                 data_files.len()
-            ));
+            );
             for (i, f) in data_files.iter().enumerate().take(20) {
-                append_desktop_log(&format!("[Pipeline]   File {}: {}", i, f.display()));
+                println!("[DEBUG]   File {}: {} (exists={})", i, f.display(), f.exists());
             }
 
             let flat_data_dir_str = flat_data_dir.to_string_lossy().replace('\\', "/");
@@ -4454,11 +4454,15 @@ fn rewrite_csv_for_flat_dir(
 /// The staging code will handle missing files.
 #[cfg(target_os = "windows")]
 fn extract_files_from_csv(content: &str, files: &mut Vec<PathBuf>) {
-    append_desktop_log(&format!(
-        "[CSV Extract Files] Processing CSV ({} bytes, {} lines)",
+    println!(
+        "[DEBUG CSV] Processing CSV ({} bytes, {} lines)",
         content.len(),
         content.lines().count()
-    ));
+    );
+    // Show first few lines of CSV for debugging
+    for (i, line) in content.lines().take(3).enumerate() {
+        println!("[DEBUG CSV] Line {}: {}", i, line);
+    }
     let mut found_count = 0;
     let mut exists_count = 0;
     let mut reader = csv::ReaderBuilder::new()
@@ -4468,23 +4472,31 @@ fn extract_files_from_csv(content: &str, files: &mut Vec<PathBuf>) {
     for record in reader.records().flatten() {
         for field in record.iter() {
             let field = field.trim();
-            if looks_like_windows_absolute_path(field) {
+            let is_win_path = looks_like_windows_absolute_path(field);
+            if is_win_path {
                 found_count += 1;
                 let normalized = normalize_windows_path_str(field);
                 let path = PathBuf::from(&normalized);
-                if path.exists() {
+                let exists = path.exists();
+                if exists {
                     exists_count += 1;
+                }
+                if found_count <= 3 {
+                    println!(
+                        "[DEBUG CSV] Field '{}' -> normalized '{}' exists={}",
+                        field, normalized, exists
+                    );
                 }
                 // Add ALL paths, not just existing ones - staging will filter
                 files.push(path);
             }
         }
     }
-    append_desktop_log(&format!(
-        "[CSV Extract Files] Found {} Windows paths, {} exist",
+    println!(
+        "[DEBUG CSV] Found {} Windows paths, {} exist",
         found_count,
         exists_count
-    ));
+    );
 }
 
 /// Extract Windows file paths from a JSON value (includes CSV files and entries inside them).
@@ -4493,24 +4505,29 @@ fn extract_files_from_csv(content: &str, files: &mut Vec<PathBuf>) {
 fn extract_files_from_json(value: &JsonValue, files: &mut Vec<PathBuf>) {
     match value {
         JsonValue::String(s) => {
-            if looks_like_windows_absolute_path(s) {
+            let is_win_path = looks_like_windows_absolute_path(s);
+            if is_win_path {
                 let normalized = normalize_windows_path_str(s);
                 let path = PathBuf::from(&normalized);
+                println!(
+                    "[DEBUG JSON] Found path: {} -> {} (exists={})",
+                    s,
+                    normalized,
+                    path.exists()
+                );
                 // Add path even if it doesn't exist - staging will filter
                 files.push(path.clone());
                 // Always try to read CSV content to extract nested paths
                 if s.to_lowercase().ends_with(".csv") {
+                    println!("[DEBUG JSON] Attempting to read CSV at {}", path.display());
                     if let Ok(content) = fs::read_to_string(&path) {
-                        append_desktop_log(&format!(
-                            "[Extract JSON] Found CSV at {}, extracting nested paths",
-                            path.display()
-                        ));
+                        println!(
+                            "[DEBUG JSON] Successfully read CSV ({} bytes), extracting nested paths",
+                            content.len()
+                        );
                         extract_files_from_csv(&content, files);
                     } else {
-                        append_desktop_log(&format!(
-                            "[Extract JSON] Could not read CSV at {}",
-                            path.display()
-                        ));
+                        println!("[DEBUG JSON] ERROR: Could not read CSV at {}", path.display());
                     }
                 }
             }
