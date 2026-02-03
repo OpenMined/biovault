@@ -16,6 +16,7 @@ Options:
   --test               Run pipeline with --test flag.
   --dry-run            Pass --dry-run to bv run.
   --with-docker        Pass --with-docker to bv run.
+  --nextflow-arg ARG   Pass through ARG to Nextflow (repeatable).
   --skip-generate      Skip automatic samplesheet generation (requires --samplesheet).
   -h, --help           Show this message.
 
@@ -39,6 +40,7 @@ RUN_TEST=0
 RUN_DRY=0
 RUN_DOCKER=0
 declare -a EXTRA_SET_ARGS=()
+declare -a NEXTFLOW_ARGS=()
 DATA_FILTER="all"
 
 while [[ $# -gt 0 ]]; do
@@ -86,6 +88,11 @@ while [[ $# -gt 0 ]]; do
       ;;
     --with-docker)
       RUN_DOCKER=1
+      ;;
+    --nextflow-arg)
+      [[ $# -lt 2 ]] && { echo "Missing value for --nextflow-arg" >&2; usage >&2; exit 1; }
+      NEXTFLOW_ARGS+=("$2")
+      shift
       ;;
     --skip-generate)
       SKIP_GENERATE=1
@@ -320,6 +327,22 @@ RUN_CMD=(run "$PROJECT_PATH" --results-dir "$RESULTS_DIR")
 for entry in "${EXTRA_SET_ARGS[@]+"${EXTRA_SET_ARGS[@]}"}"; do
   RUN_CMD+=(--set "$entry")
 done
+if [[ -n "${BV_RUN_NEXTFLOW_ARGS:-}" ]]; then
+  read -r -a _env_nxf_args <<<"${BV_RUN_NEXTFLOW_ARGS}"
+  NEXTFLOW_ARGS+=("${_env_nxf_args[@]}")
+fi
+if [[ "${BV_RUN_NEXTFLOW_PROFILE:-0}" == "1" ]]; then
+  NEXTFLOW_ARGS+=(
+    "-with-trace" "$RESULTS_DIR/nextflow-trace.tsv"
+    "-with-report" "$RESULTS_DIR/nextflow-report.html"
+    "-with-timeline" "$RESULTS_DIR/nextflow-timeline.html"
+    "-with-dag" "$RESULTS_DIR/nextflow-dag.dot"
+  )
+fi
+if (( ${#NEXTFLOW_ARGS[@]} > 0 )); then
+  RUN_CMD+=(--)
+  RUN_CMD+=("${NEXTFLOW_ARGS[@]}")
+fi
 
 echo "Running flow:"
 printf '  bv %s\n' "${RUN_CMD[*]}"
