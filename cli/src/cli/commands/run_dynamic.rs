@@ -765,6 +765,7 @@ fn rewrite_csv_with_container_paths(csv_path: &Path, use_podman_format: bool) ->
         .with_context(|| format!("Failed to open CSV: {}", csv_path.display()))?;
     let mut writer = csv::WriterBuilder::new()
         .has_headers(false)
+        .flexible(true)
         .from_writer(vec![]);
 
     for result in reader.records() {
@@ -902,6 +903,7 @@ fn rewrite_csv_for_vm(
         .with_context(|| format!("Failed to open CSV: {}", csv_path.display()))?;
     let mut writer = csv::WriterBuilder::new()
         .has_headers(false)
+        .flexible(true)
         .from_writer(vec![]);
 
     for result in reader.records() {
@@ -911,7 +913,9 @@ fn rewrite_csv_for_vm(
         for field in record.iter() {
             if looks_like_windows_absolute_path(field) {
                 let normalized = normalize_windows_path_str(field);
-                if let Some(mapped) = path_map.get(&normalized) {
+                // path_map keys are lowercase (via normalize_windows_path_key), so lowercase for lookup
+                let lookup_key = normalized.to_ascii_lowercase();
+                if let Some(mapped) = path_map.get(&lookup_key) {
                     converted_count += 1;
                     out.push(mapped.replace('\\', "/"));
                 } else {
@@ -1749,6 +1753,8 @@ pub async fn execute_dynamic(
     #[cfg(target_os = "windows")]
     let mut hyperv_flat_results_dir: Option<PathBuf> = None;
     #[cfg(target_os = "windows")]
+    let mut _hyperv_flat_project_dir: Option<PathBuf> = None;
+    #[cfg(target_os = "windows")]
     let mut vm_path_map: Option<BTreeMap<String, String>> = None;
 
     // Build command - use Docker on Windows, native Nextflow elsewhere
@@ -1802,10 +1808,10 @@ pub async fn execute_dynamic(
         // For Hyper-V mode, paths will be in the VM temp directory
         let (
             docker_biovault_home,
-            docker_project_path,
-            docker_template,
-            docker_workflow,
-            docker_project_spec,
+            mut docker_project_path,
+            mut docker_template,
+            mut docker_workflow,
+            mut docker_project_spec,
             docker_results,
             docker_log_path,
         ) = if let Some(ref vm_dir) = vm_temp_dir {
@@ -1933,16 +1939,13 @@ pub async fn execute_dynamic(
             let mut missing_paths: Vec<PathBuf> = Vec::new();
 
             for data_path in &data_files {
-                if !data_path.exists() {
+                let exists = data_path.exists();
+                if !exists {
                     missing_paths.push(data_path.clone());
                     continue;
                 }
                 let key = normalize_windows_path_key(data_path);
                 if path_map.contains_key(&key) {
-                    append_desktop_log(&format!(
-                        "[Pipeline] Duplicate input path (already staged): {}",
-                        data_path.display()
-                    ));
                     continue;
                 }
                 let staged_name = stage_name_for_path(data_path);
@@ -1991,8 +1994,60 @@ pub async fn execute_dynamic(
                 }
             }
 
+            // Before copying, also extract files referenced inside CSVs
+            // These need to be staged too, otherwise the CSV paths point to non-existent files
+            let csv_files: Vec<PathBuf> = stage_pairs
+                .iter()
+                .filter(|(src, _)| {
+                    src.extension()
+                        .and_then(|s| s.to_str())
+                        .map(|s| s.eq_ignore_ascii_case("csv"))
+                        .unwrap_or(false)
+                })
+                .map(|(src, _)| src.clone())
+                .collect();
+
+            for csv_path in &csv_files {
+                if let Ok(content) = fs::read_to_string(csv_path) {
+                    let mut csv_files_vec: Vec<PathBuf> = Vec::new();
+                    extract_files_from_csv(&content, &mut csv_files_vec);
+                    append_desktop_log(&format!(
+                        "[Pipeline] Extracted {} files from CSV: {}",
+                        csv_files_vec.len(),
+                        csv_path.display()
+                    ));
+                    for data_path in csv_files_vec {
+                        if !data_path.exists() {
+                            append_desktop_log(&format!(
+                                "[Pipeline] CSV-referenced file missing: {}",
+                                data_path.display()
+                            ));
+                            continue;
+                        }
+                        let key = normalize_windows_path_key(&data_path);
+                        if path_map.contains_key(&key) {
+                            continue; // Already staged
+                        }
+                        let staged_name = stage_name_for_path(&data_path);
+                        let staged_path = flat_data_dir.join(&staged_name);
+                        let staged_path_str = staged_path.to_string_lossy().replace('\\', "/");
+                        path_map.insert(key, staged_path_str);
+                        stage_pairs.push((data_path, staged_path));
+                    }
+                }
+            }
+
+            append_desktop_log(&format!(
+                "[Pipeline] Total files to stage (including CSV-referenced): {}",
+                stage_pairs.len()
+            ));
+
             for (src, dst) in &stage_pairs {
                 copy_path_to_path(src, dst)?;
+            }
+
+            // Now rewrite CSVs after all files are staged
+            for (_, dst) in &stage_pairs {
                 if dst
                     .extension()
                     .and_then(|s| s.to_str())
@@ -2010,10 +2065,80 @@ pub async fn execute_dynamic(
                 &path_map,
             );
 
-            hyperv_flat_dir = Some(flat_root);
+            // Also stage the project directory so it's accessible in Hyper-V
+            let flat_project_dir = flat_root.join("project");
+            fs::create_dir_all(&flat_project_dir).with_context(|| {
+                format!(
+                    "Failed to create Hyper-V flat project dir: {}",
+                    flat_project_dir.display()
+                )
+            })?;
+            append_desktop_log(&format!(
+                "[Pipeline] Copying project to flat staging: {} -> {}",
+                project_abs.display(),
+                flat_project_dir.display()
+            ));
+            copy_dir_recursive(&project_abs, &flat_project_dir)?;
+
+            // Also copy the template directory if it's outside the project
+            let template_in_project = is_path_within(&project_abs, &template_abs);
+            if !template_in_project {
+                let flat_template_dir = flat_root.join("template");
+                fs::create_dir_all(&flat_template_dir).with_context(|| {
+                    format!(
+                        "Failed to create Hyper-V flat template dir: {}",
+                        flat_template_dir.display()
+                    )
+                })?;
+                // Copy just the template file
+                let template_dest = flat_template_dir.join("template.nf");
+                fs::copy(&template_abs, &template_dest).with_context(|| {
+                    format!(
+                        "Failed to copy template to flat staging: {} -> {}",
+                        template_abs.display(),
+                        template_dest.display()
+                    )
+                })?;
+                append_desktop_log(&format!(
+                    "[Pipeline] Copied template to flat staging: {} -> {}",
+                    template_abs.display(),
+                    template_dest.display()
+                ));
+            }
+
+            hyperv_flat_dir = Some(flat_root.clone());
             hyperv_flat_results_dir = Some(flat_results_dir.clone());
+            _hyperv_flat_project_dir = Some(flat_project_dir.clone());
             let _ = path_map;
             results_path_for_run = flat_results_dir;
+
+            // Update docker paths to use flat staging locations
+            let flat_project_container = windows_path_to_container(&flat_project_dir, using_podman);
+            docker_project_path = flat_project_container.clone();
+
+            // Template path: if template was in project, use project-relative path; otherwise use flat template dir
+            let template_in_project = is_path_within(&project_abs, &template_abs);
+            if template_in_project {
+                let template_rel = relative_to_base(&project_abs, &template_abs);
+                docker_template = format!("{}/{}", flat_project_container, template_rel.display())
+                    .replace('\\', "/");
+            } else {
+                let flat_template_path = flat_root.join("template").join("template.nf");
+                docker_template = windows_path_to_container(&flat_template_path, using_podman);
+            }
+
+            // Workflow and spec are relative to project
+            let workflow_rel = relative_to_base(&project_abs, &workflow_abs);
+            let spec_rel = relative_to_base(&project_abs, &project_spec_abs);
+            docker_workflow =
+                format!("{}/{}", flat_project_container, workflow_rel.display()).replace('\\', "/");
+            docker_project_spec =
+                format!("{}/{}", flat_project_container, spec_rel.display()).replace('\\', "/");
+
+            append_desktop_log(&format!(
+                "[Pipeline] Hyper-V flat staging paths: project={}, template={}, workflow={}",
+                docker_project_path, docker_template, docker_workflow
+            ));
         }
 
         #[cfg(target_os = "windows")]
@@ -2357,6 +2482,22 @@ pub async fn execute_dynamic(
                 vm_dir
             ));
             docker_cmd.arg("-v").arg(format!("{}:{}", vm_dir, vm_dir));
+        } else if hyperv_host_mount {
+            // Hyper-V host mount mode: mount the flat staging root which contains project, data, results
+            // All paths have been rewritten to point to locations under this root
+            #[cfg(target_os = "windows")]
+            if let Some(ref flat_root) = hyperv_flat_dir {
+                let flat_root_host = windows_path_to_mount_source(flat_root, using_podman);
+                let flat_root_container = windows_path_to_container(flat_root, using_podman);
+                append_desktop_log(&format!(
+                    "[Pipeline] Hyper-V host mount: {} -> {}",
+                    flat_root.display(),
+                    flat_root_container
+                ));
+                docker_cmd
+                    .arg("-v")
+                    .arg(format!("{}:{}", flat_root_host, flat_root_container));
+            }
         } else {
             // Normal mode: mount Windows paths
             docker_cmd
@@ -2403,22 +2544,44 @@ pub async fn execute_dynamic(
             // For Hyper-V mode, the config file was copied to VM along with project
             // Reference it via the VM project path
             #[cfg(target_os = "windows")]
-            if let Some(ref vm_dir) = vm_temp_dir {
-                // Copy the config file to VM if it wasn't part of the project copy
-                let config_name = config_path
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy();
-                let vm_config_path = format!("{}/project/{}", vm_dir, config_name);
-                if let Err(e) = copy_file_to_vm(&docker_bin, &config_path, &vm_config_path) {
-                    append_desktop_log(&format!(
-                        "[Pipeline] Warning: Failed to copy config to VM: {}",
-                        e
-                    ));
+            {
+                if let Some(ref vm_dir) = vm_temp_dir {
+                    // Copy the config file to VM if it wasn't part of the project copy
+                    let config_name = config_path
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy();
+                    let vm_config_path = format!("{}/project/{}", vm_dir, config_name);
+                    if let Err(e) = copy_file_to_vm(&docker_bin, &config_path, &vm_config_path) {
+                        append_desktop_log(&format!(
+                            "[Pipeline] Warning: Failed to copy config to VM: {}",
+                            e
+                        ));
+                    }
+                    Some(vm_config_path)
+                } else if let Some(ref flat_root) = hyperv_flat_dir {
+                    // Hyper-V host mount mode: config generated AFTER project copy, must copy it now
+                    let config_name = config_path
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy();
+                    let flat_config_path = flat_root.join("project").join(config_name.as_ref());
+                    // Copy the generated config to the flat staging directory
+                    if let Err(e) = std::fs::copy(&config_path, &flat_config_path) {
+                        append_desktop_log(&format!(
+                            "[Pipeline] Warning: Failed to copy config to flat staging: {}",
+                            e
+                        ));
+                    } else {
+                        append_desktop_log(&format!(
+                            "[Pipeline] Copied runtime config to flat staging: {}",
+                            flat_config_path.display()
+                        ));
+                    }
+                    Some(windows_path_to_container(&flat_config_path, using_podman))
+                } else {
+                    Some(windows_path_to_container(&config_path, using_podman))
                 }
-                Some(vm_config_path)
-            } else {
-                Some(windows_path_to_container(&config_path, using_podman))
             }
             #[cfg(not(target_os = "windows"))]
             Some(config_path.to_string_lossy().to_string())
@@ -2509,6 +2672,18 @@ pub async fn execute_dynamic(
                         JsonValue::String(format!("{}/assets", vm_project)),
                     );
                 }
+            }
+        }
+
+        // For Hyper-V host mount mode: update assets_dir to use flat staging path
+        #[cfg(target_os = "windows")]
+        if hyperv_flat_dir.is_some() {
+            if let JsonValue::Object(ref mut map) = docker_params_json {
+                // docker_project_path was already updated to point to flat staging
+                map.insert(
+                    "assets_dir".to_string(),
+                    JsonValue::String(format!("{}/assets", docker_project_path)),
+                );
             }
         }
 
@@ -4209,6 +4384,7 @@ fn rewrite_csv_for_flat_dir(
         .with_context(|| format!("Failed to open CSV: {}", csv_path.display()))?;
     let mut writer = csv::WriterBuilder::new()
         .has_headers(false)
+        .flexible(true)
         .from_writer(vec![]);
 
     for result in reader.records() {
@@ -4218,7 +4394,9 @@ fn rewrite_csv_for_flat_dir(
         for field in record.iter() {
             if looks_like_windows_absolute_path(field) {
                 let normalized = normalize_windows_path_str(field);
-                if let Some(mapped) = path_map.get(&normalized) {
+                // path_map keys are lowercase (via normalize_windows_path_key), so lowercase for lookup
+                let lookup_key = normalized.to_ascii_lowercase();
+                if let Some(mapped) = path_map.get(&lookup_key) {
                     converted_count += 1;
                     out.push(mapped.replace('\\', "/"));
                 } else {
@@ -4265,6 +4443,8 @@ fn rewrite_csv_for_flat_dir(
 }
 
 /// Extract Windows file paths from CSV content (keeps file paths, not parent dirs).
+/// Now extracts ALL paths that look like Windows paths, even if they don't exist yet.
+/// The staging code will handle missing files.
 #[cfg(target_os = "windows")]
 fn extract_files_from_csv(content: &str, files: &mut Vec<PathBuf>) {
     let mut reader = csv::ReaderBuilder::new()
@@ -4276,29 +4456,33 @@ fn extract_files_from_csv(content: &str, files: &mut Vec<PathBuf>) {
             let field = field.trim();
             if looks_like_windows_absolute_path(field) {
                 let normalized = normalize_windows_path_str(field);
-                let path = Path::new(&normalized);
-                if path.exists() {
-                    files.push(path.to_path_buf());
-                }
+                // Normalize slashes - replace forward slashes with backslashes for Windows
+                let normalized = normalized.replace('/', "\\");
+                let path = PathBuf::from(&normalized);
+                // Add ALL paths - staging will filter missing ones
+                files.push(path);
             }
         }
     }
 }
 
 /// Extract Windows file paths from a JSON value (includes CSV files and entries inside them).
+/// Now extracts paths even if they don't exist, and always tries to read CSV contents.
 #[cfg(target_os = "windows")]
 fn extract_files_from_json(value: &JsonValue, files: &mut Vec<PathBuf>) {
     match value {
         JsonValue::String(s) => {
             if looks_like_windows_absolute_path(s) {
                 let normalized = normalize_windows_path_str(s);
-                let path = Path::new(&normalized);
-                if path.exists() {
-                    files.push(path.to_path_buf());
-                    if s.to_lowercase().ends_with(".csv") {
-                        if let Ok(content) = fs::read_to_string(path) {
-                            extract_files_from_csv(&content, files);
-                        }
+                // Normalize slashes for Windows
+                let normalized = normalized.replace('/', "\\");
+                let path = PathBuf::from(&normalized);
+                // Add path even if it doesn't exist - staging will filter
+                files.push(path.clone());
+                // Try to read CSV content to extract nested paths
+                if s.to_lowercase().ends_with(".csv") {
+                    if let Ok(content) = fs::read_to_string(&path) {
+                        extract_files_from_csv(&content, files);
                     }
                 }
             }
@@ -4537,6 +4721,7 @@ fn generate_runtime_config(
         // - Add security-opt to disable SELinux labeling for nested containers
         let mut config = r#"process.executor = 'local'
 podman.enabled = true
+podman.pullPolicy = 'always'
 process.shell = ['/bin/sh', '-ue']
 podman.runOptions = '--security-opt label=disable'
 "#
@@ -4557,6 +4742,7 @@ podman.runOptions = '--security-opt label=disable'
         let mut config = if force_x86 {
             r#"process.executor = 'local'
 docker.enabled = true
+docker.pullPolicy = 'always'
 docker.runOptions = '--platform linux/amd64 -u $(id -u):$(id -g)'
 "#
             .to_string()
@@ -4565,6 +4751,7 @@ docker.runOptions = '--platform linux/amd64 -u $(id -u):$(id -g)'
             // Multi-arch images will use arm64, x86-only images will be emulated
             r#"process.executor = 'local'
 docker.enabled = true
+docker.pullPolicy = 'always'
 docker.runOptions = '-u $(id -u):$(id -g)'
 "#
             .to_string()
