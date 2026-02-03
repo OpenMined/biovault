@@ -1,12 +1,15 @@
 name: BioVault Syqure Scenario Tests
 
+# TEMPORARILY DISABLED - Testing allele-freq-syqure workflow only
+# on:
+#   pull_request:
+#     branches: [main]
+#   workflow_dispatch:
+#   schedule:
+#     - cron: '15 3 * * *'
+#   workflow_call:
 on:
-  pull_request:
-    branches: [main]
   workflow_dispatch:
-  schedule:
-    - cron: '15 3 * * *'
-  workflow_call:
 
 concurrency:
   group: biovault-syqure-tests-${{ github.ref }}
