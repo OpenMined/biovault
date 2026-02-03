@@ -1931,18 +1931,7 @@ pub async fn execute_dynamic(
             println!("Staging inputs in: {}", flat_root.display());
 
             let mut data_files: Vec<PathBuf> = Vec::new();
-            println!(
-                "[DEBUG] Extracting files from inputs_json: {}",
-                serde_json::to_string(&inputs_json_value).unwrap_or_default()
-            );
             extract_files_from_json(&inputs_json_value, &mut data_files);
-            println!(
-                "[DEBUG] Extracted {} files from JSON (includes CSV contents)",
-                data_files.len()
-            );
-            for (i, f) in data_files.iter().enumerate().take(20) {
-                println!("[DEBUG]   File {}: {} (exists={})", i, f.display(), f.exists());
-            }
 
             let flat_data_dir_str = flat_data_dir.to_string_lossy().replace('\\', "/");
             let mut path_map: BTreeMap<String, String> = BTreeMap::new();
@@ -1952,12 +1941,6 @@ pub async fn execute_dynamic(
             for data_path in &data_files {
                 let exists = data_path.exists();
                 if !exists {
-                    if missing_paths.len() < 5 {
-                        println!(
-                            "[DEBUG STAGING] Path missing: {} (normalized from data_files)",
-                            data_path.display()
-                        );
-                    }
                     missing_paths.push(data_path.clone());
                     continue;
                 }
@@ -1968,23 +1951,10 @@ pub async fn execute_dynamic(
                 let staged_name = stage_name_for_path(data_path);
                 let staged_path = flat_data_dir.join(&staged_name);
                 let staged_path_str = staged_path.to_string_lossy().replace('\\', "/");
-                if stage_pairs.len() < 5 {
-                    println!(
-                        "[DEBUG STAGING] Staging: {} -> {}",
-                        data_path.display(),
-                        staged_path_str
-                    );
-                }
                 path_map.insert(key, staged_path_str);
                 stage_pairs.push((data_path.clone(), staged_path));
             }
 
-            println!(
-                "[DEBUG STAGING] Summary: total={}, staged={}, missing={}",
-                data_files.len(),
-                stage_pairs.len(),
-                missing_paths.len()
-            );
             append_desktop_log(&format!(
                 "[Pipeline] Hyper-V staging (flat) inputs: total={}, unique={}, missing={}",
                 data_files.len(),
@@ -2150,7 +2120,8 @@ pub async fn execute_dynamic(
             let template_in_project = is_path_within(&project_abs, &template_abs);
             if template_in_project {
                 let template_rel = relative_to_base(&project_abs, &template_abs);
-                docker_template = format!("{}/{}", flat_project_container, template_rel.display()).replace('\\', "/");
+                docker_template = format!("{}/{}", flat_project_container, template_rel.display())
+                    .replace('\\', "/");
             } else {
                 let flat_template_path = flat_root.join("template").join("template.nf");
                 docker_template = windows_path_to_container(&flat_template_path, using_podman);
@@ -2159,8 +2130,10 @@ pub async fn execute_dynamic(
             // Workflow and spec are relative to project
             let workflow_rel = relative_to_base(&project_abs, &workflow_abs);
             let spec_rel = relative_to_base(&project_abs, &project_spec_abs);
-            docker_workflow = format!("{}/{}", flat_project_container, workflow_rel.display()).replace('\\', "/");
-            docker_project_spec = format!("{}/{}", flat_project_container, spec_rel.display()).replace('\\', "/");
+            docker_workflow =
+                format!("{}/{}", flat_project_container, workflow_rel.display()).replace('\\', "/");
+            docker_project_spec =
+                format!("{}/{}", flat_project_container, spec_rel.display()).replace('\\', "/");
 
             append_desktop_log(&format!(
                 "[Pipeline] Hyper-V flat staging paths: project={}, template={}, workflow={}",
@@ -4474,17 +4447,6 @@ fn rewrite_csv_for_flat_dir(
 /// The staging code will handle missing files.
 #[cfg(target_os = "windows")]
 fn extract_files_from_csv(content: &str, files: &mut Vec<PathBuf>) {
-    println!(
-        "[DEBUG CSV] Processing CSV ({} bytes, {} lines)",
-        content.len(),
-        content.lines().count()
-    );
-    // Show first few lines of CSV for debugging
-    for (i, line) in content.lines().take(3).enumerate() {
-        println!("[DEBUG CSV] Line {}: {}", i, line);
-    }
-    let mut found_count = 0;
-    let mut exists_count = 0;
     let mut reader = csv::ReaderBuilder::new()
         .has_headers(false)
         .flexible(true)
@@ -4492,33 +4454,16 @@ fn extract_files_from_csv(content: &str, files: &mut Vec<PathBuf>) {
     for record in reader.records().flatten() {
         for field in record.iter() {
             let field = field.trim();
-            let is_win_path = looks_like_windows_absolute_path(field);
-            if is_win_path {
-                found_count += 1;
+            if looks_like_windows_absolute_path(field) {
                 let normalized = normalize_windows_path_str(field);
-                // Also normalize slashes - replace forward slashes with backslashes for Windows
+                // Normalize slashes - replace forward slashes with backslashes for Windows
                 let normalized = normalized.replace('/', "\\");
                 let path = PathBuf::from(&normalized);
-                let exists = path.exists();
-                if exists {
-                    exists_count += 1;
-                }
-                if found_count <= 3 {
-                    println!(
-                        "[DEBUG CSV] Field '{}' -> normalized '{}' exists={}",
-                        field, normalized, exists
-                    );
-                }
-                // Add ALL paths, not just existing ones - staging will filter
+                // Add ALL paths - staging will filter missing ones
                 files.push(path);
             }
         }
     }
-    println!(
-        "[DEBUG CSV] Found {} Windows paths, {} exist",
-        found_count,
-        exists_count
-    );
 }
 
 /// Extract Windows file paths from a JSON value (includes CSV files and entries inside them).
@@ -4527,31 +4472,17 @@ fn extract_files_from_csv(content: &str, files: &mut Vec<PathBuf>) {
 fn extract_files_from_json(value: &JsonValue, files: &mut Vec<PathBuf>) {
     match value {
         JsonValue::String(s) => {
-            let is_win_path = looks_like_windows_absolute_path(s);
-            if is_win_path {
+            if looks_like_windows_absolute_path(s) {
                 let normalized = normalize_windows_path_str(s);
                 // Normalize slashes for Windows
                 let normalized = normalized.replace('/', "\\");
                 let path = PathBuf::from(&normalized);
-                println!(
-                    "[DEBUG JSON] Found path: {} -> {} (exists={})",
-                    s,
-                    normalized,
-                    path.exists()
-                );
                 // Add path even if it doesn't exist - staging will filter
                 files.push(path.clone());
-                // Always try to read CSV content to extract nested paths
+                // Try to read CSV content to extract nested paths
                 if s.to_lowercase().ends_with(".csv") {
-                    println!("[DEBUG JSON] Attempting to read CSV at {}", path.display());
                     if let Ok(content) = fs::read_to_string(&path) {
-                        println!(
-                            "[DEBUG JSON] Successfully read CSV ({} bytes), extracting nested paths",
-                            content.len()
-                        );
                         extract_files_from_csv(&content, files);
-                    } else {
-                        println!("[DEBUG JSON] ERROR: Could not read CSV at {}", path.display());
                     }
                 }
             }
