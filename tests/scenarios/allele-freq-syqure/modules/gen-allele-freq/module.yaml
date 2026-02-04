@@ -9,20 +9,13 @@ spec:
     entrypoint: run.sh
   assets:
     - path: run.sh
+    - path: allele_freq_utils.py
   outputs:
-    - name: allele_freq_npz
-      type: File
-      format: { kind: npz }
-      path: allele_freq.npz
-    - name: locus_index
-      type: File
-      format: { kind: json }
-      path: locus_index.json
     - name: allele_freq_tsv
       type: File
       format: { kind: tsv }
       path: allele_freq.tsv
-    - name: vcf_results
+    - name: locus_index
       type: File
-      format: { kind: tsv }
-      path: vcf_conversion_results.tsv
+      format: { kind: json }
+      path: locus_index.json

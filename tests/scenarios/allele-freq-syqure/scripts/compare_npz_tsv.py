@@ -1,52 +1,10 @@
 #!/usr/bin/env python3
+"""
+Validate TSV allele frequency outputs and compare client data.
+"""
 import argparse
 import json
-import struct
-import zipfile
 from pathlib import Path
-
-
-def load_npz_ac(path: Path):
-    try:
-        with zipfile.ZipFile(path) as zf:
-            if "ac.npy" not in zf.namelist():
-                raise RuntimeError(f"ac.npy not found in {path}")
-            with zf.open("ac.npy") as f:
-                data = f.read()
-    except Exception as exc:
-        raise RuntimeError(f"failed to read npz: {exc}") from exc
-
-    if not data.startswith(b"\x93NUMPY"):
-        prefix = data[:16]
-        raise RuntimeError(f"invalid npy header (prefix={prefix!r})")
-
-    major = data[6]
-    if major == 1:
-        header_len = struct.unpack("<H", data[8:10])[0]
-        header_start = 10
-    elif major == 2:
-        header_len = struct.unpack("<I", data[8:12])[0]
-        header_start = 12
-    else:
-        raise RuntimeError(f"unsupported npy version: {major}")
-
-    header_end = header_start + header_len
-    header = data[header_start:header_end].decode("latin1")
-    if "fortran_order" in header and "True" in header:
-        raise RuntimeError("fortran_order arrays not supported")
-    if "'<i8'" not in header and "\"<i8\"" not in header:
-        raise RuntimeError("unsupported dtype (expected <i8)")
-
-    shape = ()
-    if "shape" in header:
-        shape_str = header.split("shape")[1]
-        shape_str = shape_str.split(")", 1)[0].split("(", 1)[1]
-        shape = tuple(int(x.strip()) for x in shape_str.split(",") if x.strip())
-    count = 1
-    for dim in shape:
-        count *= dim
-    fmt = "<" + ("q" * count)
-    return list(struct.unpack(fmt, data[header_end:header_end + struct.calcsize(fmt)]))
 
 
 def load_index(path: Path):
@@ -59,41 +17,46 @@ def load_index(path: Path):
 
 
 def load_tsv(path: Path):
-    rows = {}
+    """Load TSV and return ordered loci, rsids, and ac values."""
+    loci = []
+    rsids = []
+    ac_values = []
     with path.open() as f:
         header = f.readline().strip().split("\t")
         idx = {name: i for i, name in enumerate(header)}
+        locus_col = idx.get("locus_key") if "locus_key" in idx else idx.get("locus")
+        ac_col = idx.get("allele_count") if "allele_count" in idx else idx.get("ac")
         for line in f:
             parts = line.strip().split("\t")
             if len(parts) < 4:
                 continue
-            locus = parts[idx["locus"]]
-            rsid = parts[idx.get("rsid", 1)] if "rsid" in idx else ""
-            ac = int(parts[idx["ac"]])
-            rows[locus] = (rsid, ac)
-    return rows
+            loci.append(parts[locus_col])
+            rsids.append(parts[idx.get("rsid", 1)] if "rsid" in idx else "")
+            ac_values.append(int(parts[ac_col]))
+    return loci, rsids, ac_values
 
 
 def check_client(label: str, base: Path):
-    npz = base / "allele_freq.npz"
-    idx = base / "locus_index.json"
+    idx_file = base / "locus_index.json"
     tsv = base / "allele_freq.tsv"
-    if not npz.exists() or not idx.exists() or not tsv.exists():
-        print(f"[{label}] missing outputs")
+
+    if not tsv.exists():
+        print(f"[{label}] missing allele_freq.tsv")
         return None
-    try:
-        ac = load_npz_ac(npz)
-    except Exception as exc:
-        print(f"[{label}] npz decode failed: {exc}")
+    if not idx_file.exists():
+        print(f"[{label}] missing locus_index.json")
         return None
-    loci, rsids = load_index(idx)
-    tsv_rows = load_tsv(tsv)
+
+    loci, rsids, ac = load_tsv(tsv)
+    idx_loci, idx_rsids = load_index(idx_file)
+
+    # Verify index matches TSV
     mismatches = 0
-    for i, locus in enumerate(loci[:200]):  # sample 200 to keep it quick
-        tsv_ac = tsv_rows.get(locus, ("", None))[1]
-        if tsv_ac is None or tsv_ac != ac[i]:
+    for i, (t_locus, i_locus) in enumerate(zip(loci[:200], idx_loci[:200])):
+        if t_locus != i_locus:
             mismatches += 1
-    print(f"[{label}] loci={len(loci)} mismatches(sampled)={mismatches}")
+
+    print(f"[{label}] loci={len(loci)} index_loci={len(idx_loci)} mismatches(sampled)={mismatches}")
     return {"ac": ac, "loci": loci, "rsids": rsids}
 
 

@@ -50,14 +50,7 @@ steps:
           exit 1
           ;;
       esac
-      python3 - <<PY
-import pathlib
-path = pathlib.Path("${MODULE_YAML}")
-text = path.read_text()
-text = text.replace("entrypoint: smpc_aggregate.codon", f"entrypoint: ${ENTRY}")
-text = text.replace("entrypoint: he_aggregate.codon", f"entrypoint: ${ENTRY}")
-path.write_text(text)
-PY
+      perl -0pi -e "s/entrypoint: (smpc|he)_aggregate\\.codon/entrypoint: ${ENTRY}/g" "${MODULE_YAML}"
       echo "Syqure aggregation mode: ${MODE} (entrypoint: ${ENTRY})"
 
   # Permissions are created declaratively by the flow.yaml init_permissions step

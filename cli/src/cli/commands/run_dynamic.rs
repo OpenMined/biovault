@@ -3716,6 +3716,9 @@ fn execute_syqure_native(
 
     #[cfg(unix)]
     {
+        // Reset shutdown flag from any previous syqure invocation
+        SYQURE_SHUTDOWN_REQUESTED.store(false, Ordering::SeqCst);
+
         unsafe {
             libc::signal(libc::SIGINT, syqure_signal_handler as libc::sighandler_t);
             libc::signal(libc::SIGTERM, syqure_signal_handler as libc::sighandler_t);

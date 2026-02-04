@@ -10,6 +10,7 @@ spec:
   assets:
     - path: run.sh
     - path: build_master.py
+    - path: allele_freq_utils.py
   inputs:
     - name: index_manifest
       type: File

@@ -14,11 +14,8 @@ manifest_path = Path(os.environ.get("BV_INPUT_INDEX_MANIFEST", "index_manifest.t
 output_path = Path(os.environ.get("BV_OUTPUT_UNION_INDEX", "union_locus_index.json"))
 count_path = Path(os.environ.get("BV_OUTPUT_COUNT", "count.txt"))
 
-script_dir = Path(__file__).resolve()
-scenarios_dir = script_dir.parents[3]
-allele_utils_dir = scenarios_dir / "allele-freq" / "allele-freq"
-if allele_utils_dir.exists():
-    sys.path.insert(0, str(allele_utils_dir))
+script_dir = Path(__file__).resolve().parent
+sys.path.insert(0, str(script_dir))
 
 from allele_freq_utils import LocusIndex  # type: ignore
 
