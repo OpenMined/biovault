@@ -196,6 +196,14 @@ if [[ "$(uname -s)" == MINGW* ]] || [[ "$(uname -s)" == MSYS* ]] || [[ "$(uname 
   IS_WINDOWS=1
 fi
 
+if (( IS_WINDOWS )); then
+  # Keep Windows runs snappy by default (override by setting env vars).
+  export ALLELE_FREQ_COUNT="${ALLELE_FREQ_COUNT:-1}"
+  export BV_AGG_THREADS="${BV_AGG_THREADS:-8}"
+  export BV_EMIT_MAX_FORKS="${BV_EMIT_MAX_FORKS:-4}"
+  export BV_WIN_TMP_COPY="${BV_WIN_TMP_COPY:-1}"
+fi
+
 # Check if scenario needs syqure or container runtime
 NEEDS_SYQURE=0
 if grep -qiE '(syqure|mpc|sequre)' "$SCENARIO" 2>/dev/null; then
