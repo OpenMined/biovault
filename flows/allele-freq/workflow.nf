@@ -13,8 +13,7 @@ def envInt = { name, fallback ->
 
 def DEFAULT_EMIT_MAX_FORKS = envInt('BV_EMIT_MAX_FORKS', 10)
 def DEFAULT_AGG_THREADS = envInt('BV_AGG_THREADS', 8)
-def GLOBAL_MAX_FORKS = workflow.config.process.maxForks
-def EMIT_MAX_FORKS = params.emit_max_forks ?: (params.nextflow?.emit_max_forks ?: (GLOBAL_MAX_FORKS ?: DEFAULT_EMIT_MAX_FORKS))
+def EMIT_MAX_FORKS = params.emit_max_forks ?: (params.nextflow?.emit_max_forks ?: (params.nextflow?.max_forks ?: DEFAULT_EMIT_MAX_FORKS))
 def AGG_THREADS = params.aggregate_threads ?: (params.nextflow?.aggregate_threads ?: DEFAULT_AGG_THREADS)
 def WIN_TMP_COPY = (System.getenv('BV_WIN_TMP_COPY') ?: '').toLowerCase() in ['1','true','yes','on']
 
