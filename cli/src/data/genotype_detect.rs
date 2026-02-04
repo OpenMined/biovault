@@ -44,7 +44,9 @@ impl Default for GenotypeMetadata {
 
 /// Detect if a file is a genotype file and extract metadata (fast version - header only)
 pub fn detect_genotype_metadata(file_path: &str) -> Result<GenotypeMetadata> {
-    let path = Path::new(file_path);
+    // Normalize path for the current OS (handles Unix paths on Windows)
+    let normalized = super::files::normalize_path(file_path);
+    let path = Path::new(&normalized);
 
     if !path.exists() {
         return Ok(GenotypeMetadata::default());
@@ -128,19 +130,21 @@ pub fn detect_genotype_metadata(file_path: &str) -> Result<GenotypeMetadata> {
 
 /// Analyze genotype file for row count, chromosome count, and inferred sex (slow - reads entire file)
 pub fn analyze_genotype_file(file_path: &str) -> Result<GenotypeMetadata> {
-    let path = Path::new(file_path);
+    // Normalize path for the current OS (handles Unix paths on Windows)
+    let normalized = super::files::normalize_path(file_path);
+    let path = Path::new(&normalized);
 
     if !path.exists() {
         return Ok(GenotypeMetadata::default());
     }
 
     // First detect source from header (need this for sex inference)
-    let metadata = detect_genotype_metadata(file_path)?;
+    let metadata = detect_genotype_metadata(&normalized)?;
     let source = metadata.source.clone();
 
     // Count total rows and chromosomes by reading the entire file
     let (row_count, chromosome_count, inferred_sex) =
-        count_rows_and_chromosomes(file_path, source.as_deref())?;
+        count_rows_and_chromosomes(&normalized, source.as_deref())?;
 
     // Return combined metadata (detected + analyzed)
     Ok(GenotypeMetadata {

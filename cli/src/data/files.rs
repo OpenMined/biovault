@@ -15,6 +15,37 @@ use std::io::Read;
 
 use super::{BioVaultDb, GenotypeMetadata};
 
+/// Normalize a file path to the native OS format.
+/// On Windows, converts Unix-style paths like `/c/Users/...` or `/C/Users/...` to `C:\Users\...`
+/// This allows biovault to work with paths from Git Bash, MSYS2, or WSL.
+pub fn normalize_path(path: &str) -> String {
+    #[cfg(target_os = "windows")]
+    {
+        let path = path.trim();
+        // Check for Unix-style drive paths: /c/... or /C/...
+        if path.len() >= 3 {
+            let bytes = path.as_bytes();
+            if bytes[0] == b'/' && bytes[2] == b'/' && bytes[1].is_ascii_alphabetic() {
+                // Convert /c/Users/... to C:\Users\...
+                let drive = (bytes[1] as char).to_ascii_uppercase();
+                let rest = &path[2..];
+                return format!("{}:{}", drive, rest.replace('/', "\\"));
+            }
+        }
+        // Also handle paths that are already partially Windows-style but with forward slashes
+        // e.g., C:/Users/... -> C:\Users\...
+        if path.len() >= 2 && path.chars().nth(1) == Some(':') {
+            return path.replace('/', "\\");
+        }
+        // Return as-is if no conversion needed
+        path.to_string()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        path.to_string()
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ExtensionInfo {
     pub extension: String,
@@ -1899,7 +1930,8 @@ pub fn unlink_file(db: &BioVaultDb, file_id: i64) -> Result<FileRecord> {
 // File hashing
 
 pub fn hash_file(path: &str) -> Result<String> {
-    let content = fs::read(path)?;
+    let normalized = normalize_path(path);
+    let content = fs::read(&normalized)?;
     Ok(blake3::hash(&content).to_hex().to_string())
 }
 
@@ -1912,11 +1944,14 @@ pub fn import_files_as_pending(db: &BioVaultDb, files: Vec<CsvFileImport>) -> Re
     let mut errors = Vec::new();
 
     for file_info in files {
-        // Check if file already exists
+        // Normalize the path for the current OS
+        let normalized_path = normalize_path(&file_info.file_path);
+
+        // Check if file already exists (check both original and normalized paths)
         let existing: Option<i64> = conn
             .query_row(
-                "SELECT id FROM files WHERE file_path = ?1",
-                [&file_info.file_path],
+                "SELECT id FROM files WHERE file_path = ?1 OR file_path = ?2",
+                [&file_info.file_path, &normalized_path],
                 |row| row.get(0),
             )
             .ok();
@@ -1939,25 +1974,26 @@ pub fn import_files_as_pending(db: &BioVaultDb, files: Vec<CsvFileImport>) -> Re
             None
         };
 
-        // Get file size
-        let file_size = match std::fs::metadata(&file_info.file_path) {
+        // Get file size using normalized path
+        let file_size = match std::fs::metadata(&normalized_path) {
             Ok(meta) => Some(meta.len() as i64),
             Err(_) => None,
         };
 
         // Extract file type (extension)
-        let file_type = Path::new(&file_info.file_path)
+        let file_type = Path::new(&normalized_path)
             .extension()
             .and_then(|e| e.to_str())
             .map(|e| format!(".{}", e));
 
         // Insert file with status='pending' and placeholder hash
+        // Store the normalized path so future lookups work correctly on this OS
         let result = conn.execute(
             "INSERT INTO files (participant_id, file_path, file_hash, file_type, file_size, data_type, status, queue_added_at, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'pending', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
             rusqlite::params![
                 participant_id,
-                &file_info.file_path,
+                &normalized_path,
                 "pending", // Placeholder hash until processed
                 file_type,
                 file_size,
