@@ -17,4 +17,4 @@ spec:
         participants: inputs.samplesheet
       publish:
         allele_freq: File(allele_freq.tsv)
-        dosage_matrix: File(dosage_matrix.tsv)
+
