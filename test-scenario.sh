@@ -491,14 +491,14 @@ start_syqure_progress_tail() {
 }
 
 SCENARIO_ARGS=()
-for kv in "${SCENARIO_VARS[@]}"; do
+for kv in ${SCENARIO_VARS[@]+"${SCENARIO_VARS[@]}"}; do
   SCENARIO_ARGS+=(--set "$kv")
 done
 
 if python3 -c 'import yaml' >/dev/null 2>&1; then
   start_syqure_log_tail
   start_syqure_progress_tail
-  python3 "$ROOT_DIR/scripts/run_scenario.py" "$SCENARIO" "${SCENARIO_ARGS[@]}"
+  python3 "$ROOT_DIR/scripts/run_scenario.py" "$SCENARIO" ${SCENARIO_ARGS[@]+"${SCENARIO_ARGS[@]}"}
   status=$?
   stop_syqure_log_tail
   exit $status
@@ -506,7 +506,7 @@ fi
 
 start_syqure_log_tail
 start_syqure_progress_tail
-python3 "$ROOT_DIR/scripts/run_scenario.py" "$SCENARIO" "${SCENARIO_ARGS[@]}"
+python3 "$ROOT_DIR/scripts/run_scenario.py" "$SCENARIO" ${SCENARIO_ARGS[@]+"${SCENARIO_ARGS[@]}"}
 status=$?
 stop_syqure_log_tail
 exit $status
