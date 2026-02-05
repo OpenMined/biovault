@@ -166,11 +166,13 @@ process plot_depth {
   '''
   set -euo pipefail
 
-  # Install dependencies (show errors if any)
-  pip install --no-cache-dir matplotlib numpy || {
+  # Install dependencies to /tmp (container filesystem is read-only)
+  pip install --no-cache-dir --target=/tmp/pylibs matplotlib numpy || {
     echo "pip install failed" >&2
     exit 1
   }
+  export PYTHONPATH=/tmp/pylibs:${PYTHONPATH:-}
+  export MPLCONFIGDIR=/tmp/matplotlib
 
   python3 !{assets_dir}/plot_depth.py \
     --input "!{depth_txt}" \
@@ -178,7 +180,10 @@ process plot_depth {
     --region "!{region}" \
     --participant "!{participant_id}"
 
-  cp !{depth_txt} depth.txt
+  # Copy depth.txt to output only if not already named depth.txt
+  if [ "!{depth_txt}" != "depth.txt" ]; then
+    cp "!{depth_txt}" depth.txt
+  fi
   echo "Generated coverage plot for !{region}"
   '''
 }
