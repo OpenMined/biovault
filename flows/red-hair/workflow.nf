@@ -2,30 +2,41 @@ nextflow.enable.dsl=2
 
 workflow USER {
     take:
-      participant_id_ch
-      ref_ch
-      ref_index_ch
-      aligned_ch
-      aligned_index_ch
-      ref_version
-      assets_dir_ch
-      results_dir
+      context
+      participants
     main:
+      def assetsDir = System.getenv('BV_ASSETS_DIR') ?: "${projectDir}/assets"
+      def assets_dir_ch = Channel.value(file(assetsDir))
+
       // rs1805007 (MC1R R151C) coordinates:
       //   GRCh38: chr16:89919709
       //   GRCh37: chr16:89986117
       // (use 1-bp range like your eye example)
       def rs1805007 = ['16:89919709-89919709', '16:89986117-89986117']
-      def base_pos = pickPos(ref_version, rs1805007)
 
-      def call_region_ch = call_region(
-        base_pos, ref_ch, ref_index_ch, aligned_ch, aligned_index_ch
+    def per_participant = participants.map { record ->
+      def refVersion = (record['ref_version'] ?: record['grch_version'] ?: 'GRCh38').toString()
+      tuple(
+        record['participant_id'],
+        refVersion,
+        record['reference_file'],
+        record['reference_index'],
+        record['aligned_file'],
+        record['aligned_index']
       )
+    }
 
-      def out = interpret_redhair(assets_dir_ch, call_region_ch, participant_id_ch, results_dir)
+      def with_pos = per_participant.map { participant_id, ref_version, ref, ref_index, aligned, aligned_index ->
+        def base_pos = pickPos(ref_version, rs1805007)
+        tuple(participant_id, base_pos, ref, ref_index, aligned, aligned_index)
+      }
+
+      def calls = call_region(with_pos)
+
+      def out = interpret_redhair(assets_dir_ch, calls)
 
       out.msg
-        .map { "\n===== Red Hair (MC1R rs1805007) for Participant: ${participant_id_ch.getVal()} =====\n${it}\n====================================\n" }
+        .map { pid, msg -> "\n===== Red Hair (MC1R rs1805007) for Participant: ${pid} =====\n${msg}\n====================================\n" }
         .view()
 }
 
@@ -40,16 +51,13 @@ def pickPos(version, tuple) {
 process call_region {
   container 'quay.io/biocontainers/bcftools:1.22--h3a4d415_1'
   publishDir params.results_dir, mode: 'copy'
+  stageInMode 'symlink'
 
   input:
-  val  base_pos
-  path ref
-  path ref_index
-  path aligned
-  path aligned_index
+  tuple val(participant_id), val(base_pos), path(ref), path(ref_index), path(aligned), path(aligned_index)
 
   output:
-  tuple path("variants.vcf.gz"), path("variants.vcf.gz.csi"), path("snp.txt")
+  tuple val(participant_id), path("variants.vcf.gz"), path("variants.vcf.gz.csi"), path("snp.txt")
 
   shell:
   '''
@@ -73,13 +81,11 @@ process interpret_redhair {
 
   input:
   path assets_dir
-  tuple path(vcf), path(vcf_index), path(snp)
-  val participant_id
-  val results_dir
+  tuple val(participant_id), path(vcf), path(vcf_index), path(snp)
 
   output:
   path "red_hair.txt"
-  stdout emit: msg
+  tuple val(participant_id), stdout, emit: msg
 
   shell:
   """

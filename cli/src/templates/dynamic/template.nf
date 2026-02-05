@@ -197,6 +197,18 @@ def __bvBindInput(name, meta) {
             def innerType = typeInfo.inner
             if (innerType?.kind == 'GenotypeRecord') {
                 return __bvLoadGenotypeRecords(path, format, mapping)
+            } else if (innerType?.kind == 'Record' && (format == 'csv' || format == 'tsv')) {
+                def separator = format == 'tsv' ? '\t' : ','
+                return Channel.fromPath(path)
+                    .splitCsv(header: true, sep: separator)
+                    .map { row ->
+                        def rawMap = [:]
+                        innerType.fields.each { field ->
+                            def colName = mapping?.get(field.name) ?: field.name
+                            rawMap[field.name] = row[colName]
+                        }
+                        return __bvCoerceStructuredInput(rawMap, innerType, baseDir)
+                    }
             } else if (innerType?.kind == 'File') {
                 if (__bvIsStructuredFormat(format, path)) {
                     def rawList = __bvLoadStructuredInput(path, format)
