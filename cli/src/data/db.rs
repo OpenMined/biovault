@@ -312,95 +312,9 @@ impl BioVaultDb {
             }
         }
 
-        // Drop source and grch_version columns from files table if they exist
-        // (these should only be in genotype_metadata table)
-        let source_exists = conn
-            .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('files') WHERE name='source'",
-                [],
-                |row| row.get(0),
-            )
-            .map(|count: i32| count > 0)
-            .unwrap_or(false);
-
-        let grch_exists = conn
-            .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('files') WHERE name='grch_version'",
-                [],
-                |row| row.get(0),
-            )
-            .map(|count: i32| count > 0)
-            .unwrap_or(false);
-
-        if source_exists || grch_exists {
-            info!("Dropping source and grch_version columns from files table");
-
-            // SQLite doesn't support DROP COLUMN directly, need to recreate table
-            conn.execute("BEGIN TRANSACTION", [])?;
-
-            // Create new table without source/grch_version
-            conn.execute(
-                "CREATE TABLE files_new (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    participant_id INTEGER,
-                    file_path TEXT UNIQUE NOT NULL,
-                    file_hash TEXT NOT NULL,
-                    file_type TEXT,
-                    file_size INTEGER,
-                    metadata TEXT,
-                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    data_type TEXT DEFAULT 'Unknown',
-                    status TEXT DEFAULT 'complete',
-                    processing_error TEXT,
-                    queue_added_at DATETIME,
-                    FOREIGN KEY (participant_id) REFERENCES participants(id) ON DELETE SET NULL
-                )",
-                [],
-            )?;
-
-            // Copy data
-            conn.execute(
-                "INSERT INTO files_new (id, participant_id, file_path, file_hash, file_type, file_size,
-                    metadata, created_at, updated_at, data_type, status, processing_error, queue_added_at)
-                SELECT id, participant_id, file_path, file_hash, file_type, file_size,
-                    metadata, created_at, updated_at, data_type, status, processing_error, queue_added_at
-                FROM files",
-                [],
-            )?;
-
-            // Drop old table
-            conn.execute("DROP TABLE files", [])?;
-
-            // Rename new table
-            conn.execute("ALTER TABLE files_new RENAME TO files", [])?;
-
-            // Recreate indexes
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_files_participant_id ON files(participant_id)",
-                [],
-            )?;
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_files_file_type ON files(file_type)",
-                [],
-            )?;
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_files_hash ON files(file_hash)",
-                [],
-            )?;
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_files_data_type ON files(data_type)",
-                [],
-            )?;
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_files_status ON files(status)",
-                [],
-            )?;
-
-            conn.execute("COMMIT", [])?;
-
-            info!("Migration complete: removed source and grch_version columns from files table");
-        }
+        // NOTE: We keep source and grch_version columns in files table as they are used
+        // by import_from_csv. The genotype_metadata table provides additional detailed
+        // metadata (row_count, chromosome_count, inferred_sex) for genotype files.
 
         // Create genotype_metadata table if it doesn't exist
         conn.execute(
