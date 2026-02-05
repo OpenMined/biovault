@@ -37,7 +37,6 @@ workflow USER {
 
     emit:
         allele_freq = agg_out.allele_freq  // allele_freq.tsv
-        dosage_matrix = agg_out.dosage_matrix
 }
 
 process emit_long {
@@ -86,7 +85,6 @@ process aggregate_long {
 
     output:
         path "allele_freq.tsv", emit: allele_freq
-        path "dosage_matrix.tsv", emit: dosage_matrix
 
     script:
     def threads_arg = (AGG_THREADS > 0) ? "--threads ${AGG_THREADS}" : ""
@@ -119,7 +117,6 @@ fi
 
     bvs aggregate-long \\
       --input-list "bvlr.list.local" \\
-      --matrix-tsv "dosage_matrix.tsv" \\
       --allele-freq-tsv "allele_freq.tsv" \\
       ${threads_arg} 2>&1
     """

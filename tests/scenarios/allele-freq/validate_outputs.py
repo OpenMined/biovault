@@ -5,7 +5,7 @@ from pathlib import Path
 
 REQUIRED_FILES = [
     "allele_freq.tsv",
-    "dosage_matrix.tsv",
+    # "dosage_matrix.tsv",
 ]
 
 

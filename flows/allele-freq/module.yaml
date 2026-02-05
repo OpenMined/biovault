@@ -28,10 +28,4 @@ spec:
       format:
         kind: tsv
       path: allele_freq.tsv
-    - name: dosage_matrix
-      type: File
-      description: Wide dosage matrix per locus (one column per participant)
-      format:
-        kind: tsv
-      path: dosage_matrix.tsv
   parameters: []
