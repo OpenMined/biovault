@@ -1,0 +1,128 @@
+apiVersion: syftbox.openmined.org/v1alpha1
+kind: Flow
+metadata:
+  name: multiparty
+  version: 0.1.0
+  description: Simple 3-party collaborative sum (demo for multiparty UX)
+
+spec:
+  vars:
+    flow_path: "syft://{datasite.current}/shared/flows/{flow_name}"
+    run_path: "{vars.flow_path}/{run_id}"
+    step_path: "{vars.run_path}/{step.number}-{step.id}"
+
+  coordination:
+    url: "{vars.run_path}/_progress"
+    share_with: all
+
+  inputs:
+    datasites:
+      default:
+        - aggregator@sandbox.local
+        - client1@sandbox.local
+        - client2@sandbox.local
+
+  datasites:
+    all: inputs.datasites
+    groups:
+      aggregator:
+        include:
+          - "{datasites[0]}"
+      contributors:
+        include:
+          - "{datasites[1]}"
+          - "{datasites[2]}"
+
+  # Role descriptions for UI display
+  roles:
+    - id: contributor1
+      description: First data contributor
+    - id: contributor2
+      description: Second data contributor
+    - id: aggregator
+      description: Aggregates contributions and shares results
+
+  modules:
+    generate_numbers:
+      source:
+        kind: local
+        path: ./modules/generate-numbers
+      allow_dirty: true
+      interface:
+        outputs:
+          - name: numbers
+            type: File
+      assets:
+        - path: run.sh
+
+    aggregate_sum:
+      source:
+        kind: local
+        path: ./modules/aggregate-sum
+      allow_dirty: true
+      interface:
+        inputs:
+          - name: contributions_manifest
+            type: File
+        outputs:
+          - name: result
+            type: File
+      assets:
+        - path: run.sh
+
+  steps:
+    - id: generate
+      name: Generate Numbers
+      description: Each contributor generates random numbers locally
+      uses: generate_numbers
+      run:
+        targets: contributors
+        strategy: parallel
+
+    - id: share_contribution
+      name: Share Contribution
+      description: Contributors share their numbers to the aggregator
+      run:
+        targets: contributors
+        strategy: parallel
+      depends_on: [generate]
+      share:
+        numbers_shared:
+          source: step.generate.outputs.numbers
+          url: "{vars.step_path}/numbers.json"
+          permissions:
+            read: ["{datasites[0]}"]
+            write: ["{datasite.current}"]
+
+    # Barrier: wait for all contributors to share before aggregator can proceed
+    - id: contributions_ready
+      name: Wait for Contributions
+      description: Wait for all contributors to share their numbers
+      barrier:
+        wait_for: share_contribution
+        targets: contributors
+        timeout: 300
+
+    - id: aggregate
+      name: Aggregate Sum
+      description: Aggregator computes sum of all contributions
+      uses: aggregate_sum
+      run:
+        targets: aggregator
+      depends_on: [contributions_ready]
+      with:
+        contributions_manifest: step.share_contribution.share.numbers_shared.url_list
+
+    - id: share_result
+      name: Share Results
+      description: Aggregator shares final result with all participants
+      run:
+        targets: aggregator
+      depends_on: [aggregate]
+      share:
+        result_shared:
+          source: step.aggregate.outputs.result
+          url: "{vars.step_path}/result.json"
+          permissions:
+            read: ["{datasites[*]}"]
+            write: ["{datasite.current}"]
