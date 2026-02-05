@@ -132,6 +132,8 @@ CREATE TABLE IF NOT EXISTS variant_metadata (
     source TEXT,
     grch_version TEXT,
     format TEXT,
+    reference_file_id INTEGER,
+    reference_index_file_id INTEGER,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (file_id) REFERENCES files(id) ON DELETE CASCADE
@@ -146,6 +148,8 @@ CREATE TABLE IF NOT EXISTS aligned_metadata (
     source TEXT,
     grch_version TEXT,
     format TEXT,
+    reference_file_id INTEGER,
+    reference_index_file_id INTEGER,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (file_id) REFERENCES files(id) ON DELETE CASCADE

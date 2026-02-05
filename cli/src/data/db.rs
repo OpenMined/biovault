@@ -358,6 +358,8 @@ impl BioVaultDb {
                     source TEXT,
                     grch_version TEXT,
                     format TEXT,
+                    reference_file_id INTEGER,
+                    reference_index_file_id INTEGER,
                     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY (file_id) REFERENCES files(id) ON DELETE CASCADE
@@ -371,6 +373,8 @@ impl BioVaultDb {
                     source TEXT,
                     grch_version TEXT,
                     format TEXT,
+                    reference_file_id INTEGER,
+                    reference_index_file_id INTEGER,
                     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY (file_id) REFERENCES files(id) ON DELETE CASCADE
@@ -519,6 +523,8 @@ impl BioVaultDb {
                 source TEXT,
                 grch_version TEXT,
                 format TEXT,
+                reference_file_id INTEGER,
+                reference_index_file_id INTEGER,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (file_id) REFERENCES files(id) ON DELETE CASCADE
@@ -529,6 +535,15 @@ impl BioVaultDb {
             "CREATE INDEX IF NOT EXISTS idx_variant_file_id ON variant_metadata(file_id)",
             [],
         )?;
+        // Add reference link columns if upgrading an existing DB
+        let _ = conn.execute(
+            "ALTER TABLE variant_metadata ADD COLUMN reference_file_id INTEGER",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE variant_metadata ADD COLUMN reference_index_file_id INTEGER",
+            [],
+        );
 
         // Create aligned_metadata table if it doesn't exist
         conn.execute(
@@ -538,6 +553,8 @@ impl BioVaultDb {
                 source TEXT,
                 grch_version TEXT,
                 format TEXT,
+                reference_file_id INTEGER,
+                reference_index_file_id INTEGER,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (file_id) REFERENCES files(id) ON DELETE CASCADE
@@ -548,6 +565,14 @@ impl BioVaultDb {
             "CREATE INDEX IF NOT EXISTS idx_aligned_file_id ON aligned_metadata(file_id)",
             [],
         )?;
+        let _ = conn.execute(
+            "ALTER TABLE aligned_metadata ADD COLUMN reference_file_id INTEGER",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE aligned_metadata ADD COLUMN reference_index_file_id INTEGER",
+            [],
+        );
 
         // Create reference_metadata table if it doesn't exist
         conn.execute(

@@ -74,6 +74,8 @@ pub struct CsvFileImport {
     pub data_type: Option<String>,
     pub source: Option<String>,
     pub grch_version: Option<String>,
+    pub reference_path: Option<String>,
+    pub reference_index_path: Option<String>,
     pub row_count: Option<i64>,
     pub chromosome_count: Option<i64>,
     pub inferred_sex: Option<String>,
@@ -104,23 +106,46 @@ fn infer_format_from_path(path: &str) -> Option<String> {
     None
 }
 
+fn lookup_file_id_by_path(db: &BioVaultDb, path: Option<&str>) -> Option<i64> {
+    let path = path?.trim();
+    if path.is_empty() {
+        return None;
+    }
+    db.conn
+        .query_row("SELECT id FROM files WHERE file_path = ?1", [path], |row| {
+            row.get(0)
+        })
+        .ok()
+}
+
 fn upsert_variant_metadata(
     db: &BioVaultDb,
     file_id: i64,
     source: Option<&str>,
     grch_version: Option<&str>,
     format: Option<&str>,
+    reference_file_id: Option<i64>,
+    reference_index_file_id: Option<i64>,
 ) -> Result<()> {
     let conn = db.connection();
     conn.execute(
-        "INSERT INTO variant_metadata (file_id, source, grch_version, format, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        "INSERT INTO variant_metadata (file_id, source, grch_version, format, reference_file_id, reference_index_file_id, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
          ON CONFLICT(file_id) DO UPDATE SET
            source = excluded.source,
            grch_version = excluded.grch_version,
            format = excluded.format,
+           reference_file_id = excluded.reference_file_id,
+           reference_index_file_id = excluded.reference_index_file_id,
            updated_at = CURRENT_TIMESTAMP",
-        rusqlite::params![file_id, source, grch_version, format],
+        rusqlite::params![
+            file_id,
+            source,
+            grch_version,
+            format,
+            reference_file_id,
+            reference_index_file_id
+        ],
     )?;
     Ok(())
 }
@@ -131,17 +156,28 @@ fn upsert_aligned_metadata(
     source: Option<&str>,
     grch_version: Option<&str>,
     format: Option<&str>,
+    reference_file_id: Option<i64>,
+    reference_index_file_id: Option<i64>,
 ) -> Result<()> {
     let conn = db.connection();
     conn.execute(
-        "INSERT INTO aligned_metadata (file_id, source, grch_version, format, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        "INSERT INTO aligned_metadata (file_id, source, grch_version, format, reference_file_id, reference_index_file_id, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
          ON CONFLICT(file_id) DO UPDATE SET
            source = excluded.source,
            grch_version = excluded.grch_version,
            format = excluded.format,
+           reference_file_id = excluded.reference_file_id,
+           reference_index_file_id = excluded.reference_index_file_id,
            updated_at = CURRENT_TIMESTAMP",
-        rusqlite::params![file_id, source, grch_version, format],
+        rusqlite::params![
+            file_id,
+            source,
+            grch_version,
+            format,
+            reference_file_id,
+            reference_index_file_id
+        ],
     )?;
     Ok(())
 }
@@ -199,7 +235,14 @@ pub fn scan(path: &str, extension: Option<&str>, recursive: bool) -> Result<Scan
     };
 
     for entry in walker.into_iter().filter_map(|e| e.ok()) {
-        if !entry.file_type().is_file() {
+        let file_type = entry.file_type();
+        let mut is_file = file_type.is_file();
+        if !is_file && file_type.is_symlink() {
+            if let Ok(meta) = fs::metadata(entry.path()) {
+                is_file = meta.is_file();
+            }
+        }
+        if !is_file {
             continue;
         }
 
@@ -532,9 +575,31 @@ fn import_file_with_metadata(
         let source = metadata.source.as_deref();
         let grch_version = metadata.grch_version.as_deref();
         if normalized_type == "Variants" {
-            upsert_variant_metadata(db, file_id, source, grch_version, format.as_deref())?;
+            let reference_file_id = lookup_file_id_by_path(db, csv_row.reference_path.as_deref());
+            let reference_index_file_id =
+                lookup_file_id_by_path(db, csv_row.reference_index_path.as_deref());
+            upsert_variant_metadata(
+                db,
+                file_id,
+                source,
+                grch_version,
+                format.as_deref(),
+                reference_file_id,
+                reference_index_file_id,
+            )?;
         } else if normalized_type == "Aligned" || normalized_type == "AlignedIndex" {
-            upsert_aligned_metadata(db, file_id, source, grch_version, format.as_deref())?;
+            let reference_file_id = lookup_file_id_by_path(db, csv_row.reference_path.as_deref());
+            let reference_index_file_id =
+                lookup_file_id_by_path(db, csv_row.reference_index_path.as_deref());
+            upsert_aligned_metadata(
+                db,
+                file_id,
+                source,
+                grch_version,
+                format.as_deref(),
+                reference_file_id,
+                reference_index_file_id,
+            )?;
         } else if normalized_type == "Reference" || normalized_type == "ReferenceIndex" {
             upsert_reference_metadata(db, file_id, source, grch_version, format.as_deref())?;
         }
@@ -2096,12 +2161,18 @@ pub fn import_files_as_pending(db: &BioVaultDb, files: Vec<CsvFileImport>) -> Re
                         }
                     }
                 } else if data_type == "Variants" {
+                    let reference_file_id =
+                        lookup_file_id_by_path(db, file_info.reference_path.as_deref());
+                    let reference_index_file_id =
+                        lookup_file_id_by_path(db, file_info.reference_index_path.as_deref());
                     if let Err(e) = upsert_variant_metadata(
                         db,
                         file_id,
                         source,
                         grch_version,
                         format.as_deref(),
+                        reference_file_id,
+                        reference_index_file_id,
                     ) {
                         errors.push(format!(
                             "Failed to create metadata for {}: {}",
@@ -2109,12 +2180,18 @@ pub fn import_files_as_pending(db: &BioVaultDb, files: Vec<CsvFileImport>) -> Re
                         ));
                     }
                 } else if data_type == "Aligned" || data_type == "AlignedIndex" {
+                    let reference_file_id =
+                        lookup_file_id_by_path(db, file_info.reference_path.as_deref());
+                    let reference_index_file_id =
+                        lookup_file_id_by_path(db, file_info.reference_index_path.as_deref());
                     if let Err(e) = upsert_aligned_metadata(
                         db,
                         file_id,
                         source,
                         grch_version,
                         format.as_deref(),
+                        reference_file_id,
+                        reference_index_file_id,
                     ) {
                         errors.push(format!(
                             "Failed to create metadata for {}: {}",

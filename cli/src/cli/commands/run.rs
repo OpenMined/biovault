@@ -1174,6 +1174,7 @@ async fn ensure_files_exist(
                 checksum_policy,
                 show_progress: true,
                 cache_strategy: Default::default(),
+                progress_callback: None,
             };
 
             // Download (will be stored in cache)

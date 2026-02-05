@@ -21,9 +21,14 @@ Options:
   --sandbox DIR        Sandbox root (default: ./sandbox)
   --rust-client-bin P  Path to Rust client binary (optional)
   --skip-rust-build    Do not build Rust client (requires binary exists)
+  --no-reset           Do not reset devstack/sandbox (reuse existing state)
+  --force              Force scenario steps to re-run (overrides skip-done)
+  --allele-count N     Override allele-freq synthetic file count (default: 10)
+  --syqure-agg MODE    Syqure aggregation mode: smpc|he (default: smpc)
   --docker             Force Docker mode for syqure runtime
   --podman             Force Podman runtime (sets BIOVAULT_CONTAINER_RUNTIME=podman)
   --keep-containers    Keep syqure containers on failure (for logs/debugging)
+  --set KEY=VALUE      Override scenario variables (repeatable)
   -h, --help           Show this message
 
 Examples:
@@ -34,6 +39,8 @@ Examples:
   ./test-scenario.sh --docker tests/scenarios/syqure-distributed.yaml
   ./test-scenario.sh --podman tests/scenarios/syqure-distributed.yaml
   ./test-scenario.sh --podman --keep-containers tests/scenarios/syqure-distributed.yaml
+  ./test-scenario.sh --syqure-agg he tests/scenarios/syqure-distributed.yaml
+  ./test-scenario.sh --no-reset tests/scenarios/allele-freq-syqure.yaml
 EOF
 }
 
@@ -44,7 +51,12 @@ SKIP_RUST_BUILD=0
 USE_DOCKER=0
 USE_PODMAN=0
 KEEP_CONTAINERS=0
+NO_RESET=0
+FORCE_RUN=0
+ALLELE_COUNT=""
+SYQURE_AGG_MODE="smpc"
 SCENARIO=""
+SCENARIO_VARS=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -66,6 +78,22 @@ while [[ $# -gt 0 ]]; do
     --skip-rust-build)
       SKIP_RUST_BUILD=1
       ;;
+    --no-reset)
+      NO_RESET=1
+      ;;
+    --force)
+      FORCE_RUN=1
+      ;;
+    --allele-count)
+      [[ $# -lt 2 ]] && { echo "Missing value for --allele-count" >&2; usage; exit 1; }
+      ALLELE_COUNT="${2:-}"
+      shift
+      ;;
+    --syqure-agg)
+      [[ $# -lt 2 ]] && { echo "Missing value for --syqure-agg" >&2; usage; exit 1; }
+      SYQURE_AGG_MODE="${2:-}"
+      shift
+      ;;
     --docker)
       USE_DOCKER=1
       ;;
@@ -75,6 +103,11 @@ while [[ $# -gt 0 ]]; do
       ;;
     --keep-containers)
       KEEP_CONTAINERS=1
+      ;;
+    --set)
+      [[ $# -lt 2 ]] && { echo "Missing value for --set" >&2; usage; exit 1; }
+      SCENARIO_VARS+=("$2")
+      shift
       ;;
     -h|--help)
       usage
@@ -126,6 +159,27 @@ fi
 if (( USE_DOCKER )); then
   # Ensure syqure.yaml switches into Docker mode when --docker/--podman is used.
   export SEQURE_MODE="${SEQURE_MODE:-docker}"
+fi
+
+if (( NO_RESET )); then
+  export BV_DEVSTACK_RESET=0
+fi
+if (( FORCE_RUN )); then
+  export BV_FLOW_FORCE=1
+fi
+if [[ -n "$ALLELE_COUNT" ]]; then
+  export ALLELE_FREQ_COUNT="$ALLELE_COUNT"
+fi
+if [[ -n "$SYQURE_AGG_MODE" ]]; then
+  case "$SYQURE_AGG_MODE" in
+    smpc|he)
+      export BV_SYQURE_AGG_MODE="$SYQURE_AGG_MODE"
+      ;;
+    *)
+      echo "Unknown --syqure-agg mode: $SYQURE_AGG_MODE (expected smpc|he)" >&2
+      exit 1
+      ;;
+  esac
 fi
 
 # Let tests/scripts/devstack.sh decide which syftbox client to run.
@@ -436,10 +490,15 @@ start_syqure_progress_tail() {
   PROGRESS_PID=$!
 }
 
+SCENARIO_ARGS=()
+for kv in "${SCENARIO_VARS[@]}"; do
+  SCENARIO_ARGS+=(--set "$kv")
+done
+
 if python3 -c 'import yaml' >/dev/null 2>&1; then
   start_syqure_log_tail
   start_syqure_progress_tail
-  python3 "$ROOT_DIR/scripts/run_scenario.py" "$SCENARIO"
+  python3 "$ROOT_DIR/scripts/run_scenario.py" "$SCENARIO" "${SCENARIO_ARGS[@]}"
   status=$?
   stop_syqure_log_tail
   exit $status
@@ -447,7 +506,7 @@ fi
 
 start_syqure_log_tail
 start_syqure_progress_tail
-python3 "$ROOT_DIR/scripts/run_scenario.py" "$SCENARIO"
+python3 "$ROOT_DIR/scripts/run_scenario.py" "$SCENARIO" "${SCENARIO_ARGS[@]}"
 status=$?
 stop_syqure_log_tail
 exit $status

@@ -2,11 +2,13 @@ use super::manifest::Manifest;
 use super::{calculate_blake3, link_or_copy, CacheStrategy, ChecksumPolicy, ChecksumPolicyType};
 use anyhow::{anyhow, Context, Result};
 use indicatif::{ProgressBar, ProgressStyle};
-use reqwest::header::{ETAG, LAST_MODIFIED};
+use reqwest::header::{CONTENT_LENGTH, ETAG, LAST_MODIFIED, RANGE};
+use reqwest::StatusCode;
 use std::fs;
 use std::path::{Path, PathBuf};
-use tokio::fs::File;
-use tokio::io::AsyncWriteExt;
+use std::sync::Arc;
+use tokio::fs::{File, OpenOptions};
+use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 
 pub struct DownloadCache {
     cache_dir: PathBuf,
@@ -14,11 +16,23 @@ pub struct DownloadCache {
     manifest: Manifest,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct DownloadOptions {
     pub checksum_policy: ChecksumPolicy,
     pub cache_strategy: CacheStrategy,
     pub show_progress: bool,
+    pub progress_callback: Option<Arc<dyn Fn(u64, u64) + Send + Sync>>,
+}
+
+impl std::fmt::Debug for DownloadOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DownloadOptions")
+            .field("checksum_policy", &self.checksum_policy)
+            .field("cache_strategy", &self.cache_strategy)
+            .field("show_progress", &self.show_progress)
+            .field("progress_callback", &self.progress_callback.is_some())
+            .finish()
+    }
 }
 
 impl Default for DownloadOptions {
@@ -30,6 +44,7 @@ impl Default for DownloadOptions {
             },
             cache_strategy: CacheStrategy::default(),
             show_progress: true,
+            progress_callback: None,
         }
     }
 }
@@ -191,15 +206,22 @@ impl DownloadCache {
                 println!("  ↓ Cache miss - downloading file...");
             }
 
-            // Download to temporary location
+            // Download to temporary location using URL hash for resumability
+            // This allows resuming interrupted downloads since the temp filename is predictable
+            let url_hash = blake3::hash(url.as_bytes()).to_hex().to_string();
             let temp_path = self
                 .cache_dir
                 .join("downloads")
-                .join(format!("{}.tmp", uuid::Uuid::new_v4()));
+                .join(format!("{}.partial", &url_hash[..16]));
             fs::create_dir_all(temp_path.parent().unwrap())?;
 
             let (etag, last_modified) = self
-                .download_file(url, &temp_path, options.show_progress)
+                .download_file(
+                    url,
+                    &temp_path,
+                    options.show_progress,
+                    options.progress_callback.clone(),
+                )
                 .await?;
 
             // Calculate hash
@@ -302,6 +324,203 @@ impl DownloadCache {
         url: &str,
         target_path: &Path,
         show_progress: bool,
+        progress_callback: Option<Arc<dyn Fn(u64, u64) + Send + Sync>>,
+    ) -> Result<(Option<String>, Option<String>)> {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(3600))
+            .build()?;
+
+        // Check if partial download exists
+        let existing_size = if target_path.exists() {
+            fs::metadata(target_path).map(|m| m.len()).unwrap_or(0)
+        } else {
+            0
+        };
+
+        // First, do a HEAD request to get total size and check if server supports Range
+        let head_response = client.head(url).send().await?;
+        if !head_response.status().is_success() {
+            return Err(anyhow!(
+                "HTTP HEAD request failed: {}",
+                head_response.status()
+            ));
+        }
+
+        let total_size = head_response
+            .headers()
+            .get(CONTENT_LENGTH)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(0);
+
+        let accepts_ranges = head_response
+            .headers()
+            .get("accept-ranges")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s != "none")
+            .unwrap_or(false);
+
+        // Extract headers for caching
+        let etag = head_response
+            .headers()
+            .get(ETAG)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+
+        let last_modified = head_response
+            .headers()
+            .get(LAST_MODIFIED)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+
+        // Determine if we can resume
+        let resume_from = if existing_size > 0 && accepts_ranges && total_size > 0 {
+            if existing_size >= total_size {
+                // File already complete
+                if show_progress {
+                    println!(
+                        "    ✓ File already fully downloaded ({} bytes)",
+                        existing_size
+                    );
+                }
+                return Ok((etag, last_modified));
+            }
+            if show_progress {
+                println!(
+                    "    ↻ Resuming download from {} / {} bytes ({:.1}%)",
+                    existing_size,
+                    total_size,
+                    (existing_size as f64 / total_size as f64) * 100.0
+                );
+            }
+            Some(existing_size)
+        } else if existing_size > 0 && !accepts_ranges {
+            if show_progress {
+                println!("    ⚠ Server doesn't support resume, starting fresh");
+            }
+            // Remove partial file
+            let _ = fs::remove_file(target_path);
+            None
+        } else {
+            None
+        };
+
+        // Build the GET request with optional Range header
+        let mut request = client.get(url);
+        if let Some(offset) = resume_from {
+            request = request.header(RANGE, format!("bytes={}-", offset));
+        }
+
+        let response = request.send().await?;
+        let status = response.status();
+
+        // Handle response status
+        if status == StatusCode::RANGE_NOT_SATISFIABLE {
+            // Range not satisfiable - file might be complete or changed
+            if show_progress {
+                println!("    ⚠ Range not satisfiable, starting fresh");
+            }
+            let _ = fs::remove_file(target_path);
+            // Retry without range
+            return self
+                .download_file_fresh(
+                    url,
+                    target_path,
+                    show_progress,
+                    progress_callback,
+                    total_size,
+                )
+                .await;
+        }
+
+        if !status.is_success() {
+            return Err(anyhow!("HTTP request failed: {}", status));
+        }
+
+        // Determine actual start position and total
+        let (start_pos, content_length) = if status == StatusCode::PARTIAL_CONTENT {
+            // Server returned partial content
+            let content_len = response
+                .content_length()
+                .unwrap_or(total_size - resume_from.unwrap_or(0));
+            (resume_from.unwrap_or(0), content_len)
+        } else {
+            // Server returned full content (200 OK) - start from beginning
+            if resume_from.is_some() {
+                // We asked for range but got full content - remove partial and start fresh
+                let _ = fs::remove_file(target_path);
+            }
+            (0, response.content_length().unwrap_or(total_size))
+        };
+
+        let display_total = if start_pos > 0 {
+            start_pos + content_length
+        } else {
+            content_length
+        };
+
+        let pb = if show_progress && display_total > 0 {
+            let pb = ProgressBar::new(display_total);
+            pb.set_style(
+                ProgressStyle::default_bar()
+                    .template("    [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})")
+                    .expect("Failed to set progress bar template")
+                    .progress_chars("#>-"),
+            );
+            if start_pos > 0 {
+                pb.set_position(start_pos);
+            }
+            Some(pb)
+        } else if show_progress {
+            println!("    Downloading (size unknown)...");
+            None
+        } else {
+            None
+        };
+
+        // Open file for writing - append if resuming, create if new
+        let mut file = if start_pos > 0 {
+            let mut f = OpenOptions::new().write(true).open(target_path).await?;
+            f.seek(std::io::SeekFrom::End(0)).await?;
+            f
+        } else {
+            File::create(target_path).await?
+        };
+
+        let mut downloaded = start_pos;
+        let mut stream = response.bytes_stream();
+
+        while let Some(chunk) = futures_util::StreamExt::next(&mut stream).await {
+            let chunk = chunk?;
+            file.write_all(&chunk).await?;
+            downloaded += chunk.len() as u64;
+
+            if let Some(ref pb) = pb {
+                pb.set_position(downloaded);
+            }
+            if let Some(ref cb) = progress_callback {
+                cb(downloaded, display_total);
+            }
+        }
+
+        // Ensure all data is flushed
+        file.flush().await?;
+
+        if let Some(pb) = pb {
+            pb.finish_and_clear();
+        }
+
+        Ok((etag, last_modified))
+    }
+
+    /// Download file from scratch without attempting to resume
+    async fn download_file_fresh(
+        &self,
+        url: &str,
+        target_path: &Path,
+        show_progress: bool,
+        progress_callback: Option<Arc<dyn Fn(u64, u64) + Send + Sync>>,
+        total_size: u64,
     ) -> Result<(Option<String>, Option<String>)> {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(3600))
@@ -313,7 +532,6 @@ impl DownloadCache {
             return Err(anyhow!("HTTP request failed: {}", response.status()));
         }
 
-        // Extract headers
         let etag = response
             .headers()
             .get(ETAG)
@@ -326,10 +544,10 @@ impl DownloadCache {
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
 
-        let total_size = response.content_length().unwrap_or(0);
+        let content_length = response.content_length().unwrap_or(total_size);
 
-        let pb = if show_progress && total_size > 0 {
-            let pb = ProgressBar::new(total_size);
+        let pb = if show_progress && content_length > 0 {
+            let pb = ProgressBar::new(content_length);
             pb.set_style(
                 ProgressStyle::default_bar()
                     .template("    [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})")
@@ -337,9 +555,6 @@ impl DownloadCache {
                     .progress_chars("#>-"),
             );
             Some(pb)
-        } else if show_progress {
-            println!("    Downloading (size unknown)...");
-            None
         } else {
             None
         };
@@ -356,7 +571,12 @@ impl DownloadCache {
             if let Some(ref pb) = pb {
                 pb.set_position(downloaded);
             }
+            if let Some(ref cb) = progress_callback {
+                cb(downloaded, content_length);
+            }
         }
+
+        file.flush().await?;
 
         if let Some(pb) = pb {
             pb.finish_and_clear();
@@ -404,6 +624,7 @@ mod tests {
                 check_remote: false,
             },
             show_progress: false,
+            progress_callback: None,
         };
         let opts2 = opts1.clone();
         assert_eq!(
@@ -465,6 +686,7 @@ mod tests {
             },
             cache_strategy: CacheStrategy { check_remote: true },
             show_progress: false,
+            progress_callback: None,
         };
 
         let res = dc
@@ -510,6 +732,7 @@ mod tests {
                 check_remote: false,
             },
             show_progress: false,
+            progress_callback: None,
         };
 
         let res = dc.download_with_cache(&url, &target, opts).await.unwrap();
@@ -544,6 +767,7 @@ mod tests {
             },
             cache_strategy: CacheStrategy { check_remote: true },
             show_progress: false,
+            progress_callback: None,
         };
 
         // With network restricted and URL unreachable, this should error

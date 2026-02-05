@@ -29,6 +29,7 @@ use crate::flow_spec::{
     FlowStepSpec, FlowStoreSpec,
 };
 use crate::module_spec::{InputSpec, ModuleSpec, OutputSpec};
+use crate::subscriptions;
 use crate::types::{AccessControl, PermissionRule, SyftPermissions};
 use anyhow::{anyhow, Context};
 use chrono::Utc;
@@ -51,6 +52,57 @@ use super::run_dynamic;
 type StepOverrides = HashMap<(String, String), String>;
 type FlowOverrides = HashMap<String, String>;
 type ParseOverridesResult = (StepOverrides, FlowOverrides, Option<String>, Vec<String>);
+
+fn ensure_flow_subscription(
+    data_root: &Path,
+    datasite: &str,
+    all_datasites: &[String],
+    flow_name: &str,
+    run_id: &str,
+) -> Result<()> {
+    let sub_path = data_root.join(".data").join("syft.sub.yaml");
+    let mut cfg =
+        subscriptions::load(&sub_path).unwrap_or_else(|_| subscriptions::default_config());
+
+    let run_path = format!("shared/flows/{}/{}", flow_name, run_id);
+    let mut rules = Vec::new();
+    for peer in all_datasites {
+        if peer == datasite {
+            continue;
+        }
+        rules.push(subscriptions::Rule {
+            action: subscriptions::Action::Allow,
+            datasite: Some(peer.clone()),
+            path: format!("{}/**", run_path),
+        });
+    }
+
+    let mut changed = false;
+    for rule in rules {
+        let exists = cfg.rules.iter().any(|existing| {
+            existing.action == rule.action
+                && existing.datasite == rule.datasite
+                && existing.path == rule.path
+        });
+        if !exists {
+            cfg.rules.push(rule);
+            changed = true;
+        }
+    }
+
+    if !changed {
+        return Ok(());
+    }
+
+    subscriptions::save(&sub_path, &cfg)?;
+    println!(
+        "🔧 Added flow subscriptions for {} (run {}) at {}",
+        datasite,
+        run_id,
+        sub_path.display()
+    );
+    Ok(())
+}
 
 async fn wait_for_path(path: &Path, timeout_secs: u64) -> Result<()> {
     let start = std::time::Instant::now();
@@ -515,6 +567,55 @@ pub async fn run_flow(
         .ok()
         .map(PathBuf::from)
         .and_then(|p| p.canonicalize().ok());
+    let all_datasites_for_flow = resolve_all_datasites_from_spec(&spec, &resolved_inputs);
+
+    if !dry_run {
+        if run_all_targets {
+            if let Some(ref root) = sandbox_root {
+                for datasite in &all_datasites_for_flow {
+                    let data_root = root.join(datasite);
+                    ensure_flow_subscription(
+                        &data_root,
+                        datasite,
+                        &all_datasites_for_flow,
+                        &spec.name,
+                        &run_id,
+                    )?;
+                }
+            } else if let (Some(data_root), Some(current)) =
+                (syftbox_data_dir.as_ref(), current_datasite.as_deref())
+            {
+                ensure_flow_subscription(
+                    data_root,
+                    current,
+                    &all_datasites_for_flow,
+                    &spec.name,
+                    &run_id,
+                )?;
+            }
+        } else if let (Some(data_root), Some(current)) =
+            (syftbox_data_dir.as_ref(), current_datasite.as_deref())
+        {
+            ensure_flow_subscription(
+                data_root,
+                current,
+                &all_datasites_for_flow,
+                &spec.name,
+                &run_id,
+            )?;
+        } else if let (Some(root), Some(current)) =
+            (sandbox_root.as_ref(), current_datasite.as_deref())
+        {
+            let data_root = root.join(current);
+            ensure_flow_subscription(
+                &data_root,
+                current,
+                &all_datasites_for_flow,
+                &spec.name,
+                &run_id,
+            )?;
+        }
+    }
 
     // Progress tracking for distributed coordination
     let verbose_progress = env::var("BIOVAULT_FLOW_VERBOSE")

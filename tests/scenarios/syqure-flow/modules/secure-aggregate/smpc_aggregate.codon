@@ -1,0 +1,89 @@
+from sequre import sequre, mpc, Sharetensor as ST
+from numpy.create import array, zeros, zeros_like
+import os
+
+
+def load_json(path: str) -> List[int]:
+    """Load JSON array of ints from file. Pure Codon - no Python dependency."""
+    if not path:
+        return []
+    content = open(path).read().strip()
+    if not content or content == "[]":
+        return []
+    inner = content.strip("[]").strip()
+    if not inner:
+        return []
+    result: List[int] = []
+    for x in inner.split(","):
+        x = x.strip()
+        if x:
+            result.append(int(x))
+    return result
+
+
+def save_json(path: str, data: List[int]):
+    """Write JSON array to file. Pure Codon - no Python dependency."""
+    parts: List[str] = []
+    for x in data:
+        parts.append(str(x))
+    open(path, "w").write("[" + ",".join(parts) + "]")
+
+
+@sequre
+def add(m, a, b):
+    return a + b
+
+
+def main():
+    m = mpc()
+
+    # Clients (pid 1,2) load their counts; aggregator (pid 0) has none
+    data = load_json(os.getenv("SEQURE_INPUT_COUNTS", ""))
+    n = len(data)
+    if n == 0:
+        # Try reading array_length from file (SEQURE_INPUT_ARRAY_LENGTH points to a file)
+        array_length_file = os.getenv("SEQURE_INPUT_ARRAY_LENGTH", "")
+        if array_length_file:
+            try:
+                n = int(open(array_length_file).read().strip())
+            except:
+                pass
+        if n == 0:
+            n = int(os.getenv("SEQURE_ARRAY_LENGTH", "0"))
+
+    if n == 0:
+        print(f"ERROR: CP{m.pid} has no data and no array_length - check flow configuration")
+        m.done()
+        return
+
+    # Sync all parties before starting MPC computation
+    print(f"CP{m.pid}: Waiting for all parties to sync...")
+    m.comms.sync_parties()
+    print(f"CP{m.pid}: All parties synced!")
+
+    # Secure sum: vectorized add for performance (single MPC op per vector)
+    print(f"CP{m.pid}: Starting MPC with n={n}, data_len={len(data)}")
+    if len(data) == 0:
+        data_vec = zeros((n,), dtype=int)
+    else:
+        data_vec = array(data, dtype=int)
+        if len(data_vec) != n:
+            n = len(data_vec)
+    zero_vec = zeros_like(data_vec)
+
+    v1 = data_vec if m.pid == 1 else zero_vec
+    v2 = data_vec if m.pid == 2 else zero_vec
+
+    s1 = ST.enc(m, v1, 1, m.default_mpc_modulus)
+    s2 = ST.enc(m, v2, 2, m.default_mpc_modulus)
+    total = add(m, s1, s2)
+    revealed = total.reveal(m).tolist()
+    result: List[int] = []
+    for x in revealed:
+        result.append(int(x))
+
+    save_json(os.getenv("SEQURE_OUTPUT_AGGREGATED_COUNTS", "out.json"), result)
+    m.done()
+
+
+main()

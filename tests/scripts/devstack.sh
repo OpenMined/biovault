@@ -134,6 +134,12 @@ if (( ! CLIENT_MODE_EXPLICIT )) && [[ -n "${BV_DEVSTACK_CLIENT_MODE:-}" ]]; then
   CLIENT_MODE_EXPLICIT=1
 fi
 
+if [[ "${BV_DEVSTACK_RESET:-}" == "0" ]]; then
+  RESET_FLAG=0
+elif [[ "${BV_DEVSTACK_RESET:-}" == "1" ]]; then
+  RESET_FLAG=1
+fi
+
 if [[ -z "$RUST_CLIENT_BIN" ]] && [[ -n "${BV_DEVSTACK_RUST_CLIENT_BIN:-}" ]]; then
   RUST_CLIENT_BIN="${BV_DEVSTACK_RUST_CLIENT_BIN}"
   CLIENT_MODE_EXPLICIT=1
@@ -427,6 +433,13 @@ start_stack() {
   [[ -d "$SYFTBOX_DIR" ]] || { echo "Missing syftbox checkout at $SYFTBOX_DIR" >&2; exit 1; }
 
   mkdir -p "$SANDBOX_DIR"
+  if (( ! RESET_FLAG )); then
+    local state_path="$SANDBOX_DIR/relay/state.json"
+    if [[ -f "$state_path" ]]; then
+      echo "Devstack state already exists at $state_path; skipping start (--no-reset)." >&2
+      return 0
+    fi
+  fi
   check_disk_space "$SANDBOX_DIR"
 
   # Resolve client-mode first because it may force --skip-client-daemons (embedded mode).
@@ -458,11 +471,13 @@ start_stack() {
   devstack_log="$(mktemp)"
 
   # Run devstack command (redirect output to prevent pipe inheritance issues on Windows)
+  set +e
   (
     cd "$SYFTBOX_DIR" || exit 1
     go run ./cmd/devstack start "${args[@]}"
   ) > "$devstack_log" 2>&1 </dev/null
   local exit_code=$?
+  set -e
 
   if [[ $exit_code -ne 0 ]]; then
     echo "Devstack command failed (exit $exit_code). Log:" >&2

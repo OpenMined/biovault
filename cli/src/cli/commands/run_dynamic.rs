@@ -5,6 +5,7 @@ use crate::module_spec::{ModuleSpec, ModuleStepSpec};
 use anyhow::Context;
 use chrono::Local;
 use colored::Colorize;
+use regex::Regex;
 use serde_json::{json, Value as JsonValue};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::env;
@@ -201,6 +202,148 @@ fn get_container_platform(force_x86: bool) -> Option<&'static str> {
     None
 }
 
+/// Extract container image names from a workflow.nf file
+fn extract_containers_from_workflow(workflow_path: &Path) -> Vec<String> {
+    let mut containers = Vec::new();
+
+    let content = match fs::read_to_string(workflow_path) {
+        Ok(c) => c,
+        Err(_) => return containers,
+    };
+
+    // Match patterns like: container 'image:tag' or container "image:tag"
+    let re = Regex::new(r#"container\s+['"]([^'"]+)['"]"#).ok();
+    if let Some(regex) = re {
+        for cap in regex.captures_iter(&content) {
+            if let Some(image) = cap.get(1) {
+                containers.push(image.as_str().to_string());
+            }
+        }
+    }
+
+    // Also match container params.xxx_container patterns
+    let param_re = Regex::new(r#"container\s+params\.(\w+)"#).ok();
+    if let Some(regex) = param_re {
+        for cap in regex.captures_iter(&content) {
+            if let Some(_param_name) = cap.get(1) {
+                // These are dynamic, we can't check them statically
+                // They'll be handled at runtime
+            }
+        }
+    }
+
+    containers
+}
+
+/// Check if a container image has arm64 support
+/// First checks locally pulled images, then falls back to registry manifest
+fn check_container_has_arm64(image: &str) -> bool {
+    // First, try to check the local image (works offline)
+    let local_output = Command::new("docker")
+        .args(["image", "inspect", "--format", "{{.Architecture}}", image])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output();
+
+    if let Ok(out) = local_output {
+        if out.status.success() {
+            let arch = String::from_utf8_lossy(&out.stdout).trim().to_lowercase();
+            if arch == "arm64" || arch == "aarch64" {
+                append_desktop_log(&format!(
+                    "[Platform] Local image {} is arm64 (native)",
+                    image
+                ));
+                return true;
+            } else if arch == "amd64" || arch == "x86_64" {
+                append_desktop_log(&format!(
+                    "[Platform] Local image {} is {} (will emulate)",
+                    image, arch
+                ));
+                return false;
+            }
+            // Unknown arch, continue to manifest check
+        }
+    }
+
+    // Image not pulled locally, try remote manifest inspect (requires network)
+    let manifest_output = Command::new("docker")
+        .args(["manifest", "inspect", image])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output();
+
+    match manifest_output {
+        Ok(out) => {
+            if !out.status.success() {
+                // If manifest inspect fails (offline or image doesn't exist),
+                // assume native support to avoid unnecessary emulation
+                // The actual docker pull will fail if image doesn't exist
+                append_desktop_log(&format!(
+                    "[Platform] Cannot inspect manifest for {} (offline?), assuming native support",
+                    image
+                ));
+                return true;
+            }
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            // Check for arm64/aarch64 architecture in manifest
+            let has_arm64 = stdout.contains("\"architecture\": \"arm64\"")
+                || stdout.contains("\"architecture\":\"arm64\"")
+                || stdout.contains("\"aarch64\"")
+                || stdout.contains("/arm64");
+
+            if has_arm64 {
+                append_desktop_log(&format!(
+                    "[Platform] Registry manifest for {} includes arm64",
+                    image
+                ));
+            } else {
+                append_desktop_log(&format!(
+                    "[Platform] Registry manifest for {} is x86-only",
+                    image
+                ));
+            }
+            has_arm64
+        }
+        Err(_) => {
+            // docker not available, assume native support
+            append_desktop_log("[Platform] Docker not available for manifest check");
+            true
+        }
+    }
+}
+
+/// Check all containers in a workflow and return true if any lack arm64 support
+fn any_container_lacks_arm64(workflow_path: &Path) -> bool {
+    if !is_arm64() {
+        // Not on arm64, no need to check
+        return false;
+    }
+
+    let containers = extract_containers_from_workflow(workflow_path);
+    if containers.is_empty() {
+        return false;
+    }
+
+    append_desktop_log(&format!(
+        "[Platform] Checking {} container(s) for arm64 support on arm64 host",
+        containers.len()
+    ));
+
+    for image in &containers {
+        if !check_container_has_arm64(image) {
+            append_desktop_log(&format!(
+                "[Platform] Container {} lacks arm64 support, will use x86 emulation",
+                image
+            ));
+            return true;
+        } else {
+            append_desktop_log(&format!("[Platform] Container {} has arm64 support", image));
+        }
+    }
+
+    false
+}
+
 /// Find Git Bash on Windows, falling back to "bash" if not found.
 #[cfg(target_os = "windows")]
 fn resolve_git_bash() -> String {
@@ -250,12 +393,6 @@ fn is_podman_shim(binary: &str) -> bool {
         let combined = format!("{}{}", stdout, stderr).to_lowercase();
         return combined.contains("podman");
     }
-    false
-}
-
-#[cfg(not(target_os = "windows"))]
-#[allow(dead_code)]
-fn is_podman_shim(_binary: &str) -> bool {
     false
 }
 
@@ -3261,6 +3398,30 @@ async fn execute_syqure(
         }
     }
 
+    if !dry_run {
+        let skip_done = env::var("BV_FLOW_SKIP_DONE").unwrap_or_default() == "1";
+        let force_run = env::var("BV_FLOW_FORCE").unwrap_or_default() == "1";
+        if skip_done && !force_run && !spec.outputs.is_empty() {
+            let mut all_outputs_present = true;
+            for output in &spec.outputs {
+                let env_key = format!("BV_OUTPUT_{}", env_key_suffix(&output.name));
+                if let Some(path) = env_map.get(&env_key) {
+                    if fs::metadata(path).is_err() {
+                        all_outputs_present = false;
+                        break;
+                    }
+                } else {
+                    all_outputs_present = false;
+                    break;
+                }
+            }
+            if all_outputs_present {
+                println!("⏭️  Skipping syqure step (outputs present; BV_FLOW_SKIP_DONE=1)");
+                return Ok(());
+            }
+        }
+    }
+
     if dry_run {
         println!("\n📋 [DRY RUN] Syqure execution plan:");
         println!(
@@ -3413,6 +3574,23 @@ fn execute_syqure_native(
     println!("\n▶️  Executing syqure...");
     println!("  {}", display_cmd.dimmed());
 
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // SAFETY: pre_exec is unsafe because it runs in the child after fork.
+        // We only call async-signal-safe libc here.
+        unsafe {
+            cmd.pre_exec(|| {
+                // Start a new process group so we can terminate syqure and its children together.
+                let rc = libc::setpgid(0, 0);
+                if rc != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+
     let datasites_root = env_map
         .get("SEQURE_DATASITES_ROOT")
         .cloned()
@@ -3455,7 +3633,7 @@ fn execute_syqure_native(
 
             let status = status_parts.join(" | ");
             if status != last_status {
-                println!("  📡 MPC channels: {}", status);
+                println!("  📡 Syqure channels: {}", status);
                 last_status = status;
             }
 
@@ -3463,11 +3641,96 @@ fn execute_syqure_native(
         }
     });
 
+    let start_time = std::time::Instant::now();
     let mut child = cmd.spawn().context("Failed to spawn syqure")?;
-    let status = child.wait().context("Failed to wait for syqure")?;
+
+    #[cfg(unix)]
+    fn kill_process_group(pid: u32) {
+        let pgid = -(pid as i32);
+        unsafe {
+            libc::kill(pgid, libc::SIGTERM);
+        }
+        // Give it a moment to exit gracefully, then force kill.
+        std::thread::sleep(Duration::from_millis(250));
+        unsafe {
+            libc::kill(pgid, libc::SIGKILL);
+        }
+    }
+
+    #[cfg(unix)]
+    struct SyqureKillGuard {
+        pid: u32,
+        child_ptr: *mut std::process::Child,
+    }
+
+    #[cfg(unix)]
+    impl Drop for SyqureKillGuard {
+        fn drop(&mut self) {
+            unsafe {
+                if let Ok(None) = (*self.child_ptr).try_wait() {
+                    kill_process_group(self.pid);
+                }
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    static SYQURE_SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+    #[cfg(unix)]
+    unsafe extern "C" fn syqure_signal_handler(_: libc::c_int) {
+        SYQURE_SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
+    }
+
+    #[cfg(unix)]
+    {
+        unsafe {
+            libc::signal(libc::SIGINT, syqure_signal_handler as libc::sighandler_t);
+            libc::signal(libc::SIGTERM, syqure_signal_handler as libc::sighandler_t);
+        }
+    }
+
+    #[cfg(unix)]
+    let _kill_guard = SyqureKillGuard {
+        pid: child.id(),
+        child_ptr: &mut child as *mut std::process::Child,
+    };
+
+    #[cfg(unix)]
+    let shutdown_handle = {
+        let pid = child.id();
+        thread::spawn(move || {
+            while !SYQURE_SHUTDOWN_REQUESTED.load(Ordering::SeqCst) {
+                thread::sleep(Duration::from_millis(100));
+            }
+            kill_process_group(pid);
+        })
+    };
+
+    let status = loop {
+        match child.try_wait().context("Failed to poll syqure")? {
+            Some(status) => break status,
+            None => {
+                thread::sleep(Duration::from_millis(200));
+            }
+        }
+    };
+
+    #[cfg(unix)]
+    {
+        SYQURE_SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst); // Signal thread to exit
+        let _ = shutdown_handle.join();
+    }
 
     stop_flag.store(true, Ordering::Relaxed);
     let _ = monitor_handle.join();
+
+    let elapsed = start_time.elapsed();
+    println!(
+        "  ⏱️  Syqure step duration: {}.{:03}s",
+        elapsed.as_secs(),
+        elapsed.subsec_millis()
+    );
 
     if !status.success() {
         #[cfg(unix)]
@@ -4397,7 +4660,8 @@ fn cleanup_vm_dir(docker_bin: &str, vm_dir: &str) {
 /// Returns the path to the generated config file.
 ///
 /// Platform handling:
-/// - ARM64 without force flag: No --platform (Docker auto-selects native if available)
+/// - ARM64 with all arm64-capable containers: No --platform (native execution)
+/// - ARM64 with any x86-only container: --platform linux/amd64 (explicit emulation)
 /// - x86_64 or force flag set: --platform linux/amd64 for compatibility
 fn generate_runtime_config(
     project_path: &Path,
@@ -4407,8 +4671,20 @@ fn generate_runtime_config(
 ) -> Result<PathBuf> {
     let config_path = project_path.join(".biovault-runtime.config");
 
+    // Check for workflow.nf to inspect containers
+    let workflow_path = project_path.join("workflow.nf");
+
     // Determine if we should force x86 platform for task containers
-    let force_x86 = should_force_x86_containers() || !is_arm64();
+    // Force x86 if:
+    // 1. Environment variable is set, OR
+    // 2. Not on ARM64 (x86 host), OR
+    // 3. On ARM64 but any container lacks ARM64 support
+    let containers_need_x86 = if is_arm64() && workflow_path.exists() && !using_podman {
+        any_container_lacks_arm64(&workflow_path)
+    } else {
+        false
+    };
+    let force_x86 = should_force_x86_containers() || !is_arm64() || containers_need_x86;
 
     let config_contents = if using_podman {
         // Podman configuration

@@ -7,9 +7,10 @@ metadata:
 spec:
   runner:
     runtime: syqure
-    entrypoint: secure_aggregate.codon
+    entrypoint: smpc_aggregate.codon
   assets:
-    - path: secure_aggregate.codon
+    - path: smpc_aggregate.codon
+    - path: he_aggregate.codon
   inputs:
     - name: counts
       type: File

@@ -1,0 +1,183 @@
+setup:
+  server:
+    - |
+      if [[ "${BV_DEVSTACK_RESET:-1}" == "1" ]]; then
+        ./tests/scripts/devstack.sh --reset --clients client1@sandbox.local,client2@sandbox.local,aggregator@sandbox.local
+      else
+        ./tests/scripts/devstack.sh --clients client1@sandbox.local,client2@sandbox.local,aggregator@sandbox.local
+      fi
+
+steps:
+  - name: Initialize BioVault for client1
+    datasite: client1@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv init client1@sandbox.local --quiet
+
+  - name: Initialize BioVault for client2
+    datasite: client2@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv init client2@sandbox.local --quiet
+
+  - name: Initialize BioVault for aggregator
+    datasite: aggregator@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv init aggregator@sandbox.local --quiet
+
+  - name: Wait for client1 public key to sync to client2
+    datasite: client2@sandbox.local
+    wait_for: datasites/client1@sandbox.local/public/crypto/did.json
+    timeout: 30
+
+  - name: Wait for client2 public key to sync to client1
+    datasite: client1@sandbox.local
+    wait_for: datasites/client2@sandbox.local/public/crypto/did.json
+    timeout: 30
+
+  - name: Wait for aggregator public key to sync to client1
+    datasite: client1@sandbox.local
+    wait_for: datasites/aggregator@sandbox.local/public/crypto/did.json
+    timeout: 30
+
+  - name: Analyze Syqure program (secure_aggregate.codon)
+    datasite: aggregator@sandbox.local
+    run: |
+      set -euo pipefail
+      BIN="${SEQURE_NATIVE_BIN:-{{workspace}}/../syqure/target/release/syqure}"
+      if [[ ! -x "$BIN" ]]; then
+        BIN="{{workspace}}/../syqure/target/debug/syqure"
+      fi
+      if [[ ! -x "$BIN" ]]; then
+        echo "Syqure binary not found for analyze. Skipping." >&2
+        exit 0
+      fi
+      PROGRAM="{{workspace}}/tests/scenarios/allele-freq-syqure/modules/secure-aggregate/secure_aggregate.codon"
+      if [[ ! -f "$PROGRAM" ]]; then
+        echo "Missing codon program: $PROGRAM" >&2
+        exit 1
+      fi
+      echo "=== Syqure analyze: $PROGRAM ==="
+      "$BIN" analyze "$PROGRAM" --json || true
+
+  - name: Generate genotype data for client1
+    run: |
+      set -euo pipefail
+      script="{{workspace}}/tests/scripts/gen_allele_freq_data.sh"
+      out_dir="{{sandbox}}/client1@sandbox.local/private/app_data/biovault/allele-freq-data"
+      count="${ALLELE_FREQ_COUNT:-10}"
+      if [[ -f "$out_dir/samplesheet.csv" && "${ALLELE_FREQ_FORCE_REGEN:-0}" != "1" ]]; then
+        echo "[allele-freq] client1 samplesheet exists; skipping regeneration"
+      else
+        "$script" --output-dir "$out_dir" --count "$count" --seed 42 \
+          --apol1-het 0.6 --apol1-hom-alt 0.2 \
+          --no-call-frequency 0.2 --no-call-token - --force
+      fi
+
+  - name: Generate genotype data for client2
+    run: |
+      set -euo pipefail
+      script="{{workspace}}/tests/scripts/gen_allele_freq_data.sh"
+      out_dir="{{sandbox}}/client2@sandbox.local/private/app_data/biovault/allele-freq-data"
+      count="${ALLELE_FREQ_COUNT:-10}"
+      if [[ -f "$out_dir/samplesheet.csv" && "${ALLELE_FREQ_FORCE_REGEN:-0}" != "1" ]]; then
+        echo "[allele-freq] client2 samplesheet exists; skipping regeneration"
+      else
+        "$script" --output-dir "$out_dir" --count "$count" --seed 43 \
+          --thal-het 0.5 --thal-hom-alt 0.3 \
+          --no-call-frequency 0.2 --no-call-token - --force
+      fi
+
+  - name: Run allele-freq Syqure flow (parallel)
+    parallel:
+      - name: client1-flow
+        datasite: client1@sandbox.local
+        run: |
+          cd {{workspace}}
+          RESULTS_DIR="{{sandbox}}/results/flows/allele-freq-syqure/{{run_id}}"
+          BV_BIN={{workspace}}/cli/target/release/bv \
+          BIOVAULT_FLOW_VERBOSE=1 BIOVAULT_FLOW_RUN_ID={{run_id}} BIOVAULT_FLOW_AWAIT_TIMEOUT=600 \
+          BV_FLOW_SKIP_DONE=1 \
+          BV_SYQURE_USE_DOCKER=${BV_SYQURE_USE_DOCKER:-} \
+            {{workspace}}/cli/target/release/bv run tests/scenarios/allele-freq-syqure/flow.yaml \
+            --results-dir "$RESULTS_DIR"
+
+      - name: client2-flow
+        datasite: client2@sandbox.local
+        run: |
+          cd {{workspace}}
+          RESULTS_DIR="{{sandbox}}/results/flows/allele-freq-syqure/{{run_id}}"
+          BV_BIN={{workspace}}/cli/target/release/bv \
+          BIOVAULT_FLOW_VERBOSE=1 BIOVAULT_FLOW_RUN_ID={{run_id}} BIOVAULT_FLOW_AWAIT_TIMEOUT=600 \
+          BV_FLOW_SKIP_DONE=1 \
+          BV_SYQURE_USE_DOCKER=${BV_SYQURE_USE_DOCKER:-} \
+            {{workspace}}/cli/target/release/bv run tests/scenarios/allele-freq-syqure/flow.yaml \
+            --results-dir "$RESULTS_DIR"
+
+      - name: aggregator-flow
+        datasite: aggregator@sandbox.local
+        run: |
+          cd {{workspace}}
+          RESULTS_DIR="{{sandbox}}/results/flows/allele-freq-syqure/{{run_id}}"
+          BV_BIN={{workspace}}/cli/target/release/bv \
+          BIOVAULT_FLOW_VERBOSE=1 BIOVAULT_FLOW_RUN_ID={{run_id}} BIOVAULT_FLOW_AWAIT_TIMEOUT=600 \
+          BV_FLOW_SKIP_DONE=1 \
+          BV_SYQURE_USE_DOCKER=${BV_SYQURE_USE_DOCKER:-} \
+            {{workspace}}/cli/target/release/bv run tests/scenarios/allele-freq-syqure/flow.yaml \
+            --results-dir "$RESULTS_DIR"
+    timeout: 1800
+
+  - name: Verify flow completion
+    datasite: aggregator@sandbox.local
+    run: |
+      echo "=== Checking progress files for run {{run_id}} ==="
+
+      for ds in client1@sandbox.local client2@sandbox.local aggregator@sandbox.local; do
+        PROGRESS_DIR="datasites/${ds}/shared/flows/allele-freq-syqure/{{run_id}}/progress"
+        PROGRESS_JSON="${PROGRESS_DIR}/progress.json"
+        PROGRESS_LOG="${PROGRESS_DIR}/progress.log"
+
+        echo ""
+        echo "=== Progress for ${ds} ==="
+        if [[ -f "$PROGRESS_JSON" ]]; then
+          echo "progress.json:"
+          cat "$PROGRESS_JSON"
+        else
+          echo "No progress.json found at ${PROGRESS_JSON}"
+        fi
+
+        if [[ -f "$PROGRESS_LOG" ]]; then
+          echo ""
+          echo "progress.log:"
+          cat "$PROGRESS_LOG"
+        fi
+      done
+
+      echo ""
+      echo "=== ALLELE-FREQ SYQURE FLOW COMPLETE ==="
+
+  - name: Verify aggregated outputs exist
+    run: |
+      set -euo pipefail
+      base="{{sandbox}}/results/flows/allele-freq-syqure/{{run_id}}"
+      echo "Checking outputs in $base"
+      ls -la "$base" || true
+      find "$base" -name aggregated_counts.json -print
+
+  - name: Compare client outputs (TSV vs NPZ, APOL1/THAL side-by-side)
+    run: |
+      python3 {{workspace}}/tests/scenarios/allele-freq-syqure/scripts/compare_npz_tsv.py \
+        --workspace "{{workspace}}" \
+        --results-dir "{{sandbox}}/results/flows/allele-freq-syqure/{{run_id}}"
+
+
+  - name: Decode aggregate sum and basic stats
+    run: |
+      python3 {{workspace}}/tests/scenarios/allele-freq-syqure/scripts/decode_stats.py \
+        --workspace "{{workspace}}" \
+        --run-id "{{run_id}}" \
+        --results-dir "{{sandbox}}/results/flows/allele-freq-syqure/{{run_id}}"
+
+  - name: Verify aggregation correctness (assert client1 + client2 == aggregated)
+    run: |
+      python3 {{workspace}}/tests/scenarios/allele-freq-syqure/scripts/verify_aggregation.py \
+        --workspace "{{workspace}}" \
+        --results-dir "{{sandbox}}/results/flows/allele-freq-syqure/{{run_id}}"

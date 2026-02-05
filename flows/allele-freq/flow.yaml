@@ -1,0 +1,20 @@
+apiVersion: syftbox.openmined.org/v1alpha1
+kind: Flow
+metadata:
+  name: allele-freq
+  version: 0.1.0
+spec:
+  inputs:
+    samplesheet:
+      type: List[GenotypeRecord]
+  steps:
+    - id: allele_freq
+      uses:
+        source:
+          kind: local
+          path: ./
+      with:
+        participants: inputs.samplesheet
+      publish:
+        allele_freq: File(allele_freq.tsv)
+

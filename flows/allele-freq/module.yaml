@@ -1,0 +1,31 @@
+apiVersion: syftbox.openmined.org/v1alpha1
+kind: Module
+metadata:
+  name: allele-freq
+  version: 0.1.0
+  description: Standalone allele frequency pipeline (genotype to VCF, counts, frequency outputs).
+  authors:
+    - madhava@openmined.org
+spec:
+  runner:
+    kind: nextflow
+    entrypoint: workflow.nf
+    template: dynamic-nextflow
+  assets: []
+  inputs:
+    - name: participants
+      type: List[GenotypeRecord]
+      description: CSV/TSV with participant_id and genotype_file columns. genotype_file can be .txt (genotype) or .vcf/.vcf.gz
+      format:
+        kind: csv
+        mapping:
+          participant_id: participant_id
+          genotype_file: genotype_file
+  outputs:
+    - name: allele_freq
+      type: File
+      description: Allele frequency per locus
+      format:
+        kind: tsv
+      path: allele_freq.tsv
+  parameters: []
