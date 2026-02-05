@@ -1,28 +1,47 @@
+nextflow.enable.dsl=2
+
 workflow USER {
     take:
-      participant_id_ch
-      ref_ch
-      ref_index_ch
-      aligned_ch
-      aligned_index_ch
-      ref_version
-      assets_dir_ch
-      results_dir
+      context
+      participants
     main:
+      def assetsDir = System.getenv('BV_ASSETS_DIR') ?: "${projectDir}/assets"
+      def assets_dir_ch = Channel.value(file(assetsDir))
+
       // (GRCh38_position, GRCh37_position)
       def rs12913832 = ['15:28120472-28120472', '15:28365618-28365618']
-      def base_pos = pickPos(ref_version, rs12913832)
 
-      // detect region string using samtools/FAI
-      def region_ch = detect_region(base_pos, aligned_ch, aligned_index_ch, ref_index_ch).map { it.toString().trim() }
+    def per_participant = participants.map { record ->
+      def refVersion = (record['ref_version'] ?: record['grch_version'] ?: 'GRCh38').toString()
+      tuple(
+        record['participant_id'],
+        refVersion,
+        record['reference_file'],
+        record['reference_index'],
+        record['aligned_file'],
+        record['aligned_index']
+      )
+    }
 
-      // pass results_dir into processes
-      def call_region_ch = call_region(region_ch, ref_ch, ref_index_ch, aligned_ch, aligned_index_ch)
+      def with_pos = per_participant.map { participant_id, ref_version, ref, ref_index, aligned, aligned_index ->
+        def base_pos = pickPos(ref_version, rs12913832)
+        tuple(participant_id, base_pos, ref, ref_index, aligned, aligned_index)
+      }
 
-      def out = interpret_eyes(assets_dir_ch, call_region_ch)
+      def region_ch = detect_region(with_pos).map { pid, region ->
+        tuple(pid, region.toString().trim())
+      }
 
-      out.msg
-        .map { "\n===== Eye Color Interpretation for Participant: ${participant_id_ch.getVal()} =====\n${it}\n====================================\n" }
+      def call_inputs = region_ch.join(with_pos).map { pid, region, base_pos, ref, ref_index, aligned, aligned_index ->
+        tuple(pid, region, ref, ref_index, aligned, aligned_index)
+      }
+
+      def calls = call_region(call_inputs)
+
+      def interpreted = interpret_eyes(assets_dir_ch, calls)
+
+      interpreted.msg
+        .map { pid, msg -> "\n===== Eye Color Interpretation for Participant: ${pid} =====\n${msg}\n====================================\n" }
         .view()
 }
 
@@ -39,13 +58,10 @@ process detect_region {
   container 'quay.io/biocontainers/samtools:1.22.1--h96c455f_0'
 
   input:
-  val  base_pos
-  path aligned
-  path aligned_index
-  path ref_index
+  tuple val(participant_id), val(base_pos), path(ref), path(ref_index), path(aligned), path(aligned_index)
 
   output:
-  stdout emit: region_out
+  tuple val(participant_id), stdout, emit: region_out
 
   shell:
   '''
@@ -78,16 +94,13 @@ process detect_region {
 process call_region {
     container 'quay.io/biocontainers/bcftools:1.22--h3a4d415_1'
     publishDir params.results_dir, mode: 'copy'
+    stageInMode 'symlink'
 
     input:
-    val base_pos
-    path ref
-    path ref_index
-    path aligned
-    path aligned_index
+    tuple val(participant_id), val(base_pos), path(ref), path(ref_index), path(aligned), path(aligned_index)
 
     output:
-    tuple path("variants.vcf.gz"), path("variants.vcf.gz.csi"), path("snp.txt")
+    tuple val(participant_id), path("variants.vcf.gz"), path("variants.vcf.gz.csi"), path("snp.txt")
 
     shell:
     '''
@@ -108,11 +121,11 @@ process interpret_eyes {
   publishDir params.results_dir, mode: 'copy'
   input:
   path assets_dir
-  tuple path(vcf), path(vcf_index), path(snp)
+  tuple val(participant_id), path(vcf), path(vcf_index), path(snp)
 
   output:
   path "eye_color.txt"
-  stdout emit: msg   // capture stdout as a channel
+  tuple val(participant_id), stdout, emit: msg
   shell:
   """
   cat !{snp} | python3 ./assets/eye_color.py > eye_color.txt

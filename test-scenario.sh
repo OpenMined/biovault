@@ -28,6 +28,7 @@ Options:
   --docker             Force Docker mode for syqure runtime
   --podman             Force Podman runtime (sets BIOVAULT_CONTAINER_RUNTIME=podman)
   --keep-containers    Keep syqure containers on failure (for logs/debugging)
+  --set KEY=VALUE      Override scenario variables (repeatable)
   -h, --help           Show this message
 
 Examples:
@@ -55,6 +56,7 @@ FORCE_RUN=0
 ALLELE_COUNT=""
 SYQURE_AGG_MODE="smpc"
 SCENARIO=""
+SCENARIO_VARS=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -101,6 +103,11 @@ while [[ $# -gt 0 ]]; do
       ;;
     --keep-containers)
       KEEP_CONTAINERS=1
+      ;;
+    --set)
+      [[ $# -lt 2 ]] && { echo "Missing value for --set" >&2; usage; exit 1; }
+      SCENARIO_VARS+=("$2")
+      shift
       ;;
     -h|--help)
       usage
@@ -194,14 +201,6 @@ fi
 IS_WINDOWS=0
 if [[ "$(uname -s)" == MINGW* ]] || [[ "$(uname -s)" == MSYS* ]] || [[ "$(uname -s)" == CYGWIN* ]]; then
   IS_WINDOWS=1
-fi
-
-if (( IS_WINDOWS )); then
-  # Keep Windows runs snappy by default (override by setting env vars).
-  export ALLELE_FREQ_COUNT="${ALLELE_FREQ_COUNT:-1}"
-  export BV_AGG_THREADS="${BV_AGG_THREADS:-8}"
-  export BV_EMIT_MAX_FORKS="${BV_EMIT_MAX_FORKS:-4}"
-  export BV_WIN_TMP_COPY="${BV_WIN_TMP_COPY:-1}"
 fi
 
 # Check if scenario needs syqure or container runtime
@@ -491,10 +490,15 @@ start_syqure_progress_tail() {
   PROGRESS_PID=$!
 }
 
+SCENARIO_ARGS=()
+for kv in "${SCENARIO_VARS[@]}"; do
+  SCENARIO_ARGS+=(--set "$kv")
+done
+
 if python3 -c 'import yaml' >/dev/null 2>&1; then
   start_syqure_log_tail
   start_syqure_progress_tail
-  python3 "$ROOT_DIR/scripts/run_scenario.py" "$SCENARIO"
+  python3 "$ROOT_DIR/scripts/run_scenario.py" "$SCENARIO" "${SCENARIO_ARGS[@]}"
   status=$?
   stop_syqure_log_tail
   exit $status
@@ -502,7 +506,7 @@ fi
 
 start_syqure_log_tail
 start_syqure_progress_tail
-python3 "$ROOT_DIR/scripts/run_scenario.py" "$SCENARIO"
+python3 "$ROOT_DIR/scripts/run_scenario.py" "$SCENARIO" "${SCENARIO_ARGS[@]}"
 status=$?
 stop_syqure_log_tail
 exit $status

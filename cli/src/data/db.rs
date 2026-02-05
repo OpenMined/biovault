@@ -312,9 +312,187 @@ impl BioVaultDb {
             }
         }
 
-        // NOTE: We keep source and grch_version columns in files table as they are used
-        // by import_from_csv. The genotype_metadata table provides additional detailed
-        // metadata (row_count, chromosome_count, inferred_sex) for genotype files.
+        // Drop source and grch_version columns from files table if they exist
+        // (these should only be in genotype_metadata table)
+        let source_exists = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('files') WHERE name='source'",
+                [],
+                |row| row.get(0),
+            )
+            .map(|count: i32| count > 0)
+            .unwrap_or(false);
+
+        let grch_exists = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('files') WHERE name='grch_version'",
+                [],
+                |row| row.get(0),
+            )
+            .map(|count: i32| count > 0)
+            .unwrap_or(false);
+
+        if source_exists || grch_exists {
+            info!("Dropping source and grch_version columns from files table");
+
+            // Ensure metadata tables exist before backfilling
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS genotype_metadata (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    file_id INTEGER UNIQUE NOT NULL,
+                    source TEXT,
+                    grch_version TEXT,
+                    row_count INTEGER,
+                    chromosome_count INTEGER,
+                    inferred_sex TEXT,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (file_id) REFERENCES files(id) ON DELETE CASCADE
+                )",
+                [],
+            )?;
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS variant_metadata (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    file_id INTEGER UNIQUE NOT NULL,
+                    source TEXT,
+                    grch_version TEXT,
+                    format TEXT,
+                    reference_file_id INTEGER,
+                    reference_index_file_id INTEGER,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (file_id) REFERENCES files(id) ON DELETE CASCADE
+                )",
+                [],
+            )?;
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS aligned_metadata (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    file_id INTEGER UNIQUE NOT NULL,
+                    source TEXT,
+                    grch_version TEXT,
+                    format TEXT,
+                    reference_file_id INTEGER,
+                    reference_index_file_id INTEGER,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (file_id) REFERENCES files(id) ON DELETE CASCADE
+                )",
+                [],
+            )?;
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS reference_metadata (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    file_id INTEGER UNIQUE NOT NULL,
+                    source TEXT,
+                    grch_version TEXT,
+                    format TEXT,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (file_id) REFERENCES files(id) ON DELETE CASCADE
+                )",
+                [],
+            )?;
+
+            // Backfill metadata from files table before dropping columns
+            conn.execute(
+                "INSERT OR REPLACE INTO genotype_metadata (file_id, source, grch_version, created_at, updated_at)
+                 SELECT id, source, grch_version, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                 FROM files
+                 WHERE data_type = 'Genotype' AND (source IS NOT NULL OR grch_version IS NOT NULL)",
+                [],
+            )?;
+            conn.execute(
+                "INSERT OR REPLACE INTO variant_metadata (file_id, source, grch_version, format, created_at, updated_at)
+                 SELECT id, source, grch_version, NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                 FROM files
+                 WHERE data_type = 'Variants' AND (source IS NOT NULL OR grch_version IS NOT NULL)",
+                [],
+            )?;
+            conn.execute(
+                "INSERT OR REPLACE INTO aligned_metadata (file_id, source, grch_version, format, created_at, updated_at)
+                 SELECT id, source, grch_version, NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                 FROM files
+                 WHERE data_type IN ('Aligned', 'AlignedIndex')
+                   AND (source IS NOT NULL OR grch_version IS NOT NULL)",
+                [],
+            )?;
+            conn.execute(
+                "INSERT OR REPLACE INTO reference_metadata (file_id, source, grch_version, format, created_at, updated_at)
+                 SELECT id, source, grch_version, NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                 FROM files
+                 WHERE data_type IN ('Reference', 'ReferenceIndex')
+                   AND (source IS NOT NULL OR grch_version IS NOT NULL)",
+                [],
+            )?;
+
+            // SQLite doesn't support DROP COLUMN directly, need to recreate table
+            conn.execute("BEGIN TRANSACTION", [])?;
+
+            // Create new table without source/grch_version
+            conn.execute(
+                "CREATE TABLE files_new (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    participant_id INTEGER,
+                    file_path TEXT UNIQUE NOT NULL,
+                    file_hash TEXT NOT NULL,
+                    file_type TEXT,
+                    file_size INTEGER,
+                    metadata TEXT,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    data_type TEXT DEFAULT 'Unknown',
+                    status TEXT DEFAULT 'complete',
+                    processing_error TEXT,
+                    queue_added_at DATETIME,
+                    FOREIGN KEY (participant_id) REFERENCES participants(id) ON DELETE SET NULL
+                )",
+                [],
+            )?;
+
+            // Copy data
+            conn.execute(
+                "INSERT INTO files_new (id, participant_id, file_path, file_hash, file_type, file_size,
+                    metadata, created_at, updated_at, data_type, status, processing_error, queue_added_at)
+                SELECT id, participant_id, file_path, file_hash, file_type, file_size,
+                    metadata, created_at, updated_at, data_type, status, processing_error, queue_added_at
+                FROM files",
+                [],
+            )?;
+
+            // Drop old table
+            conn.execute("DROP TABLE files", [])?;
+
+            // Rename new table
+            conn.execute("ALTER TABLE files_new RENAME TO files", [])?;
+
+            // Recreate indexes
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_files_participant_id ON files(participant_id)",
+                [],
+            )?;
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_files_file_type ON files(file_type)",
+                [],
+            )?;
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_files_hash ON files(file_hash)",
+                [],
+            )?;
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_files_data_type ON files(data_type)",
+                [],
+            )?;
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_files_status ON files(status)",
+                [],
+            )?;
+
+            conn.execute("COMMIT", [])?;
+
+            info!("Migration complete: removed source and grch_version columns from files table");
+        }
 
         // Create genotype_metadata table if it doesn't exist
         conn.execute(
@@ -334,6 +512,84 @@ impl BioVaultDb {
         )?;
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_genotype_file_id ON genotype_metadata(file_id)",
+            [],
+        )?;
+
+        // Create variant_metadata table if it doesn't exist
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS variant_metadata (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                file_id INTEGER UNIQUE NOT NULL,
+                source TEXT,
+                grch_version TEXT,
+                format TEXT,
+                reference_file_id INTEGER,
+                reference_index_file_id INTEGER,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (file_id) REFERENCES files(id) ON DELETE CASCADE
+            )",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_variant_file_id ON variant_metadata(file_id)",
+            [],
+        )?;
+        // Add reference link columns if upgrading an existing DB
+        let _ = conn.execute(
+            "ALTER TABLE variant_metadata ADD COLUMN reference_file_id INTEGER",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE variant_metadata ADD COLUMN reference_index_file_id INTEGER",
+            [],
+        );
+
+        // Create aligned_metadata table if it doesn't exist
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS aligned_metadata (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                file_id INTEGER UNIQUE NOT NULL,
+                source TEXT,
+                grch_version TEXT,
+                format TEXT,
+                reference_file_id INTEGER,
+                reference_index_file_id INTEGER,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (file_id) REFERENCES files(id) ON DELETE CASCADE
+            )",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_aligned_file_id ON aligned_metadata(file_id)",
+            [],
+        )?;
+        let _ = conn.execute(
+            "ALTER TABLE aligned_metadata ADD COLUMN reference_file_id INTEGER",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE aligned_metadata ADD COLUMN reference_index_file_id INTEGER",
+            [],
+        );
+
+        // Create reference_metadata table if it doesn't exist
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS reference_metadata (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                file_id INTEGER UNIQUE NOT NULL,
+                source TEXT,
+                grch_version TEXT,
+                format TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (file_id) REFERENCES files(id) ON DELETE CASCADE
+            )",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_reference_file_id ON reference_metadata(file_id)",
             [],
         )?;
 

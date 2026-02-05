@@ -6,42 +6,55 @@ nextflow.enable.dsl=2
  *************************************************/
 workflow USER {
   take:
-    participant_id_ch
-    ref_ch                // FASTA
-    ref_index_ch          // FASTA .fai
-    aligned_ch            // CRAM/BAM
-    aligned_index_ch      // .crai/.bai
-    ref_version           // 'GRCh38' or 'GRCh37'
-    assets_dir_ch         // directory with y_haplogroup_panel.*.tsv + python script
-    results_dir
+    context
+    participants
 
   main:
-    // 0) panel
-    def panel_ch = select_panel(assets_dir_ch, ref_version)
+    def assetsDir = System.getenv('BV_ASSETS_DIR') ?: "${projectDir}/assets"
+    def assets_dir_ch = Channel.value(file(assetsDir))
 
-    // 1) regions + passthrough panel (two distinct outputs)
+    def per_participant = participants.map { record ->
+      def refVersion = (record['ref_version'] ?: record['grch_version'] ?: 'GRCh38').toString()
+      tuple(
+        record['participant_id'],
+        refVersion,
+        record['reference_file'],
+        record['reference_index'],
+        record['aligned_file'],
+        record['aligned_index']
+      )
+    }
+
+    def version_ch = per_participant.map { pid, ref_version, ref, ref_index, aligned, aligned_index ->
+      tuple(pid, ref_version)
+    }
+
+    def panel_ch = select_panel(assets_dir_ch, version_ch)
+
     def (regions_ch, panel_passthrough_ch) = build_regions(panel_ch)
 
-    // 2) calls (two outputs; use only the VCF)
-    def (vcf_ch, vcf_index_ch) = call_sites(
-      ref_ch,
-      ref_index_ch,
-      aligned_ch,
-      aligned_index_ch,
-      regions_ch
-    )
+    def call_inputs = per_participant.map { pid, ref_version, ref, ref_index, aligned, aligned_index ->
+      tuple(pid, ref, ref_index, aligned, aligned_index)
+    }
 
-    // 3) compact table (single output: variants.tsv)
-    def variants_tsv_ch = query_to_table(vcf_ch)
+    // Detect chromosome naming convention (chrY vs Y) and adjust regions
+    def detect_inputs = call_inputs.join(regions_ch)
+    def adjusted_regions_ch = detect_chr_prefix(detect_inputs)
 
-    // 4) interpret
+    def calls = call_sites(call_inputs.join(adjusted_regions_ch))
+
+    def variants_tsv_ch = query_to_table(calls)
+
+    def interpret_inputs = panel_passthrough_ch
+      .join(variants_tsv_ch)
+      .join(version_ch)
+      .map { pid, panel_tsv, variants_tsv, ref_version ->
+        tuple(pid, panel_tsv, variants_tsv, ref_version)
+      }
+
     interpret_haplogroup(
-      participant_id_ch,
-      ref_version,
-      panel_passthrough_ch,
-      variants_tsv_ch,
       assets_dir_ch,
-      results_dir
+      interpret_inputs
     )
 }
 
@@ -69,10 +82,10 @@ process select_panel {
 
   input:
     path assets_dir
-    val  ref_version
+    tuple val(participant_id), val(ref_version)
 
   output:
-    path "panel.tsv"
+    tuple val(participant_id), path("panel.tsv")
 
   shell:
   '''
@@ -97,11 +110,11 @@ process build_regions {
   tag { "regions" }
 
   input:
-    path panel_tsv
+    tuple val(participant_id), path(panel_tsv)
 
   output:
-    path "regions.txt"
-    path "panel.tsv"
+    tuple val(participant_id), path("regions.txt")
+    tuple val(participant_id), path("panel.tsv")
 
   shell:
   '''
@@ -117,23 +130,59 @@ process build_regions {
 }
 
 /*************************************************
+ * STEP 1.5 — detect chromosome naming convention
+ * Checks if CRAM uses "chrY" or "Y" and adjusts regions
+ *************************************************/
+process detect_chr_prefix {
+  container 'quay.io/biocontainers/samtools:1.22.1--h96c455f_0'
+  errorStrategy 'terminate'
+
+  input:
+    tuple val(participant_id), path(ref_fa), path(ref_fa_fai), path(aln), path(aln_index), path(regions_txt)
+
+  output:
+    tuple val(participant_id), path("adjusted_regions.txt")
+
+  shell:
+  '''
+  set -euo pipefail
+
+  # Check if CRAM/BAM uses "chrY" or "Y" by inspecting header
+  # Look for @SQ lines with SN:chrY or SN:Y
+  HAS_CHR_PREFIX=false
+  if samtools view -H "!{aln}" 2>/dev/null | head -n 100 | grep -q "SN:chrY"; then
+    HAS_CHR_PREFIX=true
+  fi
+
+  # Read the original regions
+  REGIONS=$(cat "!{regions_txt}")
+
+  if [ "$HAS_CHR_PREFIX" = "true" ]; then
+    # CRAM uses chrY, keep regions as-is
+    echo "$REGIONS" > adjusted_regions.txt
+    echo "Detected chrY naming convention, keeping original regions" >&2
+  else
+    # CRAM uses Y without prefix, strip "chr" from regions
+    echo "$REGIONS" | sed 's/chr//g' > adjusted_regions.txt
+    echo "Detected Y naming convention (no chr prefix), adjusted regions" >&2
+  fi
+  '''
+}
+
+/*************************************************
  * STEP 2 — bcftools mpileup + call on regions
  * Requires: FASTA + .fai; CRAM + .crai (or BAM + .bai)
  *************************************************/
 process call_sites {
   container params.bcftools_container
   errorStrategy 'terminate'
+  stageInMode 'symlink'
 
   input:
-    path ref_fa
-    path ref_fa_fai
-    path aln
-    path aln_index
-    path regions_txt
+    tuple val(participant_id), path(ref_fa), path(ref_fa_fai), path(aln), path(aln_index), path(regions_txt)
 
   output:
-    path "calls.vcf.gz"
-    path "calls.vcf.gz.csi"
+    tuple val(participant_id), path("calls.vcf.gz"), path("calls.vcf.gz.csi")
 
   shell:
   '''
@@ -141,15 +190,15 @@ process call_sites {
 
   # Ensure indexes are where htslib expects them
   # FASTA index
-  if [ ! -e "!{ref_fa}.fai" ]; then
-    ln -sf "!{ref_fa_fai}" "!{ref_fa}.fai"
+  if [ ! -e "!{ref_fa}.fai" ] && [ "!{ref_fa_fai}" != "!{ref_fa}.fai" ]; then
+    cp -f "!{ref_fa_fai}" "!{ref_fa}.fai"
   fi
 
   # Alignment index (.crai for CRAM or .bai for BAM)
   if [ ! -e "!{aln}.crai" ] && [ ! -e "!{aln}.bai" ]; then
     case "!{aln_index}" in
-      *.crai) ln -sf "!{aln_index}" "!{aln}.crai" ;;
-      *.bai)  ln -sf "!{aln_index}" "!{aln}.bai"  ;;
+      *.crai) if [ "!{aln_index}" != "!{aln}.crai" ]; then cp -f "!{aln_index}" "!{aln}.crai"; fi ;;
+      *.bai)  if [ "!{aln_index}" != "!{aln}.bai" ]; then cp -f "!{aln_index}" "!{aln}.bai"; fi ;;
       *) echo "ERROR: Unknown alignment index extension: !{aln_index}" >&2; exit 1 ;;
     esac
   fi
@@ -181,10 +230,10 @@ process query_to_table {
   errorStrategy 'terminate'
 
   input:
-    path vcf_gz
+    tuple val(participant_id), path(vcf_gz), path(vcf_index)
 
   output:
-    path "variants.tsv"
+    tuple val(participant_id), path("variants.tsv")
 
   shell:
   '''
@@ -202,14 +251,11 @@ process query_to_table {
 process interpret_haplogroup {
   container params.python_container
   errorStrategy 'terminate'
+  publishDir params.results_dir, mode: 'copy'
 
   input:
-    val participant_id_ch
-    val  ref_version
-    path panel_tsv
-    path variants_tsv
     path assets_dir
-    val  results_dir
+    tuple val(participant_id), path(panel_tsv), path(variants_tsv), val(ref_version)
 
   output:
     path "report.txt"
@@ -223,16 +269,13 @@ process interpret_haplogroup {
   python3 "!{assets_dir}/interpret_y_haplogroup.py" \
     --panel "!{panel_tsv}" \
     --variants "!{variants_tsv}" \
-    --participant "!{participant_id_ch}" \
+    --participant "!{participant_id}" \
     --ref-version "!{ref_version}" \
     --out-report "report.txt" \
     --out-variants "calls.tsv"
 
-  # Pretty names in results_dir
-  mkdir -p "!{results_dir}"
-  cp report.txt "!{results_dir}/!{participant_id_ch}.y_haplogroup.report.txt"
-  cp calls.tsv  "!{results_dir}/!{participant_id_ch}.y_haplogroup.calls.tsv"
-
-  printf "Y haplogroup summary written: %s\n" "!{results_dir}/!{participant_id_ch}.y_haplogroup.report.txt"
+  # Pretty names (published by Nextflow)
+  cp report.txt "!{participant_id}.y_haplogroup.report.txt"
+  cp calls.tsv  "!{participant_id}.y_haplogroup.calls.tsv"
   '''
 }

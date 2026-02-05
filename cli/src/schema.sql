@@ -57,8 +57,6 @@ CREATE TABLE IF NOT EXISTS files (
     file_type TEXT,
     file_size INTEGER,
     data_type TEXT DEFAULT 'Unknown',
-    source TEXT,
-    grch_version TEXT,
     metadata TEXT,
     status TEXT DEFAULT 'complete',
     processing_error TEXT,
@@ -126,6 +124,52 @@ CREATE TABLE IF NOT EXISTS genotype_metadata (
 );
 
 CREATE INDEX IF NOT EXISTS idx_genotype_file_id ON genotype_metadata(file_id);
+
+-- NEW: Variant Metadata (for files where data_type = 'Variants')
+CREATE TABLE IF NOT EXISTS variant_metadata (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    file_id INTEGER UNIQUE NOT NULL,
+    source TEXT,
+    grch_version TEXT,
+    format TEXT,
+    reference_file_id INTEGER,
+    reference_index_file_id INTEGER,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (file_id) REFERENCES files(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_variant_file_id ON variant_metadata(file_id);
+
+-- NEW: Aligned Metadata (for files where data_type = 'Aligned')
+CREATE TABLE IF NOT EXISTS aligned_metadata (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    file_id INTEGER UNIQUE NOT NULL,
+    source TEXT,
+    grch_version TEXT,
+    format TEXT,
+    reference_file_id INTEGER,
+    reference_index_file_id INTEGER,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (file_id) REFERENCES files(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_aligned_file_id ON aligned_metadata(file_id);
+
+-- NEW: Reference Metadata (for files where data_type = 'Reference')
+CREATE TABLE IF NOT EXISTS reference_metadata (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    file_id INTEGER UNIQUE NOT NULL,
+    source TEXT,
+    grch_version TEXT,
+    format TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (file_id) REFERENCES files(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_reference_file_id ON reference_metadata(file_id);
 
 -- Add columns to existing files table if they don't exist (migration)
 -- SQLite doesn't have IF NOT EXISTS for ALTER TABLE, so we check first

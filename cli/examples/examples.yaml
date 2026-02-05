@@ -1,33 +1,4 @@
 examples:
-  haplo-y:
-    name: "Haplogroup Y Analysis"
-    description: "Analyze Y chromosome haplogroups"
-    template: default
-    files:
-      - module.yaml
-      - workflow.nf
-      - assets/interpret_y_haplogroup.py
-      - assets/y_haplogroup_panel.GRCh37.tsv
-      - assets/y_haplogroup_panel.GRCh38.tsv
-
-  eye-color:
-    name: "Eye Color Prediction"
-    description: "Predict eye color from genetic markers"
-    template: default
-    files:
-      - module.yaml
-      - workflow.nf
-      - assets/eye_color.py
-
-  red-hair:
-    name: "Red Hair Prediction"
-    description: "Predict red hair trait from MC1R gene variants"
-    template: default
-    files:
-      - module.yaml
-      - workflow.nf
-      - assets/red_hair.py
-
   count-snps:
     name: "Count SNPs"
     description: "Count the number of SNPs in genomic data"

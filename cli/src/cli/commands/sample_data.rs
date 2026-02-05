@@ -127,6 +127,17 @@ pub async fn fetch(
     all: bool,
     quiet: bool,
 ) -> anyhow::Result<()> {
+    fetch_with_progress(participant_ids, all, quiet, None).await
+}
+
+pub type ProgressReporter = std::sync::Arc<dyn Fn(String, u64, u64) + Send + Sync>;
+
+pub async fn fetch_with_progress(
+    participant_ids: Option<Vec<String>>,
+    all: bool,
+    quiet: bool,
+    progress: Option<ProgressReporter>,
+) -> anyhow::Result<()> {
     let config: SampleDataConfig = serde_yaml::from_str(SAMPLE_DATA_YAML)
         .context("Failed to parse embedded sample data configuration")?;
 
@@ -216,6 +227,13 @@ pub async fn fetch(
                     DownloadOptions::default()
                 };
                 options.show_progress = !quiet;
+                if let Some(cb) = progress.clone() {
+                    let label = description.clone();
+                    options.progress_callback =
+                        Some(std::sync::Arc::new(move |downloaded, total| {
+                            cb(label.clone(), downloaded, total);
+                        }));
+                }
 
                 // Download to a temporary location (will be cached)
                 let temp_filename = target_path
@@ -302,18 +320,25 @@ pub async fn fetch(
                         fs::remove_file(target_path).ok();
                     }
 
-                    // Create symlink to cache
-                    #[cfg(unix)]
-                    {
-                        std::os::unix::fs::symlink(&cache_path, target_path).with_context(
-                            || format!("Failed to create symlink for {}", description),
-                        )?;
-                    }
-                    #[cfg(windows)]
-                    {
-                        std::os::windows::fs::symlink_file(&cache_path, target_path).with_context(
-                            || format!("Failed to create symlink for {}", description),
-                        )?;
+                    // Create symlink to cache (fall back to copy if symlink fails)
+                    let link_result = {
+                        #[cfg(unix)]
+                        {
+                            std::os::unix::fs::symlink(&cache_path, target_path).map_err(|e| e)
+                        }
+                        #[cfg(windows)]
+                        {
+                            std::os::windows::fs::symlink_file(&cache_path, target_path)
+                                .map_err(|e| e)
+                        }
+                    };
+                    if let Err(err) = link_result {
+                        fs::copy(&cache_path, target_path).with_context(|| {
+                            format!(
+                                "Failed to create symlink for {} ({}); copy also failed",
+                                description, err
+                            )
+                        })?;
                     }
 
                     if !quiet {
@@ -488,6 +513,12 @@ pub async fn fetch(
                 DownloadOptions::default()
             };
             options.show_progress = !quiet;
+            if let Some(cb) = progress.clone() {
+                let label = description.clone();
+                options.progress_callback = Some(std::sync::Arc::new(move |downloaded, total| {
+                    cb(label.clone(), downloaded, total);
+                }));
+            }
 
             // Download to a temporary location (will be cached)
             let temp_filename = target_path
@@ -513,16 +544,25 @@ pub async fn fetch(
                     fs::remove_file(target_path).ok();
                 }
 
-                // Create symlink to cache
-                #[cfg(unix)]
-                {
-                    std::os::unix::fs::symlink(&cache_path, target_path)
-                        .with_context(|| format!("Failed to create symlink for {}", description))?;
-                }
-                #[cfg(windows)]
-                {
-                    std::os::windows::fs::symlink_file(&cache_path, target_path)
-                        .with_context(|| format!("Failed to create symlink for {}", description))?;
+                // Create symlink to cache (fall back to copy if symlink fails)
+                let link_result = {
+                    #[cfg(unix)]
+                    {
+                        std::os::unix::fs::symlink(&cache_path, target_path).map_err(|e| e)
+                    }
+                    #[cfg(windows)]
+                    {
+                        std::os::windows::fs::symlink_file(&cache_path, target_path)
+                            .map_err(|e| e)
+                    }
+                };
+                if let Err(err) = link_result {
+                    fs::copy(&cache_path, target_path).with_context(|| {
+                        format!(
+                            "Failed to create symlink for {} ({}); copy also failed",
+                            description, err
+                        )
+                    })?;
                 }
 
                 if !quiet {

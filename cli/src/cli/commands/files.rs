@@ -1158,6 +1158,8 @@ pub async fn import_csv(
                     .as_ref()
                     .filter(|s| !s.trim().is_empty())
                     .cloned(),
+                reference_path: None,
+                reference_index_path: None,
                 row_count: r.row_count,
                 chromosome_count: r.chromosome_count,
                 inferred_sex: r
@@ -1335,6 +1337,8 @@ pub async fn import_pending(csv_path: String, format: String) -> Result<()> {
                     .as_ref()
                     .filter(|s| !s.trim().is_empty())
                     .cloned(),
+                reference_path: None,
+                reference_index_path: None,
                 row_count: None,
                 chromosome_count: None,
                 inferred_sex: None,
