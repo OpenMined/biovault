@@ -1808,10 +1808,10 @@ pub async fn execute_dynamic(
         // For Hyper-V mode, paths will be in the VM temp directory
         let (
             docker_biovault_home,
-            mut docker_project_path,
-            mut docker_template,
-            mut docker_workflow,
-            mut docker_project_spec,
+            docker_project_path,
+            docker_template,
+            docker_workflow,
+            docker_project_spec,
             docker_results,
             docker_log_path,
         ) = if let Some(ref vm_dir) = vm_temp_dir {
