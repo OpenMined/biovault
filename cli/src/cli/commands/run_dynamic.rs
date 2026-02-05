@@ -1806,6 +1806,7 @@ pub async fn execute_dynamic(
 
         // Convert all paths to container-compatible format
         // For Hyper-V mode, paths will be in the VM temp directory
+        #[allow(unused_mut)] // mut needed on Windows for Hyper-V flat staging reassignment
         let (
             docker_biovault_home,
             mut docker_project_path,
