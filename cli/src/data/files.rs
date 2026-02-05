@@ -91,6 +91,7 @@ fn normalize_data_type(value: &str) -> String {
         "alignedindex" | "aligned_index" => "AlignedIndex".to_string(),
         "reference" => "Reference".to_string(),
         "referenceindex" | "reference_index" => "ReferenceIndex".to_string(),
+        "variantdatabase" | "variant_database" | "database" => "VariantDatabase".to_string(),
         _ => trimmed.to_string(),
     }
 }
@@ -200,6 +201,81 @@ fn upsert_reference_metadata(
            updated_at = CURRENT_TIMESTAMP",
         rusqlite::params![file_id, source, grch_version, format],
     )?;
+    Ok(())
+}
+
+fn upsert_database_metadata(
+    db: &BioVaultDb,
+    file_id: i64,
+    source: Option<&str>,
+    grch_version: Option<&str>,
+    format: Option<&str>,
+    version: Option<&str>,
+    index_file_id: Option<i64>,
+) -> Result<()> {
+    let conn = db.connection();
+    conn.execute(
+        "INSERT INTO database_metadata (file_id, source, grch_version, format, version, index_file_id, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+         ON CONFLICT(file_id) DO UPDATE SET
+           source = excluded.source,
+           grch_version = excluded.grch_version,
+           format = excluded.format,
+           version = excluded.version,
+           index_file_id = excluded.index_file_id,
+           updated_at = CURRENT_TIMESTAMP",
+        rusqlite::params![file_id, source, grch_version, format, version, index_file_id],
+    )?;
+    Ok(())
+}
+
+/// Get the reference file IDs associated with an aligned file
+pub fn get_file_reference(
+    db: &BioVaultDb,
+    file_id: i64,
+) -> Result<(Option<i64>, Option<i64>)> {
+    let conn = db.connection();
+    let result = conn.query_row(
+        "SELECT reference_file_id, reference_index_file_id FROM aligned_metadata WHERE file_id = ?1",
+        rusqlite::params![file_id],
+        |row| Ok((row.get::<_, Option<i64>>(0)?, row.get::<_, Option<i64>>(1)?)),
+    );
+    match result {
+        Ok(ids) => Ok(ids),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok((None, None)),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Update the reference file association for an aligned file
+pub fn update_file_reference(
+    db: &BioVaultDb,
+    file_id: i64,
+    reference_file_id: Option<i64>,
+    reference_index_file_id: Option<i64>,
+) -> Result<()> {
+    let conn = db.connection();
+
+    // Check if aligned_metadata exists for this file
+    let exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM aligned_metadata WHERE file_id = ?1)",
+        rusqlite::params![file_id],
+        |row| row.get(0),
+    )?;
+
+    if exists {
+        // Update existing record
+        conn.execute(
+            "UPDATE aligned_metadata SET reference_file_id = ?1, reference_index_file_id = ?2, updated_at = CURRENT_TIMESTAMP WHERE file_id = ?3",
+            rusqlite::params![reference_file_id, reference_index_file_id, file_id],
+        )?;
+    } else {
+        // Insert new record with just the reference info
+        conn.execute(
+            "INSERT INTO aligned_metadata (file_id, reference_file_id, reference_index_file_id, created_at, updated_at) VALUES (?1, ?2, ?3, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+            rusqlite::params![file_id, reference_file_id, reference_index_file_id],
+        )?;
+    }
     Ok(())
 }
 
@@ -602,6 +678,19 @@ fn import_file_with_metadata(
             )?;
         } else if normalized_type == "Reference" || normalized_type == "ReferenceIndex" {
             upsert_reference_metadata(db, file_id, source, grch_version, format.as_deref())?;
+        } else if normalized_type == "VariantDatabase" {
+            // For databases, try to find the index file (.tbi)
+            let index_path = format!("{}.tbi", csv_row.file_path);
+            let index_file_id = lookup_file_id_by_path(db, Some(&index_path));
+            upsert_database_metadata(
+                db,
+                file_id,
+                source,
+                grch_version,
+                format.as_deref(),
+                None, // version - could be extracted from header in future
+                index_file_id,
+            )?;
         }
     }
 
@@ -2208,6 +2297,26 @@ pub fn import_files_as_pending(db: &BioVaultDb, files: Vec<CsvFileImport>) -> Re
                     ) {
                         errors.push(format!(
                             "Failed to create metadata for {}: {}",
+                            file_info.file_path, e
+                        ));
+                    }
+                } else if data_type == "VariantDatabase" {
+                    // For databases, try to find the index file
+                    let index_file_id = {
+                        let index_path = format!("{}.tbi", file_info.file_path);
+                        lookup_file_id_by_path(db, Some(&index_path))
+                    };
+                    if let Err(e) = upsert_database_metadata(
+                        db,
+                        file_id,
+                        source,
+                        grch_version,
+                        format.as_deref(),
+                        None,
+                        index_file_id,
+                    ) {
+                        errors.push(format!(
+                            "Failed to create database metadata for {}: {}",
                             file_info.file_path, e
                         ));
                     }
