@@ -475,14 +475,21 @@ pub async fn fetch_with_progress(
                     .with_context(|| format!("Failed to download {}", description))?;
 
                 if !quiet {
-                    println!("    ✓ Downloaded {}", target_path.file_name().unwrap().to_string_lossy());
+                    println!(
+                        "    ✓ Downloaded {}",
+                        target_path.file_name().unwrap().to_string_lossy()
+                    );
                 }
             }
 
             // Note: Databases are stored in a separate directory and don't go into participants.yaml
             // They're tracked separately in the databases table
             if !quiet {
-                println!("  ✓ Database {} ready at {}", participant_id, databases_dir.display());
+                println!(
+                    "  ✓ Database {} ready at {}",
+                    participant_id,
+                    databases_dir.display()
+                );
             }
 
             continue; // Skip the rest of the CRAM processing
@@ -1018,6 +1025,12 @@ mod tests {
                 snp: None,
                 snp_b3sum: None,
                 snp_post_process: None,
+                data_type: None,
+                database: None,
+                database_index: None,
+                database_b3sum: None,
+                database_index_b3sum: None,
+                grch_version: None,
             },
         );
         let cfg = SampleDataConfig {
@@ -1118,6 +1131,12 @@ mod tests {
             snp: None,
             snp_b3sum: None,
             snp_post_process: None,
+            data_type: None,
+            database: None,
+            database_index: None,
+            database_b3sum: None,
+            database_index_b3sum: None,
+            grch_version: None,
         };
         let cloned = pd.clone();
         assert_eq!(cloned.ref_version, Some("GRCh38".to_string()));
@@ -1255,6 +1274,12 @@ rename: "renamed"
             snp: None,
             snp_b3sum: None,
             snp_post_process: None,
+            data_type: None,
+            database: None,
+            database_index: None,
+            database_b3sum: None,
+            database_index_b3sum: None,
+            grch_version: None,
         };
         let yaml = serde_yaml::to_string(&pd).unwrap();
         assert!(yaml.contains("GRCh38"));
@@ -1281,6 +1306,12 @@ rename: "renamed"
                 extract: None,
                 rename: None,
             }),
+            data_type: None,
+            database: None,
+            database_index: None,
+            database_b3sum: None,
+            database_index_b3sum: None,
+            grch_version: None,
         };
         let yaml = serde_yaml::to_string(&pd).unwrap();
         assert!(yaml.contains("snp.vcf.gz"));
@@ -1384,6 +1415,12 @@ participant:
                 snp: None,
                 snp_b3sum: None,
                 snp_post_process: None,
+                data_type: None,
+                database: None,
+                database_index: None,
+                database_b3sum: None,
+                database_index_b3sum: None,
+                grch_version: None,
             },
         );
         map.insert(
@@ -1401,6 +1438,12 @@ participant:
                 snp: None,
                 snp_b3sum: None,
                 snp_post_process: None,
+                data_type: None,
+                database: None,
+                database_index: None,
+                database_b3sum: None,
+                database_index_b3sum: None,
+                grch_version: None,
             },
         );
         let cfg = SampleDataConfig {
@@ -1432,6 +1475,12 @@ participant:
                 snp: None,
                 snp_b3sum: None,
                 snp_post_process: None,
+                data_type: None,
+                database: None,
+                database_index: None,
+                database_b3sum: None,
+                database_index_b3sum: None,
+                grch_version: None,
             },
         );
         map.insert(
@@ -1449,6 +1498,12 @@ participant:
                 snp: None,
                 snp_b3sum: None,
                 snp_post_process: None,
+                data_type: None,
+                database: None,
+                database_index: None,
+                database_b3sum: None,
+                database_index_b3sum: None,
+                grch_version: None,
             },
         );
         map.insert(
@@ -1466,6 +1521,12 @@ participant:
                 snp: None,
                 snp_b3sum: None,
                 snp_post_process: None,
+                data_type: None,
+                database: None,
+                database_index: None,
+                database_b3sum: None,
+                database_index_b3sum: None,
+                grch_version: None,
             },
         );
         let cfg = SampleDataConfig {
@@ -1535,6 +1596,12 @@ participant:
             snp: None,
             snp_b3sum: None,
             snp_post_process: None,
+            data_type: None,
+            database: None,
+            database_index: None,
+            database_b3sum: None,
+            database_index_b3sum: None,
+            grch_version: None,
         };
         let debug_str = format!("{:?}", pd);
         assert!(debug_str.contains("ParticipantData"));

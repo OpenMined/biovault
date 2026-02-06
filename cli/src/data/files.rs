@@ -230,10 +230,7 @@ fn upsert_database_metadata(
 }
 
 /// Get the reference file IDs associated with an aligned file
-pub fn get_file_reference(
-    db: &BioVaultDb,
-    file_id: i64,
-) -> Result<(Option<i64>, Option<i64>)> {
+pub fn get_file_reference(db: &BioVaultDb, file_id: i64) -> Result<(Option<i64>, Option<i64>)> {
     let conn = db.connection();
     let result = conn.query_row(
         "SELECT reference_file_id, reference_index_file_id FROM aligned_metadata WHERE file_id = ?1",
