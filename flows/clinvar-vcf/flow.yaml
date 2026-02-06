@@ -1,0 +1,26 @@
+apiVersion: syftbox.openmined.org/v1alpha1
+kind: Flow
+metadata:
+  name: clinvar-vcf
+  version: 0.1.0
+spec:
+  inputs:
+    samplesheet:
+      type: "List[Record{participant_id: String, vcf_file: File, vcf_index: File?}]"
+    clinvar_vcf:
+      type: File
+    clinvar_index:
+      type: File
+  steps:
+    - id: clinvar_vcf
+      uses:
+        source:
+          kind: local
+          path: ./
+      with:
+        participants: inputs.samplesheet
+        clinvar_vcf: inputs.clinvar_vcf
+        clinvar_index: inputs.clinvar_index
+      publish:
+        clinvar_report: File(clinvar_report.tsv)
+        matched_vcf: File(clinvar_matched.vcf.gz)

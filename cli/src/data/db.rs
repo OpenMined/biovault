@@ -593,6 +593,32 @@ impl BioVaultDb {
             [],
         )?;
 
+        // Create database_metadata table if it doesn't exist (for VariantDatabase files)
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS database_metadata (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                file_id INTEGER UNIQUE NOT NULL,
+                source TEXT,
+                grch_version TEXT,
+                format TEXT,
+                version TEXT,
+                index_file_id INTEGER,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (file_id) REFERENCES files(id) ON DELETE CASCADE,
+                FOREIGN KEY (index_file_id) REFERENCES files(id) ON DELETE SET NULL
+            )",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_database_file_id ON database_metadata(file_id)",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_database_source ON database_metadata(source)",
+            [],
+        )?;
+
         // Add inferred_sex column to genotype_metadata if it doesn't exist
         let inferred_sex_exists = conn
             .query_row(

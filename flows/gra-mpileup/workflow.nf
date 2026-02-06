@@ -79,8 +79,9 @@ process detect_region {
   BASE_REGION="!{base_region}"
   CHR="${BASE_REGION%%:*}"
 
-  # Check if CRAM uses "chr8" or "8" by inspecting header
-  if samtools view -H "!{aligned}" | head -n 100 \
+  # Check CRAM/BAM header for chromosome naming convention
+  # The aligned file's contigs determine what region format to use
+  if samtools view -H "!{aligned}" 2>/dev/null | head -n 100 \
     | awk -F'\\t' '$1=="@SQ"{for(i=1;i<=NF;i++){if($i ~ /^SN:/){sub(/^SN:/,"",$i); print $i}}}' \
     | awk -v want="chr${CHR}" 'BEGIN{ok=0} $0==want{ok=1} END{exit !ok}'
   then
@@ -88,13 +89,16 @@ process detect_region {
     exit 0
   fi
 
-  # Fallback: check FASTA index
-  if awk -v want="chr${CHR}" 'BEGIN{ok=0} $1==want{ok=1} END{exit !ok}' "!{ref_index}"; then
-    echo "chr${BASE_REGION}"
+  # Check if CRAM has the chromosome without prefix
+  if samtools view -H "!{aligned}" 2>/dev/null | head -n 100 \
+    | awk -F'\\t' '$1=="@SQ"{for(i=1;i<=NF;i++){if($i ~ /^SN:/){sub(/^SN:/,"",$i); print $i}}}' \
+    | awk -v want="${CHR}" 'BEGIN{ok=0} $0==want{ok=1} END{exit !ok}'
+  then
+    echo "${BASE_REGION}"
     exit 0
   fi
 
-  # Default: no prefix
+  # Default: no prefix (base region already has no prefix)
   echo "${BASE_REGION}"
   '''
 }
@@ -115,7 +119,8 @@ process compute_depth {
   set -euo pipefail
 
   # Compute read depth for the CYP11B1/B2 region
-  samtools depth -r "!{region}" "!{aligned}" > depth.txt
+  # Use --reference for CRAM files to ensure proper decoding
+  samtools depth --reference "!{ref}" -r "!{region}" "!{aligned}" > depth.txt
 
   # Check if we got any data
   if [ ! -s depth.txt ]; then
@@ -158,6 +163,7 @@ process plot_depth {
   tuple val(participant_id), val(region), path(depth_txt)
 
   output:
+  path "depth_plot.pdf"
   path "depth_plot.png"
   path "depth.txt"
   tuple val(participant_id), stdout, emit: msg
@@ -176,7 +182,8 @@ process plot_depth {
 
   python3 !{assets_dir}/plot_depth.py \
     --input "!{depth_txt}" \
-    --output "depth_plot.png" \
+    --output-pdf "depth_plot.pdf" \
+    --output-png "depth_plot.png" \
     --region "!{region}" \
     --participant "!{participant_id}"
 

@@ -76,6 +76,8 @@ struct PostProcess {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct ParticipantData {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    data_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     ref_version: Option<String>,
     #[serde(rename = "ref", default, skip_serializing_if = "Option::is_none")]
     ref_url: Option<String>,
@@ -99,6 +101,17 @@ struct ParticipantData {
     snp_b3sum: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     snp_post_process: Option<PostProcess>,
+    // Variant database fields (ClinVar, dbSNP, etc.)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    database: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    database_index: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    database_b3sum: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    database_index_b3sum: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    grch_version: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -384,6 +397,99 @@ pub async fn fetch_with_progress(
             save_participants_file(&participants_file_path, &participants_file)?;
             if !quiet {
                 println!("  ✓ Updated participants.yaml");
+            }
+
+            continue; // Skip the rest of the CRAM processing
+        }
+
+        // Check if this is a variant database (ClinVar, dbSNP, etc.)
+        if let Some(database_url) = &participant_data.database {
+            let database_filename = extract_filename_from_url(database_url)?;
+            let database_checksum = participant_data
+                .database_b3sum
+                .as_ref()
+                .unwrap_or(&String::new())
+                .clone();
+
+            // Create databases directory
+            let databases_dir = sample_data_dir.join("databases");
+            fs::create_dir_all(&databases_dir).context("Failed to create databases directory")?;
+
+            let mut downloads = vec![(
+                database_url.clone(),
+                databases_dir.join(&database_filename),
+                "Variant database".to_string(),
+                database_checksum,
+            )];
+
+            // Add index file if present
+            if let Some(index_url) = &participant_data.database_index {
+                let index_filename = extract_filename_from_url(index_url)?;
+                let index_checksum = participant_data
+                    .database_index_b3sum
+                    .as_ref()
+                    .unwrap_or(&String::new())
+                    .clone();
+                downloads.push((
+                    index_url.clone(),
+                    databases_dir.join(&index_filename),
+                    "Database index".to_string(),
+                    index_checksum,
+                ));
+            }
+
+            for (url, target_path, description, expected_b3sum) in &downloads {
+                if !quiet {
+                    println!(
+                        "\n  Processing {}: {}",
+                        description,
+                        target_path.file_name().unwrap().to_string_lossy()
+                    );
+                }
+
+                // No checksum requirement for databases (they update frequently)
+                let mut options = if !expected_b3sum.is_empty() {
+                    DownloadOptions {
+                        checksum_policy: ChecksumPolicy {
+                            policy_type: ChecksumPolicyType::Required,
+                            expected_hash: Some(expected_b3sum.to_string()),
+                        },
+                        ..Default::default()
+                    }
+                } else {
+                    DownloadOptions::default()
+                };
+                options.show_progress = !quiet;
+                if let Some(cb) = progress.clone() {
+                    let label = description.clone();
+                    options.progress_callback =
+                        Some(std::sync::Arc::new(move |downloaded, total| {
+                            cb(label.clone(), downloaded, total);
+                        }));
+                }
+
+                // Download directly to target (no caching for frequently updated files)
+                download_cache
+                    .download_with_cache(url, target_path, options)
+                    .await
+                    .with_context(|| format!("Failed to download {}", description))?;
+
+                if !quiet {
+                    println!(
+                        "    ✓ Downloaded {}",
+                        target_path.file_name().unwrap().to_string_lossy()
+                    );
+                }
+            }
+
+            // Note: Databases are stored in a separate directory and don't go into participants.yaml
+            // They're tracked separately in the databases table
+            if !quiet {
+                println!(
+                    "  ✓ Database {} ready at {}",
+                    participant_id,
+                    databases_dir.display()
+                );
             }
 
             continue; // Skip the rest of the CRAM processing
@@ -809,8 +915,17 @@ pub async fn list() -> anyhow::Result<()> {
     for (participant_id, data) in &config.sample_data_urls {
         println!("\nParticipant ID: {}", participant_id);
 
-        // Check if this is SNP data or CRAM data
-        if let Some(snp_url) = &data.snp {
+        // Check data type
+        if let Some(database_url) = &data.database {
+            println!("  Type: VariantDatabase");
+            if let Some(grch) = &data.grch_version {
+                println!("  grch_version: {}", grch);
+            }
+            println!("  database: {}", database_url);
+            if let Some(db_index) = &data.database_index {
+                println!("  database_index: {}", db_index);
+            }
+        } else if let Some(snp_url) = &data.snp {
             println!("  Type: SNP");
             println!("  snp: {}", snp_url);
             if let Some(snp_b3sum) = &data.snp_b3sum {
@@ -910,6 +1025,12 @@ mod tests {
                 snp: None,
                 snp_b3sum: None,
                 snp_post_process: None,
+                data_type: None,
+                database: None,
+                database_index: None,
+                database_b3sum: None,
+                database_index_b3sum: None,
+                grch_version: None,
             },
         );
         let cfg = SampleDataConfig {
@@ -1010,6 +1131,12 @@ mod tests {
             snp: None,
             snp_b3sum: None,
             snp_post_process: None,
+            data_type: None,
+            database: None,
+            database_index: None,
+            database_b3sum: None,
+            database_index_b3sum: None,
+            grch_version: None,
         };
         let cloned = pd.clone();
         assert_eq!(cloned.ref_version, Some("GRCh38".to_string()));
@@ -1147,6 +1274,12 @@ rename: "renamed"
             snp: None,
             snp_b3sum: None,
             snp_post_process: None,
+            data_type: None,
+            database: None,
+            database_index: None,
+            database_b3sum: None,
+            database_index_b3sum: None,
+            grch_version: None,
         };
         let yaml = serde_yaml::to_string(&pd).unwrap();
         assert!(yaml.contains("GRCh38"));
@@ -1173,6 +1306,12 @@ rename: "renamed"
                 extract: None,
                 rename: None,
             }),
+            data_type: None,
+            database: None,
+            database_index: None,
+            database_b3sum: None,
+            database_index_b3sum: None,
+            grch_version: None,
         };
         let yaml = serde_yaml::to_string(&pd).unwrap();
         assert!(yaml.contains("snp.vcf.gz"));
@@ -1276,6 +1415,12 @@ participant:
                 snp: None,
                 snp_b3sum: None,
                 snp_post_process: None,
+                data_type: None,
+                database: None,
+                database_index: None,
+                database_b3sum: None,
+                database_index_b3sum: None,
+                grch_version: None,
             },
         );
         map.insert(
@@ -1293,6 +1438,12 @@ participant:
                 snp: None,
                 snp_b3sum: None,
                 snp_post_process: None,
+                data_type: None,
+                database: None,
+                database_index: None,
+                database_b3sum: None,
+                database_index_b3sum: None,
+                grch_version: None,
             },
         );
         let cfg = SampleDataConfig {
@@ -1324,6 +1475,12 @@ participant:
                 snp: None,
                 snp_b3sum: None,
                 snp_post_process: None,
+                data_type: None,
+                database: None,
+                database_index: None,
+                database_b3sum: None,
+                database_index_b3sum: None,
+                grch_version: None,
             },
         );
         map.insert(
@@ -1341,6 +1498,12 @@ participant:
                 snp: None,
                 snp_b3sum: None,
                 snp_post_process: None,
+                data_type: None,
+                database: None,
+                database_index: None,
+                database_b3sum: None,
+                database_index_b3sum: None,
+                grch_version: None,
             },
         );
         map.insert(
@@ -1358,6 +1521,12 @@ participant:
                 snp: None,
                 snp_b3sum: None,
                 snp_post_process: None,
+                data_type: None,
+                database: None,
+                database_index: None,
+                database_b3sum: None,
+                database_index_b3sum: None,
+                grch_version: None,
             },
         );
         let cfg = SampleDataConfig {
@@ -1427,6 +1596,12 @@ participant:
             snp: None,
             snp_b3sum: None,
             snp_post_process: None,
+            data_type: None,
+            database: None,
+            database_index: None,
+            database_b3sum: None,
+            database_index_b3sum: None,
+            grch_version: None,
         };
         let debug_str = format!("{:?}", pd);
         assert!(debug_str.contains("ParticipantData"));

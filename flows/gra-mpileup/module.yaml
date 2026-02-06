@@ -27,7 +27,13 @@ spec:
           reference_index: reference_index
           ref_version: ref_version
   outputs:
-    - name: depth_plot
+    - name: depth_plot_pdf
+      type: File
+      description: Coverage depth plot (PDF, publication quality)
+      format:
+        kind: pdf
+      path: depth_plot.pdf
+    - name: depth_plot_png
       type: File
       description: Coverage depth plot (PNG)
       format:
