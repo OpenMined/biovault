@@ -40,7 +40,7 @@ spec:
     - id: contributor2
       description: Second data contributor
     - id: aggregator
-      description: Aggregates contributions and shares results
+      description: Aggregates contributions and publishes final result
 
   modules:
     generate_numbers:
@@ -78,14 +78,6 @@ spec:
       run:
         targets: contributors
         strategy: parallel
-
-    - id: share_contribution
-      name: Share Contribution
-      description: Contributors share their numbers to the aggregator
-      run:
-        targets: contributors
-        strategy: parallel
-      depends_on: [generate]
       share:
         numbers_shared:
           source: step.generate.outputs.numbers
@@ -99,7 +91,7 @@ spec:
       name: Wait for Contributions
       description: Wait for all contributors to share their numbers
       barrier:
-        wait_for: share_contribution
+        wait_for: generate
         targets: contributors
         timeout: 300
 
@@ -111,14 +103,7 @@ spec:
         targets: aggregator
       depends_on: [contributions_ready]
       with:
-        contributions_manifest: step.share_contribution.share.numbers_shared.url_list
-
-    - id: share_result
-      name: Share Results
-      description: Aggregator shares final result with all participants
-      run:
-        targets: aggregator
-      depends_on: [aggregate]
+        contributions_manifest: step.generate.share.numbers_shared.url_list
       share:
         result_shared:
           source: step.aggregate.outputs.result
