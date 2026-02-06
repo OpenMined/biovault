@@ -171,6 +171,25 @@ CREATE TABLE IF NOT EXISTS reference_metadata (
 
 CREATE INDEX IF NOT EXISTS idx_reference_file_id ON reference_metadata(file_id);
 
+-- NEW: Database Metadata (for files where data_type = 'VariantDatabase')
+-- Used for variant annotation databases like ClinVar, dbSNP, gnomAD, etc.
+CREATE TABLE IF NOT EXISTS database_metadata (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    file_id INTEGER UNIQUE NOT NULL,
+    source TEXT,                          -- Source name (e.g., "ClinVar", "dbSNP", "gnomAD")
+    grch_version TEXT,                    -- Reference genome version (e.g., "GRCh38", "GRCh37")
+    format TEXT,                          -- File format (e.g., "vcf.gz")
+    version TEXT,                         -- Database version/release date
+    index_file_id INTEGER,                -- Associated index file (.tbi)
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (file_id) REFERENCES files(id) ON DELETE CASCADE,
+    FOREIGN KEY (index_file_id) REFERENCES files(id) ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_database_file_id ON database_metadata(file_id);
+CREATE INDEX IF NOT EXISTS idx_database_source ON database_metadata(source);
+
 -- Add columns to existing files table if they don't exist (migration)
 -- SQLite doesn't have IF NOT EXISTS for ALTER TABLE, so we check first
 -- This is handled by separate migration code if needed

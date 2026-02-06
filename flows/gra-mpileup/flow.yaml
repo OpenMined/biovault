@@ -16,6 +16,7 @@ spec:
       with:
         participants: inputs.samplesheet
       publish:
-        depth_plot: File(depth_plot.png)
+        depth_plot_pdf: File(depth_plot.pdf)
+        depth_plot_png: File(depth_plot.png)
         depth_data: File(depth.txt)
         region_bam: File(cyp11b_region.bam)
