@@ -71,10 +71,6 @@ fn mpc_comm_port_with_base(
     base + offset_major + offset_minor
 }
 
-fn mpc_comm_port(local_pid: usize, remote_pid: usize, parties: usize) -> usize {
-    mpc_comm_port_with_base(SEQURE_COMMUNICATION_PORT, local_pid, remote_pid, parties)
-}
-
 fn ensure_flow_subscription(
     data_root: &Path,
     datasite: &str,
@@ -816,6 +812,20 @@ pub async fn run_flow(
     if let Some(ref mpc) = spec.mpc {
         let all_datasites = resolve_all_datasites_from_spec(&spec, &resolved_inputs);
         let party_count = all_datasites.len();
+        let tcp_proxy_enabled = env::var("BV_SYQURE_TCP_PROXY")
+            .map(|v| {
+                let t = v.trim().to_ascii_lowercase();
+                t == "1" || t == "true" || t == "yes" || t == "on"
+            })
+            .unwrap_or(false);
+        let syqure_port_base = if tcp_proxy_enabled {
+            Some(run_dynamic::prepare_syqure_port_base_for_run(
+                &run_id,
+                party_count,
+            )?)
+        } else {
+            None
+        };
 
         println!(
             "\n🔐 Setting up MPC channels (topology: {}, {} parties)",
@@ -901,7 +911,7 @@ pub async fn run_flow(
                     &run_id,
                 )?;
 
-                if env::var("BV_SYQURE_TCP_PROXY").ok().as_deref() == Some("1") {
+                if tcp_proxy_enabled {
                     let parsed = SyftURL::parse(&channel_url_clone).with_context(|| {
                         format!("Invalid MPC channel URL: {}", channel_url_clone)
                     })?;
@@ -910,11 +920,16 @@ pub async fn run_flow(
                         .join(&parsed.email)
                         .join(&parsed.path);
                     let _ = std::fs::create_dir_all(&channel_dir);
-                    let port = mpc_comm_port(my_party_index, *to_idx, party_count);
-                    let from_base = SEQURE_COMMUNICATION_PORT
+                    let global_base = syqure_port_base.unwrap_or(SEQURE_COMMUNICATION_PORT);
+                    let port = mpc_comm_port_with_base(
+                        global_base,
+                        my_party_index,
+                        *to_idx,
+                        party_count,
+                    );
+                    let from_base = global_base
                         + my_party_index * SEQURE_COMMUNICATION_PORT_STRIDE;
-                    let to_base =
-                        SEQURE_COMMUNICATION_PORT + to_idx * SEQURE_COMMUNICATION_PORT_STRIDE;
+                    let to_base = global_base + to_idx * SEQURE_COMMUNICATION_PORT_STRIDE;
                     let from_port =
                         mpc_comm_port_with_base(from_base, my_party_index, *to_idx, party_count);
                     let to_port =

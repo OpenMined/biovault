@@ -5,6 +5,7 @@ import argparse
 import hashlib
 import json
 import os
+import signal
 import subprocess
 import shutil
 import sys
@@ -731,6 +732,38 @@ def execute_commands(commands: Any, variables: Dict[str, str]):
 _background_processes: List[subprocess.Popen] = []
 _background_threads: List[threading.Thread] = []
 
+def terminate_process_tree(proc: subprocess.Popen, grace_seconds: float = 2.0) -> None:
+    """Terminate a process and its subprocess tree."""
+    if proc.poll() is not None:
+        return
+    try:
+        if os.name == "nt":
+            proc.terminate()
+        else:
+            os.killpg(proc.pid, signal.SIGTERM)
+    except Exception:
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+
+    deadline = time.time() + grace_seconds
+    while time.time() < deadline:
+        if proc.poll() is not None:
+            return
+        time.sleep(0.05)
+
+    try:
+        if os.name == "nt":
+            proc.kill()
+        else:
+            os.killpg(proc.pid, signal.SIGKILL)
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
 
 def run_shell_background(
     command: str,
@@ -808,6 +841,7 @@ def run_shell_background(
             bash_cmd + [bash_flags, expanded],
             cwd=client_dir,
             env=env,
+            start_new_session=True,
             text=True,
             encoding="utf-8",
             errors="replace",
@@ -833,6 +867,7 @@ def run_shell_background(
                 bash_cmd + [bash_flags, expanded],
                 cwd=ROOT,
                 env=env,
+                start_new_session=True,
                 text=True,
                 encoding="utf-8",
                 errors="replace",
@@ -844,6 +879,7 @@ def run_shell_background(
                 expanded,
                 cwd=ROOT,
                 env=env,
+                start_new_session=True,
                 text=True,
                 encoding="utf-8",
                 errors="replace",
@@ -894,11 +930,15 @@ def wait_for_background_processes(timeout: int | None = None) -> bool:
             if proc.returncode != 0:
                 print(f"Background process exited with code {proc.returncode}")
                 all_ok = False
+                break
         except subprocess.TimeoutExpired:
             print("Timeout waiting for background process")
-            proc.kill()
             all_ok = False
+            break
 
+    if not all_ok:
+        for proc in _background_processes:
+            terminate_process_tree(proc)
     # Wait for output threads to finish
     for thread in _background_threads:
         thread.join(timeout=5)
@@ -1062,7 +1102,10 @@ def resolve_bg_timeout(step_timeout: int | None = None) -> int | None:
     env_timeout = os.getenv("SCENARIO_BG_TIMEOUT")
     if env_timeout is not None:
         try:
-            return int(env_timeout)
+            env_value = int(env_timeout)
+            if step_timeout is None:
+                return env_value
+            return min(env_value, step_timeout)
         except ValueError:
             return step_timeout
     return step_timeout
