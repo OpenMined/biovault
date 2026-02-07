@@ -2632,6 +2632,31 @@ fn render_flow_template(
 ) -> String {
     let mut rendered = template.to_string();
 
+    let resolve_user_var = |name: &str| -> Option<String> {
+        let mut value = user_vars.get(name)?.clone();
+        for _ in 0..5 {
+            let before = value.clone();
+            for (var_name, var_value) in user_vars {
+                value = value.replace(&format!("{{vars.{}}}", var_name), var_value);
+            }
+            if value == before {
+                break;
+            }
+        }
+        Some(value)
+    };
+
+    let flow_path = resolve_user_var("flow_path")
+        .unwrap_or_else(|| format!("syft://{}/shared/flows/{}", current, flow_name));
+    let run_path = resolve_user_var("run_path").unwrap_or_else(|| format!("{}/{}", flow_path, run_id));
+    let step_path = resolve_user_var("step_path").unwrap_or_else(|| {
+        if let (Some(num), Some(id)) = (step_number, step_id) {
+            format!("{}/{}-{}", run_path, num, id)
+        } else {
+            run_path.clone()
+        }
+    });
+
     // First pass: expand user-defined variables (namespaced as {vars.name})
     // Do multiple passes to handle variables that reference other variables
     for _ in 0..5 {
@@ -2644,6 +2669,14 @@ fn render_flow_template(
         }
     }
 
+    // Support both namespaced and shorthand path variables.
+    rendered = rendered.replace("{vars.flow_path}", &flow_path);
+    rendered = rendered.replace("{vars.run_path}", &run_path);
+    rendered = rendered.replace("{vars.step_path}", &step_path);
+    rendered = rendered.replace("{flow_path}", &flow_path);
+    rendered = rendered.replace("{run_path}", &run_path);
+    rendered = rendered.replace("{step_path}", &step_path);
+
     // Second pass: expand built-in variables
     rendered = rendered.replace("{current_datasite}", current);
     rendered = rendered.replace("{datasite.current}", current);
@@ -2655,7 +2688,7 @@ fn render_flow_template(
     }
     rendered = rendered.replace("{datasites}", &datasites.join(","));
     if let Some(num) = step_number {
-        rendered = rendered.replace("{step.number}", &format!("{:02}", num));
+        rendered = rendered.replace("{step.number}", &num.to_string());
     }
     if let Some(id) = step_id {
         rendered = rendered.replace("{step.id}", id);

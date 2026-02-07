@@ -51,6 +51,7 @@ spec:
             type: File
       assets:
         - path: run.sh
+        - path: gen_variants.py
 
     build_master:
       source:
@@ -68,6 +69,7 @@ spec:
             type: String
       assets:
         - path: run.sh
+        - path: build_master.py
 
     align_counts:
       source:
@@ -85,6 +87,7 @@ spec:
             type: File
       assets:
         - path: run.sh
+        - path: align_counts.py
 
     # Secure MPC aggregation using Syqure runtime
     secure_aggregate:
