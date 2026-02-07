@@ -921,14 +921,9 @@ pub async fn run_flow(
                         .join(&parsed.path);
                     let _ = std::fs::create_dir_all(&channel_dir);
                     let global_base = syqure_port_base.unwrap_or(SEQURE_COMMUNICATION_PORT);
-                    let port = mpc_comm_port_with_base(
-                        global_base,
-                        my_party_index,
-                        *to_idx,
-                        party_count,
-                    );
-                    let from_base = global_base
-                        + my_party_index * SEQURE_COMMUNICATION_PORT_STRIDE;
+                    let port =
+                        mpc_comm_port_with_base(global_base, my_party_index, *to_idx, party_count);
+                    let from_base = global_base + my_party_index * SEQURE_COMMUNICATION_PORT_STRIDE;
                     let to_base = global_base + to_idx * SEQURE_COMMUNICATION_PORT_STRIDE;
                     let from_port =
                         mpc_comm_port_with_base(from_base, my_party_index, *to_idx, party_count);

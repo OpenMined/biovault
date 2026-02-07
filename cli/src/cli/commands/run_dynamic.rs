@@ -12,7 +12,7 @@ use std::env;
 use std::ffi::OsStr;
 use std::fs::{self, OpenOptions};
 use std::hash::{Hash, Hasher};
-use std::io::Write;
+use std::io::{self, Write};
 use std::net::{Ipv4Addr, SocketAddrV4, TcpListener};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -25,7 +25,12 @@ const SEQURE_COMMUNICATION_PORT_STRIDE: usize = 1000;
 const SEQURE_DATA_SHARING_PORT_OFFSET: usize = 10_000;
 const SEQURE_PORT_BASE_MIN: usize = 20_000;
 
-fn mpc_comm_port_with_base(base: usize, local_pid: usize, remote_pid: usize, parties: usize) -> usize {
+fn mpc_comm_port_with_base(
+    base: usize,
+    local_pid: usize,
+    remote_pid: usize,
+    parties: usize,
+) -> usize {
     let min_pid = std::cmp::min(local_pid, remote_pid);
     let max_pid = std::cmp::max(local_pid, remote_pid);
     let offset_major = min_pid * parties - min_pid * (min_pid + 1) / 2;
@@ -37,11 +42,16 @@ fn max_syqure_base_port(party_count: usize) -> usize {
     let parties = party_count.max(2);
     let max_party_base_delta = (parties - 1) * SEQURE_COMMUNICATION_PORT_STRIDE;
     let max_pair_offset = parties * (parties - 1) / 2;
-    let reserve = max_party_base_delta + max_pair_offset + SEQURE_DATA_SHARING_PORT_OFFSET + parties;
+    let reserve =
+        max_party_base_delta + max_pair_offset + SEQURE_DATA_SHARING_PORT_OFFSET + parties;
     (u16::MAX as usize).saturating_sub(reserve)
 }
 
-fn required_syqure_ports_for_party(global_base: usize, party_id: usize, party_count: usize) -> Option<Vec<u16>> {
+fn required_syqure_ports_for_party(
+    global_base: usize,
+    party_id: usize,
+    party_count: usize,
+) -> Option<Vec<u16>> {
     let parties = party_count.max(2);
     if party_id >= parties {
         return None;
@@ -81,6 +91,42 @@ fn syqure_port_base_is_available(global_base: usize, party_count: usize) -> bool
     ports.into_iter().all(tcp_port_is_free)
 }
 
+fn syqure_port_base_hint_path(run_id: &str, party_count: usize) -> PathBuf {
+    let safe_run_id: String = run_id
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    env::temp_dir().join(format!(
+        "biovault-syqure-port-base-{}-p{}.txt",
+        safe_run_id, party_count
+    ))
+}
+
+fn read_syqure_port_base_hint(path: &Path) -> Option<usize> {
+    let raw = fs::read_to_string(path).ok()?;
+    raw.trim().parse::<usize>().ok()
+}
+
+fn validate_syqure_port_base(name: &str, base: usize, max_base: usize) -> Result<()> {
+    if base < SEQURE_PORT_BASE_MIN || base > max_base {
+        return Err(anyhow::anyhow!(
+            "{} must be in range {}..={}, got {}",
+            name,
+            SEQURE_PORT_BASE_MIN,
+            max_base,
+            base
+        )
+        .into());
+    }
+    Ok(())
+}
+
 fn parse_port_base_env(name: &str) -> Result<Option<usize>> {
     match env::var(name) {
         Ok(value) => {
@@ -107,11 +153,6 @@ fn parse_port_base_env(name: &str) -> Result<Option<usize>> {
 }
 
 pub(crate) fn prepare_syqure_port_base_for_run(run_id: &str, party_count: usize) -> Result<usize> {
-    if let Some(base) = parse_port_base_env("BV_SYQURE_PORT_BASE")? {
-        return Ok(base);
-    }
-    let requested_base = parse_port_base_env("SEQURE_COMMUNICATION_PORT")?;
-
     let max_base = max_syqure_base_port(party_count);
     if max_base <= SEQURE_PORT_BASE_MIN {
         return Err(anyhow::anyhow!(
@@ -121,28 +162,69 @@ pub(crate) fn prepare_syqure_port_base_for_run(run_id: &str, party_count: usize)
         .into());
     }
 
+    if let Some(base) = parse_port_base_env("BV_SYQURE_PORT_BASE")? {
+        validate_syqure_port_base("BV_SYQURE_PORT_BASE", base, max_base)?;
+        return Ok(base);
+    }
+    let requested_base = parse_port_base_env("SEQURE_COMMUNICATION_PORT")?;
+    if let Some(base) = requested_base {
+        validate_syqure_port_base("SEQURE_COMMUNICATION_PORT", base, max_base)?;
+        env::set_var("BV_SYQURE_PORT_BASE", base.to_string());
+        return Ok(base);
+    }
+
+    let hint_path = syqure_port_base_hint_path(run_id, party_count);
+    if let Some(base) = read_syqure_port_base_hint(&hint_path) {
+        validate_syqure_port_base("cached syqure port base", base, max_base)?;
+        env::set_var("BV_SYQURE_PORT_BASE", base.to_string());
+        return Ok(base);
+    }
+
     let span = max_base - SEQURE_PORT_BASE_MIN + 1;
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     run_id.hash(&mut hasher);
     party_count.hash(&mut hasher);
-    let seed_candidate = requested_base.unwrap_or_else(|| SEQURE_PORT_BASE_MIN + (hasher.finish() as usize % span));
+    let seed_candidate = SEQURE_PORT_BASE_MIN + (hasher.finish() as usize % span);
+    let mut selected: Option<usize> = None;
     for offset in 0..span {
-        let candidate = SEQURE_PORT_BASE_MIN + ((seed_candidate - SEQURE_PORT_BASE_MIN + offset) % span);
+        let candidate =
+            SEQURE_PORT_BASE_MIN + ((seed_candidate - SEQURE_PORT_BASE_MIN + offset) % span);
         if syqure_port_base_is_available(candidate, party_count) {
-            env::set_var("BV_SYQURE_PORT_BASE", candidate.to_string());
-            return Ok(candidate);
+            selected = Some(candidate);
+            break;
         }
     }
+    let selected = selected.ok_or_else(|| {
+        anyhow::anyhow!(
+            "No free Syqure TCP proxy base port found for {} parties. \
+             Tried {} candidate bases in [{}..={}].",
+            party_count,
+            span,
+            SEQURE_PORT_BASE_MIN,
+            max_base
+        )
+    })?;
 
-    Err(anyhow::anyhow!(
-        "No free Syqure TCP proxy base port found for {} parties. \
-         Tried {} candidate bases in [{}..={}].",
-        party_count,
-        span,
-        SEQURE_PORT_BASE_MIN,
-        max_base
-    )
-    .into())
+    match OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&hint_path)
+    {
+        Ok(mut file) => {
+            let _ = writeln!(file, "{}", selected);
+        }
+        Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
+            if let Some(existing) = read_syqure_port_base_hint(&hint_path) {
+                validate_syqure_port_base("cached syqure port base", existing, max_base)?;
+                env::set_var("BV_SYQURE_PORT_BASE", existing.to_string());
+                return Ok(existing);
+            }
+            let _ = fs::write(&hint_path, format!("{selected}\n"));
+        }
+        Err(_) => {}
+    }
+    env::set_var("BV_SYQURE_PORT_BASE", selected.to_string());
+    Ok(selected)
 }
 
 fn is_truthy(value: &str) -> bool {
@@ -3594,9 +3676,13 @@ async fn execute_syqure(
             .collect::<Vec<_>>()
             .join(",");
         env_map.insert("SEQURE_CP_IPS".to_string(), proxy_ips);
-        env_map.insert("BV_SYQURE_PORT_BASE".to_string(), syqure_port_base.to_string());
-        let base_port =
-            syqure_port_base + (party_id as usize) * SEQURE_COMMUNICATION_PORT_STRIDE;
+        env_map.insert(
+            "BV_SYQURE_PORT_BASE".to_string(),
+            syqure_port_base.to_string(),
+        );
+        // Share one global base across parties, but use party-specific communication/data-sharing
+        // ports so each local proxy listener gets a unique bind address.
+        let base_port = syqure_port_base + party_id * SEQURE_COMMUNICATION_PORT_STRIDE;
         env_map.insert(
             "SEQURE_COMMUNICATION_PORT".to_string(),
             base_port.to_string(),
@@ -3672,6 +3758,40 @@ async fn execute_syqure(
         env_value("BV_SYFTBOX_HOTLINK_QUIC"),
         env_value("BV_SYFTBOX_HOTLINK_QUIC_ONLY")
     );
+    if tcp_proxy {
+        let effective_comm_port = env_map
+            .get("SEQURE_COMMUNICATION_PORT")
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(syqure_port_base);
+        let expected_comm_port = syqure_port_base + party_id * SEQURE_COMMUNICATION_PORT_STRIDE;
+        let mismatch = effective_comm_port != expected_comm_port;
+        println!(
+            "  TCP proxy ports: party_id={} party_count={} global_base={} expected_comm_port={} effective_comm_port={} stride={}{}",
+            party_id,
+            party_count,
+            syqure_port_base,
+            expected_comm_port,
+            effective_comm_port,
+            SEQURE_COMMUNICATION_PORT_STRIDE,
+            if mismatch { " [MISMATCH]" } else { "" }
+        );
+
+        let mut peer_ports = Vec::new();
+        for peer_id in 0..party_count {
+            if peer_id == party_id {
+                continue;
+            }
+            let port = mpc_comm_port_with_base(effective_comm_port, party_id, peer_id, party_count);
+            peer_ports.push(format!("CP{}<->CP{}={}", party_id, peer_id, port));
+        }
+        if !peer_ports.is_empty() {
+            println!(
+                "  TCP proxy expected peer ports (from CP{} view): {}",
+                party_id,
+                peer_ports.join(", ")
+            );
+        }
+    }
 
     for input in &spec.inputs {
         let env_key = format!("BV_INPUT_{}", env_key_suffix(&input.name));
