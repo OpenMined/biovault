@@ -137,6 +137,15 @@ impl BioVaultDb {
         Ok(self.conn.last_insert_rowid())
     }
 
+    /// Update flow path (for re-importing local flows)
+    pub fn update_flow_path(&self, flow_id: i64, flow_path: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE flows SET flow_path = ?1, updated_at = datetime('now') WHERE id = ?2",
+            params![flow_path, flow_id],
+        )?;
+        Ok(())
+    }
+
     /// Update flow timestamp
     pub fn touch_flow(&self, flow_id: i64) -> Result<()> {
         self.conn.execute(
