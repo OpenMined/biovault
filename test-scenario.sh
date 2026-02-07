@@ -25,6 +25,8 @@ Options:
   --force              Force scenario steps to re-run (overrides skip-done)
   --allele-count N     Override allele-freq synthetic file count (default: 10)
   --syqure-agg MODE    Syqure aggregation mode: smpc|he (default: smpc)
+  --syqure-transport T Syqure transport: hotlink|file (default: hotlink)
+  --hotlink-quic-only Force QUIC-only hotlink transport (no websocket fallback)
   --docker             Force Docker mode for syqure runtime
   --podman             Force Podman runtime (sets BIOVAULT_CONTAINER_RUNTIME=podman)
   --keep-containers    Keep syqure containers on failure (for logs/debugging)
@@ -40,6 +42,8 @@ Examples:
   ./test-scenario.sh --podman tests/scenarios/syqure-distributed.yaml
   ./test-scenario.sh --podman --keep-containers tests/scenarios/syqure-distributed.yaml
   ./test-scenario.sh --syqure-agg he tests/scenarios/syqure-distributed.yaml
+  ./test-scenario.sh --syqure-transport file tests/scenarios/syqure-distributed.yaml
+  ./test-scenario.sh --hotlink-quic-only tests/scenarios/syqure-distributed.yaml
   ./test-scenario.sh --no-reset tests/scenarios/allele-freq-syqure.yaml
 EOF
 }
@@ -55,6 +59,8 @@ NO_RESET=0
 FORCE_RUN=0
 ALLELE_COUNT=""
 SYQURE_AGG_MODE="smpc"
+SYQURE_TRANSPORT="hotlink"
+HOTLINK_QUIC_ONLY=0
 SCENARIO=""
 SCENARIO_VARS=()
 
@@ -93,6 +99,14 @@ while [[ $# -gt 0 ]]; do
       [[ $# -lt 2 ]] && { echo "Missing value for --syqure-agg" >&2; usage; exit 1; }
       SYQURE_AGG_MODE="${2:-}"
       shift
+      ;;
+    --syqure-transport)
+      [[ $# -lt 2 ]] && { echo "Missing value for --syqure-transport" >&2; usage; exit 1; }
+      SYQURE_TRANSPORT="${2:-}"
+      shift
+      ;;
+    --hotlink-quic-only)
+      HOTLINK_QUIC_ONLY=1
       ;;
     --docker)
       USE_DOCKER=1
@@ -177,6 +191,35 @@ if [[ -n "$SYQURE_AGG_MODE" ]]; then
       ;;
     *)
       echo "Unknown --syqure-agg mode: $SYQURE_AGG_MODE (expected smpc|he)" >&2
+      exit 1
+      ;;
+  esac
+fi
+
+if [[ -n "$SYQURE_TRANSPORT" ]]; then
+  case "$SYQURE_TRANSPORT" in
+    hotlink)
+      export BV_SYQURE_TRANSPORT="hotlink"
+      export BV_SYQURE_TCP_PROXY="1"
+      export BV_SYFTBOX_HOTLINK="1"
+      export BV_SYFTBOX_HOTLINK_TCP_PROXY="1"
+      export BV_SYFTBOX_HOTLINK_QUIC="${BV_SYFTBOX_HOTLINK_QUIC:-1}"
+      if (( HOTLINK_QUIC_ONLY )); then
+        export BV_SYFTBOX_HOTLINK_QUIC_ONLY="1"
+      else
+        export BV_SYFTBOX_HOTLINK_QUIC_ONLY="${BV_SYFTBOX_HOTLINK_QUIC_ONLY:-0}"
+      fi
+      ;;
+    file)
+      export BV_SYQURE_TRANSPORT="file"
+      export BV_SYQURE_TCP_PROXY="0"
+      export BV_SYFTBOX_HOTLINK="0"
+      export BV_SYFTBOX_HOTLINK_TCP_PROXY="0"
+      export BV_SYFTBOX_HOTLINK_QUIC="0"
+      export BV_SYFTBOX_HOTLINK_QUIC_ONLY="0"
+      ;;
+    *)
+      echo "Unknown --syqure-transport: $SYQURE_TRANSPORT (expected hotlink|file)" >&2
       exit 1
       ;;
   esac

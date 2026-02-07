@@ -8,6 +8,8 @@ spec:
   runner:
     runtime: syqure
     entrypoint: smpc_aggregate.codon
+    syqure:
+      transport: hotlink
   assets:
     - path: smpc_aggregate.codon
     - path: he_aggregate.codon
