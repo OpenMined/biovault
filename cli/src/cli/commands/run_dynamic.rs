@@ -18,6 +18,69 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+const SEQURE_COMMUNICATION_PORT: usize = 9000;
+const SEQURE_COMMUNICATION_PORT_STRIDE: usize = 1000;
+
+fn is_truthy(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+fn env_flag(names: &[&str]) -> Option<bool> {
+    for name in names {
+        if let Ok(value) = env::var(name) {
+            return Some(is_truthy(&value));
+        }
+    }
+    None
+}
+
+fn env_value(name: &str) -> String {
+    env::var(name).unwrap_or_else(|_| "<unset>".to_string())
+}
+
+fn describe_syqure_transport_mode(env_map: &BTreeMap<String, String>) -> String {
+    let sequre_transport = env_map
+        .get("SEQURE_TRANSPORT")
+        .cloned()
+        .unwrap_or_else(|| "unknown".to_string());
+    let bv_transport = env::var("BV_SYQURE_TRANSPORT").unwrap_or_default();
+    let hotlink_enabled = env_flag(&["BV_SYFTBOX_HOTLINK", "SYFTBOX_HOTLINK"]).unwrap_or(false);
+    let quic_enabled =
+        env_flag(&["BV_SYFTBOX_HOTLINK_QUIC", "SYFTBOX_HOTLINK_QUIC"]).unwrap_or(true);
+    let quic_only =
+        env_flag(&["BV_SYFTBOX_HOTLINK_QUIC_ONLY", "SYFTBOX_HOTLINK_QUIC_ONLY"]).unwrap_or(false);
+
+    if sequre_transport == "tcp" && (bv_transport == "hotlink" || hotlink_enabled) {
+        if quic_only {
+            return "hotlink over TCP proxy (QUIC-only, websocket fallback disabled)".to_string();
+        }
+        if quic_enabled {
+            return "hotlink over TCP proxy (QUIC preferred, websocket fallback enabled)"
+                .to_string();
+        }
+        return "hotlink over TCP proxy (websocket only, QUIC disabled)".to_string();
+    }
+
+    if sequre_transport == "file" || bv_transport == "file" {
+        return "file transport".to_string();
+    }
+
+    format!("{} transport", sequre_transport)
+}
+
+fn is_hotlink_transport_mode(env_map: &BTreeMap<String, String>) -> bool {
+    let sequre_transport = env_map
+        .get("SEQURE_TRANSPORT")
+        .map(|v| v.as_str())
+        .unwrap_or("");
+    let bv_transport = env::var("BV_SYQURE_TRANSPORT").unwrap_or_default();
+    let hotlink_enabled = env_flag(&["BV_SYFTBOX_HOTLINK", "SYFTBOX_HOTLINK"]).unwrap_or(false);
+    sequre_transport == "tcp" && (bv_transport == "hotlink" || hotlink_enabled)
+}
+
 fn count_mpc_files(dir: &Path) -> (usize, Option<u64>) {
     let mut count = 0usize;
     let mut latest_modified: Option<u64> = None;
@@ -47,6 +110,45 @@ fn count_mpc_files(dir: &Path) -> (usize, Option<u64>) {
     }
 
     (count, latest_modified)
+}
+
+struct HotlinkTelemetrySummary {
+    mode: String,
+    tx_quic_packets: u64,
+    tx_ws_packets: u64,
+    ws_fallbacks: u64,
+    tx_avg_send_ms: f64,
+}
+
+fn read_hotlink_telemetry(path: &Path) -> Option<HotlinkTelemetrySummary> {
+    let raw = fs::read_to_string(path).ok()?;
+    let v: JsonValue = serde_json::from_str(&raw).ok()?;
+    Some(HotlinkTelemetrySummary {
+        mode: v
+            .get("mode")
+            .and_then(|x| x.as_str())
+            .unwrap_or("unknown")
+            .to_string(),
+        tx_quic_packets: v
+            .get("tx_quic_packets")
+            .and_then(|x| x.as_u64())
+            .unwrap_or(0),
+        tx_ws_packets: v.get("tx_ws_packets").and_then(|x| x.as_u64()).unwrap_or(0),
+        ws_fallbacks: v.get("ws_fallbacks").and_then(|x| x.as_u64()).unwrap_or(0),
+        tx_avg_send_ms: v
+            .get("tx_avg_send_ms")
+            .and_then(|x| x.as_f64())
+            .unwrap_or(0.0),
+    })
+}
+
+fn short_hotlink_mode(mode: &str) -> &'static str {
+    match mode {
+        "hotlink_quic_only" => "quic-only",
+        "hotlink_quic_pref" => "quic-pref",
+        "hotlink_ws_only" => "ws-only",
+        _ => "unknown",
+    }
 }
 
 fn append_desktop_log(message: &str) {
@@ -3193,7 +3295,7 @@ async fn execute_syqure(
     let flow_name = env::var("BV_FLOW_NAME").unwrap_or_else(|_| "syqure-flow".to_string());
     let file_dir = format!("shared/flows/{}/{}/_mpc", flow_name, run_id);
 
-    env_map.insert("SEQURE_TRANSPORT".to_string(), transport);
+    env_map.insert("SEQURE_TRANSPORT".to_string(), transport.clone());
     env_map.insert("SEQURE_FILE_DIR".to_string(), file_dir);
     env_map.insert("SEQURE_FILE_POLL_MS".to_string(), poll_ms.to_string());
     env_map.insert("SEQURE_CP_COUNT".to_string(), party_count.to_string());
@@ -3202,6 +3304,45 @@ async fn execute_syqure(
     env_map.insert("SEQURE_LOCAL_EMAIL".to_string(), current_email.clone());
     env_map.insert("SEQURE_FILE_KEEP".to_string(), "1".to_string());
     env_map.insert("SEQURE_FILE_DEBUG".to_string(), "1".to_string());
+    // Default behavior for `transport: hotlink` is TCP proxy mode.
+    // Users can still force it off explicitly with `SEQURE_TCP_PROXY=0`.
+    let tcp_proxy = env_map
+        .get("SEQURE_TCP_PROXY")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(transport == "hotlink");
+    env_map.insert(
+        "SEQURE_TCP_PROXY".to_string(),
+        if tcp_proxy {
+            "1".to_string()
+        } else {
+            "0".to_string()
+        },
+    );
+    if tcp_proxy && transport == "hotlink" {
+        env_map.insert("SEQURE_TRANSPORT".to_string(), "tcp".to_string());
+    }
+    if tcp_proxy {
+        let proxy_ip = "127.0.0.1".to_string();
+        let proxy_ips = std::iter::repeat_n(proxy_ip.as_str(), party_count)
+            .collect::<Vec<_>>()
+            .join(",");
+        env_map.insert("SEQURE_CP_IPS".to_string(), proxy_ips);
+        let base_port =
+            SEQURE_COMMUNICATION_PORT + (party_id as usize) * SEQURE_COMMUNICATION_PORT_STRIDE;
+        env_map.insert(
+            "SEQURE_COMMUNICATION_PORT".to_string(),
+            base_port.to_string(),
+        );
+        env_map.insert(
+            "SEQURE_DATA_SHARING_PORT".to_string(),
+            (base_port + 10_000).to_string(),
+        );
+    }
+    for pass_through in &["SYQURE_SKIP_BUNDLE", "SYQURE_DEBUG"] {
+        if let Ok(val) = env::var(pass_through) {
+            env_map.insert(pass_through.to_string(), val);
+        }
+    }
     if env::var("SYQURE_BUNDLE_CACHE").is_err() {
         let cache_dir = PathBuf::from(&datasites_root)
             .join(".syqure-cache")
@@ -3212,6 +3353,53 @@ async fn execute_syqure(
             cache_dir.to_string_lossy().to_string(),
         );
     }
+    let codon_path_missing = env_map
+        .get("CODON_PATH")
+        .map(|v| v.trim().is_empty())
+        .unwrap_or(true);
+    if codon_path_missing {
+        if let Some(codon_path) = resolve_codon_path_from_syqure_binary(&syqure_binary) {
+            env_map.insert(
+                "CODON_PATH".to_string(),
+                codon_path.to_string_lossy().to_string(),
+            );
+        }
+    }
+
+    println!(
+        "  Syqure env: SEQURE_TRANSPORT={} SEQURE_TCP_PROXY={} SEQURE_COMMUNICATION_PORT={} SYQURE_SKIP_BUNDLE={} CODON_PATH={} SYQURE_DEBUG={}",
+        env_map
+            .get("SEQURE_TRANSPORT")
+            .map(|s| s.as_str())
+            .unwrap_or(""),
+        env_map
+            .get("SEQURE_TCP_PROXY")
+            .map(|s| s.as_str())
+            .unwrap_or(""),
+        env_map
+            .get("SEQURE_COMMUNICATION_PORT")
+            .map(|s| s.as_str())
+            .unwrap_or(""),
+        env_map
+            .get("SYQURE_SKIP_BUNDLE")
+            .map(|s| s.as_str())
+            .unwrap_or(""),
+        env_map.get("CODON_PATH").map(|s| s.as_str()).unwrap_or(""),
+        env_map
+            .get("SYQURE_DEBUG")
+            .map(|s| s.as_str())
+            .unwrap_or("")
+    );
+    println!(
+        "  Syqure transport mode: {}",
+        describe_syqure_transport_mode(&env_map)
+    );
+    println!(
+        "  Hotlink flags: BV_SYFTBOX_HOTLINK={} BV_SYFTBOX_HOTLINK_QUIC={} BV_SYFTBOX_HOTLINK_QUIC_ONLY={}",
+        env_value("BV_SYFTBOX_HOTLINK"),
+        env_value("BV_SYFTBOX_HOTLINK_QUIC"),
+        env_value("BV_SYFTBOX_HOTLINK_QUIC_ONLY")
+    );
 
     for input in &spec.inputs {
         let env_key = format!("BV_INPUT_{}", env_key_suffix(&input.name));
@@ -3403,6 +3591,26 @@ fn resolve_syqure_backend(spec: &ModuleSpec) -> Result<(String, bool)> {
     .into())
 }
 
+fn resolve_codon_path_from_syqure_binary(syqure_binary: &str) -> Option<PathBuf> {
+    let bin_path = PathBuf::from(syqure_binary);
+    let platforms = ["macos-arm64", "linux-x86", "linux-x86_64", "linux-amd64"];
+    for ancestor in bin_path.ancestors() {
+        let mut candidates = Vec::new();
+        for platform in platforms {
+            candidates.push(ancestor.join("bin").join(platform).join("codon"));
+        }
+        candidates.push(ancestor.join("bin/codon"));
+        candidates.push(ancestor.join("codon/install"));
+        candidates.push(ancestor.join("codon"));
+        for candidate in candidates {
+            if candidate.join("lib/codon/stdlib").exists() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
 fn execute_syqure_native(
     binary: &str,
     entrypoint: &Path,
@@ -3416,6 +3624,13 @@ fn execute_syqure_native(
     cmd.arg(entrypoint);
     cmd.arg("--");
     cmd.arg(party_id.to_string());
+
+    if !env_map.contains_key("CODON_PATH") {
+        cmd.env_remove("CODON_PATH");
+    }
+    if !env_map.contains_key("CODON_PLUGIN_PATH") {
+        cmd.env_remove("CODON_PLUGIN_PATH");
+    }
 
     for (k, v) in env_map {
         cmd.env(k, v);
@@ -3461,6 +3676,18 @@ fn execute_syqure_native(
         .get("SEQURE_LOCAL_EMAIL")
         .cloned()
         .unwrap_or_default();
+    let tcp_transport = env_map
+        .get("SEQURE_TRANSPORT")
+        .map(|v| v == "tcp")
+        .unwrap_or(false);
+    let hotlink_transport = is_hotlink_transport_mode(env_map);
+    let status_label = if hotlink_transport {
+        "  📡 Hotlink telemetry (mode q/ws fb avg-ms)"
+    } else if tcp_transport {
+        "  📡 MPC dir activity (files/age)"
+    } else {
+        "  📡 Syqure channels"
+    };
 
     let stop_flag = Arc::new(AtomicBool::new(false));
     let stop_flag_clone = stop_flag.clone();
@@ -3468,6 +3695,18 @@ fn execute_syqure_native(
     let datasites_root_clone = datasites_root.clone();
     let file_dir_clone = file_dir.clone();
     let party_emails_clone = party_emails.clone();
+    let status_label_clone = status_label.to_string();
+    let hotlink_transport_clone = hotlink_transport;
+
+    if hotlink_transport {
+        println!(
+            "  ℹ️  Hotlink stats are per-party packet counters from .syftbox/hotlink_telemetry.json."
+        );
+    } else if tcp_transport {
+        println!(
+            "  ℹ️  TCP/hotlink mode: channel counters below are directory activity, not packet latency."
+        );
+    }
 
     let monitor_handle = thread::spawn(move || {
         let mut last_status = String::new();
@@ -3479,18 +3718,58 @@ fn execute_syqure_native(
 
             let mut status_parts = Vec::new();
             for party in &party_emails_clone {
+                let short_party = party.split('@').next().unwrap_or(party);
+                if hotlink_transport_clone {
+                    let telemetry_paths = [
+                        PathBuf::from(&datasites_root_clone)
+                            .join(party)
+                            .join(".syftbox")
+                            .join("hotlink_telemetry.json"),
+                        PathBuf::from(&datasites_root_clone)
+                            .join(party)
+                            .join("datasites")
+                            .join(party)
+                            .join(".syftbox")
+                            .join("hotlink_telemetry.json"),
+                    ];
+                    let mut telemetry_found = false;
+                    for telemetry_path in telemetry_paths {
+                        if let Some(t) = read_hotlink_telemetry(&telemetry_path) {
+                            status_parts.push(format!(
+                                "{}:{} q{}/ws{} fb{} {:.1}ms",
+                                short_party,
+                                short_hotlink_mode(&t.mode),
+                                t.tx_quic_packets,
+                                t.tx_ws_packets,
+                                t.ws_fallbacks,
+                                t.tx_avg_send_ms
+                            ));
+                            telemetry_found = true;
+                            break;
+                        }
+                    }
+                    if telemetry_found {
+                        continue;
+                    }
+                    let channel_path = PathBuf::from(&datasites_root_clone)
+                        .join(party)
+                        .join(&file_dir_clone);
+                    let (count, last_mod) = count_mpc_files(&channel_path);
+                    let ago = last_mod.map(|lm| now.saturating_sub(lm)).unwrap_or(999);
+                    status_parts.push(format!("{}:pending {}f/{}s", short_party, count, ago));
+                    continue;
+                }
                 let channel_path = PathBuf::from(&datasites_root_clone)
                     .join(party)
                     .join(&file_dir_clone);
                 let (count, last_mod) = count_mpc_files(&channel_path);
                 let ago = last_mod.map(|lm| now.saturating_sub(lm)).unwrap_or(999);
-                let short_party = party.split('@').next().unwrap_or(party);
                 status_parts.push(format!("{}:{}f/{}s", short_party, count, ago));
             }
 
             let status = status_parts.join(" | ");
             if status != last_status {
-                println!("  📡 Syqure channels: {}", status);
+                println!("{}: {}", status_label_clone, status);
                 last_status = status;
             }
 
