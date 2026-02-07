@@ -1,0 +1,54 @@
+apiVersion: syftbox.openmined.org/v1alpha1
+kind: Module
+metadata:
+  name: gra-mpileup
+  version: 0.1.0
+  description: CYP11B1/CYP11B2 region depth analysis for GRA (Glucocorticoid-Remediable Aldosteronism).
+  authors:
+    - madhava@openmined.org
+spec:
+  runner:
+    kind: nextflow
+    entrypoint: workflow.nf
+    template: dynamic-nextflow
+  assets:
+    - path: plot_depth.py
+  inputs:
+    - name: participants
+      type: "List[Record{participant_id: String, aligned_file: File, aligned_index: File, reference_file: File, reference_index: File, ref_version: String?}]"
+      description: CSV/TSV with participant_id, aligned/reference paths, and ref_version.
+      format:
+        kind: csv
+        mapping:
+          participant_id: participant_id
+          aligned_file: aligned_file
+          aligned_index: aligned_index
+          reference_file: reference_file
+          reference_index: reference_index
+          ref_version: ref_version
+  outputs:
+    - name: depth_plot_pdf
+      type: File
+      description: Coverage depth plot (PDF, publication quality)
+      format:
+        kind: pdf
+      path: depth_plot.pdf
+    - name: depth_plot_png
+      type: File
+      description: Coverage depth plot (PNG)
+      format:
+        kind: png
+      path: depth_plot.png
+    - name: depth_data
+      type: File
+      description: Raw depth data (TSV)
+      format:
+        kind: txt
+      path: depth.txt
+    - name: region_bam
+      type: File
+      description: Extracted BAM for CYP11B1/B2 region
+      format:
+        kind: bam
+      path: cyp11b_region.bam
+  parameters: []

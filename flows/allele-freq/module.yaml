@@ -11,12 +11,7 @@ spec:
     kind: nextflow
     entrypoint: workflow.nf
     template: dynamic-nextflow
-  assets:
-    - path: extract_counts.py
-    - path: aggregate_batch.py
-    - path: merge_all_batches.py
-    - path: aggregate_conversion_stats.py
-    - path: calc_allele_freq.py
+  assets: []
   inputs:
     - name: participants
       type: List[GenotypeRecord]
@@ -27,40 +22,10 @@ spec:
           participant_id: participant_id
           genotype_file: genotype_file
   outputs:
-    - name: dosage_matrix_tsv
-      type: File
-      description: Per-participant dosage matrix (wide TSV)
-      format:
-        kind: tsv
-      path: dosage_matrix.tsv
-    - name: dosage_matrix_npz
-      type: File
-      description: Per-participant dosage matrix (npz)
-      format:
-        kind: npz
-      path: dosage_matrix.npz
-    - name: locus_index
-      type: File
-      description: Locus index list (text)
-      format:
-        kind: txt
-      path: locus_index.txt
-    - name: participants
-      type: File
-      description: Participant order used for matrix columns
-      format:
-        kind: txt
-      path: participants.txt
     - name: allele_freq
       type: File
       description: Allele frequency per locus
       format:
         kind: tsv
       path: allele_freq.tsv
-    - name: vcf_results
-      type: File
-      description: VCF conversion stats per participant
-      format:
-        kind: tsv
-      path: vcf_conversion_results.tsv
   parameters: []

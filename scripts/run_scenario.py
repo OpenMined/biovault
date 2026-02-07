@@ -25,6 +25,154 @@ SANDBOX_ROOT = Path(_SANDBOX_ENV).resolve() if _SANDBOX_ENV else (ROOT / "sandbo
 JAVA_HOME_OVERRIDE: Optional[str] = None
 
 
+def env_flag(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() not in {"0", "false", "no", "off", ""}
+
+
+def parse_bytes(value: str) -> Optional[int]:
+    text = value.strip()
+    if not text:
+        return None
+    num = ""
+    unit = ""
+    for ch in text:
+        if ch.isdigit() or ch == ".":
+            num += ch
+        else:
+            unit += ch
+    if not num:
+        return None
+    try:
+        base = float(num)
+    except ValueError:
+        return None
+    unit = unit.strip()
+    if unit == "B" or unit == "":
+        return int(base)
+    scale = {
+        "kB": 1000,
+        "KB": 1000,
+        "MB": 1000 ** 2,
+        "GB": 1000 ** 3,
+        "TB": 1000 ** 4,
+        "KiB": 1024,
+        "MiB": 1024 ** 2,
+        "GiB": 1024 ** 3,
+        "TiB": 1024 ** 4,
+    }
+    factor = scale.get(unit)
+    if factor is None:
+        return None
+    return int(base * factor)
+
+
+def format_bytes(num: int) -> str:
+    if num < 0:
+        return f"{num} B"
+    units = ["B", "KiB", "MiB", "GiB", "TiB"]
+    size = float(num)
+    for unit in units:
+        if size < 1024 or unit == units[-1]:
+            return f"{size:.2f} {unit}"
+        size /= 1024
+    return f"{size:.2f} TiB"
+
+
+class DockerStatsSampler:
+    def __init__(self, interval_s: float = 2.0):
+        self.interval_s = max(interval_s, 0.5)
+        self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self.max_total_bytes = 0
+        self.max_by_container: Dict[str, int] = {}
+        self.sample_count = 0
+        self.last_error: Optional[str] = None
+
+    def start(self) -> bool:
+        if shutil.which("docker") is None:
+            return False
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+        return True
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread:
+            self._thread.join(timeout=5)
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            try:
+                result = subprocess.run(
+                    ["docker", "stats", "--no-stream", "--format", "{{.Name}}\t{{.MemUsage}}"],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                if result.returncode != 0:
+                    self.last_error = result.stderr.strip() or result.stdout.strip() or "docker stats failed"
+                else:
+                    total = 0
+                    for line in result.stdout.splitlines():
+                        if not line.strip():
+                            continue
+                        name, mem_usage = line.split("\t", 1)
+                        used = mem_usage.split("/", 1)[0].strip()
+                        used_bytes = parse_bytes(used)
+                        if used_bytes is None:
+                            continue
+                        total += used_bytes
+                        current_max = self.max_by_container.get(name, 0)
+                        if used_bytes > current_max:
+                            self.max_by_container[name] = used_bytes
+                    if total > self.max_total_bytes:
+                        self.max_total_bytes = total
+                    self.sample_count += 1
+            except Exception as exc:
+                self.last_error = str(exc)
+            self._stop.wait(self.interval_s)
+
+
+class ScenarioProfiler:
+    def __init__(self, enabled: bool):
+        self.enabled = enabled
+        self.started_at = time.time() if enabled else None
+        self.step_timings: List[tuple[str, float]] = []
+
+    def record_step(self, name: str, duration_s: float) -> None:
+        if not self.enabled:
+            return
+        self.step_timings.append((name, duration_s))
+
+    def finish(self, docker_sampler: Optional[DockerStatsSampler] = None) -> None:
+        if not self.enabled or self.started_at is None:
+            return
+        total = time.time() - self.started_at
+        print("\n=== Scenario Profiling Summary ===")
+        print(f"Total duration: {total:.2f}s")
+        if self.step_timings:
+            print("Step durations:")
+            for name, duration in self.step_timings:
+                print(f"  - {name}: {duration:.2f}s")
+        if docker_sampler:
+            if docker_sampler.sample_count == 0 and docker_sampler.last_error:
+                print(f"Docker stats: unavailable ({docker_sampler.last_error})")
+            else:
+                print(f"Docker stats samples: {docker_sampler.sample_count}")
+                print(f"Docker max total memory: {format_bytes(docker_sampler.max_total_bytes)}")
+                if docker_sampler.max_by_container:
+                    print("Docker max memory by container:")
+                    for name, mem in sorted(
+                        docker_sampler.max_by_container.items(),
+                        key=lambda item: item[1],
+                        reverse=True,
+                    ):
+                        print(f"  - {name}: {format_bytes(mem)}")
+
+
 def detect_java_home() -> Optional[str]:
     """Return a Java 17-24 home if available, preferring SCENARIO_JAVA_HOME."""
     env_java = os.environ.get("SCENARIO_JAVA_HOME") or os.environ.get("JAVA_HOME")
@@ -426,10 +574,11 @@ def run_shell(
     variables: Dict[str, str],
     capture: bool = False,
 ) -> subprocess.CompletedProcess:
-    use_bash = os.name == "nt"
+    # Always use bash to support set -o pipefail and other bash-specific features
+    use_bash = True
     shell_vars = variables
-    # On Windows, always convert paths to MSYS format
-    if use_bash:
+    # On Windows, convert paths to MSYS format
+    if os.name == "nt":
         shell_vars = dict(variables)
         shell_vars["workspace"] = to_msys_path(variables.get("workspace", ""))
         shell_vars["sandbox"] = to_msys_path(variables.get("sandbox", ""))
@@ -590,10 +739,11 @@ def run_shell_background(
     name: str = "background",
 ) -> subprocess.Popen:
     """Run a shell command in the background, returning the process handle."""
-    use_bash = os.name == "nt"
+    # Always use bash to support set -o pipefail and other bash-specific features
+    use_bash = True
     shell_vars = variables
-    # On Windows, always convert paths to MSYS format
-    if use_bash:
+    # On Windows, convert paths to MSYS format
+    if os.name == "nt":
         shell_vars = dict(variables)
         shell_vars["workspace"] = to_msys_path(variables.get("workspace", ""))
         shell_vars["sandbox"] = to_msys_path(variables.get("sandbox", ""))
@@ -980,6 +1130,16 @@ def main():
     args = parser.parse_args()
 
     scenario = load_scenario(args.scenario)
+    profiler = ScenarioProfiler(enabled=env_flag("SCENARIO_PROFILE", False))
+    docker_sampler: Optional[DockerStatsSampler] = None
+    if env_flag("SCENARIO_DOCKER_STATS", False):
+        interval = float(os.getenv("SCENARIO_DOCKER_STATS_INTERVAL", "2"))
+        docker_sampler = DockerStatsSampler(interval_s=interval)
+        if docker_sampler.start():
+            print(f"Docker stats sampling enabled (interval={docker_sampler.interval_s:.1f}s)")
+        else:
+            docker_sampler = None
+            print("Docker stats sampling requested, but docker is not available on PATH.")
 
     # Extract datasites and generate run_id
     scenario_name = args.scenario.stem
@@ -1018,25 +1178,36 @@ def main():
             if not isinstance(parallel_steps, list):
                 raise SystemExit("'parallel' must be a list of steps.")
             timeout = step.get("timeout", 300)
+            t0 = time.time()
             run_parallel_steps(parallel_steps, variables, timeout=timeout)
+            profiler.record_step(step.get("name", "parallel"), time.time() - t0)
             continue
 
         # Handle wait_background step
         if step.get("wait_background"):
             timeout = step.get("timeout", 300)
             print(f"\n=== Waiting for background processes ===")
+            t0 = time.time()
             if not wait_for_background_processes(timeout=resolve_bg_timeout(timeout)):
                 raise SystemExit("One or more background processes failed")
+            profiler.record_step(step.get("name", "wait_background"), time.time() - t0)
             continue
 
+        t0 = time.time()
         run_step(step, variables)
+        profiler.record_step(step.get("name", "step"), time.time() - t0)
 
     # Wait for any remaining background processes
     if _background_processes:
         print(f"\n=== Waiting for remaining background processes ===")
+        t0 = time.time()
         if not wait_for_background_processes(timeout=resolve_bg_timeout(300)):
             raise SystemExit("One or more background processes failed")
+        profiler.record_step("remaining_background", time.time() - t0)
 
+    if docker_sampler:
+        docker_sampler.stop()
+    profiler.finish(docker_sampler=docker_sampler)
     print("\nScenario completed successfully.")
 
 

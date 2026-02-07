@@ -1,0 +1,50 @@
+{
+  "description": "ClinVar filter configuration - controls which variants appear in the report",
+  "clinical_significance": {
+    "description": "CLNSIG values to include in report (case-insensitive, supports partial match)",
+    "include": [
+      "Pathogenic",
+      "Likely_pathogenic",
+      "Pathogenic/Likely_pathogenic",
+      "risk_factor",
+      "drug_response"
+    ],
+    "exclude": [
+      "Benign",
+      "Likely_benign"
+    ]
+  },
+  "review_status": {
+    "description": "CLNREVSTAT minimum quality levels (higher = more reliable)",
+    "min_stars": 0,
+    "star_mapping": {
+      "practice_guideline": 4,
+      "reviewed_by_expert_panel": 3,
+      "criteria_provided,_multiple_submitters,_no_conflicts": 2,
+      "criteria_provided,_conflicting_classifications": 1,
+      "criteria_provided,_single_submitter": 1,
+      "no_assertion_criteria_provided": 0,
+      "no_classification_provided": 0
+    }
+  },
+  "output_columns": {
+    "description": "Columns to include in TSV report",
+    "columns": [
+      "CHROM",
+      "POS",
+      "REF",
+      "ALT",
+      "RS",
+      "GENEINFO",
+      "CLNSIG",
+      "CLNREVSTAT",
+      "CLNVC",
+      "dbSNP_URL",
+      "ClinVar_URL"
+    ]
+  },
+  "url_templates": {
+    "dbsnp": "https://www.ncbi.nlm.nih.gov/snp/rs",
+    "clinvar": "https://www.ncbi.nlm.nih.gov/clinvar/variation/"
+  }
+}

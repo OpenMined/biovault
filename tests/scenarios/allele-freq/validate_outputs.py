@@ -4,12 +4,8 @@ from pathlib import Path
 
 
 REQUIRED_FILES = [
-    "dosage_matrix.tsv",
-    "dosage_matrix.npz",
-    "locus_index.txt",
-    "participants.txt",
     "allele_freq.tsv",
-    "vcf_conversion_results.tsv",
+    # "dosage_matrix.tsv",
 ]
 
 

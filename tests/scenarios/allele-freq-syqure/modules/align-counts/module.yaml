@@ -10,18 +10,16 @@ spec:
   assets:
     - path: run.sh
     - path: align_counts.py
+    - path: allele_freq_utils.py
   inputs:
     - name: union_index
       type: File
       format: { kind: json }
-    - name: allele_freq_npz
+    - name: allele_freq_tsv
       type: File
-      format: { kind: npz }
-    - name: locus_index
-      type: File
-      format: { kind: json }
+      format: { kind: tsv }
   outputs:
-    - name: aligned_ac
+    - name: aligned_counts
       type: File
       format: { kind: json }
-      path: aligned_ac.json
+      path: aligned_counts.json

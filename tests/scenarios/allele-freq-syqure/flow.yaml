@@ -45,12 +45,13 @@ spec:
       allow_dirty: true
       interface:
         outputs:
-          - name: allele_freq_npz
+          - name: allele_freq_tsv
             type: File
           - name: locus_index
             type: File
       assets:
         - path: run.sh
+        - path: allele_freq_utils.py
 
     build_master:
       source:
@@ -69,6 +70,7 @@ spec:
       assets:
         - path: run.sh
         - path: build_master.py
+        - path: allele_freq_utils.py
 
     align_counts:
       source:
@@ -79,36 +81,15 @@ spec:
         inputs:
           - name: union_index
             type: File
-          - name: allele_freq_npz
-            type: File
-          - name: locus_index
+          - name: allele_freq_tsv
             type: File
         outputs:
-          - name: aligned_ac
+          - name: aligned_counts
             type: File
       assets:
         - path: run.sh
         - path: align_counts.py
-
-    report_counts:
-      source:
-        kind: local
-        path: ./modules/report-counts
-      allow_dirty: true
-      interface:
-        inputs:
-          - name: union_index
-            type: File
-          - name: aligned_ac
-            type: File
-        outputs:
-          - name: report_json
-            type: File
-          - name: report_tsv
-            type: File
-      assets:
-        - path: run.sh
-        - path: report_counts.py
+        - path: allele_freq_utils.py
 
     secure_aggregate:
       source:
@@ -136,7 +117,7 @@ spec:
         inputs:
           - name: union_index
             type: File
-          - name: aligned_ac
+          - name: local_counts
             type: File
           - name: aggregated_counts
             type: File
@@ -144,6 +125,8 @@ spec:
           - name: report_json
             type: File
           - name: report_tsv
+            type: File
+          - name: aggregated_allele_freq_tsv
             type: File
       assets:
         - path: run.sh
@@ -186,17 +169,7 @@ spec:
         strategy: parallel
       with:
         union_index: step.build_master.share.union_index_shared
-        allele_freq_npz: step.gen_allele_freq.outputs.allele_freq_npz
-        locus_index: step.gen_allele_freq.outputs.locus_index
-
-    - id: report_counts
-      uses: report_counts
-      run:
-        targets: clients
-        strategy: parallel
-      with:
-        union_index: step.build_master.share.union_index_shared
-        aligned_ac: step.align_counts.outputs.aligned_ac
+        allele_freq_tsv: step.gen_allele_freq.outputs.allele_freq_tsv
 
     - id: mpc_barrier
       barrier:
@@ -204,14 +177,15 @@ spec:
         targets: clients
         timeout: 900
 
-    - id: secure_aggregate_ac
+    # Single MPC aggregation for combined AC+AN vector (2x faster than separate)
+    - id: secure_aggregate
       uses: secure_aggregate
       run:
         targets: all
         strategy: parallel
       with:
         counts:
-          value: step.align_counts.outputs.aligned_ac
+          value: step.align_counts.outputs.aligned_counts
           only: clients
         array_length:
           value: step.build_master.outputs.count
@@ -219,7 +193,7 @@ spec:
       share:
         result_shared:
           source: self.outputs.aggregated_counts
-          url: "{vars.step_path}/sum_ac.json"
+          url: "{vars.step_path}/aggregated_counts.json"
           permissions:
             read: ["{datasites[*]}"]
             write: ["{datasite.current}"]
@@ -231,5 +205,5 @@ spec:
         strategy: parallel
       with:
         union_index: step.build_master.share.union_index_shared
-        aligned_ac: step.align_counts.outputs.aligned_ac
-        aggregated_counts: step.secure_aggregate_ac.outputs.aggregated_counts
+        local_counts: step.align_counts.outputs.aligned_counts
+        aggregated_counts: step.secure_aggregate.outputs.aggregated_counts

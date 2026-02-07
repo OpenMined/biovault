@@ -30,6 +30,7 @@ Options:
   --docker             Force Docker mode for syqure runtime
   --podman             Force Podman runtime (sets BIOVAULT_CONTAINER_RUNTIME=podman)
   --keep-containers    Keep syqure containers on failure (for logs/debugging)
+  --set KEY=VALUE      Override scenario variables (repeatable)
   -h, --help           Show this message
 
 Examples:
@@ -61,6 +62,7 @@ SYQURE_AGG_MODE="smpc"
 SYQURE_TRANSPORT="hotlink"
 HOTLINK_QUIC_ONLY=0
 SCENARIO=""
+SCENARIO_VARS=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -115,6 +117,11 @@ while [[ $# -gt 0 ]]; do
       ;;
     --keep-containers)
       KEEP_CONTAINERS=1
+      ;;
+    --set)
+      [[ $# -lt 2 ]] && { echo "Missing value for --set" >&2; usage; exit 1; }
+      SCENARIO_VARS+=("$2")
+      shift
       ;;
     -h|--help)
       usage
@@ -526,10 +533,15 @@ start_syqure_progress_tail() {
   PROGRESS_PID=$!
 }
 
+SCENARIO_ARGS=()
+for kv in ${SCENARIO_VARS[@]+"${SCENARIO_VARS[@]}"}; do
+  SCENARIO_ARGS+=(--set "$kv")
+done
+
 if python3 -c 'import yaml' >/dev/null 2>&1; then
   start_syqure_log_tail
   start_syqure_progress_tail
-  python3 "$ROOT_DIR/scripts/run_scenario.py" "$SCENARIO"
+  python3 "$ROOT_DIR/scripts/run_scenario.py" "$SCENARIO" ${SCENARIO_ARGS[@]+"${SCENARIO_ARGS[@]}"}
   status=$?
   stop_syqure_log_tail
   exit $status
@@ -537,7 +549,7 @@ fi
 
 start_syqure_log_tail
 start_syqure_progress_tail
-python3 "$ROOT_DIR/scripts/run_scenario.py" "$SCENARIO"
+python3 "$ROOT_DIR/scripts/run_scenario.py" "$SCENARIO" ${SCENARIO_ARGS[@]+"${SCENARIO_ARGS[@]}"}
 status=$?
 stop_syqure_log_tail
 exit $status

@@ -34,3 +34,18 @@ sample_data_urls:
     snp_post_process:
       uncompress: true
       file: genome_Zeeshan_Usamani_v4_Full.txt
+
+  # Variant Databases
+  ClinVar-GRCh38:
+    data_type: VariantDatabase
+    database: https://ftp.ncbi.nlm.nih.gov/pub/clinvar/vcf_GRCh38/clinvar.vcf.gz
+    database_index: https://ftp.ncbi.nlm.nih.gov/pub/clinvar/vcf_GRCh38/clinvar.vcf.gz.tbi
+    grch_version: GRCh38
+    # Note: ClinVar updates weekly, checksums change frequently
+
+  ClinVar-GRCh37:
+    data_type: VariantDatabase
+    database: https://ftp.ncbi.nlm.nih.gov/pub/clinvar/vcf_GRCh37/clinvar.vcf.gz
+    database_index: https://ftp.ncbi.nlm.nih.gov/pub/clinvar/vcf_GRCh37/clinvar.vcf.gz.tbi
+    grch_version: GRCh37
+    # Note: ClinVar updates weekly, checksums change frequently

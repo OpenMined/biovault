@@ -1,0 +1,22 @@
+apiVersion: syftbox.openmined.org/v1alpha1
+kind: Flow
+metadata:
+  name: gra-mpileup
+  version: 0.1.0
+spec:
+  inputs:
+    samplesheet:
+      type: "List[Record{participant_id: String, aligned_file: File, aligned_index: File, reference_file: File, reference_index: File, ref_version: String?}]"
+  steps:
+    - id: gra_mpileup
+      uses:
+        source:
+          kind: local
+          path: ./
+      with:
+        participants: inputs.samplesheet
+      publish:
+        depth_plot_pdf: File(depth_plot.pdf)
+        depth_plot_png: File(depth_plot.png)
+        depth_data: File(depth.txt)
+        region_bam: File(cyp11b_region.bam)

@@ -1,0 +1,20 @@
+apiVersion: syftbox.openmined.org/v1alpha1
+kind: Flow
+metadata:
+  name: haplo-y
+  version: 0.1.0
+spec:
+  inputs:
+    samplesheet:
+      type: "List[Record{participant_id: String, aligned_file: File, aligned_index: File, reference_file: File, reference_index: File, ref_version: String?}]"
+  steps:
+    - id: haplo_y
+      uses:
+        source:
+          kind: local
+          path: ./
+      with:
+        participants: inputs.samplesheet
+      publish:
+        haplogroup_report: File(report.txt)
+        haplogroup_calls: File(calls.tsv)
