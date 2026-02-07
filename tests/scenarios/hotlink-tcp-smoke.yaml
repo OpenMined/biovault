@@ -1,0 +1,121 @@
+# Hotlink TCP Proxy Smoke Test
+# Validates bidirectional data transfer through the hotlink TCP proxy
+# without any Syqure/MPC dependency.
+#
+# Run with: ./test-scenario.sh --syqure-transport hotlink tests/scenarios/hotlink-tcp-smoke.yaml
+
+setup:
+  server:
+    - "SYFTBOX_HOTLINK=1 SYFTBOX_HOTLINK_SOCKET_ONLY=1 SYFTBOX_HOTLINK_TCP_PROXY=1 SYFTBOX_HOTLINK_DEBUG=1 ./tests/scripts/devstack.sh --reset --clients client1@sandbox.local,client2@sandbox.local"
+
+steps:
+  - name: Initialize BioVault for client1
+    datasite: client1@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv init client1@sandbox.local --quiet
+
+  - name: Initialize BioVault for client2
+    datasite: client2@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv init client2@sandbox.local --quiet
+
+  - name: Wait for client1 public key to sync to client2
+    datasite: client2@sandbox.local
+    wait_for: datasites/client1@sandbox.local/public/crypto/did.json
+    timeout: 30
+
+  - name: Wait for client2 public key to sync to client1
+    datasite: client1@sandbox.local
+    wait_for: datasites/client2@sandbox.local/public/crypto/did.json
+    timeout: 30
+
+  - name: Create TCP proxy markers for client1
+    datasite: client1@sandbox.local
+    run: |
+      CHAN="datasites/client1@sandbox.local/shared/flows/hotlink-smoke/{{run_id}}/_mpc/0_to_1"
+      MPC="datasites/client1@sandbox.local/shared/flows/hotlink-smoke/{{run_id}}/_mpc"
+      mkdir -p "${CHAN}"
+      echo '{"from":"client1@sandbox.local","to":"client2@sandbox.local","port":9001,"ports":{"client1@sandbox.local":9001,"client2@sandbox.local":10001}}' > "${CHAN}/stream.tcp"
+      echo '1' > "${CHAN}/stream.accept"
+      python3 -c "
+      import pathlib
+      perms = 'rules:\n- pattern: \"**\"\n  access:\n    read:\n    - client1@sandbox.local\n    - client2@sandbox.local\n    write:\n    - client1@sandbox.local\n    - client2@sandbox.local\n    admin:\n    - client1@sandbox.local\n'
+      pathlib.Path('${CHAN}/syft.pub.yaml').write_text(perms)
+      pathlib.Path('${MPC}/syft.pub.yaml').write_text(perms)
+      "
+      echo "Client1 markers created"
+      cat "${CHAN}/stream.tcp"
+
+  - name: Create TCP proxy markers for client2
+    datasite: client2@sandbox.local
+    run: |
+      CHAN="datasites/client2@sandbox.local/shared/flows/hotlink-smoke/{{run_id}}/_mpc/0_to_1"
+      MPC="datasites/client2@sandbox.local/shared/flows/hotlink-smoke/{{run_id}}/_mpc"
+      mkdir -p "${CHAN}"
+      echo '{"from":"client2@sandbox.local","to":"client1@sandbox.local","port":10001,"ports":{"client2@sandbox.local":10001,"client1@sandbox.local":9001}}' > "${CHAN}/stream.tcp"
+      echo '1' > "${CHAN}/stream.accept"
+      python3 -c "
+      import pathlib
+      perms = 'rules:\n- pattern: \"**\"\n  access:\n    read:\n    - client1@sandbox.local\n    - client2@sandbox.local\n    write:\n    - client1@sandbox.local\n    - client2@sandbox.local\n    admin:\n    - client2@sandbox.local\n'
+      pathlib.Path('${CHAN}/syft.pub.yaml').write_text(perms)
+      pathlib.Path('${MPC}/syft.pub.yaml').write_text(perms)
+      "
+      echo "Client2 markers created"
+      cat "${CHAN}/stream.tcp"
+
+  - name: Wait for TCP proxy discovery and ACL sync
+    run: |
+      echo "Waiting 5s for TCP proxy discovery (250ms poll) and ACL sync..."
+      sleep 5
+
+  - name: Verify TCP proxy ports are listening
+    run: |
+      echo "Checking TCP proxy ports..."
+      python3 -c "
+      import socket, sys, time
+      ports = [9001, 10001]
+      for port in ports:
+          for attempt in range(20):
+              try:
+                  s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                  s.settimeout(1)
+                  s.connect(('127.0.0.1', port))
+                  s.close()
+                  print(f'  Port {port}: OPEN')
+                  break
+              except (ConnectionRefusedError, OSError):
+                  if attempt < 19:
+                      time.sleep(0.5)
+                  else:
+                      print(f'  Port {port}: NOT READY after 10s')
+                      sys.exit(1)
+      print('All TCP proxy ports are ready')
+      "
+
+  - name: Run TCP proxy data transfer test
+    run: |
+      echo "=== Running hotlink TCP proxy smoke test ==="
+      PORT_CLIENT1=9001 PORT_CLIENT2=10001 PAYLOAD_SIZE=10000 TCP_TIMEOUT=15 \
+        python3 {{workspace}}/tests/scripts/hotlink-tcp-test.py
+
+  - name: Check hotlink telemetry
+    datasite: client1@sandbox.local
+    run: |
+      TELEM="datasites/client1@sandbox.local/.syftbox/hotlink_telemetry.json"
+      if [ -f "$TELEM" ]; then
+        echo "Client1 telemetry:"
+        python3 -m json.tool "$TELEM" 2>/dev/null || cat "$TELEM"
+      else
+        echo "No telemetry file found"
+      fi
+
+  - name: Check client2 telemetry
+    datasite: client2@sandbox.local
+    run: |
+      TELEM="datasites/client2@sandbox.local/.syftbox/hotlink_telemetry.json"
+      if [ -f "$TELEM" ]; then
+        echo "Client2 telemetry:"
+        python3 -m json.tool "$TELEM" 2>/dev/null || cat "$TELEM"
+      else
+        echo "No telemetry file found"
+      fi

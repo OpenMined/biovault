@@ -53,6 +53,28 @@ type StepOverrides = HashMap<(String, String), String>;
 type FlowOverrides = HashMap<String, String>;
 type ParseOverridesResult = (StepOverrides, FlowOverrides, Option<String>, Vec<String>);
 
+const SEQURE_COMMUNICATION_PORT: usize = 9000;
+const SEQURE_COMMUNICATION_PORT_STRIDE: usize = 1000;
+
+fn mpc_comm_port_with_base(
+    base: usize,
+    local_pid: usize,
+    remote_pid: usize,
+    parties: usize,
+) -> usize {
+    let min_pid = std::cmp::min(local_pid, remote_pid);
+    let max_pid = std::cmp::max(local_pid, remote_pid);
+    // Canonical pair index independent of direction.
+    // For 3 parties: (0,1)->1, (0,2)->2, (1,2)->3.
+    let offset_major = min_pid * parties - min_pid * (min_pid + 1) / 2;
+    let offset_minor = max_pid - min_pid;
+    base + offset_major + offset_minor
+}
+
+fn mpc_comm_port(local_pid: usize, remote_pid: usize, parties: usize) -> usize {
+    mpc_comm_port_with_base(SEQURE_COMMUNICATION_PORT, local_pid, remote_pid, parties)
+}
+
 fn ensure_flow_subscription(
     data_root: &Path,
     datasite: &str,
@@ -851,6 +873,7 @@ pub async fn run_flow(
                     &spec.vars,
                 );
                 let channel_url = format!("{}/{}", base_url, channel_name);
+                let channel_url_clone = channel_url.clone();
 
                 println!(
                     "  📡 {}@{} → {} (channel: {})",
@@ -877,6 +900,41 @@ pub async fn run_flow(
                     &spec.name,
                     &run_id,
                 )?;
+
+                if env::var("BV_SYQURE_TCP_PROXY").ok().as_deref() == Some("1") {
+                    let parsed = SyftURL::parse(&channel_url_clone).with_context(|| {
+                        format!("Invalid MPC channel URL: {}", channel_url_clone)
+                    })?;
+                    let channel_dir = target_data_dir
+                        .join("datasites")
+                        .join(&parsed.email)
+                        .join(&parsed.path);
+                    let _ = std::fs::create_dir_all(&channel_dir);
+                    let port = mpc_comm_port(my_party_index, *to_idx, party_count);
+                    let from_base = SEQURE_COMMUNICATION_PORT
+                        + my_party_index * SEQURE_COMMUNICATION_PORT_STRIDE;
+                    let to_base =
+                        SEQURE_COMMUNICATION_PORT + to_idx * SEQURE_COMMUNICATION_PORT_STRIDE;
+                    let from_port =
+                        mpc_comm_port_with_base(from_base, my_party_index, *to_idx, party_count);
+                    let to_port =
+                        mpc_comm_port_with_base(to_base, *to_idx, my_party_index, party_count);
+                    let marker = serde_json::json!({
+                        "from": datasite_key.clone(),
+                        "to": receiver_datasite.clone(),
+                        "port": port,
+                        "ports": {
+                            datasite_key.clone(): from_port,
+                            receiver_datasite.clone(): to_port,
+                        },
+                    });
+                    let marker_path = channel_dir.join("stream.tcp");
+                    let accept_path = channel_dir.join("stream.accept");
+                    std::fs::write(&marker_path, marker.to_string())
+                        .with_context(|| format!("Failed to write {}", marker_path.display()))?;
+                    std::fs::write(&accept_path, "1")
+                        .with_context(|| format!("Failed to write {}", accept_path.display()))?;
+                }
             }
         }
 
@@ -2648,7 +2706,8 @@ fn render_flow_template(
 
     let flow_path = resolve_user_var("flow_path")
         .unwrap_or_else(|| format!("syft://{}/shared/flows/{}", current, flow_name));
-    let run_path = resolve_user_var("run_path").unwrap_or_else(|| format!("{}/{}", flow_path, run_id));
+    let run_path =
+        resolve_user_var("run_path").unwrap_or_else(|| format!("{}/{}", flow_path, run_id));
     let step_path = resolve_user_var("step_path").unwrap_or_else(|| {
         if let (Some(num), Some(id)) = (step_number, step_id) {
             format!("{}/{}-{}", run_path, num, id)
