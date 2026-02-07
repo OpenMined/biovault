@@ -51,6 +51,7 @@ spec:
             type: File
       assets:
         - path: run.sh
+        - path: gen_variants.py
 
     build_master:
       source:
@@ -68,6 +69,7 @@ spec:
             type: String
       assets:
         - path: run.sh
+        - path: build_master.py
 
     align_counts:
       source:
@@ -85,6 +87,7 @@ spec:
             type: File
       assets:
         - path: run.sh
+        - path: align_counts.py
 
     # Secure MPC aggregation using Syqure runtime
     secure_aggregate:
@@ -135,6 +138,12 @@ spec:
           permissions:
             read: ["{datasites[*]}"]
             write: ["{datasites[0]}"]
+        count_shared:
+          source: self.outputs.count
+          url: "{vars.step_path}/count.txt"
+          permissions:
+            read: ["{datasites[*]}"]
+            write: ["{datasites[0]}"]
 
     - id: align_counts
       uses: align_counts
@@ -165,8 +174,7 @@ spec:
           value: step.align_counts.outputs.counts_array
           only: clients
         array_length:
-          value: step.build_master.outputs.count
-          only: aggregator
+          value: step.build_master.share.count_shared
       share:
         # All parties share their result for transparency/verification
         result_shared:

@@ -161,6 +161,12 @@ spec:
           permissions:
             read: ["{datasites[*]}"]
             write: ["{datasites[0]}"]
+        count_shared:
+          source: self.outputs.count
+          url: "{vars.step_path}/count.txt"
+          permissions:
+            read: ["{datasites[*]}"]
+            write: ["{datasites[0]}"]
 
     - id: align_counts
       uses: align_counts
@@ -188,8 +194,7 @@ spec:
           value: step.align_counts.outputs.aligned_counts
           only: clients
         array_length:
-          value: step.build_master.outputs.count
-          only: aggregator
+          value: step.build_master.share.count_shared
       share:
         result_shared:
           source: self.outputs.aggregated_counts

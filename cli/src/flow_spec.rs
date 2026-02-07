@@ -75,6 +75,15 @@ pub struct FlowFileSpec {
     pub runtime: Option<FlowRuntimeSpec>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completion: Option<YamlValue>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub roles: Vec<FlowRole>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct FlowRole {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -887,6 +896,10 @@ pub struct FlowSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub multiparty: Option<bool>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub roles: Vec<FlowRole>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<FlowContextSpec>,
     /// User-defined variables for URL templates
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -1088,6 +1101,7 @@ impl FlowFile {
                 outputs: BTreeMap::new(),
                 runtime: None,
                 completion: None,
+                roles: Vec::new(),
             },
             manifest: None,
         })
@@ -1180,6 +1194,8 @@ impl FlowFile {
         Ok(FlowSpec {
             name: self.metadata.name.clone(),
             description: self.metadata.description.clone(),
+            multiparty: None,
+            roles: self.spec.roles.clone(),
             context: None,
             vars: self.spec.vars.clone(),
             coordination: self.spec.coordination.clone(),

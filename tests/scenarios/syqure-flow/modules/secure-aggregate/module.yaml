@@ -2,7 +2,7 @@ apiVersion: syftbox.openmined.org/v1alpha1
 kind: Module
 metadata:
   name: secure-aggregate
-  version: 0.1.0
+  version: 0.1.1
   description: Secure multi-party aggregation using Syqure MPC
 spec:
   runner:

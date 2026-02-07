@@ -107,6 +107,18 @@ pub enum MessageType {
         request_type: String,
         params: Option<JsonValue>,
     },
+    FlowInvitation {
+        flow_name: String,
+        session_id: String,
+        participants: Vec<FlowParticipant>,
+        flow_spec: JsonValue,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FlowParticipant {
+    pub email: String,
+    pub role: String,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -144,6 +156,7 @@ impl std::fmt::Display for MessageType {
             MessageType::Text => write!(f, "text"),
             MessageType::Module { .. } => write!(f, "module"),
             MessageType::Request { .. } => write!(f, "request"),
+            MessageType::FlowInvitation { .. } => write!(f, "flow_invitation"),
         }
     }
 }

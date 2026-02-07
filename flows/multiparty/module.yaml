@@ -1,0 +1,44 @@
+apiVersion: syftbox.openmined.org/v1alpha1
+kind: Module
+metadata:
+  name: multiparty
+  version: 0.1.0
+  description: Simple 3-party collaborative sum for testing multiparty flow UX
+  authors:
+    - madhava@openmined.org
+spec:
+  runner:
+    kind: nextflow
+    entrypoint: workflow.nf
+    template: dynamic-nextflow
+  assets: []
+  inputs:
+    - name: role
+      type: String
+      description: The role this participant plays (contributor1, contributor2, aggregator)
+    - name: session_id
+      type: String
+      description: Unique identifier for this flow execution session
+    - name: step_id
+      type: String
+      description: Which step to execute
+    - name: input_dir
+      type: Directory
+      description: Directory containing inputs from other participants (for aggregator)
+      optional: true
+  outputs:
+    - name: numbers
+      type: File
+      description: Generated random numbers (contributors)
+      format:
+        kind: json
+      path: numbers.json
+      optional: true
+    - name: result
+      type: File
+      description: Aggregated sum result (aggregator)
+      format:
+        kind: json
+      path: result.json
+      optional: true
+  parameters: []
