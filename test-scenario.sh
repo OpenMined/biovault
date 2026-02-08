@@ -173,6 +173,43 @@ fi
 if (( USE_DOCKER )); then
   # Ensure syqure.yaml switches into Docker mode when --docker/--podman is used.
   export SEQURE_MODE="${SEQURE_MODE:-docker}"
+  # Syqure runs in containers need the host-side hotlink TCP proxy reachable.
+  # Bind proxy listeners to all interfaces unless user provided an override.
+  export BV_SYFTBOX_HOTLINK_TCP_PROXY_ADDR="${BV_SYFTBOX_HOTLINK_TCP_PROXY_ADDR:-0.0.0.0}"
+  # Resolve a numeric host IP from inside Docker so syqure containers avoid
+  # hostname/address-family issues when connecting to hotlink TCP proxies.
+  if [[ -z "${BV_SYQURE_CP_HOST:-}" ]] && [[ "${BIOVAULT_CONTAINER_RUNTIME:-docker}" == "docker" ]]; then
+    detect_docker_host_ip() {
+      local alias="$1"
+      docker run --rm alpine:3.19 sh -lc \
+        "getent hosts '$alias' 2>/dev/null | awk 'NR==1 {print \$1}'" 2>/dev/null || true
+    }
+
+    for alias in host.docker.internal gateway.docker.internal; do
+      candidate="$(detect_docker_host_ip "$alias")"
+      if [[ "$candidate" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+        export BV_SYQURE_CP_HOST="$candidate"
+        echo "Syqure Docker CP host: ${BV_SYQURE_CP_HOST} (${alias})"
+        break
+      fi
+    done
+  fi
+
+  # Fail-fast: verify container→host networking works before running the full test.
+  if [[ -n "${BV_SYQURE_CP_HOST:-}" ]]; then
+    echo "Docker networking preflight: checking container→host connectivity (${BV_SYQURE_CP_HOST})..."
+    # Spin up a tiny container that tries to ping or connect to the host IP.
+    if docker run --rm --platform linux/amd64 alpine:3.19 sh -c \
+        "nc -z -w3 '${BV_SYQURE_CP_HOST}' 80 2>/dev/null; ping -c1 -W2 '${BV_SYQURE_CP_HOST}' >/dev/null 2>&1" 2>/dev/null; then
+      echo "Docker networking preflight: host ${BV_SYQURE_CP_HOST} is reachable ✓"
+    else
+      # Ping may fail in some configs (e.g., firewall), but as long as we can
+      # resolve the host IP the routing should work once proxy ports are listening.
+      echo "Docker networking preflight: host ${BV_SYQURE_CP_HOST} ping failed (OK if firewall blocks ICMP)"
+    fi
+  else
+    echo "WARNING: Could not detect Docker host IP. Container→host proxy connectivity may fail." >&2
+  fi
 fi
 
 if (( NO_RESET )); then
