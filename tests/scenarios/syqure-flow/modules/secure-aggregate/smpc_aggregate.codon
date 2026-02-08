@@ -29,13 +29,30 @@ def save_json(path: str, data: List[int]):
     open(path, "w").write("[" + ",".join(parts) + "]")
 
 
+def append_phase(path: str, msg: str):
+    if not path:
+        return
+    try:
+        prev = ""
+        try:
+            prev = open(path).read()
+        except:
+            prev = ""
+        open(path, "w").write(prev + msg + "\n")
+    except:
+        pass
+
+
 @sequre
 def add(m, a, b):
     return a + b
 
 
 def main():
+    phase_path = os.getenv("SEQURE_OUTPUT_AGGREGATED_COUNTS", "out.json") + ".phase"
+    append_phase(phase_path, "start:before_mpc")
     m = mpc()
+    append_phase(phase_path, f"start:after_mpc pid={m.pid}")
 
     # Clients (pid 1,2) load their counts; aggregator (pid 0) has none
     data = load_json(os.getenv("SEQURE_INPUT_COUNTS", ""))
@@ -53,13 +70,16 @@ def main():
 
     if n == 0:
         print(f"ERROR: CP{m.pid} has no data and no array_length - check flow configuration")
+        append_phase(phase_path, f"error:no_data pid={m.pid}")
         m.done()
         return
 
     # Sync all parties before starting MPC computation
     print(f"CP{m.pid}: Waiting for all parties to sync...")
+    append_phase(phase_path, f"sync:start pid={m.pid} n={n} data_len={len(data)}")
     m.comms.sync_parties()
     print(f"CP{m.pid}: All parties synced!")
+    append_phase(phase_path, f"sync:done pid={m.pid}")
 
     # Secure sum: vectorized add for performance (single MPC op per vector)
     print(f"CP{m.pid}: Starting MPC with n={n}, data_len={len(data)}")
@@ -71,18 +91,32 @@ def main():
             n = len(data_vec)
     zero_vec = zeros_like(data_vec)
 
+    print(f"CP{m.pid}: Encrypting shares")
+    append_phase(phase_path, f"encrypt:start pid={m.pid}")
     v1 = data_vec if m.pid == 1 else zero_vec
     v2 = data_vec if m.pid == 2 else zero_vec
 
     s1 = ST.enc(m, v1, 1, m.default_mpc_modulus)
     s2 = ST.enc(m, v2, 2, m.default_mpc_modulus)
+    append_phase(phase_path, f"encrypt:done pid={m.pid}")
+    print(f"CP{m.pid}: Running secure add")
+    append_phase(phase_path, f"add:start pid={m.pid}")
     total = add(m, s1, s2)
+    append_phase(phase_path, f"add:done pid={m.pid}")
+    print(f"CP{m.pid}: Revealing result")
+    append_phase(phase_path, f"reveal:start pid={m.pid}")
     revealed = total.reveal(m).tolist()
+    append_phase(phase_path, f"reveal:done pid={m.pid}")
     result: List[int] = []
     for x in revealed:
         result.append(int(x))
 
+    print(f"CP{m.pid}: Writing output")
+    append_phase(phase_path, f"write:start pid={m.pid}")
     save_json(os.getenv("SEQURE_OUTPUT_AGGREGATED_COUNTS", "out.json"), result)
+    append_phase(phase_path, f"write:done pid={m.pid} len={len(result)}")
+    print(f"CP{m.pid}: Done")
+    append_phase(phase_path, f"done pid={m.pid}")
     m.done()
 
 

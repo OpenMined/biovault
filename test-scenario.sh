@@ -17,6 +17,7 @@ usage() {
 Usage: ./test-scenario.sh [options] <scenario.yaml>
 
 Options:
+  --webrtc-flow        Run fast 2-peer WebRTC/hotlink transport smoke scenario
   --client-mode MODE   SyftBox client: go|rust|mixed|embedded (default: rust)
   --sandbox DIR        Sandbox root (default: ./sandbox)
   --rust-client-bin P  Path to Rust client binary (optional)
@@ -26,7 +27,8 @@ Options:
   --allele-count N     Override allele-freq synthetic file count (default: 10)
   --syqure-agg MODE    Syqure aggregation mode: smpc|he (default: smpc)
   --syqure-transport T Syqure transport: hotlink|file (default: hotlink)
-  --hotlink-quic-only Force QUIC-only hotlink transport (no websocket fallback)
+  --hotlink-p2p-only  Force p2p-only hotlink mode (disable websocket fallback)
+  --hotlink-quic-only Deprecated alias for --hotlink-p2p-only
   --docker             Force Docker mode for syqure runtime
   --podman             Force Podman runtime (sets BIOVAULT_CONTAINER_RUNTIME=podman)
   --keep-containers    Keep syqure containers on failure (for logs/debugging)
@@ -34,6 +36,7 @@ Options:
   -h, --help           Show this message
 
 Examples:
+  ./test-scenario.sh --webrtc-flow
   ./test-scenario.sh tests/scenarios/inbox-ping-pong.yaml
   ./test-scenario.sh --client-mode go tests/scenarios/inbox-ping-pong.yaml
   ./test-scenario.sh --sandbox sandbox-rs tests/scenarios/inbox-ping-pong.yaml
@@ -43,7 +46,7 @@ Examples:
   ./test-scenario.sh --podman --keep-containers tests/scenarios/syqure-distributed.yaml
   ./test-scenario.sh --syqure-agg he tests/scenarios/syqure-distributed.yaml
   ./test-scenario.sh --syqure-transport file tests/scenarios/syqure-distributed.yaml
-  ./test-scenario.sh --hotlink-quic-only tests/scenarios/syqure-distributed.yaml
+  ./test-scenario.sh --hotlink-p2p-only tests/scenarios/syqure-distributed.yaml
   ./test-scenario.sh --no-reset tests/scenarios/allele-freq-syqure.yaml
 EOF
 }
@@ -60,7 +63,8 @@ FORCE_RUN=0
 ALLELE_COUNT=""
 SYQURE_AGG_MODE="smpc"
 SYQURE_TRANSPORT="hotlink"
-HOTLINK_QUIC_ONLY=0
+HOTLINK_P2P_ONLY=0
+WEBRTC_FLOW=0
 SCENARIO=""
 SCENARIO_VARS=()
 
@@ -105,8 +109,11 @@ while [[ $# -gt 0 ]]; do
       SYQURE_TRANSPORT="${2:-}"
       shift
       ;;
-    --hotlink-quic-only)
-      HOTLINK_QUIC_ONLY=1
+    --hotlink-p2p-only|--hotlink-quic-only)
+      HOTLINK_P2P_ONLY=1
+      ;;
+    --webrtc-flow)
+      WEBRTC_FLOW=1
       ;;
     --docker)
       USE_DOCKER=1
@@ -140,8 +147,22 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "$SCENARIO" ]]; then
-  usage
-  exit 1
+  if (( WEBRTC_FLOW )); then
+    SCENARIO="tests/scenarios/hotlink-tcp-smoke.yaml"
+  else
+    usage
+    exit 1
+  fi
+fi
+
+if (( WEBRTC_FLOW )); then
+  if [[ "$SCENARIO" != "tests/scenarios/hotlink-tcp-smoke.yaml" ]]; then
+    echo "--webrtc-flow cannot be combined with an explicit scenario path" >&2
+    exit 1
+  fi
+  # Force hotlink + p2p-only so this exercises WebRTC path without ws fallback.
+  SYQURE_TRANSPORT="hotlink"
+  HOTLINK_P2P_ONLY=1
 fi
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -234,6 +255,10 @@ if [[ -n "$SYQURE_AGG_MODE" ]]; then
 fi
 
 if [[ -n "$SYQURE_TRANSPORT" ]]; then
+  if [[ "$SYQURE_TRANSPORT" == "webrtc" ]]; then
+    echo "NOTE: --syqure-transport webrtc is deprecated; using hotlink" >&2
+    SYQURE_TRANSPORT="hotlink"
+  fi
   case "$SYQURE_TRANSPORT" in
     hotlink)
       export BV_SYQURE_TRANSPORT="hotlink"
@@ -241,9 +266,11 @@ if [[ -n "$SYQURE_TRANSPORT" ]]; then
       export BV_SYFTBOX_HOTLINK="1"
       export BV_SYFTBOX_HOTLINK_TCP_PROXY="1"
       export BV_SYFTBOX_HOTLINK_QUIC="${BV_SYFTBOX_HOTLINK_QUIC:-1}"
-      if (( HOTLINK_QUIC_ONLY )); then
+      if (( HOTLINK_P2P_ONLY )); then
+        export BV_SYFTBOX_HOTLINK_P2P_ONLY="1"
         export BV_SYFTBOX_HOTLINK_QUIC_ONLY="1"
       else
+        export BV_SYFTBOX_HOTLINK_P2P_ONLY="${BV_SYFTBOX_HOTLINK_P2P_ONLY:-0}"
         export BV_SYFTBOX_HOTLINK_QUIC_ONLY="${BV_SYFTBOX_HOTLINK_QUIC_ONLY:-0}"
       fi
       ;;
@@ -252,6 +279,7 @@ if [[ -n "$SYQURE_TRANSPORT" ]]; then
       export BV_SYQURE_TCP_PROXY="0"
       export BV_SYFTBOX_HOTLINK="0"
       export BV_SYFTBOX_HOTLINK_TCP_PROXY="0"
+      export BV_SYFTBOX_HOTLINK_P2P_ONLY="0"
       export BV_SYFTBOX_HOTLINK_QUIC="0"
       export BV_SYFTBOX_HOTLINK_QUIC_ONLY="0"
       ;;
