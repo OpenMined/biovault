@@ -271,15 +271,25 @@ impl Config {
     }
 
     pub fn save_binary_path(name: &str, path: Option<String>) -> crate::error::Result<Self> {
+        let fallback_email = get_env_var("SYFTBOX_EMAIL")
+            .or_else(|| get_env_var("BIOVAULT_EMAIL"))
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty() && v != "setup@pending")
+            .unwrap_or_default();
+
         // Try to load existing config, but preserve the email if it exists
         let mut config = match Self::load() {
             Ok(existing) => existing,
-            Err(_) => Self::new(String::new()),
+            Err(_) => Self::new(fallback_email.clone()),
         };
 
         // Avoid persisting placeholder onboarding values when dependency paths are saved early.
         if config.email.trim() == "setup@pending" {
             config.email.clear();
+        }
+
+        if config.email.trim().is_empty() && !fallback_email.is_empty() {
+            config.email = fallback_email;
         }
 
         let normalized = path.and_then(|p| {

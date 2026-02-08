@@ -1,0 +1,35 @@
+apiVersion: syftbox.openmined.org/v1alpha1
+kind: Module
+metadata:
+  name: report-aggregate
+  version: 0.1.0
+spec:
+  runner:
+    template: shell
+    entrypoint: run.sh
+  assets:
+    - path: run.sh
+    - path: report_aggregate.py
+  inputs:
+    - name: union_index
+      type: File
+      format: { kind: json }
+    - name: local_counts
+      type: File
+      format: { kind: json }
+    - name: aggregated_counts
+      type: File
+      format: { kind: json }
+  outputs:
+    - name: report_json
+      type: File
+      format: { kind: json }
+      path: report.json
+    - name: report_tsv
+      type: File
+      format: { kind: tsv }
+      path: report.tsv
+    - name: aggregated_allele_freq_tsv
+      type: File
+      format: { kind: tsv }
+      path: aggregated_allele_freq.tsv

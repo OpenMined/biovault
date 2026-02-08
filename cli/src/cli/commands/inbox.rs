@@ -210,6 +210,7 @@ pub fn list(config: &Config, filters: ListFilters) -> Result<()> {
             MessageType::Text => "✉️",
             MessageType::Module { .. } => "📦",
             MessageType::Request { .. } => "🔔",
+            MessageType::FlowInvitation { .. } => "🔄",
         };
 
         println!(

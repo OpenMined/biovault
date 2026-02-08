@@ -50,7 +50,7 @@ steps:
         echo "Syqure binary not found for analyze. Skipping." >&2
         exit 0
       fi
-      PROGRAM="{{workspace}}/tests/scenarios/allele-freq-syqure/modules/secure-aggregate/secure_aggregate.codon"
+      PROGRAM="{{workspace}}/flows/multiparty-allele-freq/modules/secure-aggregate/secure_aggregate.codon"
       if [[ ! -f "$PROGRAM" ]]; then
         echo "Missing codon program: $PROGRAM" >&2
         exit 1
@@ -92,36 +92,36 @@ steps:
         datasite: client1@sandbox.local
         run: |
           cd {{workspace}}
-          RESULTS_DIR="{{sandbox}}/results/flows/allele-freq-syqure/{{run_id}}"
+          RESULTS_DIR="{{sandbox}}/results/flows/multiparty-allele-freq/{{run_id}}"
           BV_BIN={{workspace}}/cli/target/release/bv \
           BIOVAULT_FLOW_VERBOSE=1 BIOVAULT_FLOW_RUN_ID={{run_id}} BIOVAULT_FLOW_AWAIT_TIMEOUT=600 \
           BV_FLOW_SKIP_DONE=1 \
           BV_SYQURE_USE_DOCKER=${BV_SYQURE_USE_DOCKER:-} \
-            {{workspace}}/cli/target/release/bv run tests/scenarios/allele-freq-syqure/flow.yaml \
+            {{workspace}}/cli/target/release/bv run flows/multiparty-allele-freq/flow.yaml \
             --results-dir "$RESULTS_DIR"
 
       - name: client2-flow
         datasite: client2@sandbox.local
         run: |
           cd {{workspace}}
-          RESULTS_DIR="{{sandbox}}/results/flows/allele-freq-syqure/{{run_id}}"
+          RESULTS_DIR="{{sandbox}}/results/flows/multiparty-allele-freq/{{run_id}}"
           BV_BIN={{workspace}}/cli/target/release/bv \
           BIOVAULT_FLOW_VERBOSE=1 BIOVAULT_FLOW_RUN_ID={{run_id}} BIOVAULT_FLOW_AWAIT_TIMEOUT=600 \
           BV_FLOW_SKIP_DONE=1 \
           BV_SYQURE_USE_DOCKER=${BV_SYQURE_USE_DOCKER:-} \
-            {{workspace}}/cli/target/release/bv run tests/scenarios/allele-freq-syqure/flow.yaml \
+            {{workspace}}/cli/target/release/bv run flows/multiparty-allele-freq/flow.yaml \
             --results-dir "$RESULTS_DIR"
 
       - name: aggregator-flow
         datasite: aggregator@sandbox.local
         run: |
           cd {{workspace}}
-          RESULTS_DIR="{{sandbox}}/results/flows/allele-freq-syqure/{{run_id}}"
+          RESULTS_DIR="{{sandbox}}/results/flows/multiparty-allele-freq/{{run_id}}"
           BV_BIN={{workspace}}/cli/target/release/bv \
           BIOVAULT_FLOW_VERBOSE=1 BIOVAULT_FLOW_RUN_ID={{run_id}} BIOVAULT_FLOW_AWAIT_TIMEOUT=600 \
           BV_FLOW_SKIP_DONE=1 \
           BV_SYQURE_USE_DOCKER=${BV_SYQURE_USE_DOCKER:-} \
-            {{workspace}}/cli/target/release/bv run tests/scenarios/allele-freq-syqure/flow.yaml \
+            {{workspace}}/cli/target/release/bv run flows/multiparty-allele-freq/flow.yaml \
             --results-dir "$RESULTS_DIR"
     timeout: 1800
 
@@ -131,7 +131,7 @@ steps:
       echo "=== Checking progress files for run {{run_id}} ==="
 
       for ds in client1@sandbox.local client2@sandbox.local aggregator@sandbox.local; do
-        PROGRESS_DIR="datasites/${ds}/shared/flows/allele-freq-syqure/{{run_id}}/progress"
+        PROGRESS_DIR="datasites/${ds}/shared/flows/multiparty-allele-freq/{{run_id}}/progress"
         PROGRESS_JSON="${PROGRESS_DIR}/progress.json"
         PROGRESS_LOG="${PROGRESS_DIR}/progress.log"
 
@@ -157,27 +157,27 @@ steps:
   - name: Verify aggregated outputs exist
     run: |
       set -euo pipefail
-      base="{{sandbox}}/results/flows/allele-freq-syqure/{{run_id}}"
+      base="{{sandbox}}/results/flows/multiparty-allele-freq/{{run_id}}"
       echo "Checking outputs in $base"
       ls -la "$base" || true
       find "$base" -name aggregated_counts.json -print
 
   - name: Compare client outputs (TSV vs NPZ, APOL1/THAL side-by-side)
     run: |
-      python3 {{workspace}}/tests/scenarios/allele-freq-syqure/scripts/compare_npz_tsv.py \
+      python3 {{workspace}}/flows/multiparty-allele-freq/scripts/compare_npz_tsv.py \
         --workspace "{{workspace}}" \
-        --results-dir "{{sandbox}}/results/flows/allele-freq-syqure/{{run_id}}"
+        --results-dir "{{sandbox}}/results/flows/multiparty-allele-freq/{{run_id}}"
 
 
   - name: Decode aggregate sum and basic stats
     run: |
-      python3 {{workspace}}/tests/scenarios/allele-freq-syqure/scripts/decode_stats.py \
+      python3 {{workspace}}/flows/multiparty-allele-freq/scripts/decode_stats.py \
         --workspace "{{workspace}}" \
         --run-id "{{run_id}}" \
-        --results-dir "{{sandbox}}/results/flows/allele-freq-syqure/{{run_id}}"
+        --results-dir "{{sandbox}}/results/flows/multiparty-allele-freq/{{run_id}}"
 
   - name: Verify aggregation correctness (assert client1 + client2 == aggregated)
     run: |
-      python3 {{workspace}}/tests/scenarios/allele-freq-syqure/scripts/verify_aggregation.py \
+      python3 {{workspace}}/flows/multiparty-allele-freq/scripts/verify_aggregation.py \
         --workspace "{{workspace}}" \
-        --results-dir "{{sandbox}}/results/flows/allele-freq-syqure/{{run_id}}"
+        --results-dir "{{sandbox}}/results/flows/multiparty-allele-freq/{{run_id}}"

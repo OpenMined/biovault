@@ -11,7 +11,10 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::env;
 use std::ffi::OsStr;
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::future::Future;
+use std::hash::{Hash, Hasher};
+use std::io::{self, BufRead, BufReader, Write};
+use std::net::{Ipv4Addr, SocketAddrV4, TcpListener};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -19,8 +22,374 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-const SEQURE_COMMUNICATION_PORT: usize = 9000;
 const SEQURE_COMMUNICATION_PORT_STRIDE: usize = 1000;
+const SEQURE_DATA_SHARING_PORT_OFFSET: usize = 10_000;
+const SEQURE_PORT_BASE_MIN: usize = 20_000;
+
+#[derive(Debug, Clone, Default)]
+pub struct DynamicExecutionContext {
+    pub current_datasite: Option<String>,
+    pub datasites_override: Option<Vec<String>>,
+    pub syftbox_data_dir: Option<String>,
+    pub run_id: Option<String>,
+    pub flow_name: Option<String>,
+    pub syqure_port_base: Option<usize>,
+    pub tauri_context: bool,
+}
+
+tokio::task_local! {
+    static EXECUTION_CONTEXT: DynamicExecutionContext;
+}
+
+pub async fn with_execution_context<F, T>(ctx: DynamicExecutionContext, fut: F) -> T
+where
+    F: Future<Output = T>,
+{
+    // Keep run-specific values task-local so concurrent parties do not race
+    // through process-global env vars (a prior desktop-only failure mode).
+    EXECUTION_CONTEXT.scope(ctx, fut).await
+}
+
+fn execution_context() -> Option<DynamicExecutionContext> {
+    EXECUTION_CONTEXT.try_with(|ctx| ctx.clone()).ok()
+}
+
+pub fn mpc_comm_port_with_base(
+    base: usize,
+    local_pid: usize,
+    remote_pid: usize,
+    parties: usize,
+) -> usize {
+    let min_pid = std::cmp::min(local_pid, remote_pid);
+    let max_pid = std::cmp::max(local_pid, remote_pid);
+    let offset_major = min_pid * parties - min_pid * (min_pid + 1) / 2;
+    let offset_minor = max_pid - min_pid;
+    base + offset_major + offset_minor
+}
+
+/// Write a unified syqure diagnostics file to /tmp so both CLI and Tauri
+/// produce identical output for comparison.
+/// File: /tmp/biovault-syqure-diag-{run_id}-p{party_id}.log
+fn write_syqure_diag_file(
+    run_id: &str,
+    party_id: usize,
+    party_count: usize,
+    email: &str,
+    port_base: usize,
+    tcp_proxy: bool,
+    env_map: &BTreeMap<String, String>,
+    module_path: &Path,
+    binary: &str,
+    entrypoint: &Path,
+) {
+    let safe_run_id: String = run_id
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let path = PathBuf::from(format!(
+        "/tmp/biovault-syqure-diag-{}-p{}.log",
+        safe_run_id, party_id
+    ));
+    let caller = if execution_context()
+        .map(|ctx| ctx.tauri_context)
+        .unwrap_or(false)
+    {
+        "tauri"
+    } else if env::var("TAURI_ENV").is_ok()
+        || env::var("TAURI_PLATFORM").is_ok()
+        || std::env::current_exe()
+            .ok()
+            .and_then(|p| {
+                p.file_name()
+                    .map(|n| n.to_string_lossy().contains("biovault-desktop"))
+            })
+            .unwrap_or(false)
+    {
+        "tauri"
+    } else {
+        "cli"
+    };
+    let ts = chrono::Local::now().to_rfc3339();
+    let mut lines: Vec<String> = Vec::new();
+
+    lines.push(format!("timestamp={}", ts));
+    lines.push(format!("caller={}", caller));
+    lines.push(format!("run_id={}", run_id));
+    lines.push(format!("party_id={}", party_id));
+    lines.push(format!("party_count={}", party_count));
+    lines.push(format!("email={}", email));
+    lines.push(format!("port_base={}", port_base));
+    lines.push(format!("tcp_proxy={}", tcp_proxy));
+    lines.push(format!("binary={}", binary));
+    lines.push(format!("entrypoint={}", entrypoint.display()));
+    lines.push(format!("module_path={}", module_path.display()));
+    lines.push(format!(
+        "BV_SYFTBOX_BACKEND={}",
+        env::var("BV_SYFTBOX_BACKEND").unwrap_or_else(|_| "unset".to_string())
+    ));
+    lines.push(format!(
+        "SYFTBOX_HOTLINK_TCP_PROXY={}",
+        env::var("SYFTBOX_HOTLINK_TCP_PROXY").unwrap_or_else(|_| "unset".to_string())
+    ));
+
+    let hint_path = syqure_port_base_hint_path(run_id, party_count);
+    lines.push(format!(
+        "port_hint_file={} exists={}",
+        hint_path.display(),
+        hint_path.exists()
+    ));
+
+    // Env vars (SEQURE_* and BV_*)
+    for (k, v) in env_map
+        .iter()
+        .filter(|(k, _)| k.starts_with("SEQURE_") || k.starts_with("BV_"))
+    {
+        lines.push(format!("env.{}={}", k, v));
+    }
+
+    // TCP proxy port checks
+    if tcp_proxy {
+        for peer_id in 0..party_count {
+            if peer_id == party_id {
+                continue;
+            }
+            let comm_base = port_base + party_id * SEQURE_COMMUNICATION_PORT_STRIDE;
+            let port = mpc_comm_port_with_base(comm_base, party_id, peer_id, party_count);
+            let listening = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port as u16))
+                .map(|_| false)
+                .unwrap_or(true);
+            lines.push(format!(
+                "tcp_port_check: CP{}<->CP{} port={} status={}",
+                party_id,
+                peer_id,
+                port,
+                if listening {
+                    "LISTENING"
+                } else {
+                    "NOT_LISTENING"
+                }
+            ));
+        }
+    }
+
+    let content = lines.join("\n") + "\n";
+    if let Err(e) = fs::write(&path, &content) {
+        eprintln!(
+            "warn: failed to write syqure diag file {}: {}",
+            path.display(),
+            e
+        );
+    } else {
+        println!("  Diag file: {}", path.display());
+    }
+}
+
+fn max_syqure_base_port(party_count: usize) -> usize {
+    let parties = party_count.max(2);
+    let max_party_base_delta = (parties - 1) * SEQURE_COMMUNICATION_PORT_STRIDE;
+    let max_pair_offset = parties * (parties - 1) / 2;
+    let reserve =
+        max_party_base_delta + max_pair_offset + SEQURE_DATA_SHARING_PORT_OFFSET + parties;
+    (u16::MAX as usize).saturating_sub(reserve)
+}
+
+fn required_syqure_ports_for_party(
+    global_base: usize,
+    party_id: usize,
+    party_count: usize,
+) -> Option<Vec<u16>> {
+    let parties = party_count.max(2);
+    if party_id >= parties {
+        return None;
+    }
+    let party_base = global_base + party_id * SEQURE_COMMUNICATION_PORT_STRIDE;
+    let mut ports: BTreeSet<u16> = BTreeSet::new();
+    for remote_pid in 0..parties {
+        if party_id == remote_pid {
+            continue;
+        }
+        let port = mpc_comm_port_with_base(party_base, party_id, remote_pid, parties);
+        ports.insert(u16::try_from(port).ok()?);
+    }
+    ports.insert(u16::try_from(party_base + SEQURE_DATA_SHARING_PORT_OFFSET).ok()?);
+    Some(ports.into_iter().collect())
+}
+
+fn required_syqure_ports_for_all(global_base: usize, party_count: usize) -> Option<Vec<u16>> {
+    let parties = party_count.max(2);
+    let mut all_ports: BTreeSet<u16> = BTreeSet::new();
+    for party_id in 0..parties {
+        for port in required_syqure_ports_for_party(global_base, party_id, parties)? {
+            all_ports.insert(port);
+        }
+    }
+    Some(all_ports.into_iter().collect())
+}
+
+fn tcp_port_is_free(port: u16) -> bool {
+    TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port)).is_ok()
+}
+
+fn syqure_port_base_is_available(global_base: usize, party_count: usize) -> bool {
+    let Some(ports) = required_syqure_ports_for_all(global_base, party_count) else {
+        return false;
+    };
+    ports.into_iter().all(tcp_port_is_free)
+}
+
+fn syqure_port_base_hint_path(run_id: &str, party_count: usize) -> PathBuf {
+    let safe_run_id: String = run_id
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    env::temp_dir().join(format!(
+        "biovault-syqure-port-base-{}-p{}.txt",
+        safe_run_id, party_count
+    ))
+}
+
+fn read_syqure_port_base_hint(path: &Path) -> Option<usize> {
+    let raw = fs::read_to_string(path).ok()?;
+    raw.trim().parse::<usize>().ok()
+}
+
+fn validate_syqure_port_base(name: &str, base: usize, max_base: usize) -> Result<()> {
+    if base < SEQURE_PORT_BASE_MIN || base > max_base {
+        return Err(anyhow::anyhow!(
+            "{} must be in range {}..={}, got {}",
+            name,
+            SEQURE_PORT_BASE_MIN,
+            max_base,
+            base
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn parse_port_base_env(name: &str) -> Result<Option<usize>> {
+    match env::var(name) {
+        Ok(value) => {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                return Ok(None);
+            }
+            let parsed = trimmed.parse::<usize>().map_err(|_| {
+                anyhow::anyhow!("{} must be a positive integer, got '{}'", name, trimmed)
+            })?;
+            if parsed == 0 || parsed > u16::MAX as usize {
+                return Err(anyhow::anyhow!(
+                    "{} must be in range 1..={}, got {}",
+                    name,
+                    u16::MAX,
+                    parsed
+                )
+                .into());
+            }
+            Ok(Some(parsed))
+        }
+        Err(_) => Ok(None),
+    }
+}
+
+pub fn prepare_syqure_port_base_for_run(
+    run_id: &str,
+    party_count: usize,
+    requested_base_override: Option<usize>,
+) -> Result<usize> {
+    let max_base = max_syqure_base_port(party_count);
+    if max_base <= SEQURE_PORT_BASE_MIN {
+        return Err(anyhow::anyhow!(
+            "Unable to allocate Syqure base port for {} parties (invalid port range)",
+            party_count
+        )
+        .into());
+    }
+
+    if let Some(base) = requested_base_override {
+        // In desktop multiparty, all parties in one session must share one base.
+        // Do not derive a per-party base, or channels will silently diverge.
+        validate_syqure_port_base("context syqure port base", base, max_base)?;
+        env::set_var("BV_SYQURE_PORT_BASE", base.to_string());
+        return Ok(base);
+    }
+
+    if let Some(base) = parse_port_base_env("BV_SYQURE_PORT_BASE")? {
+        validate_syqure_port_base("BV_SYQURE_PORT_BASE", base, max_base)?;
+        return Ok(base);
+    }
+    let requested_base = parse_port_base_env("SEQURE_COMMUNICATION_PORT")?;
+    if let Some(base) = requested_base {
+        validate_syqure_port_base("SEQURE_COMMUNICATION_PORT", base, max_base)?;
+        env::set_var("BV_SYQURE_PORT_BASE", base.to_string());
+        return Ok(base);
+    }
+
+    let hint_path = syqure_port_base_hint_path(run_id, party_count);
+    if let Some(base) = read_syqure_port_base_hint(&hint_path) {
+        validate_syqure_port_base("cached syqure port base", base, max_base)?;
+        env::set_var("BV_SYQURE_PORT_BASE", base.to_string());
+        return Ok(base);
+    }
+
+    let span = max_base - SEQURE_PORT_BASE_MIN + 1;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    run_id.hash(&mut hasher);
+    party_count.hash(&mut hasher);
+    let seed_candidate = SEQURE_PORT_BASE_MIN + (hasher.finish() as usize % span);
+    let mut selected: Option<usize> = None;
+    for offset in 0..span {
+        let candidate =
+            SEQURE_PORT_BASE_MIN + ((seed_candidate - SEQURE_PORT_BASE_MIN + offset) % span);
+        if syqure_port_base_is_available(candidate, party_count) {
+            selected = Some(candidate);
+            break;
+        }
+    }
+    let selected = selected.ok_or_else(|| {
+        anyhow::anyhow!(
+            "No free Syqure TCP proxy base port found for {} parties. \
+             Tried {} candidate bases in [{}..={}].",
+            party_count,
+            span,
+            SEQURE_PORT_BASE_MIN,
+            max_base
+        )
+    })?;
+
+    match OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&hint_path)
+    {
+        Ok(mut file) => {
+            let _ = writeln!(file, "{}", selected);
+        }
+        Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
+            if let Some(existing) = read_syqure_port_base_hint(&hint_path) {
+                validate_syqure_port_base("cached syqure port base", existing, max_base)?;
+                env::set_var("BV_SYQURE_PORT_BASE", existing.to_string());
+                return Ok(existing);
+            }
+            let _ = fs::write(&hint_path, format!("{selected}\n"));
+        }
+        Err(_) => {}
+    }
+    env::set_var("BV_SYQURE_PORT_BASE", selected.to_string());
+    Ok(selected)
+}
 
 fn is_truthy(value: &str) -> bool {
     matches!(
@@ -152,6 +521,100 @@ fn short_hotlink_mode(mode: &str) -> &'static str {
     }
 }
 
+fn multiparty_progress_dirs(
+    datasites_root: &str,
+    email: &str,
+    flow_name: &str,
+    run_id: &str,
+) -> Vec<PathBuf> {
+    let root = PathBuf::from(datasites_root);
+    vec![
+        root.join(email)
+            .join("shared")
+            .join("flows")
+            .join(flow_name)
+            .join(run_id)
+            .join("_progress"),
+        root.join(email)
+            .join("datasites")
+            .join(email)
+            .join("shared")
+            .join("flows")
+            .join(flow_name)
+            .join(run_id)
+            .join("_progress"),
+    ]
+}
+
+fn peer_failed_step_in_progress(progress_dir: &Path, step_id: &str) -> Option<String> {
+    let entries = fs::read_dir(progress_dir).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if !name.ends_with(".json") || name == "state.json" || name == "progress.json" {
+            continue;
+        }
+        let raw = match fs::read_to_string(&path) {
+            Ok(raw) => raw,
+            Err(_) => continue,
+        };
+        let parsed: JsonValue = match serde_json::from_str(&raw) {
+            Ok(parsed) => parsed,
+            Err(_) => continue,
+        };
+        let parsed_step = parsed
+            .get("step_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        if parsed_step != step_id {
+            continue;
+        }
+        let status = parsed
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        if !status.eq_ignore_ascii_case("Failed") {
+            continue;
+        }
+        let role = parsed.get("role").and_then(|v| v.as_str()).unwrap_or("");
+        if role.is_empty() {
+            return Some("unknown".to_string());
+        }
+        return Some(role.to_string());
+    }
+    None
+}
+
+fn detect_peer_step_failure(
+    datasites_root: &str,
+    flow_name: &str,
+    run_id: &str,
+    step_id: &str,
+    local_email: &str,
+    party_emails: &[String],
+) -> Option<String> {
+    for peer_email in party_emails {
+        if peer_email.eq_ignore_ascii_case(local_email) {
+            continue;
+        }
+        for progress_dir in multiparty_progress_dirs(datasites_root, peer_email, flow_name, run_id)
+        {
+            if !progress_dir.exists() {
+                continue;
+            }
+            if let Some(role) = peer_failed_step_in_progress(&progress_dir, step_id) {
+                return Some(format!("{} ({})", peer_email, role));
+            }
+        }
+    }
+    None
+}
+
 fn append_desktop_log(message: &str) {
     if let Ok(path) = std::env::var("BIOVAULT_DESKTOP_LOG_FILE") {
         if path.is_empty() {
@@ -189,6 +652,28 @@ fn format_command(cmd: &Command) -> String {
         parts.push(shell_quote(arg));
     }
     parts.join(" ")
+}
+
+fn spawn_child_stream_capture<R: std::io::Read + Send + 'static>(
+    reader: R,
+    stream_name: &'static str,
+    log_path: Option<PathBuf>,
+    echo_stderr: bool,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        let mut writer = log_path
+            .as_ref()
+            .and_then(|path| OpenOptions::new().create(true).append(true).open(path).ok());
+        let buffered = BufReader::new(reader);
+        for line in buffered.lines().map_while(|res| res.ok()) {
+            if echo_stderr && stream_name == "stderr" {
+                eprintln!("  [syqure:{}] {}", stream_name, line);
+            }
+            if let Some(file) = writer.as_mut() {
+                let _ = writeln!(file, "[{}] {}", stream_name, line);
+            }
+        }
+    })
 }
 
 fn bundled_env_var(name: &str) -> Option<&'static str> {
@@ -2981,6 +3466,11 @@ struct DatasiteContext {
 }
 
 fn resolve_current_datasite() -> Option<String> {
+    if let Some(current) = execution_context().and_then(|ctx| ctx.current_datasite) {
+        if !current.trim().is_empty() {
+            return Some(current);
+        }
+    }
     if let Ok(env_override) = env::var("BIOVAULT_DATASITE_OVERRIDE") {
         if !env_override.trim().is_empty() {
             return Some(env_override.trim().to_string());
@@ -3005,6 +3495,11 @@ fn resolve_current_datasite() -> Option<String> {
 }
 
 fn resolve_datasites_override() -> Option<Vec<String>> {
+    if let Some(list) = execution_context().and_then(|ctx| ctx.datasites_override) {
+        if !list.is_empty() {
+            return Some(list);
+        }
+    }
     let raw = env::var("BIOVAULT_DATASITES_OVERRIDE").ok()?;
     let list: Vec<String> = raw
         .split(',')
@@ -3113,6 +3608,12 @@ fn default_shell_step(spec: &ModuleSpec) -> ModuleStepSpec {
         inputs: Vec::new(),
         outputs: Vec::new(),
     }
+}
+
+fn shell_input_uses_path_resolution(raw_type: &str) -> bool {
+    let trimmed = raw_type.trim();
+    let normalized = trimmed.trim_end_matches('?');
+    matches!(normalized, "File" | "Directory" | "Dir" | "Path")
 }
 
 async fn execute_shell(
@@ -3233,12 +3734,17 @@ async fn execute_shell(
             let env_key = format!("BV_INPUT_{}", env_key_suffix(&input.name));
             if let Some(arg) = parsed_args.inputs.get(&input.name) {
                 let rendered_value = render_template(&arg.value, &ctx);
-                let input_path = if Path::new(&rendered_value).is_absolute() {
-                    PathBuf::from(rendered_value)
+                let final_value = if shell_input_uses_path_resolution(&input.raw_type) {
+                    let input_path = if Path::new(&rendered_value).is_absolute() {
+                        PathBuf::from(rendered_value)
+                    } else {
+                        project_path.join(rendered_value)
+                    };
+                    input_path.to_string_lossy().to_string()
                 } else {
-                    project_path.join(rendered_value)
+                    rendered_value
                 };
-                env_map.insert(env_key, input_path.to_string_lossy().to_string());
+                env_map.insert(env_key, final_value);
                 continue;
             }
             if let Some(path_template) = input.path.as_deref() {
@@ -3335,12 +3841,25 @@ async fn execute_syqure(
 
     let (syqure_binary, use_docker) = resolve_syqure_backend(spec)?;
 
-    let run_id = env::var("BV_RUN_ID")
-        .unwrap_or_else(|_| chrono::Local::now().format("%Y%m%d%H%M%S").to_string());
+    let exec_ctx = execution_context();
+    let run_id = exec_ctx
+        .as_ref()
+        .and_then(|c| c.run_id.clone())
+        .or_else(|| env::var("BV_RUN_ID").ok())
+        .unwrap_or_else(|| chrono::Local::now().format("%Y%m%d%H%M%S").to_string());
 
-    let datasites_root = env::var("BV_DATASITES_ROOT")
-        .or_else(|_| {
-            env::var("SYFTBOX_DATA_DIR").map(|dir| {
+    let datasites_root = exec_ctx
+        .as_ref()
+        .and_then(|c| c.syftbox_data_dir.as_ref())
+        .map(|dir| {
+            PathBuf::from(dir)
+                .join("datasites")
+                .to_string_lossy()
+                .to_string()
+        })
+        .or_else(|| env::var("BV_DATASITES_ROOT").ok())
+        .or_else(|| {
+            env::var("SYFTBOX_DATA_DIR").ok().map(|dir| {
                 // Use PathBuf::join to properly handle path separators on all platforms
                 PathBuf::from(&dir)
                     .join("datasites")
@@ -3348,7 +3867,7 @@ async fn execute_syqure(
                     .to_string()
             })
         })
-        .map_err(|_| {
+        .ok_or_else(|| {
             anyhow::anyhow!(
                 "Syqure runtime requires BV_DATASITES_ROOT or SYFTBOX_DATA_DIR environment variable"
             )
@@ -3424,6 +3943,11 @@ async fn execute_syqure(
     let party_count = party_emails.split(',').count();
     let current_email = current_datasite.clone().unwrap_or_default();
     let party_id = datasite_index_ctx.unwrap_or(0);
+    let syqure_port_base = prepare_syqure_port_base_for_run(
+        &run_id,
+        party_count,
+        exec_ctx.as_ref().and_then(|c| c.syqure_port_base),
+    )?;
 
     let mut env_map = build_shell_env(
         &spec.env,
@@ -3435,7 +3959,11 @@ async fn execute_syqure(
     );
 
     // MPC file dir must match flow.yaml mpc.url pattern: shared/flows/{flow_name}/{run_id}/_mpc
-    let flow_name = env::var("BV_FLOW_NAME").unwrap_or_else(|_| "syqure-flow".to_string());
+    let flow_name = exec_ctx
+        .as_ref()
+        .and_then(|c| c.flow_name.clone())
+        .or_else(|| env::var("BV_FLOW_NAME").ok())
+        .unwrap_or_else(|| "syqure-flow".to_string());
     let file_dir = format!("shared/flows/{}/{}/_mpc", flow_name, run_id);
 
     env_map.insert("SEQURE_TRANSPORT".to_string(), transport.clone());
@@ -3470,15 +3998,20 @@ async fn execute_syqure(
             .collect::<Vec<_>>()
             .join(",");
         env_map.insert("SEQURE_CP_IPS".to_string(), proxy_ips);
-        let base_port =
-            SEQURE_COMMUNICATION_PORT + (party_id as usize) * SEQURE_COMMUNICATION_PORT_STRIDE;
+        env_map.insert(
+            "BV_SYQURE_PORT_BASE".to_string(),
+            syqure_port_base.to_string(),
+        );
+        // Share one global base across parties, but use party-specific communication/data-sharing
+        // ports so each local proxy listener gets a unique bind address.
+        let base_port = syqure_port_base + party_id * SEQURE_COMMUNICATION_PORT_STRIDE;
         env_map.insert(
             "SEQURE_COMMUNICATION_PORT".to_string(),
             base_port.to_string(),
         );
         env_map.insert(
             "SEQURE_DATA_SHARING_PORT".to_string(),
-            (base_port + 10_000).to_string(),
+            (base_port + SEQURE_DATA_SHARING_PORT_OFFSET).to_string(),
         );
     }
     for pass_through in &["SYQURE_SKIP_BUNDLE", "SYQURE_DEBUG"] {
@@ -3510,13 +4043,17 @@ async fn execute_syqure(
     }
 
     println!(
-        "  Syqure env: SEQURE_TRANSPORT={} SEQURE_TCP_PROXY={} SEQURE_COMMUNICATION_PORT={} SYQURE_SKIP_BUNDLE={} CODON_PATH={} SYQURE_DEBUG={}",
+        "  Syqure env: SEQURE_TRANSPORT={} SEQURE_TCP_PROXY={} BV_SYQURE_PORT_BASE={} SEQURE_COMMUNICATION_PORT={} SYQURE_SKIP_BUNDLE={} CODON_PATH={} SYQURE_DEBUG={}",
         env_map
             .get("SEQURE_TRANSPORT")
             .map(|s| s.as_str())
             .unwrap_or(""),
         env_map
             .get("SEQURE_TCP_PROXY")
+            .map(|s| s.as_str())
+            .unwrap_or(""),
+        env_map
+            .get("BV_SYQURE_PORT_BASE")
             .map(|s| s.as_str())
             .unwrap_or(""),
         env_map
@@ -3543,6 +4080,55 @@ async fn execute_syqure(
         env_value("BV_SYFTBOX_HOTLINK_QUIC"),
         env_value("BV_SYFTBOX_HOTLINK_QUIC_ONLY")
     );
+    println!(
+        "  Syqure coordination: run_id={} party_id={}/{} email={} BV_SYFTBOX_BACKEND={} SYFTBOX_HOTLINK_TCP_PROXY={}",
+        run_id,
+        party_id,
+        party_count,
+        current_email,
+        env_value("BV_SYFTBOX_BACKEND"),
+        env_value("SYFTBOX_HOTLINK_TCP_PROXY"),
+    );
+    let hint_path = syqure_port_base_hint_path(&run_id, party_count);
+    println!(
+        "  Port hint file: {} (exists={})",
+        hint_path.display(),
+        hint_path.exists()
+    );
+    if tcp_proxy {
+        let effective_comm_port = env_map
+            .get("SEQURE_COMMUNICATION_PORT")
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(syqure_port_base);
+        let expected_comm_port = syqure_port_base + party_id * SEQURE_COMMUNICATION_PORT_STRIDE;
+        let mismatch = effective_comm_port != expected_comm_port;
+        println!(
+            "  TCP proxy ports: party_id={} party_count={} global_base={} expected_comm_port={} effective_comm_port={} stride={}{}",
+            party_id,
+            party_count,
+            syqure_port_base,
+            expected_comm_port,
+            effective_comm_port,
+            SEQURE_COMMUNICATION_PORT_STRIDE,
+            if mismatch { " [MISMATCH]" } else { "" }
+        );
+
+        let mut peer_ports = Vec::new();
+        for peer_id in 0..party_count {
+            if peer_id == party_id {
+                continue;
+            }
+            let port = mpc_comm_port_with_base(effective_comm_port, party_id, peer_id, party_count);
+            peer_ports.push(format!("CP{}<->CP{}={}", party_id, peer_id, port));
+        }
+        if !peer_ports.is_empty() {
+            println!(
+                "  TCP proxy expected peer ports (from CP{} view): {}",
+                party_id,
+                peer_ports.join(", ")
+            );
+        }
+    }
 
     for input in &spec.inputs {
         let env_key = format!("BV_INPUT_{}", env_key_suffix(&input.name));
@@ -3571,6 +4157,14 @@ async fn execute_syqure(
             let path_str = input_path.to_string_lossy().to_string();
             env_map.insert(env_key, path_str.clone());
             env_map.insert(sequre_env_key, path_str);
+        }
+    }
+    if let Some(array_length_path) = env_map.get("SEQURE_INPUT_ARRAY_LENGTH").cloned() {
+        if let Ok(raw) = fs::read_to_string(&array_length_path) {
+            let trimmed = raw.trim();
+            if !trimmed.is_empty() {
+                env_map.insert("SEQURE_ARRAY_LENGTH".to_string(), trimmed.to_string());
+            }
         }
     }
 
@@ -3633,6 +4227,45 @@ async fn execute_syqure(
 
     fs::create_dir_all(&datasites_root)?;
 
+    // Write unified diagnostic file (same format for both CLI and Tauri)
+    write_syqure_diag_file(
+        &run_id,
+        party_id,
+        party_count,
+        &current_email,
+        syqure_port_base,
+        tcp_proxy,
+        &env_map,
+        module_path,
+        &syqure_binary,
+        &entrypoint_path,
+    );
+
+    if tcp_proxy {
+        println!("  Pre-launch TCP proxy port check:");
+        for peer_id in 0..party_count {
+            if peer_id == party_id {
+                continue;
+            }
+            let comm_base = syqure_port_base + party_id * SEQURE_COMMUNICATION_PORT_STRIDE;
+            let port = mpc_comm_port_with_base(comm_base, party_id, peer_id, party_count);
+            let listening = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port as u16))
+                .map(|_| false)
+                .unwrap_or(true);
+            println!(
+                "    CP{}<->CP{} port {} {}",
+                party_id,
+                peer_id,
+                port,
+                if listening {
+                    "LISTENING (proxy ready)"
+                } else {
+                    "FREE (proxy NOT yet bound)"
+                }
+            );
+        }
+    }
+
     if use_docker {
         execute_syqure_docker(
             &syqure_binary,
@@ -3645,7 +4278,20 @@ async fn execute_syqure(
             &docker_platform,
         )?;
     } else {
-        execute_syqure_native(&syqure_binary, &entrypoint_path, party_id, &env_map)?;
+        println!(
+            "  [trace] spawn_blocking execute_syqure_native party_id={} thread={:?}",
+            party_id,
+            std::thread::current().id()
+        );
+        let binary_owned = syqure_binary.to_string();
+        let entrypoint_owned = entrypoint_path.to_path_buf();
+        let env_map_owned = env_map.clone();
+        let sb_result = tokio::task::spawn_blocking(move || {
+            execute_syqure_native(&binary_owned, &entrypoint_owned, party_id, &env_map_owned)
+        })
+        .await;
+        println!("  [trace] spawn_blocking returned party_id={}", party_id);
+        sb_result.map_err(|e| anyhow::anyhow!("Syqure task join error: {}", e))??;
     }
 
     println!("\n✅ Syqure execution completed successfully!");
@@ -3760,6 +4406,12 @@ fn execute_syqure_native(
     party_id: usize,
     env_map: &BTreeMap<String, String>,
 ) -> Result<()> {
+    println!(
+        "  [trace] execute_syqure_native START party_id={} thread={:?} pid={}",
+        party_id,
+        std::thread::current().id(),
+        std::process::id()
+    );
     println!("  Using native syqure: {}", binary);
 
     let mut cmd = Command::new(binary);
@@ -3789,6 +4441,58 @@ fn execute_syqure_native(
     println!("\n▶️  Executing syqure...");
     println!("  {}", display_cmd.dimmed());
 
+    let syqure_log_path = env_map
+        .get("BV_RESULTS_DIR")
+        .map(PathBuf::from)
+        .map(|dir| dir.join("syqure-native.log"));
+
+    // Syqure startup currently removes stale `sock.*` files from the process CWD.
+    // In multiparty desktop runs, parties execute concurrently and can otherwise
+    // delete each other's active sockets if they share one working directory.
+    let syqure_work_dir = env_map
+        .get("SYQURE_BUNDLE_CACHE")
+        .map(PathBuf::from)
+        .or_else(|| env_map.get("BV_RESULTS_DIR").map(PathBuf::from))
+        .or_else(|| env::current_dir().ok())
+        .unwrap_or_else(|| PathBuf::from("."));
+    if let Err(err) = fs::create_dir_all(&syqure_work_dir) {
+        return Err(anyhow::anyhow!(
+            "Failed to prepare Syqure working directory {}: {}",
+            syqure_work_dir.display(),
+            err
+        )
+        .into());
+    }
+    cmd.current_dir(&syqure_work_dir);
+    if let Some(path) = syqure_log_path.as_ref() {
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(path) {
+            let _ = writeln!(
+                f,
+                "[{}] starting syqure command: {}",
+                Local::now().format("%Y-%m-%dT%H:%M:%S%:z"),
+                display_cmd
+            );
+            for (k, v) in env_map.iter().filter(|(k, _)| {
+                k.starts_with("SEQURE_")
+                    || k.starts_with("BV_")
+                    || k.starts_with("SYFTBOX_")
+                    || k.starts_with("SYQURE_")
+                    || k.starts_with("CODON_")
+                    || k.starts_with("BIOVAULT_")
+            }) {
+                let _ = writeln!(f, "[env] {}={}", k, v);
+            }
+            let _ = writeln!(f, "[env] SYQURE_WORK_DIR={}", syqure_work_dir.display());
+        }
+        println!("  Syqure output log: {}", path.display());
+    }
+
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -3815,7 +4519,7 @@ fn execute_syqure_native(
         .get("SEQURE_PARTY_EMAILS")
         .map(|s| s.split(',').map(|e| e.to_string()).collect())
         .unwrap_or_default();
-    let _local_email = env_map
+    let current_email = env_map
         .get("SEQURE_LOCAL_EMAIL")
         .cloned()
         .unwrap_or_default();
@@ -3921,7 +4625,42 @@ fn execute_syqure_native(
     });
 
     let start_time = std::time::Instant::now();
+    println!("  [trace] spawning syqure child process...");
     let mut child = cmd.spawn().context("Failed to spawn syqure")?;
+    println!(
+        "  [trace] syqure child spawned pid={} party_id={}",
+        child.id(),
+        party_id
+    );
+    let mut io_threads = Vec::new();
+    if let Some(stdout) = child.stdout.take() {
+        io_threads.push(spawn_child_stream_capture(
+            stdout,
+            "stdout",
+            syqure_log_path.clone(),
+            false,
+        ));
+    }
+    if let Some(stderr) = child.stderr.take() {
+        io_threads.push(spawn_child_stream_capture(
+            stderr,
+            "stderr",
+            syqure_log_path.clone(),
+            true,
+        ));
+    }
+    let flow_name = env_map
+        .get("BV_FLOW_NAME")
+        .cloned()
+        .or_else(|| env::var("BV_FLOW_NAME").ok())
+        .unwrap_or_default();
+    let run_id = env_map
+        .get("BV_RUN_ID")
+        .cloned()
+        .or_else(|| env::var("BV_RUN_ID").ok())
+        .unwrap_or_default();
+    let step_id = env::var("BV_MULTIPARTY_STEP_ID").unwrap_or_default();
+    let mut peer_failure_reason: Option<String> = None;
 
     #[cfg(unix)]
     fn kill_process_group(pid: u32) {
@@ -3963,6 +4702,15 @@ fn execute_syqure_native(
 
     #[cfg(unix)]
     {
+        // This runner can execute multiple Syqure steps in a long-lived desktop process.
+        // Reset the global shutdown latch before each execution so stale state from a
+        // previous run does not terminate the new process immediately.
+        SYQURE_SHUTDOWN_REQUESTED.store(false, Ordering::SeqCst);
+        println!(
+            "  [trace] installing signal handlers for syqure pid={} party_id={}",
+            std::process::id(),
+            party_id
+        );
         unsafe {
             libc::signal(libc::SIGINT, syqure_signal_handler as libc::sighandler_t);
             libc::signal(libc::SIGTERM, syqure_signal_handler as libc::sighandler_t);
@@ -3975,34 +4723,80 @@ fn execute_syqure_native(
         child_ptr: &mut child as *mut std::process::Child,
     };
 
-    #[cfg(unix)]
-    let shutdown_handle = {
-        let pid = child.id();
-        thread::spawn(move || {
-            while !SYQURE_SHUTDOWN_REQUESTED.load(Ordering::SeqCst) {
-                thread::sleep(Duration::from_millis(100));
-            }
-            kill_process_group(pid);
-        })
-    };
-
+    let mut poll_count: u64 = 0;
     let status = loop {
         match child.try_wait().context("Failed to poll syqure")? {
-            Some(status) => break status,
+            Some(status) => {
+                println!(
+                    "  [trace] syqure child exited status={:?} party_id={} after {:.1}s polls={}",
+                    status.code(),
+                    party_id,
+                    start_time.elapsed().as_secs_f64(),
+                    poll_count
+                );
+                break status;
+            }
             None => {
+                poll_count += 1;
+                // Log every 10s (50 polls at 200ms)
+                if poll_count.is_multiple_of(50) {
+                    println!(
+                        "  [trace] syqure still running party_id={} pid={} elapsed={:.1}s polls={}",
+                        party_id,
+                        child.id(),
+                        start_time.elapsed().as_secs_f64(),
+                        poll_count
+                    );
+                }
+                #[cfg(unix)]
+                if SYQURE_SHUTDOWN_REQUESTED.load(Ordering::SeqCst) {
+                    if peer_failure_reason.is_none() {
+                        let reason = "Shutdown requested; stopping local Syqure".to_string();
+                        println!("  ⚠️  {}", reason);
+                        peer_failure_reason = Some(reason);
+                    }
+                    kill_process_group(child.id());
+                }
+                if peer_failure_reason.is_none()
+                    && !datasites_root.is_empty()
+                    && !flow_name.is_empty()
+                    && !run_id.is_empty()
+                    && !step_id.is_empty()
+                    && !party_emails.is_empty()
+                    && !current_email.is_empty()
+                {
+                    if let Some(peer) = detect_peer_step_failure(
+                        &datasites_root,
+                        &flow_name,
+                        &run_id,
+                        &step_id,
+                        &current_email,
+                        &party_emails,
+                    ) {
+                        let reason = format!(
+                            "Peer failure detected for step '{}' from {}; stopping local Syqure",
+                            step_id, peer
+                        );
+                        println!("  ⚠️  {}", reason);
+                        #[cfg(unix)]
+                        kill_process_group(child.id());
+                        #[cfg(not(unix))]
+                        {
+                            let _ = child.kill();
+                        }
+                        peer_failure_reason = Some(reason);
+                    }
+                }
                 thread::sleep(Duration::from_millis(200));
             }
         }
     };
 
-    #[cfg(unix)]
-    {
-        SYQURE_SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst); // Signal thread to exit
-        let _ = shutdown_handle.join();
-    }
-
     stop_flag.store(true, Ordering::Relaxed);
     let _ = monitor_handle.join();
+    for handle in io_threads {
+        let _ = handle.join();
+    }
 
     let elapsed = start_time.elapsed();
     println!(
@@ -4010,6 +4804,10 @@ fn execute_syqure_native(
         elapsed.as_secs(),
         elapsed.subsec_millis()
     );
+
+    if let Some(reason) = peer_failure_reason {
+        return Err(anyhow::anyhow!(reason).into());
+    }
 
     if !status.success() {
         #[cfg(unix)]
@@ -4022,6 +4820,10 @@ fn execute_syqure_native(
         return Err(anyhow::anyhow!("Syqure exited with code: {:?}", status.code()).into());
     }
 
+    println!(
+        "  [trace] execute_syqure_native END party_id={} ok",
+        party_id
+    );
     Ok(())
 }
 

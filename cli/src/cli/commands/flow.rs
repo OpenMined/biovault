@@ -71,10 +71,6 @@ fn mpc_comm_port_with_base(
     base + offset_major + offset_minor
 }
 
-fn mpc_comm_port(local_pid: usize, remote_pid: usize, parties: usize) -> usize {
-    mpc_comm_port_with_base(SEQURE_COMMUNICATION_PORT, local_pid, remote_pid, parties)
-}
-
 fn ensure_flow_subscription(
     data_root: &Path,
     datasite: &str,
@@ -816,6 +812,21 @@ pub async fn run_flow(
     if let Some(ref mpc) = spec.mpc {
         let all_datasites = resolve_all_datasites_from_spec(&spec, &resolved_inputs);
         let party_count = all_datasites.len();
+        let tcp_proxy_enabled = env::var("BV_SYQURE_TCP_PROXY")
+            .map(|v| {
+                let t = v.trim().to_ascii_lowercase();
+                t == "1" || t == "true" || t == "yes" || t == "on"
+            })
+            .unwrap_or(false);
+        let syqure_port_base = if tcp_proxy_enabled {
+            Some(run_dynamic::prepare_syqure_port_base_for_run(
+                &run_id,
+                party_count,
+                None,
+            )?)
+        } else {
+            None
+        };
 
         println!(
             "\n🔐 Setting up MPC channels (topology: {}, {} parties)",
@@ -901,7 +912,7 @@ pub async fn run_flow(
                     &run_id,
                 )?;
 
-                if env::var("BV_SYQURE_TCP_PROXY").ok().as_deref() == Some("1") {
+                if tcp_proxy_enabled {
                     let parsed = SyftURL::parse(&channel_url_clone).with_context(|| {
                         format!("Invalid MPC channel URL: {}", channel_url_clone)
                     })?;
@@ -910,11 +921,11 @@ pub async fn run_flow(
                         .join(&parsed.email)
                         .join(&parsed.path);
                     let _ = std::fs::create_dir_all(&channel_dir);
-                    let port = mpc_comm_port(my_party_index, *to_idx, party_count);
-                    let from_base = SEQURE_COMMUNICATION_PORT
-                        + my_party_index * SEQURE_COMMUNICATION_PORT_STRIDE;
-                    let to_base =
-                        SEQURE_COMMUNICATION_PORT + to_idx * SEQURE_COMMUNICATION_PORT_STRIDE;
+                    let global_base = syqure_port_base.unwrap_or(SEQURE_COMMUNICATION_PORT);
+                    let port =
+                        mpc_comm_port_with_base(global_base, my_party_index, *to_idx, party_count);
+                    let from_base = global_base + my_party_index * SEQURE_COMMUNICATION_PORT_STRIDE;
+                    let to_base = global_base + to_idx * SEQURE_COMMUNICATION_PORT_STRIDE;
                     let from_port =
                         mpc_comm_port_with_base(from_base, my_party_index, *to_idx, party_count);
                     let to_port =
@@ -2690,6 +2701,32 @@ fn render_flow_template(
 ) -> String {
     let mut rendered = template.to_string();
 
+    let resolve_user_var = |name: &str| -> Option<String> {
+        let mut value = user_vars.get(name)?.clone();
+        for _ in 0..5 {
+            let before = value.clone();
+            for (var_name, var_value) in user_vars {
+                value = value.replace(&format!("{{vars.{}}}", var_name), var_value);
+            }
+            if value == before {
+                break;
+            }
+        }
+        Some(value)
+    };
+
+    let flow_path = resolve_user_var("flow_path")
+        .unwrap_or_else(|| format!("syft://{}/shared/flows/{}", current, flow_name));
+    let run_path =
+        resolve_user_var("run_path").unwrap_or_else(|| format!("{}/{}", flow_path, run_id));
+    let step_path = resolve_user_var("step_path").unwrap_or_else(|| {
+        if let (Some(num), Some(id)) = (step_number, step_id) {
+            format!("{}/{}-{}", run_path, num, id)
+        } else {
+            run_path.clone()
+        }
+    });
+
     // First pass: expand user-defined variables (namespaced as {vars.name})
     // Do multiple passes to handle variables that reference other variables
     for _ in 0..5 {
@@ -2702,6 +2739,14 @@ fn render_flow_template(
         }
     }
 
+    // Support both namespaced and shorthand path variables.
+    rendered = rendered.replace("{vars.flow_path}", &flow_path);
+    rendered = rendered.replace("{vars.run_path}", &run_path);
+    rendered = rendered.replace("{vars.step_path}", &step_path);
+    rendered = rendered.replace("{flow_path}", &flow_path);
+    rendered = rendered.replace("{run_path}", &run_path);
+    rendered = rendered.replace("{step_path}", &step_path);
+
     // Second pass: expand built-in variables
     rendered = rendered.replace("{current_datasite}", current);
     rendered = rendered.replace("{datasite.current}", current);
@@ -2713,7 +2758,7 @@ fn render_flow_template(
     }
     rendered = rendered.replace("{datasites}", &datasites.join(","));
     if let Some(num) = step_number {
-        rendered = rendered.replace("{step.number}", &format!("{:02}", num));
+        rendered = rendered.replace("{step.number}", &num.to_string());
     }
     if let Some(id) = step_id {
         rendered = rendered.replace("{step.id}", id);
