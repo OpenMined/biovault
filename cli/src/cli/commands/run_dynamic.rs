@@ -411,6 +411,21 @@ fn env_value(name: &str) -> String {
     env::var(name).unwrap_or_else(|_| "<unset>".to_string())
 }
 
+fn syqure_container_proxy_host(container_runtime: &str) -> String {
+    if let Ok(value) = env::var("BV_SYQURE_CP_HOST") {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    if container_runtime.eq_ignore_ascii_case("podman") {
+        "host.containers.internal".to_string()
+    } else {
+        // Prefer host alias (reaches the macOS/Windows host; gateway alias is only the VM router).
+        "host.docker.internal".to_string()
+    }
+}
+
 fn describe_syqure_transport_mode(env_map: &BTreeMap<String, String>) -> String {
     let sequre_transport = env_map
         .get("SEQURE_TRANSPORT")
@@ -3993,7 +4008,13 @@ async fn execute_syqure(
         env_map.insert("SEQURE_TRANSPORT".to_string(), "tcp".to_string());
     }
     if tcp_proxy {
-        let proxy_ip = "127.0.0.1".to_string();
+        let proxy_ip = if use_docker {
+            let container_runtime =
+                env::var("BIOVAULT_CONTAINER_RUNTIME").unwrap_or_else(|_| "docker".to_string());
+            syqure_container_proxy_host(&container_runtime)
+        } else {
+            "127.0.0.1".to_string()
+        };
         let proxy_ips = std::iter::repeat_n(proxy_ip.as_str(), party_count)
             .collect::<Vec<_>>()
             .join(",");
@@ -4108,7 +4129,7 @@ async fn execute_syqure(
     }
 
     println!(
-        "  Syqure env: SEQURE_TRANSPORT={} SEQURE_TCP_PROXY={} BV_SYQURE_PORT_BASE={} SEQURE_COMMUNICATION_PORT={} SYQURE_SKIP_BUNDLE={} CODON_PATH={} SYQURE_DEBUG={} SEQURE_NATIVE_BIN={}",
+        "  Syqure env: SEQURE_TRANSPORT={} SEQURE_TCP_PROXY={} SEQURE_CP_IPS={} SEQURE_COMMUNICATION_PORT={} SYQURE_SKIP_BUNDLE={} CODON_PATH={} SYQURE_DEBUG={}",
         env_map
             .get("SEQURE_TRANSPORT")
             .map(|s| s.as_str())
@@ -4117,6 +4138,7 @@ async fn execute_syqure(
             .get("SEQURE_TCP_PROXY")
             .map(|s| s.as_str())
             .unwrap_or(""),
+        env_map.get("SEQURE_CP_IPS").map(|s| s.as_str()).unwrap_or(""),
         env_map
             .get("BV_SYQURE_PORT_BASE")
             .map(|s| s.as_str())
@@ -5121,9 +5143,6 @@ fn execute_syqure_docker(
         results_root: &Path,
         datasites_root: &Path,
     ) -> Option<String> {
-        if value.starts_with('/') {
-            return Some(value.replace('\\', "/"));
-        }
         let stripped = strip_extended_path_prefix(value);
         let value_path = PathBuf::from(&stripped);
         if let Ok(rel_path) = value_path.strip_prefix(results_root) {
@@ -5193,11 +5212,60 @@ fn execute_syqure_docker(
     let module_root_for_match = PathBuf::from(strip_extended_path_prefix(
         module_path_abs.to_string_lossy().as_ref(),
     ));
-    let results_root_for_match = PathBuf::from(strip_extended_path_prefix(
-        results_root.to_string_lossy().as_ref(),
-    ));
-    let datasites_root_for_match =
-        PathBuf::from(strip_extended_path_prefix(effective_datasites_mount));
+    let datasites_mount_path = strip_extended_path_prefix(effective_datasites_mount);
+    let results_mount_path = strip_extended_path_prefix(results_root.to_string_lossy().as_ref());
+    fs::create_dir_all(&datasites_mount_path).with_context(|| {
+        format!(
+            "Failed to create datasites mount source: {}",
+            datasites_mount_path
+        )
+    })?;
+    fs::create_dir_all(&results_mount_path).with_context(|| {
+        format!(
+            "Failed to create results mount source: {}",
+            results_mount_path
+        )
+    })?;
+
+    let results_root_for_match = PathBuf::from(&results_mount_path);
+    let datasites_root_for_match = PathBuf::from(&datasites_mount_path);
+
+    // Fail-fast: verify container→host proxy connectivity before launching the real container.
+    if let Some(cp_ips) = env_map.get("SEQURE_CP_IPS") {
+        if let Some(proxy_host) = cp_ips.split(',').next() {
+            let comm_port = env_map
+                .get("SEQURE_COMMUNICATION_PORT")
+                .map(|s| s.as_str())
+                .unwrap_or("9001");
+            println!(
+                "  Preflight: checking container→host connectivity {}:{}...",
+                proxy_host, comm_port
+            );
+            let probe = Command::new(&container_runtime)
+                .args([
+                    "run",
+                    "--rm",
+                    "alpine:3.19",
+                    "sh",
+                    "-c",
+                    &format!("nc -z -w3 '{}' '{}' 2>&1", proxy_host, comm_port),
+                ])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .output();
+            match probe {
+                Ok(output) if output.status.success() => {
+                    println!("  Preflight: {}:{} reachable ✓", proxy_host, comm_port);
+                }
+                _ => {
+                    eprintln!(
+                        "  Preflight WARNING: {}:{} not reachable from container (proxy may not be listening yet)",
+                        proxy_host, comm_port
+                    );
+                }
+            }
+        }
+    }
 
     let mut cmd = Command::new(&container_runtime);
     super::configure_child_process(&mut cmd);
@@ -5211,6 +5279,11 @@ fn execute_syqure_docker(
     // This uses QEMU emulation on ARM64 systems
     if container_runtime == "docker" && !platform.is_empty() {
         cmd.args(["--platform", platform]);
+    }
+    if container_runtime == "docker" && cfg!(target_os = "linux") {
+        // Ensure Docker host aliases are available on Linux too.
+        cmd.args(["--add-host", "host.docker.internal:host-gateway"]);
+        cmd.args(["--add-host", "gateway.docker.internal:host-gateway"]);
     }
 
     for (k, v) in env_map {
@@ -5230,9 +5303,6 @@ fn execute_syqure_docker(
 
     // Strip Windows extended path prefix for Docker volume mounts
     let module_mount_path = strip_extended_path_prefix(module_path_abs.to_string_lossy().as_ref());
-    let datasites_mount_path = strip_extended_path_prefix(effective_datasites_mount);
-    let results_mount_path = strip_extended_path_prefix(results_root.to_string_lossy().as_ref());
-
     cmd.args(["-v", &format!("{}:/workspace/project", module_mount_path)]);
     cmd.args([
         "-v",
