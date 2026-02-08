@@ -45,6 +45,8 @@ pub async fn with_execution_context<F, T>(ctx: DynamicExecutionContext, fut: F) 
 where
     F: Future<Output = T>,
 {
+    // Keep run-specific values task-local so concurrent parties do not race
+    // through process-global env vars (a prior desktop-only failure mode).
     EXECUTION_CONTEXT.scope(ctx, fut).await
 }
 
@@ -317,6 +319,8 @@ pub fn prepare_syqure_port_base_for_run(
     }
 
     if let Some(base) = requested_base_override {
+        // In desktop multiparty, all parties in one session must share one base.
+        // Do not derive a per-party base, or channels will silently diverge.
         validate_syqure_port_base("context syqure port base", base, max_base)?;
         env::set_var("BV_SYQURE_PORT_BASE", base.to_string());
         return Ok(base);
