@@ -3610,6 +3610,12 @@ fn default_shell_step(spec: &ModuleSpec) -> ModuleStepSpec {
     }
 }
 
+fn shell_input_uses_path_resolution(raw_type: &str) -> bool {
+    let trimmed = raw_type.trim();
+    let normalized = trimmed.trim_end_matches('?');
+    matches!(normalized, "File" | "Directory" | "Dir" | "Path")
+}
+
 async fn execute_shell(
     spec: &ModuleSpec,
     project_path: &Path,
@@ -3728,12 +3734,17 @@ async fn execute_shell(
             let env_key = format!("BV_INPUT_{}", env_key_suffix(&input.name));
             if let Some(arg) = parsed_args.inputs.get(&input.name) {
                 let rendered_value = render_template(&arg.value, &ctx);
-                let input_path = if Path::new(&rendered_value).is_absolute() {
-                    PathBuf::from(rendered_value)
+                let final_value = if shell_input_uses_path_resolution(&input.raw_type) {
+                    let input_path = if Path::new(&rendered_value).is_absolute() {
+                        PathBuf::from(rendered_value)
+                    } else {
+                        project_path.join(rendered_value)
+                    };
+                    input_path.to_string_lossy().to_string()
                 } else {
-                    project_path.join(rendered_value)
+                    rendered_value
                 };
-                env_map.insert(env_key, input_path.to_string_lossy().to_string());
+                env_map.insert(env_key, final_value);
                 continue;
             }
             if let Some(path_template) = input.path.as_deref() {

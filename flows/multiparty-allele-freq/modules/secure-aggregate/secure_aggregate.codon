@@ -1,0 +1,153 @@
+from sequre import sequre, mpc, Sharetensor as ST
+from numpy.create import array, zeros, zeros_like
+import os
+
+
+def load_json(path: str) -> List[int]:
+    """Load JSON array of ints from file. Pure Codon - no Python dependency."""
+    if not path:
+        return []
+    content = open(path).read().strip()
+    if not content or content == "[]":
+        return []
+    inner = content.strip("[]").strip()
+    if not inner:
+        return []
+    result: List[int] = []
+    for x in inner.split(","):
+        x = x.strip()
+        if x:
+            result.append(int(x))
+    return result
+
+
+def save_json(path: str, data: List[int]):
+    """Write JSON array to file. Pure Codon - no Python dependency."""
+    parts: List[str] = []
+    for x in data:
+        parts.append(str(x))
+    open(path, "w").write("[" + ",".join(parts) + "]")
+
+
+def read_positive_int_file(path: str) -> int:
+    if not path:
+        return 0
+    try:
+        content = open(path).read().strip()
+    except:
+        return 0
+    if not content:
+        return 0
+    try:
+        value = int(content)
+    except:
+        return 0
+    return value if value > 0 else 0
+
+
+def getenv_positive_int(name: str, default_value: int) -> int:
+    raw = os.getenv(name, "")
+    if not raw:
+        return default_value
+    try:
+        value = int(raw.strip())
+    except:
+        return default_value
+    return value if value > 0 else default_value
+
+
+@sequre
+def add(m, a, b):
+    return a + b
+
+
+def main():
+    m = mpc()
+    pid = m.pid
+
+    counts_path = os.getenv("SEQURE_INPUT_COUNTS", "")
+    array_length_path = os.getenv("SEQURE_INPUT_ARRAY_LENGTH", "")
+    array_length_fallback = os.getenv("SEQURE_ARRAY_LENGTH", "")
+    output_path = os.getenv("SEQURE_OUTPUT_AGGREGATED_COUNTS", "")
+
+    expected_n = read_positive_int_file(array_length_path)
+    if expected_n <= 0:
+        try:
+            expected_n = int(array_length_fallback.strip()) if array_length_fallback else 0
+        except:
+            expected_n = 0
+
+    all_data: List[int] = []
+    if pid == 1 or pid == 2:
+        all_data = load_json(counts_path)
+
+    n = expected_n if expected_n > 0 else len(all_data)
+    if n < 0:
+        n = 0
+    chunk_size = getenv_positive_int("SEQURE_CHUNK_SIZE", 65536)
+    if chunk_size > n and n > 0:
+        chunk_size = n
+
+    data: List[int] = []
+    if pid == 1 or pid == 2:
+        # Pad/truncate to the declared master length so both clients match index space.
+        idx = 0
+        while idx < n:
+            if idx < len(all_data):
+                data.append(all_data[idx])
+            else:
+                data.append(0)
+            idx += 1
+        print(f"CP{pid}: n={n}, loaded={len(all_data)}, using={len(data)}")
+    else:
+        print(f"CP{pid}: dealer (no input), n={n}")
+
+    m.comms.sync_parties()
+    print(f"CP{pid}: starting SMPC aggregation with n={n}, chunk_size={chunk_size}")
+    result: List[int] = []
+    pos = 0
+    while pos < n:
+        end = pos + chunk_size
+        if end > n:
+            end = n
+        width = end - pos
+
+        chunk: List[int] = []
+        idx = pos
+        while idx < end:
+            if idx < len(data):
+                chunk.append(data[idx])
+            else:
+                chunk.append(0)
+            idx += 1
+
+        if len(chunk) == 0:
+            data_vec = zeros((width,), dtype=int)
+        else:
+            data_vec = array(chunk, dtype=int)
+        zero_vec = zeros_like(data_vec)
+
+        v1 = data_vec if pid == 1 else zero_vec
+        v2 = data_vec if pid == 2 else zero_vec
+
+        s1 = ST.enc(m, v1, 1, m.default_mpc_modulus)
+        s2 = ST.enc(m, v2, 2, m.default_mpc_modulus)
+        total = add(m, s1, s2)
+        revealed = total.reveal(m).tolist()
+        for x in revealed:
+            result.append(int(x))
+
+        if pid == 1 or pid == 2:
+            print(f"CP{pid}: processed {end}/{n}")
+        pos = end
+
+    if pid == 1 or pid == 2:
+        print(f"CP{pid}: result length={len(result)}")
+        if output_path:
+            save_json(output_path, result)
+            print(f"CP{pid}: saved aggregated counts to {output_path}")
+
+    m.done()
+
+
+main()

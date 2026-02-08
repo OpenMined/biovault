@@ -473,6 +473,8 @@ def __bvLoadGenotypeRecords(path, format, mapping) {
                 // Apply mapping if provided
                 def participantId = mapping?.participant_id ? row[mapping.participant_id] : row.participant_id
                 def genotypeFile = mapping?.genotype_file ? row[mapping.genotype_file] : (row.genotype_file ?: row.genotype_path ?: row.genotype_file_path)
+                participantId = __bvSanitizeCsvScalar(participantId)
+                genotypeFile = __bvSanitizeCsvScalar(genotypeFile)
                 def grchBuild = mapping?.grch_build ? row[mapping.grch_build] : (row.grch_build ?: row.build)
                 def source = mapping?.source ? row[mapping.source] : row.source
 
@@ -502,6 +504,8 @@ def __bvLoadGenotypeRecords(path, format, mapping) {
         return Channel.from(jsonData).map { record ->
             def participantId = mapping?.participant_id ? record[mapping.participant_id] : record.participant_id
             def genotypeFile = mapping?.genotype_file ? record[mapping.genotype_file] : (record.genotype_file ?: record.genotype_path ?: record.genotype_file_path)
+            participantId = __bvSanitizeCsvScalar(participantId)
+            genotypeFile = __bvSanitizeCsvScalar(genotypeFile)
             def grchBuild = mapping?.grch_build ? record[mapping.grch_build] : (record.grch_build ?: record.build)
             def source = mapping?.source ? record[mapping.source] : record.source
 
@@ -528,6 +532,17 @@ def __bvLoadGenotypeRecords(path, format, mapping) {
     } else {
         throw new IllegalArgumentException("Unsupported format '${format}' for GenotypeRecord loading. Use 'csv', 'tsv', or 'json'.")
     }
+}
+
+def __bvSanitizeCsvScalar(value) {
+    if (value == null) return null
+    def text = value.toString().trim()
+    if (text.size() >= 2) {
+        if ((text.startsWith('"') && text.endsWith('"')) || (text.startsWith("'") && text.endsWith("'"))) {
+            text = text.substring(1, text.length() - 1).trim()
+        }
+    }
+    return text
 }
 
 def __bvLoadParticipantSheet(path, format, mapping) {
