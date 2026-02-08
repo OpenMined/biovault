@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-MODE=${1:-quic}
+MODE=${1:-p2p}
 SCENARIO=${2:-biovault/tests/scenarios/syqure-distributed.yaml}
 
 case "$MODE" in
-  quic)
+  p2p|quic)
     export BV_SYFTBOX_HOTLINK=1
     export BV_SYFTBOX_HOTLINK_QUIC=1
     export BV_SYFTBOX_HOTLINK_QUIC_ONLY=1
     export BV_SYQURE_TRANSPORT=hotlink
     ;;
-  hotlink-ws)
+  ws-only|hotlink-ws)
     export BV_SYFTBOX_HOTLINK=1
     export BV_SYFTBOX_HOTLINK_QUIC=0
     export BV_SYFTBOX_HOTLINK_QUIC_ONLY=0
@@ -24,7 +24,8 @@ case "$MODE" in
     export BV_SYQURE_TRANSPORT=file
     ;;
   *)
-    echo "Usage: $0 {quic|hotlink-ws|file} [scenario]" >&2
+    echo "Usage: $0 {p2p|ws-only|file} [scenario]" >&2
+    echo "Aliases: quic -> p2p, hotlink-ws -> ws-only" >&2
     exit 2
     ;;
  esac

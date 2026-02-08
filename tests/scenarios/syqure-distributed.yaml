@@ -41,7 +41,19 @@ steps:
   - name: Select Syqure aggregation mode
     run: |
       MODE="${BV_SYQURE_AGG_MODE:-smpc}"
-      TRANSPORT="${BV_SYQURE_TRANSPORT:-hotlink}"
+      RAW_TRANSPORT="${BV_SYQURE_TRANSPORT:-hotlink}"
+      case "${RAW_TRANSPORT}" in
+        hotlink|webrtc|"")
+          TRANSPORT="hotlink"
+          ;;
+        file)
+          TRANSPORT="file"
+          ;;
+        *)
+          echo "Unknown BV_SYQURE_TRANSPORT: ${RAW_TRANSPORT} (expected hotlink|file)" >&2
+          exit 1
+          ;;
+      esac
       MODULE_YAML="{{workspace}}/tests/scenarios/syqure-flow/modules/secure-aggregate/module.yaml"
       case "$MODE" in
         he) ENTRY="he_aggregate.codon" ;;

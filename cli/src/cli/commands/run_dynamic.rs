@@ -411,6 +411,15 @@ fn env_value(name: &str) -> String {
     env::var(name).unwrap_or_else(|_| "<unset>".to_string())
 }
 
+fn canonical_hotlink_transport(value: &str) -> String {
+    let normalized = value.trim().to_ascii_lowercase();
+    if normalized == "webrtc" {
+        "hotlink".to_string()
+    } else {
+        normalized
+    }
+}
+
 fn syqure_container_proxy_host(container_runtime: &str) -> String {
     if let Ok(value) = env::var("BV_SYQURE_CP_HOST") {
         let trimmed = value.trim();
@@ -430,23 +439,25 @@ fn describe_syqure_transport_mode(env_map: &BTreeMap<String, String>) -> String 
     let sequre_transport = env_map
         .get("SEQURE_TRANSPORT")
         .cloned()
-        .unwrap_or_else(|| "unknown".to_string());
-    let bv_transport = env::var("BV_SYQURE_TRANSPORT").unwrap_or_default();
+        .unwrap_or_else(|| "unknown".to_string())
+        .trim()
+        .to_ascii_lowercase();
+    let bv_transport = canonical_hotlink_transport(&env::var("BV_SYQURE_TRANSPORT").unwrap_or_default());
     let hotlink_enabled = env_flag(&["BV_SYFTBOX_HOTLINK", "SYFTBOX_HOTLINK"]).unwrap_or(false);
-    let quic_enabled =
+    let p2p_enabled =
         env_flag(&["BV_SYFTBOX_HOTLINK_QUIC", "SYFTBOX_HOTLINK_QUIC"]).unwrap_or(true);
-    let quic_only =
+    let p2p_only =
         env_flag(&["BV_SYFTBOX_HOTLINK_QUIC_ONLY", "SYFTBOX_HOTLINK_QUIC_ONLY"]).unwrap_or(false);
 
     if sequre_transport == "tcp" && (bv_transport == "hotlink" || hotlink_enabled) {
-        if quic_only {
-            return "hotlink over TCP proxy (QUIC-only, websocket fallback disabled)".to_string();
+        if p2p_only {
+            return "hotlink over TCP proxy (p2p-only, websocket fallback disabled)".to_string();
         }
-        if quic_enabled {
-            return "hotlink over TCP proxy (QUIC preferred, websocket fallback enabled)"
+        if p2p_enabled {
+            return "hotlink over TCP proxy (p2p preferred, websocket fallback enabled)"
                 .to_string();
         }
-        return "hotlink over TCP proxy (websocket only, QUIC disabled)".to_string();
+        return "hotlink over TCP proxy (websocket only, p2p disabled)".to_string();
     }
 
     if sequre_transport == "file" || bv_transport == "file" {
@@ -459,9 +470,9 @@ fn describe_syqure_transport_mode(env_map: &BTreeMap<String, String>) -> String 
 fn is_hotlink_transport_mode(env_map: &BTreeMap<String, String>) -> bool {
     let sequre_transport = env_map
         .get("SEQURE_TRANSPORT")
-        .map(|v| v.as_str())
-        .unwrap_or("");
-    let bv_transport = env::var("BV_SYQURE_TRANSPORT").unwrap_or_default();
+        .map(|v| v.trim().to_ascii_lowercase())
+        .unwrap_or_default();
+    let bv_transport = canonical_hotlink_transport(&env::var("BV_SYQURE_TRANSPORT").unwrap_or_default());
     let hotlink_enabled = env_flag(&["BV_SYFTBOX_HOTLINK", "SYFTBOX_HOTLINK"]).unwrap_or(false);
     sequre_transport == "tcp" && (bv_transport == "hotlink" || hotlink_enabled)
 }
@@ -498,41 +509,38 @@ fn count_mpc_files(dir: &Path) -> (usize, Option<u64>) {
 }
 
 struct HotlinkTelemetrySummary {
-    mode: String,
-    tx_quic_packets: u64,
-    tx_ws_packets: u64,
-    ws_fallbacks: u64,
-    tx_avg_send_ms: f64,
+    tx_packets: u64,
+    tx_bytes: u64,
+    tx_p2p_packets: u64,
+    rx_packets: u64,
+    rx_bytes: u64,
+    webrtc_connected: u64,
 }
 
 fn read_hotlink_telemetry(path: &Path) -> Option<HotlinkTelemetrySummary> {
     let raw = fs::read_to_string(path).ok()?;
     let v: JsonValue = serde_json::from_str(&raw).ok()?;
     Some(HotlinkTelemetrySummary {
-        mode: v
-            .get("mode")
-            .and_then(|x| x.as_str())
-            .unwrap_or("unknown")
-            .to_string(),
-        tx_quic_packets: v
-            .get("tx_quic_packets")
+        tx_packets: v.get("tx_packets").and_then(|x| x.as_u64()).unwrap_or(0),
+        tx_bytes: v.get("tx_bytes").and_then(|x| x.as_u64()).unwrap_or(0),
+        tx_p2p_packets: v
+            .get("tx_p2p_packets")
+            .or_else(|| v.get("tx_quic_packets"))
             .and_then(|x| x.as_u64())
             .unwrap_or(0),
-        tx_ws_packets: v.get("tx_ws_packets").and_then(|x| x.as_u64()).unwrap_or(0),
-        ws_fallbacks: v.get("ws_fallbacks").and_then(|x| x.as_u64()).unwrap_or(0),
-        tx_avg_send_ms: v
-            .get("tx_avg_send_ms")
-            .and_then(|x| x.as_f64())
-            .unwrap_or(0.0),
+        rx_packets: v.get("rx_packets").and_then(|x| x.as_u64()).unwrap_or(0),
+        rx_bytes: v.get("rx_bytes").and_then(|x| x.as_u64()).unwrap_or(0),
+        webrtc_connected: v.get("webrtc_connected").and_then(|x| x.as_u64()).unwrap_or(0),
     })
 }
 
-fn short_hotlink_mode(mode: &str) -> &'static str {
-    match mode {
-        "hotlink_quic_only" => "quic-only",
-        "hotlink_quic_pref" => "quic-pref",
-        "hotlink_ws_only" => "ws-only",
-        _ => "unknown",
+fn fmt_hotlink_bytes(b: u64) -> String {
+    if b >= 1_048_576 {
+        format!("{:.1}MB", b as f64 / 1_048_576.0)
+    } else if b >= 1024 {
+        format!("{:.1}KB", b as f64 / 1024.0)
+    } else {
+        format!("{}B", b)
     }
 }
 
@@ -3909,13 +3917,14 @@ async fn execute_syqure(
         .and_then(|s| s.poll_ms)
         .unwrap_or(50);
 
-    let transport = spec
+    let raw_transport = spec
         .runner
         .as_ref()
         .and_then(|r| r.syqure.as_ref())
         .and_then(|s| s.transport.as_ref())
         .cloned()
         .unwrap_or_else(|| "file".to_string());
+    let transport = canonical_hotlink_transport(&raw_transport);
 
     // Get platform from spec, defaulting to linux/amd64
     // Syqure containers are x86-only for now, so we always force amd64
@@ -4163,7 +4172,7 @@ async fn execute_syqure(
         describe_syqure_transport_mode(&env_map)
     );
     println!(
-        "  Hotlink flags: BV_SYFTBOX_HOTLINK={} BV_SYFTBOX_HOTLINK_QUIC={} BV_SYFTBOX_HOTLINK_QUIC_ONLY={}",
+        "  Hotlink flags: BV_SYFTBOX_HOTLINK={} BV_SYFTBOX_HOTLINK_QUIC(legacy p2p)={} BV_SYFTBOX_HOTLINK_QUIC_ONLY(legacy p2p-only)={}",
         env_value("BV_SYFTBOX_HOTLINK"),
         env_value("BV_SYFTBOX_HOTLINK_QUIC"),
         env_value("BV_SYFTBOX_HOTLINK_QUIC_ONLY")
@@ -4765,7 +4774,7 @@ fn execute_syqure_native(
         .unwrap_or(false);
     let hotlink_transport = is_hotlink_transport_mode(env_map);
     let status_label = if hotlink_transport {
-        "  📡 Hotlink telemetry (mode q/ws fb avg-ms)"
+        "  📡 Hotlink (↑tx ↓rx data p2p-status)"
     } else if tcp_transport {
         "  📡 MPC dir activity (files/age)"
     } else {
@@ -4818,15 +4827,29 @@ fn execute_syqure_native(
                     let mut telemetry_found = false;
                     for telemetry_path in telemetry_paths {
                         if let Some(t) = read_hotlink_telemetry(&telemetry_path) {
-                            status_parts.push(format!(
-                                "{}:{} q{}/ws{} fb{} {:.1}ms",
-                                short_party,
-                                short_hotlink_mode(&t.mode),
-                                t.tx_quic_packets,
-                                t.tx_ws_packets,
-                                t.ws_fallbacks,
-                                t.tx_avg_send_ms
-                            ));
+                            let p2p_status = if t.webrtc_connected > 0 {
+                                format!("p2p:UP({})", t.webrtc_connected)
+                            } else if t.tx_p2p_packets > 0 {
+                                "p2p:used".to_string()
+                            } else {
+                                "p2p:off".to_string()
+                            };
+                            let total = t.tx_packets + t.rx_packets;
+                            if total == 0 {
+                                status_parts.push(format!(
+                                    "{}: idle {}",
+                                    short_party, p2p_status
+                                ));
+                            } else {
+                                status_parts.push(format!(
+                                    "{}: ↑{} ↓{} {} {}",
+                                    short_party,
+                                    t.tx_packets,
+                                    t.rx_packets,
+                                    fmt_hotlink_bytes(t.tx_bytes + t.rx_bytes),
+                                    p2p_status,
+                                ));
+                            }
                             telemetry_found = true;
                             break;
                         }
@@ -4834,12 +4857,7 @@ fn execute_syqure_native(
                     if telemetry_found {
                         continue;
                     }
-                    let channel_path = PathBuf::from(&datasites_root_clone)
-                        .join(party)
-                        .join(&file_dir_clone);
-                    let (count, last_mod) = count_mpc_files(&channel_path);
-                    let ago = last_mod.map(|lm| now.saturating_sub(lm)).unwrap_or(999);
-                    status_parts.push(format!("{}:pending {}f/{}s", short_party, count, ago));
+                    status_parts.push(format!("{}: waiting", short_party));
                     continue;
                 }
                 let channel_path = PathBuf::from(&datasites_root_clone)

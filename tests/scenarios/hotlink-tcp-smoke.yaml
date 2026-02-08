@@ -6,7 +6,7 @@
 
 setup:
   server:
-    - "SYFTBOX_HOTLINK=1 SYFTBOX_HOTLINK_SOCKET_ONLY=1 SYFTBOX_HOTLINK_TCP_PROXY=1 SYFTBOX_HOTLINK_DEBUG=1 ./tests/scripts/devstack.sh --reset --clients client1@sandbox.local,client2@sandbox.local"
+    - "SYFTBOX_HOTLINK=${BV_SYFTBOX_HOTLINK-1} SYFTBOX_HOTLINK_SOCKET_ONLY=1 SYFTBOX_HOTLINK_TCP_PROXY=${BV_SYFTBOX_HOTLINK_TCP_PROXY-1} SYFTBOX_HOTLINK_QUIC=${BV_SYFTBOX_HOTLINK_QUIC-1} SYFTBOX_HOTLINK_QUIC_ONLY=${BV_SYFTBOX_HOTLINK_QUIC_ONLY-1} SYFTBOX_HOTLINK_P2P_ONLY=${BV_SYFTBOX_HOTLINK_P2P_ONLY-1} SYFTBOX_HOTLINK_DEBUG=1 ./tests/scripts/devstack.sh --reset --clients client1@sandbox.local,client2@sandbox.local"
 
 steps:
   - name: Initialize BioVault for client1
@@ -119,3 +119,38 @@ steps:
       else
         echo "No telemetry file found"
       fi
+
+  - name: Assert strict WebRTC mode (no websocket fallback)
+    run: |
+      python3 - <<'PY'
+      import json
+      import pathlib
+      import sys
+
+      base = pathlib.Path("sandbox")
+      peers = ["client1@sandbox.local", "client2@sandbox.local"]
+      ok = True
+      for peer in peers:
+        path = base / peer / "datasites" / peer / ".syftbox" / "hotlink_telemetry.json"
+        if not path.exists():
+          print(f"FAIL: telemetry missing for {peer}: {path}")
+          ok = False
+          continue
+        data = json.loads(path.read_text())
+        ws_fallbacks = int(data.get("ws_fallbacks", 0))
+        webrtc_connected = int(data.get("webrtc_connected", 0))
+        mode = data.get("mode", "")
+        print(
+          f"{peer}: mode={mode} webrtc_connected={webrtc_connected} ws_fallbacks={ws_fallbacks}"
+        )
+        if ws_fallbacks > 0:
+          print(f"FAIL: {peer} used websocket fallback")
+          ok = False
+        if webrtc_connected <= 0:
+          print(f"FAIL: {peer} never reached connected WebRTC state")
+          ok = False
+
+      if not ok:
+        sys.exit(1)
+      print("PASS: strict WebRTC assertions satisfied")
+      PY
