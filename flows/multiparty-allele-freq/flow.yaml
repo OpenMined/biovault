@@ -52,6 +52,8 @@ spec:
         outputs:
           - name: allele_freq
             type: File
+          - name: locus_index
+            type: File
       assets:
         - path: module.yaml
         - path: workflow.nf
@@ -74,6 +76,22 @@ spec:
         - path: run.sh
         - path: build_master.py
         - path: allele_freq_utils.py
+
+    share_locus_index:
+      source:
+        kind: local
+        path: ./modules/share-locus-index
+      allow_dirty: true
+      interface:
+        inputs:
+          - name: locus_index
+            type: File
+        outputs:
+          - name: locus_index
+            type: File
+      assets:
+        - path: module.yaml
+        - path: run.sh
 
     align_counts:
       source:
@@ -144,10 +162,18 @@ spec:
         timeout: 3600
       with:
         participants: inputs.genotype_files
+
+    - id: share_locus_index
+      uses: share_locus_index
+      run:
+        targets: clients
+        strategy: parallel
+      with:
+        locus_index: step.gen_allele_freq.outputs.locus_index
       share:
-        allele_freq_shared:
-          source: self.outputs.allele_freq
-          url: "{vars.step_path}/allele_freq.tsv"
+        locus_index_shared:
+          source: self.outputs.locus_index
+          url: "{vars.step_path}/locus_index.tsv"
           permissions:
             read: ["{datasites[0]}"]
             write: ["{datasite.current}"]
@@ -158,7 +184,7 @@ spec:
         targets: aggregator
         timeout: 600
       with:
-        index_manifest: step.gen_allele_freq.share.allele_freq_shared.url_list
+        index_manifest: step.share_locus_index.share.locus_index_shared.url_list
       share:
         union_index_shared:
           source: self.outputs.union_index

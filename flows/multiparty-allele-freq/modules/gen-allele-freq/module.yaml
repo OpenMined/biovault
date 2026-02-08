@@ -28,4 +28,10 @@ spec:
       format:
         kind: tsv
       path: allele_freq.tsv
+    - name: locus_index
+      type: File
+      description: Non-sensitive locus index (locus + rsid only)
+      format:
+        kind: tsv
+      path: locus_index.tsv
   parameters: []

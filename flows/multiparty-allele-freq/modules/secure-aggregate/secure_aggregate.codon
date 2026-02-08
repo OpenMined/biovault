@@ -141,11 +141,10 @@ def main():
             print(f"CP{pid}: processed {end}/{n}")
         pos = end
 
-    if pid == 1 or pid == 2:
-        print(f"CP{pid}: result length={len(result)}")
-        if output_path:
-            save_json(output_path, result)
-            print(f"CP{pid}: saved aggregated counts to {output_path}")
+    print(f"CP{pid}: result length={len(result)}")
+    if output_path:
+        save_json(output_path, result)
+        print(f"CP{pid}: saved aggregated counts to {output_path}")
 
     m.done()
 

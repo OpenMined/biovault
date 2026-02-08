@@ -37,6 +37,7 @@ workflow USER {
 
     emit:
         allele_freq = agg_out.allele_freq  // allele_freq.tsv
+        locus_index = agg_out.locus_index  // locus_index.tsv (locus + rsid only)
 }
 
 process emit_long {
@@ -85,6 +86,7 @@ process aggregate_long {
 
     output:
         path "allele_freq.tsv", emit: allele_freq
+        path "locus_index.tsv", emit: locus_index
 
     script:
     def threads_arg = (AGG_THREADS > 0) ? "--threads ${AGG_THREADS}" : ""
@@ -119,5 +121,22 @@ fi
       --input-list "bvlr.list.local" \\
       --allele-freq-tsv "allele_freq.tsv" \\
       ${threads_arg} 2>&1
+
+    # Derive a non-sensitive index view for cross-party sharing.
+    # Keep raw allele_freq.tsv local; only share locus_key/rsid.
+    awk -F'\\t' '
+      NR==1 {
+        for (i=1; i<=NF; i++) {
+          if (\$i=="locus_key" || \$i=="locus") l=i
+          if (\$i=="rsid") r=i
+        }
+        print "locus_key\\trsid"
+        next
+      }
+      l>0 {
+        rs=(r>0 ? \$r : "")
+        print \$l "\\t" rs
+      }
+    ' allele_freq.tsv > locus_index.tsv
     """
 }
