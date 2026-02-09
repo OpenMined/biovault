@@ -83,7 +83,7 @@ spec:
           source: step.generate.outputs.numbers
           url: "{vars.step_path}/numbers.json"
           permissions:
-            read: ["{datasites[0]}"]
+            read: ["{groups.aggregator}"]
             write: ["{datasite.current}"]
 
     # Barrier: wait for all contributors to share before aggregator can proceed

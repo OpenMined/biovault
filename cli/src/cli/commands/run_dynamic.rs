@@ -3975,12 +3975,12 @@ async fn execute_syqure(
     env_map.insert("SEQURE_LOCAL_EMAIL".to_string(), current_email.clone());
     env_map.insert("SEQURE_FILE_KEEP".to_string(), "1".to_string());
     env_map.insert("SEQURE_FILE_DEBUG".to_string(), "1".to_string());
-    // Default behavior for `transport: hotlink` is TCP proxy mode.
-    // Users can still force it off explicitly with `SEQURE_TCP_PROXY=0`.
+    // TCP proxy is always on by default (syqure integrated).
+    // Users can force it off explicitly with `SEQURE_TCP_PROXY=0`.
     let tcp_proxy = env_map
         .get("SEQURE_TCP_PROXY")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(transport == "hotlink");
+        .unwrap_or(true);
     env_map.insert(
         "SEQURE_TCP_PROXY".to_string(),
         if tcp_proxy {

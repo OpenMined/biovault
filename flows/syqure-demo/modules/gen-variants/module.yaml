@@ -1,0 +1,21 @@
+apiVersion: syftbox.openmined.org/v1alpha1
+kind: Module
+metadata:
+  name: gen-variants
+  version: 0.1.1
+spec:
+  runner:
+    template: shell
+    entrypoint: run.sh
+  assets:
+    - path: run.sh
+    - path: gen_variants.py
+  outputs:
+    - name: rsids
+      type: File
+      format: { kind: txt }
+      path: rsids.txt
+    - name: counts
+      type: File
+      format: { kind: json }
+      path: counts.json

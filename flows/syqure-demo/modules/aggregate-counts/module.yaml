@@ -1,0 +1,21 @@
+apiVersion: syftbox.openmined.org/v1alpha1
+kind: Module
+metadata:
+  name: aggregate-counts
+  version: 0.1.0
+spec:
+  runner:
+    template: shell
+    entrypoint: run.sh
+  assets:
+    - path: run.sh
+    - path: aggregate_counts.py
+  inputs:
+    - name: counts_manifest
+      type: File
+      format: { kind: txt }
+  outputs:
+    - name: aggregated_counts
+      type: File
+      format: { kind: json }
+      path: aggregated_counts.json

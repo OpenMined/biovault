@@ -1,0 +1,26 @@
+apiVersion: syftbox.openmined.org/v1alpha1
+kind: Module
+metadata:
+  name: secure-aggregate-he
+  version: 0.1.0
+  description: Secure multi-party aggregation using Syqure MHE (manual ciphertext exchange)
+spec:
+  runner:
+    runtime: syqure
+    entrypoint: secure_aggregate_he.codon
+  assets:
+    - path: secure_aggregate_he.codon
+  inputs:
+    - name: counts
+      type: File
+      format: { kind: json }
+      description: Aligned count array (clients only - stays private for MHE)
+    - name: array_length
+      type: String
+      description: Number of elements to aggregate (from build_master)
+  outputs:
+    - name: aggregated_counts
+      type: File
+      format: { kind: json }
+      path: aggregated_counts.json
+      description: Aggregated sum (all parties write and share for verification)

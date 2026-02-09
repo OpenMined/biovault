@@ -1,7 +1,7 @@
 apiVersion: syftbox.openmined.org/v1alpha1
 kind: Flow
 metadata:
-  name: syqure-flow
+  name: syqure-demo
   version: 0.1.0
   description: Multi-party rsid aggregation flow with privacy-preserving sharing.
 

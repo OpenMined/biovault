@@ -175,7 +175,7 @@ spec:
           source: self.outputs.locus_index
           url: "{vars.step_path}/locus_index.tsv"
           permissions:
-            read: ["{datasites[0]}"]
+            read: ["{groups.aggregator}"]
             write: ["{datasite.current}"]
 
     - id: build_master
@@ -191,13 +191,13 @@ spec:
           url: "{vars.step_path}/union_locus_index.json"
           permissions:
             read: ["{datasites[*]}"]
-            write: ["{datasites[0]}"]
+            write: ["{groups.aggregator}"]
         count_shared:
           source: self.outputs.count
           url: "{vars.step_path}/count.txt"
           permissions:
             read: ["{datasites[*]}"]
-            write: ["{datasites[0]}"]
+            write: ["{groups.aggregator}"]
 
     - id: align_counts
       uses: align_counts
