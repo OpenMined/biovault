@@ -115,6 +115,7 @@ fn bundled_env_key(dep: &str) -> Option<&'static str> {
         "java" => Some("BIOVAULT_BUNDLED_JAVA"),
         "nextflow" => Some("BIOVAULT_BUNDLED_NEXTFLOW"),
         "syftbox" => Some("SYFTBOX_BINARY"),
+        "syqure" => Some("SEQURE_NATIVE_BIN"),
         "uv" => Some("BIOVAULT_BUNDLED_UV"),
         _ => None,
     }

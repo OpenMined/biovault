@@ -4652,8 +4652,11 @@ fn execute_syqure_native(
     println!("\n▶️  Executing syqure...");
     println!("  {}", display_cmd.dimmed());
 
+    // Write syqure log to private cache dir (not shared results dir) to avoid
+    // leaking keys through shared step outputs.
     let syqure_log_path = env_map
-        .get("BV_RESULTS_DIR")
+        .get("SYQURE_BUNDLE_CACHE")
+        .or_else(|| env_map.get("BV_RESULTS_DIR"))
         .map(PathBuf::from)
         .map(|dir| dir.join("syqure-native.log"));
 
