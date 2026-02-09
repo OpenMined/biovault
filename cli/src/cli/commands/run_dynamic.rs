@@ -5053,7 +5053,7 @@ fn execute_syqure_native(
         let syqure_log_tail = syqure_log_path
             .as_ref()
             .and_then(|path| fs::read_to_string(path).ok())
-            .map(|contents| {
+            .and_then(|contents| {
                 let tail = contents
                     .lines()
                     .rev()
@@ -5068,8 +5068,7 @@ fn execute_syqure_native(
                 } else {
                     Some(tail)
                 }
-            })
-            .flatten();
+            });
 
         #[cfg(unix)]
         {
