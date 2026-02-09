@@ -4042,21 +4042,69 @@ async fn execute_syqure(
         }
     }
 
-    // Validate CODON_PATH/lib/codon exists — fail fast with actionable error.
+    // Validate CODON_PATH/lib/codon and Sequre plugin — fail fast with actionable error.
     if let Some(codon) = env_map.get("CODON_PATH") {
         let codon_lib = PathBuf::from(codon).join("lib").join("codon");
         if !codon_lib.exists() {
-            eprintln!(
+            return Err(anyhow::anyhow!(
                 "ERROR: CODON_PATH is set to '{}' but lib/codon subdirectory does not exist.\n\
                  Expected: {}\n\
                  The syqure binary will fail with exit code 127 on Linux.\n\
                  Check your syqure build or set CODON_PATH to a valid Codon installation.",
                 codon,
                 codon_lib.display()
-            );
-        } else {
-            println!("  Codon lib/codon verified: {}", codon_lib.display());
+            )
+            .into());
         }
+
+        #[cfg(target_os = "linux")]
+        if codon.contains("/bin/macos-") {
+            return Err(anyhow::anyhow!(
+                "ERROR: CODON_PATH appears to be macOS on Linux: '{}'.\n\
+                 Set CODON_PATH to a Linux codon bundle (e.g. .../bin/linux-x86/codon).",
+                codon
+            )
+            .into());
+        }
+
+        #[cfg(target_os = "macos")]
+        if codon.contains("/bin/linux-") {
+            return Err(anyhow::anyhow!(
+                "ERROR: CODON_PATH appears to be Linux on macOS: '{}'.\n\
+                 Set CODON_PATH to a macOS codon bundle (e.g. .../bin/macos-arm64/codon).",
+                codon
+            )
+            .into());
+        }
+
+        #[cfg(target_os = "linux")]
+        let sequre_plugin = codon_lib
+            .join("plugins")
+            .join("sequre")
+            .join("build")
+            .join("libsequre.so");
+        #[cfg(target_os = "macos")]
+        let sequre_plugin = codon_lib
+            .join("plugins")
+            .join("sequre")
+            .join("build")
+            .join("libsequre.dylib");
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        let sequre_plugin = codon_lib.join("plugins").join("sequre").join("build");
+
+        if !sequre_plugin.exists() {
+            return Err(anyhow::anyhow!(
+                "ERROR: Sequre plugin library not found for CODON_PATH='{}'.\n\
+                 Expected plugin path: {}\n\
+                 This usually means CODON_PATH points at the wrong platform bundle.",
+                codon,
+                sequre_plugin.display()
+            )
+            .into());
+        }
+
+        println!("  Codon lib/codon verified: {}", codon_lib.display());
+        println!("  Sequre plugin verified: {}", sequre_plugin.display());
     }
 
     println!(
@@ -4400,7 +4448,16 @@ fn resolve_syqure_backend(spec: &ModuleSpec) -> Result<(String, bool)> {
 
 fn resolve_codon_path_from_syqure_binary(syqure_binary: &str) -> Option<PathBuf> {
     let bin_path = PathBuf::from(syqure_binary);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    let platforms = ["linux-x86", "linux-x86_64", "linux-amd64", "macos-arm64"];
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     let platforms = ["macos-arm64", "linux-x86", "linux-x86_64", "linux-amd64"];
+    #[cfg(not(any(
+        all(target_os = "linux", target_arch = "x86_64"),
+        all(target_os = "macos", target_arch = "aarch64")
+    )))]
+    let platforms = ["linux-x86", "linux-x86_64", "linux-amd64", "macos-arm64"];
+
     for ancestor in bin_path.ancestors() {
         let mut candidates = Vec::new();
         for platform in platforms {
@@ -4471,12 +4528,13 @@ fn execute_syqure_native(
     let codon_lib_dir = if !codon_path.is_empty() {
         let lib_dir = PathBuf::from(&codon_path).join("lib").join("codon");
         if !lib_dir.exists() {
-            eprintln!(
-                "WARNING: CODON_PATH/lib/codon does not exist: {}\n\
-                 Syqure may fail with exit code 127 (missing shared libraries).",
-                lib_dir.display()
-            );
-            None
+            return Err(anyhow::anyhow!(
+                "FATAL: CODON_PATH/lib/codon does not exist: {}\n\
+                 Refusing to start syqure with invalid CODON_PATH='{}'.",
+                lib_dir.display(),
+                codon_path
+            )
+            .into());
         } else {
             println!("  Codon lib dir: {}", lib_dir.display());
             Some(lib_dir)
@@ -4504,15 +4562,45 @@ fn execute_syqure_native(
                 lib_dir.display()
             );
         } else {
-            eprintln!(
-                "WARNING: CODON_PATH not set and no codon libs found near binary.\n\
-                 Syqure may fail with exit code 127 on Linux (missing shared libraries).\n\
+            return Err(anyhow::anyhow!(
+                "FATAL: CODON_PATH not set and no codon libs found near binary.\n\
+                 Refusing to start syqure.\n\
                  Binary: {}",
                 binary
-            );
+            )
+            .into());
         }
         found
     };
+
+    if let Some(ref lib_dir) = codon_lib_dir {
+        #[cfg(target_os = "linux")]
+        let sequre_plugin = lib_dir
+            .join("plugins")
+            .join("sequre")
+            .join("build")
+            .join("libsequre.so");
+        #[cfg(target_os = "macos")]
+        let sequre_plugin = lib_dir
+            .join("plugins")
+            .join("sequre")
+            .join("build")
+            .join("libsequre.dylib");
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        let sequre_plugin = lib_dir.join("plugins").join("sequre").join("build");
+
+        if !sequre_plugin.exists() {
+            return Err(anyhow::anyhow!(
+                "FATAL: Sequre plugin library not found before syqure start.\n\
+                 Expected: {}\n\
+                 CODON_PATH='{}'",
+                sequre_plugin.display(),
+                codon_path
+            )
+            .into());
+        }
+        println!("  Sequre plugin verified: {}", sequre_plugin.display());
+    }
 
     let mut cmd = Command::new(binary);
     super::configure_child_process(&mut cmd);
@@ -4748,6 +4836,21 @@ fn execute_syqure_native(
     });
 
     let start_time = std::time::Instant::now();
+    let syqure_timeout_s = env_map
+        .get("BV_SYQURE_NATIVE_TIMEOUT_S")
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .or_else(|| {
+            env::var("BV_SYQURE_NATIVE_TIMEOUT_S")
+                .ok()
+                .and_then(|v| v.trim().parse::<u64>().ok())
+        })
+        .filter(|v| *v > 0)
+        .unwrap_or(600);
+    let syqure_timeout = Duration::from_secs(syqure_timeout_s);
+    println!(
+        "  [trace] syqure timeout={}s party_id={}",
+        syqure_timeout_s, party_id
+    );
     println!("  [trace] spawning syqure child process...");
     let mut child = cmd.spawn().context("Failed to spawn syqure")?;
     println!(
@@ -4861,6 +4964,20 @@ fn execute_syqure_native(
             }
             None => {
                 poll_count += 1;
+                if peer_failure_reason.is_none() && start_time.elapsed() >= syqure_timeout {
+                    let reason = format!(
+                        "Syqure timed out after {}s for party_id={}; terminating process group",
+                        syqure_timeout_s, party_id
+                    );
+                    println!("  ⚠️  {}", reason);
+                    #[cfg(unix)]
+                    kill_process_group(child.id());
+                    #[cfg(not(unix))]
+                    {
+                        let _ = child.kill();
+                    }
+                    peer_failure_reason = Some(reason);
+                }
                 // Log every 10s (50 polls at 200ms)
                 if poll_count.is_multiple_of(50) {
                     println!(
@@ -4933,14 +5050,45 @@ fn execute_syqure_native(
     }
 
     if !status.success() {
+        let syqure_log_tail = syqure_log_path
+            .as_ref()
+            .and_then(|path| fs::read_to_string(path).ok())
+            .map(|contents| {
+                let tail = contents
+                    .lines()
+                    .rev()
+                    .take(80)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if tail.trim().is_empty() {
+                    None
+                } else {
+                    Some(tail)
+                }
+            })
+            .flatten();
+
         #[cfg(unix)]
         {
             use std::os::unix::process::ExitStatusExt;
             if let Some(signal) = status.signal() {
-                return Err(anyhow::anyhow!("Syqure exited due to signal: {}", signal).into());
+                let mut msg = format!("Syqure exited due to signal: {}", signal);
+                if let Some(tail) = syqure_log_tail.as_ref() {
+                    msg.push_str("\n--- syqure-native.log tail ---\n");
+                    msg.push_str(tail);
+                }
+                return Err(anyhow::anyhow!(msg).into());
             }
         }
-        return Err(anyhow::anyhow!("Syqure exited with code: {:?}", status.code()).into());
+        let mut msg = format!("Syqure exited with code: {:?}", status.code());
+        if let Some(tail) = syqure_log_tail {
+            msg.push_str("\n--- syqure-native.log tail ---\n");
+            msg.push_str(&tail);
+        }
+        return Err(anyhow::anyhow!(msg).into());
     }
 
     println!(
