@@ -4042,8 +4042,25 @@ async fn execute_syqure(
         }
     }
 
+    // Validate CODON_PATH/lib/codon exists — fail fast with actionable error.
+    if let Some(codon) = env_map.get("CODON_PATH") {
+        let codon_lib = PathBuf::from(codon).join("lib").join("codon");
+        if !codon_lib.exists() {
+            eprintln!(
+                "ERROR: CODON_PATH is set to '{}' but lib/codon subdirectory does not exist.\n\
+                 Expected: {}\n\
+                 The syqure binary will fail with exit code 127 on Linux.\n\
+                 Check your syqure build or set CODON_PATH to a valid Codon installation.",
+                codon,
+                codon_lib.display()
+            );
+        } else {
+            println!("  Codon lib/codon verified: {}", codon_lib.display());
+        }
+    }
+
     println!(
-        "  Syqure env: SEQURE_TRANSPORT={} SEQURE_TCP_PROXY={} BV_SYQURE_PORT_BASE={} SEQURE_COMMUNICATION_PORT={} SYQURE_SKIP_BUNDLE={} CODON_PATH={} SYQURE_DEBUG={}",
+        "  Syqure env: SEQURE_TRANSPORT={} SEQURE_TCP_PROXY={} BV_SYQURE_PORT_BASE={} SEQURE_COMMUNICATION_PORT={} SYQURE_SKIP_BUNDLE={} CODON_PATH={} SYQURE_DEBUG={} SEQURE_NATIVE_BIN={}",
         env_map
             .get("SEQURE_TRANSPORT")
             .map(|s| s.as_str())
@@ -4068,7 +4085,8 @@ async fn execute_syqure(
         env_map
             .get("SYQURE_DEBUG")
             .map(|s| s.as_str())
-            .unwrap_or("")
+            .unwrap_or(""),
+        &syqure_binary
     );
     println!(
         "  Syqure transport mode: {}",
@@ -4412,7 +4430,89 @@ fn execute_syqure_native(
         std::thread::current().id(),
         std::process::id()
     );
+
+    // ── Pre-flight: validate binary ──────────────────────────────────
+    // Fail loudly before spawning so CI logs immediately show what's wrong.
+    let binary_path = Path::new(binary);
+    if !binary_path.exists() {
+        return Err(anyhow::anyhow!(
+            "FATAL: syqure binary does not exist: {}\n\
+             Set SEQURE_NATIVE_BIN to a valid path or build syqure first.",
+            binary
+        )
+        .into());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(binary_path)
+            .map(|m| m.permissions().mode())
+            .unwrap_or(0);
+        if mode & 0o111 == 0 {
+            return Err(anyhow::anyhow!(
+                "FATAL: syqure binary is not executable (mode {:o}): {}\n\
+                 Run: chmod +x {}",
+                mode,
+                binary,
+                binary
+            )
+            .into());
+        }
+    }
     println!("  Using native syqure: {}", binary);
+
+    // ── Pre-flight: validate CODON_PATH and Codon shared libraries ───
+    // The syqure binary dynamically links libcodonrt and libcodonc.
+    // On macOS, @loader_path rpaths handle this automatically.
+    // On Linux, the dynamic linker needs LD_LIBRARY_PATH to point at
+    // the Codon lib directory, otherwise the binary exits with code 127
+    // ("command not found" / shared library load failure).
+    let codon_path = env_map.get("CODON_PATH").cloned().unwrap_or_default();
+    let codon_lib_dir = if !codon_path.is_empty() {
+        let lib_dir = PathBuf::from(&codon_path).join("lib").join("codon");
+        if !lib_dir.exists() {
+            eprintln!(
+                "WARNING: CODON_PATH/lib/codon does not exist: {}\n\
+                 Syqure may fail with exit code 127 (missing shared libraries).",
+                lib_dir.display()
+            );
+            None
+        } else {
+            println!("  Codon lib dir: {}", lib_dir.display());
+            Some(lib_dir)
+        }
+    } else {
+        // Try to find codon libs relative to the syqure binary as a fallback.
+        // Dev builds: syqure/target/{release,debug}/syqure → syqure/bin/<platform>/codon/lib/codon
+        // Bundled:    resources/syqure/syqure → resources/syqure/lib/codon
+        let mut found = None;
+        if let Some(bin_parent) = binary_path.parent() {
+            let candidates = [
+                bin_parent.join("lib").join("codon"),
+                bin_parent.join("..").join("lib").join("codon"),
+            ];
+            for c in &candidates {
+                if c.exists() {
+                    found = Some(c.clone());
+                    break;
+                }
+            }
+        }
+        if let Some(ref lib_dir) = found {
+            println!(
+                "  Codon lib dir (auto-detected near binary): {}",
+                lib_dir.display()
+            );
+        } else {
+            eprintln!(
+                "WARNING: CODON_PATH not set and no codon libs found near binary.\n\
+                 Syqure may fail with exit code 127 on Linux (missing shared libraries).\n\
+                 Binary: {}",
+                binary
+            );
+        }
+        found
+    };
 
     let mut cmd = Command::new(binary);
     super::configure_child_process(&mut cmd);
@@ -4429,6 +4529,29 @@ fn execute_syqure_native(
 
     for (k, v) in env_map {
         cmd.env(k, v);
+    }
+
+    // ── LD_LIBRARY_PATH: ensure Codon shared libs are discoverable ───
+    // On Linux, the syqure binary links libcodonrt.so and libcodonc.so
+    // dynamically. The compiled rpath ($ORIGIN/lib/codon) only works when
+    // libs are co-located with the binary. In dev/CI the libs live under
+    // CODON_PATH/lib/codon or the bundle cache, so we must add them to
+    // LD_LIBRARY_PATH explicitly. On macOS this is harmless (dyld ignores it).
+    if let Some(ref lib_dir) = codon_lib_dir {
+        let lib_dir_str = lib_dir.to_string_lossy().to_string();
+        // Also include the parent (lib/) for any top-level .so files.
+        let lib_parent = lib_dir.parent().map(|p| p.to_string_lossy().to_string());
+        let existing_ld = env::var("LD_LIBRARY_PATH").unwrap_or_default();
+        let mut parts: Vec<String> = vec![lib_dir_str.clone()];
+        if let Some(ref parent) = lib_parent {
+            parts.push(parent.clone());
+        }
+        if !existing_ld.is_empty() {
+            parts.push(existing_ld);
+        }
+        let new_ld = parts.join(":");
+        cmd.env("LD_LIBRARY_PATH", &new_ld);
+        println!("  LD_LIBRARY_PATH={}", new_ld);
     }
     if env::var("BV_SYQURE_BACKTRACE")
         .map(|v| v == "1" || v.to_lowercase() == "true")
