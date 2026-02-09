@@ -6,10 +6,10 @@ metadata:
 spec:
   runner:
     template: shell
-    entrypoint: run.sh
+    entrypoint: assets/run.sh
   assets:
-    - path: run.sh
-    - path: aggregate_counts.py
+    - path: assets/run.sh
+    - path: assets/aggregate_counts.py
   inputs:
     - name: counts_manifest
       type: File
