@@ -20,6 +20,9 @@ Starts or stops the SyftBox devstack (server + clients) without Docker using the
 sbdev tool from the syftbox checkout. Defaults to the sandbox clients already
 used in the scenario tests.
 
+A local coturn TURN server is auto-started when the turnserver binary is
+available, so WebRTC P2P connectivity works out of the box.
+
 Options:
   --clients list   Comma-separated client emails (default: client1@sandbox.local,client2@sandbox.local)
   --sandbox DIR    Sandbox root path (default: ./sandbox)
@@ -30,7 +33,6 @@ Options:
   --reset          Remove any existing devstack state before starting (also removes sandbox on stop)
   --skip-sync-check Skip the sbdev sync probe after boot (faster, less safe)
   --skip-keys      Skip key generation (for manual key management testing)
-  --turn           Start a local coturn TURN server for WebRTC P2P testing
   --stop           Stop the devstack instead of starting it
   --status         Print the current devstack state (relay/state.json) and exit
   -h, --help       Show this message
@@ -39,7 +41,6 @@ Environment (optional defaults when flags not provided):
   BV_DEVSTACK_CLIENT_MODE      go|rust|mixed|embedded (go disabled)
   BV_DEVSTACK_RUST_CLIENT_BIN  Path to Rust client binary
   BV_DEVSTACK_SKIP_RUST_BUILD  Set to 1 to skip building Rust client
-  BV_DEVSTACK_TURN             Set to 1 to start a local coturn TURN server
 EOF
 }
 
@@ -57,8 +58,6 @@ CLIENT_MODE=""
 CLIENT_MODE_EXPLICIT=0
 RUST_CLIENT_BIN=""
 SKIP_RUST_BUILD=0
-TURN_ENABLED=0
-TURN_PORT="${TURN_PORT:-3478}"
 TURN_USER="${TURN_USER:-syftbox}"
 TURN_PASS="${TURN_PASS:-syftbox}"
 
@@ -116,9 +115,6 @@ while [[ $# -gt 0 ]]; do
     --skip-client-daemons)
       SKIP_CLIENT_DAEMONS=1
       ;;
-    --turn)
-      TURN_ENABLED=1
-      ;;
     --stop)
       ACTION="stop"
       ;;
@@ -159,10 +155,6 @@ fi
 
 if (( ! SKIP_RUST_BUILD )) && [[ "${BV_DEVSTACK_SKIP_RUST_BUILD:-0}" == "1" ]]; then
   SKIP_RUST_BUILD=1
-fi
-
-if (( ! TURN_ENABLED )) && [[ "${BV_DEVSTACK_TURN:-0}" == "1" ]]; then
-  TURN_ENABLED=1
 fi
 
 # Default to embedded mode if not specified
@@ -309,21 +301,27 @@ ensure_bv_binary() {
   [[ -x "$BV_BIN" ]] || { echo "Failed to build BioVault CLI at $BV_BIN" >&2; exit 1; }
 }
 
+pick_free_port() {
+  python3 -c 'import socket; s=socket.socket(); s.bind(("",0)); print(s.getsockname()[1]); s.close()'
+}
+
 start_turn() {
   if ! command -v turnserver >/dev/null 2>&1; then
-    echo "ERROR: coturn (turnserver) not found. Install it (e.g. sudo pacman -S coturn) or disable --turn." >&2
-    exit 1
+    echo "WARNING: coturn (turnserver) not found; skipping TURN server. Install it (e.g. sudo pacman -S coturn) for WebRTC P2P." >&2
+    return 0
   fi
+  local turn_port
+  turn_port="$(pick_free_port)"
   local turn_pidfile="$SANDBOX_DIR/turn.pid"
   if [[ -f "$turn_pidfile" ]] && kill -0 "$(cat "$turn_pidfile")" 2>/dev/null; then
     echo "TURN server already running (pid $(cat "$turn_pidfile"))"
   else
-    echo "Starting TURN server on 127.0.0.1:${TURN_PORT}..."
+    echo "Starting TURN server on 127.0.0.1:${turn_port}..."
     turnserver -n \
       --realm=biovault.local \
       --lt-cred-mech \
       --user="${TURN_USER}:${TURN_PASS}" \
-      --listening-port="${TURN_PORT}" \
+      --listening-port="${turn_port}" \
       --listening-ip=127.0.0.1 \
       --relay-ip=127.0.0.1 \
       --fingerprint \
@@ -341,7 +339,7 @@ start_turn() {
     echo "TURN server started (pid $(cat "$turn_pidfile"))"
   fi
   # Export env vars so syftbox daemons inherit them
-  export SYFTBOX_HOTLINK_ICE_SERVERS="turn:127.0.0.1:${TURN_PORT}?transport=udp,turn:127.0.0.1:${TURN_PORT}?transport=tcp"
+  export SYFTBOX_HOTLINK_ICE_SERVERS="turn:127.0.0.1:${turn_port}?transport=udp,turn:127.0.0.1:${turn_port}?transport=tcp"
   export SYFTBOX_HOTLINK_TURN_USER="${TURN_USER}"
   export SYFTBOX_HOTLINK_TURN_PASS="${TURN_PASS}"
   export BV_SYFTBOX_HOTLINK_ICE_SERVERS="${SYFTBOX_HOTLINK_ICE_SERVERS}"
@@ -530,9 +528,7 @@ start_stack() {
   [[ -n "${NXF_IGNORE_JAVA_VERSION:-}" ]] && export NXF_IGNORE_JAVA_VERSION
   [[ -n "${NXF_OPTS:-}" ]] && export NXF_OPTS
 
-  if (( TURN_ENABLED )); then
-    start_turn
-  fi
+  start_turn
 
   echo "Starting SyftBox devstack via syftbox/cmd/devstack..."
 
