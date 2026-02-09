@@ -4155,7 +4155,7 @@ dependencies = [
 
 [[package]]
 name = "syftbox-sdk"
-version = "0.1.15"
+version = "0.1.17"
 dependencies = [
  "anyhow",
  "base64",
