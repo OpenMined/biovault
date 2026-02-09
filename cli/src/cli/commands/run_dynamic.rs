@@ -512,9 +512,11 @@ struct HotlinkTelemetrySummary {
     tx_packets: u64,
     tx_bytes: u64,
     tx_p2p_packets: u64,
+    tx_ws_packets: u64,
     rx_packets: u64,
     rx_bytes: u64,
     webrtc_connected: u64,
+    ws_fallbacks: u64,
 }
 
 fn read_hotlink_telemetry(path: &Path) -> Option<HotlinkTelemetrySummary> {
@@ -528,9 +530,11 @@ fn read_hotlink_telemetry(path: &Path) -> Option<HotlinkTelemetrySummary> {
             .or_else(|| v.get("tx_quic_packets"))
             .and_then(|x| x.as_u64())
             .unwrap_or(0),
+        tx_ws_packets: v.get("tx_ws_packets").and_then(|x| x.as_u64()).unwrap_or(0),
         rx_packets: v.get("rx_packets").and_then(|x| x.as_u64()).unwrap_or(0),
         rx_bytes: v.get("rx_bytes").and_then(|x| x.as_u64()).unwrap_or(0),
         webrtc_connected: v.get("webrtc_connected").and_then(|x| x.as_u64()).unwrap_or(0),
+        ws_fallbacks: v.get("ws_fallbacks").and_then(|x| x.as_u64()).unwrap_or(0),
     })
 }
 
@@ -4904,6 +4908,7 @@ fn execute_syqure_native(
 
     let monitor_handle = thread::spawn(move || {
         let mut last_status = String::new();
+        let mut hotlink_activity: HashMap<String, (u64, std::time::Instant)> = HashMap::new();
         while !stop_flag_clone.load(Ordering::Relaxed) {
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -4929,6 +4934,16 @@ fn execute_syqure_native(
                     let mut telemetry_found = false;
                     for telemetry_path in telemetry_paths {
                         if let Some(t) = read_hotlink_telemetry(&telemetry_path) {
+                            let activity_total = t.tx_packets + t.rx_packets;
+                            let now_instant = std::time::Instant::now();
+                            let entry = hotlink_activity
+                                .entry(party.to_string())
+                                .or_insert((activity_total, now_instant));
+                            if activity_total > entry.0 {
+                                entry.0 = activity_total;
+                                entry.1 = now_instant;
+                            }
+                            let stalled_for_s = now_instant.duration_since(entry.1).as_secs();
                             let p2p_status = if t.webrtc_connected > 0 {
                                 format!("p2p:UP({})", t.webrtc_connected)
                             } else if t.tx_p2p_packets > 0 {
@@ -4936,20 +4951,22 @@ fn execute_syqure_native(
                             } else {
                                 "p2p:off".to_string()
                             };
-                            let total = t.tx_packets + t.rx_packets;
-                            if total == 0 {
+                            if activity_total == 0 {
                                 status_parts.push(format!(
-                                    "{}: idle {}",
-                                    short_party, p2p_status
+                                    "{}: idle {} stall:{}s",
+                                    short_party, p2p_status, stalled_for_s
                                 ));
                             } else {
                                 status_parts.push(format!(
-                                    "{}: ↑{} ↓{} {} {}",
+                                    "{}: ↑{} ↓{} {} {} ws_fb:{} ws_tx:{} stall:{}s",
                                     short_party,
                                     t.tx_packets,
                                     t.rx_packets,
                                     fmt_hotlink_bytes(t.tx_bytes + t.rx_bytes),
                                     p2p_status,
+                                    t.ws_fallbacks,
+                                    t.tx_ws_packets,
+                                    stalled_for_s,
                                 ));
                             }
                             telemetry_found = true;

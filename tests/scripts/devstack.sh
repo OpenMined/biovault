@@ -306,8 +306,17 @@ pick_free_port() {
 }
 
 start_turn() {
+  local hotlink_enabled=0
+  case "${SYFTBOX_HOTLINK:-${BV_SYFTBOX_HOTLINK:-0}}" in
+    1|true|TRUE|True|yes|YES|on|ON) hotlink_enabled=1 ;;
+  esac
+
   if ! command -v turnserver >/dev/null 2>&1; then
-    echo "WARNING: coturn (turnserver) not found; skipping TURN server. Install it (e.g. sudo pacman -S coturn) for WebRTC P2P." >&2
+    if (( hotlink_enabled )); then
+      echo "ERROR: coturn (turnserver) not found but hotlink is enabled. Install coturn and retry." >&2
+      return 1
+    fi
+    echo "WARNING: coturn (turnserver) not found; skipping TURN server (hotlink disabled)." >&2
     return 0
   fi
   local turn_port
@@ -336,7 +345,29 @@ start_turn() {
       fi
       sleep 0.5
     done
-    echo "TURN server started (pid $(cat "$turn_pidfile"))"
+    if ! kill -0 "$(cat "$turn_pidfile")" 2>/dev/null; then
+      echo "ERROR: TURN server failed to stay running." >&2
+      tail -n 80 "$SANDBOX_DIR/turn.log" >&2 || true
+      return 1
+    fi
+    if ! python3 - "$turn_port" <<'PY'
+import socket, sys
+port = int(sys.argv[1])
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.settimeout(1.5)
+try:
+    s.connect(("127.0.0.1", port))
+except OSError:
+    sys.exit(1)
+finally:
+    s.close()
+PY
+    then
+      echo "ERROR: TURN server did not accept TCP connections on 127.0.0.1:${turn_port}." >&2
+      tail -n 80 "$SANDBOX_DIR/turn.log" >&2 || true
+      return 1
+    fi
+    echo "TURN server started (pid $(cat "$turn_pidfile")) on 127.0.0.1:${turn_port}"
   fi
   # Export env vars so syftbox daemons inherit them
   export SYFTBOX_HOTLINK_ICE_SERVERS="turn:127.0.0.1:${turn_port}?transport=udp,turn:127.0.0.1:${turn_port}?transport=tcp"
