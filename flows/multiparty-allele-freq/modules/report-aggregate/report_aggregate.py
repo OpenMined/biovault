@@ -7,6 +7,7 @@ We split it back into AC and AN halves to compute allele frequencies.
 """
 import argparse
 import json
+import os
 from pathlib import Path
 
 
@@ -22,6 +23,19 @@ def split_combined_counts(combined: list[int], loci_count: int) -> tuple[list[in
     ac = combined[: min(len(combined), loci_count)]
     an = [0 for _ in range(len(ac))]
     return ac, an
+
+
+def atomic_write_text(path: Path, content: str) -> None:
+    """
+    Write file content via temp file + atomic rename to avoid partial-file sync races.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f".{path.name}.tmp-{os.getpid()}")
+    with tmp_path.open("w", encoding="utf-8") as f:
+        f.write(content)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp_path, path)
 
 
 def main() -> int:
@@ -100,35 +114,32 @@ def main() -> int:
     # Write detailed TSV report
     if args.out_tsv:
         out_path = Path(args.out_tsv)
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        with out_path.open("w", encoding="utf-8") as f:
-            f.write("locus\trsid\tagg_ac\tagg_an\tagg_af\tlocal_ac\tlocal_an\tlocal_af\n")
-            for i, (locus, rsid) in enumerate(zip(loci, rsids)):
-                ac = agg_ac[i]
-                an = agg_an[i]
-                af = (ac / an) if an else 0.0
-                lac = local_ac[i]
-                lan = local_an[i]
-                laf = (lac / lan) if lan else 0.0
-                f.write(f"{locus}\t{rsid}\t{ac}\t{an}\t{af:.6f}\t{lac}\t{lan}\t{laf:.6f}\n")
+        lines = ["locus\trsid\tagg_ac\tagg_an\tagg_af\tlocal_ac\tlocal_an\tlocal_af\n"]
+        for i, (locus, rsid) in enumerate(zip(loci, rsids)):
+            ac = agg_ac[i]
+            an = agg_an[i]
+            af = (ac / an) if an else 0.0
+            lac = local_ac[i]
+            lan = local_an[i]
+            laf = (lac / lan) if lan else 0.0
+            lines.append(f"{locus}\t{rsid}\t{ac}\t{an}\t{af:.6f}\t{lac}\t{lan}\t{laf:.6f}\n")
+        atomic_write_text(out_path, "".join(lines))
 
     # Write aggregated allele_freq.tsv format (same format as input TSV but with aggregated values)
     if args.out_agg_tsv:
         out_path = Path(args.out_agg_tsv)
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        with out_path.open("w", encoding="utf-8") as f:
-            f.write("locus_key\trsid\tallele_count\tallele_number\tallele_freq\n")
-            for i, (locus, rsid) in enumerate(zip(loci, rsids)):
-                ac = agg_ac[i]
-                an = agg_an[i]
-                af = (ac / an) if an else 0.0
-                f.write(f"{locus}\t{rsid}\t{ac}\t{an}\t{af:.6f}\n")
+        lines = ["locus_key\trsid\tallele_count\tallele_number\tallele_freq\n"]
+        for i, (locus, rsid) in enumerate(zip(loci, rsids)):
+            ac = agg_ac[i]
+            an = agg_an[i]
+            af = (ac / an) if an else 0.0
+            lines.append(f"{locus}\t{rsid}\t{ac}\t{an}\t{af:.6f}\n")
+        atomic_write_text(out_path, "".join(lines))
         print(f"aggregated_allele_freq.tsv: {out_path}")
 
     # Write JSON summary
     if args.out_json:
         out_path = Path(args.out_json)
-        out_path.parent.mkdir(parents=True, exist_ok=True)
         top_rows = []
         for rank, i in enumerate(top_idx, start=1):
             ac = agg_ac[i]
@@ -161,7 +172,7 @@ def main() -> int:
             "max_agg": int(max_agg),
             "top": top_rows,
         }
-        out_path.write_text(json.dumps(payload, separators=(",", ":")) + "\n", encoding="utf-8")
+        atomic_write_text(out_path, json.dumps(payload, separators=(",", ":")) + "\n")
 
     print(f"report_json: {args.out_json}")
     print(f"report_tsv: {args.out_tsv}")
