@@ -4002,6 +4002,10 @@ async fn execute_syqure(
     let mut docker_network_name: Option<String> = None;
     let mut docker_network_subnet: Option<String> = None;
     let mut docker_party_ip: Option<String> = None;
+    let mut tcp_proxy = env_map
+        .get("SEQURE_TCP_PROXY")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(transport == "hotlink");
 
     // Docker+hotlink defaults to direct container TCP over a shared Docker network.
     // Set BV_SYQURE_DOCKER_DIRECT=0 to force legacy proxy mode for debugging.
@@ -4012,6 +4016,7 @@ async fn execute_syqure(
             .unwrap_or(true);
 
     if docker_direct_tcp {
+        tcp_proxy = false;
         if party_count > 253 {
             return Err(anyhow::anyhow!(
                 "Syqure Docker direct mode supports up to 253 parties, got {}",
@@ -4051,8 +4056,7 @@ async fn execute_syqure(
             env::var("BV_SYQURE_DOCKER_NETWORK").unwrap_or_else(|_| format!("syqure-net-{}", run_id));
         let network_subnet =
             env::var("BV_SYQURE_DOCKER_SUBNET").unwrap_or_else(|_| "172.29.0.0/24".to_string());
-        let base_port =
-            SEQURE_COMMUNICATION_PORT + (party_id as usize) * SEQURE_COMMUNICATION_PORT_STRIDE;
+        let base_port = syqure_port_base + (party_id as usize) * SEQURE_COMMUNICATION_PORT_STRIDE;
 
         env_map.insert("SEQURE_TRANSPORT".to_string(), "tcp".to_string());
         env_map.insert("SEQURE_TCP_PROXY".to_string(), "0".to_string());
@@ -4075,10 +4079,6 @@ async fn execute_syqure(
         );
     } else {
         // Legacy behavior: hotlink over host TCP proxy.
-        let tcp_proxy = env_map
-            .get("SEQURE_TCP_PROXY")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(transport == "hotlink");
         env_map.insert(
             "SEQURE_TCP_PROXY".to_string(),
             if tcp_proxy {
@@ -4103,7 +4103,7 @@ async fn execute_syqure(
                 .join(",");
             env_map.insert("SEQURE_CP_IPS".to_string(), proxy_ips);
             let base_port =
-                SEQURE_COMMUNICATION_PORT + (party_id as usize) * SEQURE_COMMUNICATION_PORT_STRIDE;
+                syqure_port_base + (party_id as usize) * SEQURE_COMMUNICATION_PORT_STRIDE;
             env_map.insert(
                 "SEQURE_COMMUNICATION_PORT".to_string(),
                 base_port.to_string(),
@@ -4120,10 +4120,38 @@ async fn execute_syqure(
         }
     }
     if env::var("SYQURE_BUNDLE_CACHE").is_err() {
-        let cache_dir = PathBuf::from(&datasites_root)
+        let preferred_cache_dir = PathBuf::from(&datasites_root)
             .join(".syqure-cache")
             .join(&run_id)
             .join(format!("party-{}", party_id));
+        let cache_dir = match fs::create_dir_all(&preferred_cache_dir) {
+            Ok(_) => preferred_cache_dir,
+            Err(err) => {
+                let fallback = env::temp_dir()
+                    .join("biovault-syqure-cache")
+                    .join(&run_id)
+                    .join(format!("party-{}", party_id));
+                if let Err(fallback_err) = fs::create_dir_all(&fallback) {
+                    return Err(anyhow::anyhow!(
+                        "Failed to prepare Syqure cache directories.\n\
+                         Preferred: {} ({})\n\
+                         Fallback: {} ({})",
+                        preferred_cache_dir.display(),
+                        err,
+                        fallback.display(),
+                        fallback_err
+                    )
+                    .into());
+                }
+                eprintln!(
+                    "warn: using fallback Syqure cache dir due to permissions: {} -> {} ({})",
+                    preferred_cache_dir.display(),
+                    fallback.display(),
+                    err
+                );
+                fallback
+            }
+        };
         env_map.insert(
             "SYQURE_BUNDLE_CACHE".to_string(),
             cache_dir.to_string_lossy().to_string(),
@@ -4208,7 +4236,7 @@ async fn execute_syqure(
     }
 
     println!(
-        "  Syqure env: SEQURE_TRANSPORT={} SEQURE_TCP_PROXY={} SEQURE_CP_IPS={} SEQURE_COMMUNICATION_PORT={} SYQURE_SKIP_BUNDLE={} CODON_PATH={} SYQURE_DEBUG={}",
+        "  Syqure env: SEQURE_TRANSPORT={} SEQURE_TCP_PROXY={} SEQURE_CP_IPS={} BV_SYQURE_PORT_BASE={} SEQURE_COMMUNICATION_PORT={} SYQURE_SKIP_BUNDLE={} CODON_PATH={} SYQURE_DEBUG={} SYQURE_BINARY={}",
         env_map
             .get("SEQURE_TRANSPORT")
             .map(|s| s.as_str())
