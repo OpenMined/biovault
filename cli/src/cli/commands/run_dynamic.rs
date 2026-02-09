@@ -3471,37 +3471,64 @@ async fn execute_syqure(
     env_map.insert("SEQURE_LOCAL_EMAIL".to_string(), current_email.clone());
     env_map.insert("SEQURE_FILE_KEEP".to_string(), "1".to_string());
     env_map.insert("SEQURE_FILE_DEBUG".to_string(), "1".to_string());
-    // Default behavior for `transport: hotlink` is TCP proxy mode.
-    // Users can still force it off explicitly with `SEQURE_TCP_PROXY=0`.
-    let tcp_proxy = env_map
-        .get("SEQURE_TCP_PROXY")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(transport == "hotlink");
-    env_map.insert(
-        "SEQURE_TCP_PROXY".to_string(),
-        if tcp_proxy {
-            "1".to_string()
+    let mut docker_network_name: Option<String> = None;
+    let mut docker_network_subnet: Option<String> = None;
+    let mut docker_party_ip: Option<String> = None;
+
+    // Docker+hotlink defaults to direct container TCP over a shared Docker network.
+    // Set BV_SYQURE_DOCKER_DIRECT=0 to force legacy proxy mode for debugging.
+    let docker_direct_tcp = use_docker
+        && transport == "hotlink"
+        && env::var("BV_SYQURE_DOCKER_DIRECT")
+            .map(|v| is_truthy(&v))
+            .unwrap_or(true);
+
+    if docker_direct_tcp {
+        if party_count > 253 {
+            return Err(anyhow::anyhow!(
+                "Syqure Docker direct mode supports up to 253 parties, got {}",
+                party_count
+            )
+            .into());
+        }
+        let cp_ips: Vec<String> = if let Ok(raw) = env::var("BV_SYQURE_DOCKER_CP_IPS") {
+            let values: Vec<String> = raw
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if values.len() != party_count {
+                return Err(anyhow::anyhow!(
+                    "BV_SYQURE_DOCKER_CP_IPS must have {} entries (got {})",
+                    party_count,
+                    values.len()
+                )
+                .into());
+            }
+            values
         } else {
-            "0".to_string()
-        },
-    );
-    if tcp_proxy && transport == "hotlink" {
-        env_map.insert("SEQURE_TRANSPORT".to_string(), "tcp".to_string());
-    }
-    if tcp_proxy {
-        let proxy_ip = if use_docker {
-            let container_runtime =
-                env::var("BIOVAULT_CONTAINER_RUNTIME").unwrap_or_else(|_| "docker".to_string());
-            syqure_container_proxy_host(&container_runtime)
-        } else {
-            "127.0.0.1".to_string()
+            (0..party_count)
+                .map(|idx| format!("172.29.0.{}", idx + 2))
+                .collect()
         };
-        let proxy_ips = std::iter::repeat_n(proxy_ip.as_str(), party_count)
-            .collect::<Vec<_>>()
-            .join(",");
-        env_map.insert("SEQURE_CP_IPS".to_string(), proxy_ips);
+        if party_id >= cp_ips.len() {
+            return Err(anyhow::anyhow!(
+                "Party id {} out of bounds for CP IP list of size {}",
+                party_id,
+                cp_ips.len()
+            )
+            .into());
+        }
+        let network_name =
+            env::var("BV_SYQURE_DOCKER_NETWORK").unwrap_or_else(|_| format!("syqure-net-{}", run_id));
+        let network_subnet =
+            env::var("BV_SYQURE_DOCKER_SUBNET").unwrap_or_else(|_| "172.29.0.0/24".to_string());
         let base_port =
             SEQURE_COMMUNICATION_PORT + (party_id as usize) * SEQURE_COMMUNICATION_PORT_STRIDE;
+
+        env_map.insert("SEQURE_TRANSPORT".to_string(), "tcp".to_string());
+        env_map.insert("SEQURE_TCP_PROXY".to_string(), "0".to_string());
+        env_map.insert("SEQURE_CP_IPS".to_string(), cp_ips.join(","));
         env_map.insert(
             "SEQURE_COMMUNICATION_PORT".to_string(),
             base_port.to_string(),
@@ -3510,6 +3537,54 @@ async fn execute_syqure(
             "SEQURE_DATA_SHARING_PORT".to_string(),
             (base_port + 10_000).to_string(),
         );
+        docker_party_ip = Some(cp_ips[party_id].clone());
+        docker_network_name = Some(network_name);
+        docker_network_subnet = Some(network_subnet);
+        println!(
+            "  Syqure Docker direct TCP enabled: network={} ip={}",
+            docker_network_name.as_deref().unwrap_or(""),
+            docker_party_ip.as_deref().unwrap_or("")
+        );
+    } else {
+        // Legacy behavior: hotlink over host TCP proxy.
+        let tcp_proxy = env_map
+            .get("SEQURE_TCP_PROXY")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(transport == "hotlink");
+        env_map.insert(
+            "SEQURE_TCP_PROXY".to_string(),
+            if tcp_proxy {
+                "1".to_string()
+            } else {
+                "0".to_string()
+            },
+        );
+        if tcp_proxy && transport == "hotlink" {
+            env_map.insert("SEQURE_TRANSPORT".to_string(), "tcp".to_string());
+        }
+        if tcp_proxy {
+            let proxy_ip = if use_docker {
+                let container_runtime =
+                    env::var("BIOVAULT_CONTAINER_RUNTIME").unwrap_or_else(|_| "docker".to_string());
+                syqure_container_proxy_host(&container_runtime)
+            } else {
+                "127.0.0.1".to_string()
+            };
+            let proxy_ips = std::iter::repeat_n(proxy_ip.as_str(), party_count)
+                .collect::<Vec<_>>()
+                .join(",");
+            env_map.insert("SEQURE_CP_IPS".to_string(), proxy_ips);
+            let base_port =
+                SEQURE_COMMUNICATION_PORT + (party_id as usize) * SEQURE_COMMUNICATION_PORT_STRIDE;
+            env_map.insert(
+                "SEQURE_COMMUNICATION_PORT".to_string(),
+                base_port.to_string(),
+            );
+            env_map.insert(
+                "SEQURE_DATA_SHARING_PORT".to_string(),
+                (base_port + 10_000).to_string(),
+            );
+        }
     }
     for pass_through in &["SYQURE_SKIP_BUNDLE", "SYQURE_DEBUG"] {
         if let Ok(val) = env::var(pass_through) {
@@ -3674,6 +3749,9 @@ async fn execute_syqure(
             &datasites_root,
             &run_id,
             &docker_platform,
+            docker_network_name.as_deref(),
+            docker_network_subnet.as_deref(),
+            docker_party_ip.as_deref(),
         )?;
     } else {
         execute_syqure_native(&syqure_binary, &entrypoint_path, party_id, &env_map)?;
@@ -4075,6 +4153,9 @@ fn execute_syqure_docker(
     datasites_root: &str,
     run_id: &str,
     platform: &str,
+    docker_network_name: Option<&str>,
+    docker_network_subnet: Option<&str>,
+    docker_party_ip: Option<&str>,
 ) -> Result<()> {
     fn to_container_path(path: &Path) -> String {
         path.to_string_lossy().replace('\\', "/")
@@ -4133,6 +4214,61 @@ fn execute_syqure_docker(
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
+
+    if let Some(network_name) = docker_network_name {
+        if container_runtime != "docker" {
+            return Err(anyhow::anyhow!(
+                "Syqure Docker direct mode requires docker runtime, got {}",
+                container_runtime
+            )
+            .into());
+        }
+        let mut inspect = Command::new(&container_runtime);
+        super::configure_child_process(&mut inspect);
+        let exists = inspect
+            .args(["network", "inspect", network_name])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !exists {
+            let mut create = Command::new(&container_runtime);
+            super::configure_child_process(&mut create);
+            create.args(["network", "create", "--driver", "bridge"]);
+            if let Some(subnet) = docker_network_subnet {
+                create.args(["--subnet", subnet]);
+            }
+            create.arg(network_name);
+            let created = create.output().with_context(|| {
+                format!("Failed to create docker network {}", network_name)
+            })?;
+            if !created.status.success() {
+                let mut recheck = Command::new(&container_runtime);
+                super::configure_child_process(&mut recheck);
+                let already_exists = recheck
+                    .args(["network", "inspect", network_name])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status()
+                    .map(|s| s.success())
+                    .unwrap_or(false);
+                if !already_exists {
+                    return Err(anyhow::anyhow!(
+                        "Failed creating docker network {}: {}",
+                        network_name,
+                        String::from_utf8_lossy(&created.stderr)
+                    )
+                    .into());
+                }
+            }
+        }
+        println!(
+            "  Docker direct network: {} ({})",
+            network_name,
+            docker_network_subnet.unwrap_or("subnet unspecified")
+        );
+    }
 
     let module_path_abs = module_path
         .canonicalize()
@@ -4221,7 +4357,12 @@ fn execute_syqure_docker(
     })?;
 
     // Fail-fast: verify container→host proxy connectivity before launching the real container.
-    if let Some(cp_ips) = env_map.get("SEQURE_CP_IPS") {
+    let tcp_proxy_enabled = env_map
+        .get("SEQURE_TCP_PROXY")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    if tcp_proxy_enabled {
+        if let Some(cp_ips) = env_map.get("SEQURE_CP_IPS") {
         if let Some(proxy_host) = cp_ips.split(',').next() {
             let comm_port = env_map
                 .get("SEQURE_COMMUNICATION_PORT")
@@ -4247,14 +4388,33 @@ fn execute_syqure_docker(
                 Ok(output) if output.status.success() => {
                     println!("  Preflight: {}:{} reachable ✓", proxy_host, comm_port);
                 }
-                _ => {
+                Ok(output) => {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    let combined = format!("{}\n{}", stdout, stderr);
+                    if combined.to_ascii_lowercase().contains("network is unreachable") {
+                        return Err(anyhow::anyhow!(
+                            "Container→host proxy route unreachable for {}:{} ({}). Set BV_SYQURE_CP_HOST to a reachable host IP.",
+                            proxy_host,
+                            comm_port,
+                            combined.trim()
+                        )
+                        .into());
+                    }
                     eprintln!(
                         "  Preflight WARNING: {}:{} not reachable from container (proxy may not be listening yet)",
                         proxy_host, comm_port
                     );
                 }
+                Err(err) => {
+                    eprintln!(
+                        "  Preflight WARNING: failed to probe {}:{} from container: {}",
+                        proxy_host, comm_port, err
+                    );
+                }
             }
         }
+    }
     }
 
     let mut cmd = Command::new(&container_runtime);
@@ -4262,6 +4422,12 @@ fn execute_syqure_docker(
     cmd.args(["run", "--name", &container_name]);
     if !keep_containers {
         cmd.arg("--rm");
+    }
+    if let Some(network_name) = docker_network_name {
+        cmd.args(["--network", network_name]);
+    }
+    if let Some(party_ip) = docker_party_ip {
+        cmd.args(["--ip", party_ip]);
     }
 
     // Add --platform for docker when specified (podman handles this differently)
