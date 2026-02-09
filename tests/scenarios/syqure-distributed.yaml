@@ -76,27 +76,27 @@ steps:
         run: |
           cd {{workspace}}
           TIMEFORMAT='flow_time:%3R'
-          BIOVAULT_FLOW_VERBOSE=1 BIOVAULT_FLOW_RUN_ID={{run_id}} \
-          BV_SYQURE_USE_DOCKER=${BV_SYQURE_USE_DOCKER:-} \
-            time {{workspace}}/cli/target/release/bv run tests/scenarios/syqure-flow/flow.yaml
+          time BIOVAULT_FLOW_VERBOSE=1 BIOVAULT_FLOW_RUN_ID={{run_id}} \
+            BV_SYQURE_USE_DOCKER=${BV_SYQURE_USE_DOCKER:-} \
+            {{workspace}}/cli/target/release/bv run tests/scenarios/syqure-flow/flow.yaml
 
       - name: client2-flow
         datasite: client2@sandbox.local
         run: |
           cd {{workspace}}
           TIMEFORMAT='flow_time:%3R'
-          BIOVAULT_FLOW_VERBOSE=1 BIOVAULT_FLOW_RUN_ID={{run_id}} \
-          BV_SYQURE_USE_DOCKER=${BV_SYQURE_USE_DOCKER:-} \
-            time {{workspace}}/cli/target/release/bv run tests/scenarios/syqure-flow/flow.yaml
+          time BIOVAULT_FLOW_VERBOSE=1 BIOVAULT_FLOW_RUN_ID={{run_id}} \
+            BV_SYQURE_USE_DOCKER=${BV_SYQURE_USE_DOCKER:-} \
+            {{workspace}}/cli/target/release/bv run tests/scenarios/syqure-flow/flow.yaml
 
       - name: aggregator-flow
         datasite: aggregator@sandbox.local
         run: |
           cd {{workspace}}
           TIMEFORMAT='flow_time:%3R'
-          BIOVAULT_FLOW_VERBOSE=1 BIOVAULT_FLOW_RUN_ID={{run_id}} \
-          BV_SYQURE_USE_DOCKER=${BV_SYQURE_USE_DOCKER:-} \
-            time {{workspace}}/cli/target/release/bv run tests/scenarios/syqure-flow/flow.yaml
+          time BIOVAULT_FLOW_VERBOSE=1 BIOVAULT_FLOW_RUN_ID={{run_id}} \
+            BV_SYQURE_USE_DOCKER=${BV_SYQURE_USE_DOCKER:-} \
+            {{workspace}}/cli/target/release/bv run tests/scenarios/syqure-flow/flow.yaml
     timeout: 900
 
   - name: Verify flow completion

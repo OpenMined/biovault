@@ -194,16 +194,36 @@ fi
 if (( USE_DOCKER )); then
   # Ensure syqure.yaml switches into Docker mode when --docker/--podman is used.
   export SEQURE_MODE="${SEQURE_MODE:-docker}"
-  # Syqure runs in containers need the host-side hotlink TCP proxy reachable.
-  # Bind proxy listeners to all interfaces unless user provided an override.
-  export BV_SYFTBOX_HOTLINK_TCP_PROXY_ADDR="${BV_SYFTBOX_HOTLINK_TCP_PROXY_ADDR:-0.0.0.0}"
-  # Resolve a numeric host IP from inside Docker so syqure containers avoid
-  # hostname/address-family issues when connecting to hotlink TCP proxies.
-  if [[ -z "${BV_SYQURE_CP_HOST:-}" ]] && [[ "${BIOVAULT_CONTAINER_RUNTIME:-docker}" == "docker" ]]; then
+  hotlink_direct=0
+  if [[ "$SYQURE_TRANSPORT" == "hotlink" ]]; then
+    case "${BV_SYQURE_DOCKER_DIRECT:-1}" in
+      0|false|False|FALSE|no|No|NO|off|Off|OFF)
+        hotlink_direct=0
+        ;;
+      *)
+        hotlink_direct=1
+        export BV_SYQURE_DOCKER_DIRECT=1
+        ;;
+    esac
+  fi
+
+  if (( hotlink_direct )); then
+    echo "Syqure Docker direct TCP mode enabled (shared network, proxy bypassed)."
+  else
+    # Legacy hotlink path uses host TCP proxy.
+    # Bind proxy listeners to all interfaces unless user provided an override.
+    export BV_SYFTBOX_HOTLINK_TCP_PROXY_ADDR="${BV_SYFTBOX_HOTLINK_TCP_PROXY_ADDR:-0.0.0.0}"
+    # Resolve a numeric host IP from inside Docker so syqure containers avoid
+    # hostname/address-family issues when connecting to hotlink TCP proxies.
+    if [[ -z "${BV_SYQURE_CP_HOST:-}" ]] && [[ "${BIOVAULT_CONTAINER_RUNTIME:-docker}" == "docker" ]]; then
     detect_docker_host_ip() {
       local alias="$1"
       docker run --rm alpine:3.19 sh -lc \
         "getent hosts '$alias' 2>/dev/null | awk 'NR==1 {print \$1}'" 2>/dev/null || true
+    }
+
+    detect_docker_bridge_gateway() {
+      docker network inspect bridge --format '{{(index .IPAM.Config 0).Gateway}}' 2>/dev/null || true
     }
 
     for alias in host.docker.internal gateway.docker.internal; do
@@ -214,10 +234,28 @@ if (( USE_DOCKER )); then
         break
       fi
     done
-  fi
 
-  # Fail-fast: verify container→host networking works before running the full test.
-  if [[ -n "${BV_SYQURE_CP_HOST:-}" ]]; then
+    # Linux engines may not provide host.docker.internal aliases.
+    # Fall back to the default bridge gateway when alias lookup is unavailable.
+    if [[ -z "${BV_SYQURE_CP_HOST:-}" ]]; then
+      candidate="$(detect_docker_bridge_gateway)"
+      if [[ "$candidate" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+        export BV_SYQURE_CP_HOST="$candidate"
+        echo "Syqure Docker CP host: ${BV_SYQURE_CP_HOST} (bridge gateway)"
+      fi
+    fi
+    fi
+
+    # Fail-fast: verify container→host networking works before running the full test.
+    if [[ -n "${BV_SYQURE_CP_HOST:-}" ]]; then
+    # Hard fail fast when container routing to host proxy is impossible.
+    if ! docker run --rm --platform linux/amd64 alpine:3.19 sh -c \
+        "ip route get '${BV_SYQURE_CP_HOST}' >/dev/null 2>&1"; then
+      echo "ERROR: Docker cannot route to Syqure host proxy ${BV_SYQURE_CP_HOST} from containers." >&2
+      echo "Set BV_SYQURE_CP_HOST to a reachable host IP (for this engine, bridge gateway often works)." >&2
+      exit 1
+    fi
+
     echo "Docker networking preflight: checking container→host connectivity (${BV_SYQURE_CP_HOST})..."
     # Spin up a tiny container that tries to ping or connect to the host IP.
     if docker run --rm --platform linux/amd64 alpine:3.19 sh -c \
@@ -228,8 +266,14 @@ if (( USE_DOCKER )); then
       # resolve the host IP the routing should work once proxy ports are listening.
       echo "Docker networking preflight: host ${BV_SYQURE_CP_HOST} ping failed (OK if firewall blocks ICMP)"
     fi
-  else
-    echo "WARNING: Could not detect Docker host IP. Container→host proxy connectivity may fail." >&2
+    else
+      if [[ "$SYQURE_TRANSPORT" == "hotlink" ]]; then
+      echo "ERROR: Could not detect Docker host IP for Syqure hotlink TCP proxy." >&2
+      echo "Set BV_SYQURE_CP_HOST explicitly to a reachable host IP and retry." >&2
+      exit 1
+      fi
+      echo "WARNING: Could not detect Docker host IP. Container→host proxy connectivity may fail." >&2
+    fi
   fi
 fi
 
