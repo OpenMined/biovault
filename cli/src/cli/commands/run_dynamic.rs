@@ -5160,6 +5160,7 @@ fn execute_syqure_docker(
         module_root: &Path,
         results_root: &Path,
         datasites_root: &Path,
+        datasites_in_container: &str,
     ) -> Option<String> {
         let stripped = strip_extended_path_prefix(value);
         let value_path = PathBuf::from(&stripped);
@@ -5173,7 +5174,11 @@ fn execute_syqure_docker(
             ));
         }
         if let Ok(rel_path) = value_path.strip_prefix(datasites_root) {
-            return Some(format!("/datasites/{}", to_container_path(rel_path)));
+            return Some(format!(
+                "{}/{}",
+                datasites_in_container.trim_end_matches('/'),
+                to_container_path(rel_path)
+            ));
         }
         None
     }
@@ -5208,7 +5213,7 @@ fn execute_syqure_docker(
         .canonicalize()
         .unwrap_or_else(|_| module_path.to_path_buf());
 
-    let datasites_in_container = "/datasites";
+    let mut datasites_in_container = "/datasites".to_string();
     let results_in_container = "/results";
 
     let shared_datasites_root = env::var("BV_SHARED_DATASITES_ROOT").ok();
@@ -5247,6 +5252,48 @@ fn execute_syqure_docker(
 
     let results_root_for_match = PathBuf::from(&results_mount_path);
     let datasites_root_for_match = PathBuf::from(&datasites_mount_path);
+
+    // Docker Desktop can fail mounting nested paths with special characters in parent directories
+    // (e.g. ".../client1@sandbox.local/datasites"). Mount the parent and remap root in-container.
+    let mut datasites_mount_source = datasites_mount_path.clone();
+    let mut datasites_volume_target = datasites_in_container.clone();
+    if container_runtime == "docker" && datasites_mount_path.ends_with("/datasites") {
+        if let Some(parent) = Path::new(&datasites_mount_path).parent() {
+            if let Some(parent_str) = parent.to_str() {
+                datasites_mount_source = parent_str.to_string();
+                datasites_volume_target = "/datasite-home".to_string();
+                datasites_in_container = "/datasite-home/datasites".to_string();
+                // Docker Desktop can reject a direct bind mount to paths containing '@'
+                // (e.g. ".../sandbox/client1@sandbox.local"). In that case, mount the
+                // parent sandbox root and remap datasites to the current datasite path.
+                let parent_has_at = parent
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .map(|name| name.contains('@'))
+                    .unwrap_or(false);
+                if parent_has_at {
+                    if let Some(sandbox_root) = parent.parent().and_then(|p| p.to_str()) {
+                        if let Some(current_ds) = env_map.get("BV_CURRENT_DATASITE") {
+                            datasites_mount_source = sandbox_root.to_string();
+                            datasites_volume_target = "/datasite-root".to_string();
+                            datasites_in_container =
+                                format!("/datasite-root/{}/datasites", current_ds);
+                            println!(
+                                "  Docker mount fallback: using sandbox root {} (datasite {})",
+                                datasites_mount_source, current_ds
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+    fs::create_dir_all(&datasites_mount_source).with_context(|| {
+        format!(
+            "Failed to create resolved datasites mount source: {}",
+            datasites_mount_source
+        )
+    })?;
 
     // Fail-fast: verify container→host proxy connectivity before launching the real container.
     if let Some(cp_ips) = env_map.get("SEQURE_CP_IPS") {
@@ -5312,6 +5359,7 @@ fn execute_syqure_docker(
             &module_root_for_match,
             &results_root_for_match,
             &datasites_root_for_match,
+            &datasites_in_container,
         ) {
             cmd.args(["-e", &format!("{}={}", k, mapped)]);
         } else {
@@ -5324,7 +5372,7 @@ fn execute_syqure_docker(
     cmd.args(["-v", &format!("{}:/workspace/project", module_mount_path)]);
     cmd.args([
         "-v",
-        &format!("{}:{}", datasites_mount_path, datasites_in_container),
+        &format!("{}:{}", datasites_mount_source, datasites_volume_target),
     ]);
     cmd.args([
         "-v",
