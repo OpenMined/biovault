@@ -4562,6 +4562,7 @@ fn resolve_codon_path_from_syqure_binary(syqure_binary: &str) -> Option<PathBuf>
     )))]
     let platforms = ["linux-x86", "linux-x86_64", "linux-amd64", "macos-arm64"];
 
+
     for ancestor in bin_path.ancestors() {
         let mut candidates = Vec::new();
         for platform in platforms {
