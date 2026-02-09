@@ -20,6 +20,9 @@ Starts or stops the SyftBox devstack (server + clients) without Docker using the
 sbdev tool from the syftbox checkout. Defaults to the sandbox clients already
 used in the scenario tests.
 
+A local coturn TURN server is auto-started when the turnserver binary is
+available, so WebRTC P2P connectivity works out of the box.
+
 Options:
   --clients list   Comma-separated client emails (default: client1@sandbox.local,client2@sandbox.local)
   --sandbox DIR    Sandbox root path (default: ./sandbox)
@@ -55,6 +58,8 @@ CLIENT_MODE=""
 CLIENT_MODE_EXPLICIT=0
 RUST_CLIENT_BIN=""
 SKIP_RUST_BUILD=0
+TURN_USER="${TURN_USER:-syftbox}"
+TURN_PASS="${TURN_PASS:-syftbox}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -296,8 +301,99 @@ ensure_bv_binary() {
   [[ -x "$BV_BIN" ]] || { echo "Failed to build BioVault CLI at $BV_BIN" >&2; exit 1; }
 }
 
+pick_free_port() {
+  python3 -c 'import socket; s=socket.socket(); s.bind(("",0)); print(s.getsockname()[1]); s.close()'
+}
+
+start_turn() {
+  local hotlink_enabled=0
+  case "${SYFTBOX_HOTLINK:-${BV_SYFTBOX_HOTLINK:-0}}" in
+    1|true|TRUE|True|yes|YES|on|ON) hotlink_enabled=1 ;;
+  esac
+
+  if ! command -v turnserver >/dev/null 2>&1; then
+    if (( hotlink_enabled )); then
+      echo "ERROR: coturn (turnserver) not found but hotlink is enabled. Install coturn and retry." >&2
+      return 1
+    fi
+    echo "WARNING: coturn (turnserver) not found; skipping TURN server (hotlink disabled)." >&2
+    return 0
+  fi
+  local turn_port
+  turn_port="$(pick_free_port)"
+  local turn_pidfile="$SANDBOX_DIR/turn.pid"
+  if [[ -f "$turn_pidfile" ]] && kill -0 "$(cat "$turn_pidfile")" 2>/dev/null; then
+    echo "TURN server already running (pid $(cat "$turn_pidfile"))"
+  else
+    echo "Starting TURN server on 127.0.0.1:${turn_port}..."
+    turnserver -n \
+      --realm=biovault.local \
+      --lt-cred-mech \
+      --user="${TURN_USER}:${TURN_PASS}" \
+      --listening-port="${turn_port}" \
+      --listening-ip=127.0.0.1 \
+      --relay-ip=127.0.0.1 \
+      --fingerprint \
+      --no-cli \
+      --log-file=stdout \
+      </dev/null >"$SANDBOX_DIR/turn.log" 2>&1 &
+    echo $! > "$turn_pidfile"
+    # Wait for readiness
+    for _ in $(seq 1 10); do
+      if grep -q "listening" "$SANDBOX_DIR/turn.log" 2>/dev/null; then
+        break
+      fi
+      sleep 0.5
+    done
+    if ! kill -0 "$(cat "$turn_pidfile")" 2>/dev/null; then
+      echo "ERROR: TURN server failed to stay running." >&2
+      tail -n 80 "$SANDBOX_DIR/turn.log" >&2 || true
+      return 1
+    fi
+    if ! python3 - "$turn_port" <<'PY'
+import socket, sys
+port = int(sys.argv[1])
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.settimeout(1.5)
+try:
+    s.connect(("127.0.0.1", port))
+except OSError:
+    sys.exit(1)
+finally:
+    s.close()
+PY
+    then
+      echo "ERROR: TURN server did not accept TCP connections on 127.0.0.1:${turn_port}." >&2
+      tail -n 80 "$SANDBOX_DIR/turn.log" >&2 || true
+      return 1
+    fi
+    echo "TURN server started (pid $(cat "$turn_pidfile")) on 127.0.0.1:${turn_port}"
+  fi
+  # Export env vars so syftbox daemons inherit them
+  export SYFTBOX_HOTLINK_ICE_SERVERS="turn:127.0.0.1:${turn_port}?transport=udp,turn:127.0.0.1:${turn_port}?transport=tcp"
+  export SYFTBOX_HOTLINK_TURN_USER="${TURN_USER}"
+  export SYFTBOX_HOTLINK_TURN_PASS="${TURN_PASS}"
+  export BV_SYFTBOX_HOTLINK_ICE_SERVERS="${SYFTBOX_HOTLINK_ICE_SERVERS}"
+  export BV_SYFTBOX_HOTLINK_TURN_USER="${TURN_USER}"
+  export BV_SYFTBOX_HOTLINK_TURN_PASS="${TURN_PASS}"
+}
+
+stop_turn() {
+  local turn_pidfile="$SANDBOX_DIR/turn.pid"
+  if [[ -f "$turn_pidfile" ]]; then
+    local pid
+    pid="$(cat "$turn_pidfile")"
+    if kill -0 "$pid" 2>/dev/null; then
+      kill "$pid" 2>/dev/null || true
+      echo "Stopped TURN server (pid $pid)"
+    fi
+    rm -f "$turn_pidfile"
+  fi
+}
+
 stop_stack() {
   echo "Stopping SyftBox devstack at $SANDBOX_DIR..."
+  stop_turn
   # Stop any Jupyter processes in the sandbox first
   pkill -f "jupyter.*$SANDBOX_DIR" 2>/dev/null || true
 
@@ -462,6 +558,8 @@ start_stack() {
   [[ -n "${NXF_DISABLE_JAVA_VERSION_CHECK:-}" ]] && export NXF_DISABLE_JAVA_VERSION_CHECK
   [[ -n "${NXF_IGNORE_JAVA_VERSION:-}" ]] && export NXF_IGNORE_JAVA_VERSION
   [[ -n "${NXF_OPTS:-}" ]] && export NXF_OPTS
+
+  start_turn
 
   echo "Starting SyftBox devstack via syftbox/cmd/devstack..."
 

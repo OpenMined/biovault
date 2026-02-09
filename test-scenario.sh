@@ -17,6 +17,7 @@ usage() {
 Usage: ./test-scenario.sh [options] <scenario.yaml>
 
 Options:
+  --webrtc-flow        Run fast 2-peer WebRTC/hotlink transport smoke scenario
   --client-mode MODE   SyftBox client: go|rust|mixed|embedded (default: rust)
   --sandbox DIR        Sandbox root (default: ./sandbox)
   --rust-client-bin P  Path to Rust client binary (optional)
@@ -26,7 +27,8 @@ Options:
   --allele-count N     Override allele-freq synthetic file count (default: 10)
   --syqure-agg MODE    Syqure aggregation mode: smpc|he (default: smpc)
   --syqure-transport T Syqure transport: hotlink|file (default: hotlink)
-  --hotlink-quic-only Force QUIC-only hotlink transport (no websocket fallback)
+  --hotlink-p2p-only  Force p2p-only hotlink mode (disable websocket fallback)
+  --hotlink-quic-only Deprecated alias for --hotlink-p2p-only
   --docker             Force Docker mode for syqure runtime
   --podman             Force Podman runtime (sets BIOVAULT_CONTAINER_RUNTIME=podman)
   --keep-containers    Keep syqure containers on failure (for logs/debugging)
@@ -34,6 +36,7 @@ Options:
   -h, --help           Show this message
 
 Examples:
+  ./test-scenario.sh --webrtc-flow
   ./test-scenario.sh tests/scenarios/inbox-ping-pong.yaml
   ./test-scenario.sh --client-mode go tests/scenarios/inbox-ping-pong.yaml
   ./test-scenario.sh --sandbox sandbox-rs tests/scenarios/inbox-ping-pong.yaml
@@ -43,7 +46,7 @@ Examples:
   ./test-scenario.sh --podman --keep-containers tests/scenarios/syqure-distributed.yaml
   ./test-scenario.sh --syqure-agg he tests/scenarios/syqure-distributed.yaml
   ./test-scenario.sh --syqure-transport file tests/scenarios/syqure-distributed.yaml
-  ./test-scenario.sh --hotlink-quic-only tests/scenarios/syqure-distributed.yaml
+  ./test-scenario.sh --hotlink-p2p-only tests/scenarios/syqure-distributed.yaml
   ./test-scenario.sh --no-reset tests/scenarios/allele-freq-syqure.yaml
 EOF
 }
@@ -60,7 +63,8 @@ FORCE_RUN=0
 ALLELE_COUNT=""
 SYQURE_AGG_MODE="smpc"
 SYQURE_TRANSPORT="hotlink"
-HOTLINK_QUIC_ONLY=0
+HOTLINK_P2P_ONLY=0
+WEBRTC_FLOW=0
 SCENARIO=""
 SCENARIO_VARS=()
 
@@ -105,8 +109,11 @@ while [[ $# -gt 0 ]]; do
       SYQURE_TRANSPORT="${2:-}"
       shift
       ;;
-    --hotlink-quic-only)
-      HOTLINK_QUIC_ONLY=1
+    --hotlink-p2p-only|--hotlink-quic-only)
+      HOTLINK_P2P_ONLY=1
+      ;;
+    --webrtc-flow)
+      WEBRTC_FLOW=1
       ;;
     --docker)
       USE_DOCKER=1
@@ -140,8 +147,22 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "$SCENARIO" ]]; then
-  usage
-  exit 1
+  if (( WEBRTC_FLOW )); then
+    SCENARIO="tests/scenarios/hotlink-tcp-smoke.yaml"
+  else
+    usage
+    exit 1
+  fi
+fi
+
+if (( WEBRTC_FLOW )); then
+  if [[ "$SCENARIO" != "tests/scenarios/hotlink-tcp-smoke.yaml" ]]; then
+    echo "--webrtc-flow cannot be combined with an explicit scenario path" >&2
+    exit 1
+  fi
+  # Force hotlink + p2p-only so this exercises WebRTC path without ws fallback.
+  SYQURE_TRANSPORT="hotlink"
+  HOTLINK_P2P_ONLY=1
 fi
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -173,6 +194,87 @@ fi
 if (( USE_DOCKER )); then
   # Ensure syqure.yaml switches into Docker mode when --docker/--podman is used.
   export SEQURE_MODE="${SEQURE_MODE:-docker}"
+  hotlink_direct=0
+  if [[ "$SYQURE_TRANSPORT" == "hotlink" ]]; then
+    case "${BV_SYQURE_DOCKER_DIRECT:-1}" in
+      0|false|False|FALSE|no|No|NO|off|Off|OFF)
+        hotlink_direct=0
+        ;;
+      *)
+        hotlink_direct=1
+        export BV_SYQURE_DOCKER_DIRECT=1
+        ;;
+    esac
+  fi
+
+  if (( hotlink_direct )); then
+    echo "Syqure Docker direct TCP mode enabled (shared network, proxy bypassed)."
+  else
+    # Legacy hotlink path uses host TCP proxy.
+    # Bind proxy listeners to all interfaces unless user provided an override.
+    export BV_SYFTBOX_HOTLINK_TCP_PROXY_ADDR="${BV_SYFTBOX_HOTLINK_TCP_PROXY_ADDR:-0.0.0.0}"
+    # Resolve a numeric host IP from inside Docker so syqure containers avoid
+    # hostname/address-family issues when connecting to hotlink TCP proxies.
+    if [[ -z "${BV_SYQURE_CP_HOST:-}" ]] && [[ "${BIOVAULT_CONTAINER_RUNTIME:-docker}" == "docker" ]]; then
+    detect_docker_host_ip() {
+      local alias="$1"
+      docker run --rm alpine:3.19 sh -lc \
+        "getent hosts '$alias' 2>/dev/null | awk 'NR==1 {print \$1}'" 2>/dev/null || true
+    }
+
+    detect_docker_bridge_gateway() {
+      docker network inspect bridge --format '{{(index .IPAM.Config 0).Gateway}}' 2>/dev/null || true
+    }
+
+    for alias in host.docker.internal gateway.docker.internal; do
+      candidate="$(detect_docker_host_ip "$alias")"
+      if [[ "$candidate" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+        export BV_SYQURE_CP_HOST="$candidate"
+        echo "Syqure Docker CP host: ${BV_SYQURE_CP_HOST} (${alias})"
+        break
+      fi
+    done
+
+    # Linux engines may not provide host.docker.internal aliases.
+    # Fall back to the default bridge gateway when alias lookup is unavailable.
+    if [[ -z "${BV_SYQURE_CP_HOST:-}" ]]; then
+      candidate="$(detect_docker_bridge_gateway)"
+      if [[ "$candidate" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+        export BV_SYQURE_CP_HOST="$candidate"
+        echo "Syqure Docker CP host: ${BV_SYQURE_CP_HOST} (bridge gateway)"
+      fi
+    fi
+    fi
+
+    # Fail-fast: verify container→host networking works before running the full test.
+    if [[ -n "${BV_SYQURE_CP_HOST:-}" ]]; then
+    # Hard fail fast when container routing to host proxy is impossible.
+    if ! docker run --rm --platform linux/amd64 alpine:3.19 sh -c \
+        "ip route get '${BV_SYQURE_CP_HOST}' >/dev/null 2>&1"; then
+      echo "ERROR: Docker cannot route to Syqure host proxy ${BV_SYQURE_CP_HOST} from containers." >&2
+      echo "Set BV_SYQURE_CP_HOST to a reachable host IP (for this engine, bridge gateway often works)." >&2
+      exit 1
+    fi
+
+    echo "Docker networking preflight: checking container→host connectivity (${BV_SYQURE_CP_HOST})..."
+    # Spin up a tiny container that tries to ping or connect to the host IP.
+    if docker run --rm --platform linux/amd64 alpine:3.19 sh -c \
+        "nc -z -w3 '${BV_SYQURE_CP_HOST}' 80 2>/dev/null; ping -c1 -W2 '${BV_SYQURE_CP_HOST}' >/dev/null 2>&1" 2>/dev/null; then
+      echo "Docker networking preflight: host ${BV_SYQURE_CP_HOST} is reachable ✓"
+    else
+      # Ping may fail in some configs (e.g., firewall), but as long as we can
+      # resolve the host IP the routing should work once proxy ports are listening.
+      echo "Docker networking preflight: host ${BV_SYQURE_CP_HOST} ping failed (OK if firewall blocks ICMP)"
+    fi
+    else
+      if [[ "$SYQURE_TRANSPORT" == "hotlink" ]]; then
+      echo "ERROR: Could not detect Docker host IP for Syqure hotlink TCP proxy." >&2
+      echo "Set BV_SYQURE_CP_HOST explicitly to a reachable host IP and retry." >&2
+      exit 1
+      fi
+      echo "WARNING: Could not detect Docker host IP. Container→host proxy connectivity may fail." >&2
+    fi
+  fi
 fi
 
 if (( NO_RESET )); then
@@ -197,6 +299,10 @@ if [[ -n "$SYQURE_AGG_MODE" ]]; then
 fi
 
 if [[ -n "$SYQURE_TRANSPORT" ]]; then
+  if [[ "$SYQURE_TRANSPORT" == "webrtc" ]]; then
+    echo "NOTE: --syqure-transport webrtc is deprecated; using hotlink" >&2
+    SYQURE_TRANSPORT="hotlink"
+  fi
   case "$SYQURE_TRANSPORT" in
     hotlink)
       export BV_SYQURE_TRANSPORT="hotlink"
@@ -204,10 +310,12 @@ if [[ -n "$SYQURE_TRANSPORT" ]]; then
       export BV_SYFTBOX_HOTLINK="1"
       export BV_SYFTBOX_HOTLINK_TCP_PROXY="1"
       export BV_SYFTBOX_HOTLINK_QUIC="${BV_SYFTBOX_HOTLINK_QUIC:-1}"
-      if (( HOTLINK_QUIC_ONLY )); then
+      if (( HOTLINK_P2P_ONLY )); then
+        export BV_SYFTBOX_HOTLINK_P2P_ONLY="1"
         export BV_SYFTBOX_HOTLINK_QUIC_ONLY="1"
       else
-        export BV_SYFTBOX_HOTLINK_QUIC_ONLY="${BV_SYFTBOX_HOTLINK_QUIC_ONLY:-0}"
+        export BV_SYFTBOX_HOTLINK_P2P_ONLY="${BV_SYFTBOX_HOTLINK_P2P_ONLY:-0}"
+        export BV_SYFTBOX_HOTLINK_QUIC_ONLY="${BV_SYFTBOX_HOTLINK_QUIC_ONLY:-$BV_SYFTBOX_HOTLINK_P2P_ONLY}"
       fi
       ;;
     file)
@@ -215,6 +323,7 @@ if [[ -n "$SYQURE_TRANSPORT" ]]; then
       export BV_SYQURE_TCP_PROXY="0"
       export BV_SYFTBOX_HOTLINK="0"
       export BV_SYFTBOX_HOTLINK_TCP_PROXY="0"
+      export BV_SYFTBOX_HOTLINK_P2P_ONLY="0"
       export BV_SYFTBOX_HOTLINK_QUIC="0"
       export BV_SYFTBOX_HOTLINK_QUIC_ONLY="0"
       ;;

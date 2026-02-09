@@ -57,14 +57,31 @@ def read_positive_int_file(pid: int, path: str, label: str) -> int:
     return parse_positive_int(pid, content, f"{label} file contents")
 
 
+def append_phase(path: str, msg: str):
+    if not path:
+        return
+    try:
+        prev = ""
+        try:
+            prev = open(path).read()
+        except:
+            prev = ""
+        open(path, "w").write(prev + msg + "\n")
+    except:
+        pass
+
+
 @sequre
 def add(m, a, b):
     return a + b
 
 
 def main():
+    phase_path = os.getenv("SEQURE_OUTPUT_AGGREGATED_COUNTS", "out.json") + ".phase"
+    append_phase(phase_path, "start:before_mpc")
     m = mpc()
     pid = m.pid
+    append_phase(phase_path, f"start:after_mpc pid={pid}")
 
     counts_path = os.getenv("SEQURE_INPUT_COUNTS", "")
     array_length_path = os.getenv("SEQURE_INPUT_ARRAY_LENGTH", "")
@@ -101,8 +118,10 @@ def main():
 
     # Sync all parties before starting MPC computation
     print(f"CP{pid}: Waiting for all parties to sync...")
+    append_phase(phase_path, f"sync:start pid={pid} n={n} data_len={len(data)}")
     m.comms.sync_parties()
     print(f"CP{pid}: All parties synced!")
+    append_phase(phase_path, f"sync:done pid={pid}")
 
     # Secure sum: vectorized add for performance (single MPC op per vector)
     print(f"CP{pid}: Starting MPC with n={n}, data_len={len(data)}")
@@ -112,13 +131,22 @@ def main():
         data_vec = array(data, dtype=int)
     zero_vec = zeros_like(data_vec)
 
+    print(f"CP{pid}: Encrypting shares")
+    append_phase(phase_path, f"encrypt:start pid={pid}")
     v1 = data_vec if pid == 1 else zero_vec
     v2 = data_vec if pid == 2 else zero_vec
 
     s1 = ST.enc(m, v1, 1, m.default_mpc_modulus)
     s2 = ST.enc(m, v2, 2, m.default_mpc_modulus)
+    append_phase(phase_path, f"encrypt:done pid={m.pid}")
+    print(f"CP{m.pid}: Running secure add")
+    append_phase(phase_path, f"add:start pid={m.pid}")
     total = add(m, s1, s2)
+    append_phase(phase_path, f"add:done pid={m.pid}")
+    print(f"CP{m.pid}: Revealing result")
+    append_phase(phase_path, f"reveal:start pid={m.pid}")
     revealed = total.reveal(m).tolist()
+    append_phase(phase_path, f"reveal:done pid={m.pid}")
     result: List[int] = []
     for x in revealed:
         result.append(int(x))
@@ -126,7 +154,12 @@ def main():
     if len(result) != n:
         fail_fast(pid, f"revealed output length mismatch: got {len(result)}, expected {n}")
 
+    print(f"CP{pid}: Writing output")
+    append_phase(phase_path, f"write:start pid={pid}")
     save_json(output_path, result)
+    append_phase(phase_path, f"write:done pid={pid} len={len(result)}")
+    print(f"CP{pid}: Done")
+    append_phase(phase_path, f"done pid={pid}")
     m.done()
 
 

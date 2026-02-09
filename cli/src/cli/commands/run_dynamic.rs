@@ -411,27 +411,53 @@ fn env_value(name: &str) -> String {
     env::var(name).unwrap_or_else(|_| "<unset>".to_string())
 }
 
+fn canonical_hotlink_transport(value: &str) -> String {
+    let normalized = value.trim().to_ascii_lowercase();
+    if normalized == "webrtc" {
+        "hotlink".to_string()
+    } else {
+        normalized
+    }
+}
+
+fn syqure_container_proxy_host(container_runtime: &str) -> String {
+    if let Ok(value) = env::var("BV_SYQURE_CP_HOST") {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    if container_runtime.eq_ignore_ascii_case("podman") {
+        "host.containers.internal".to_string()
+    } else {
+        // Prefer host alias (reaches the macOS/Windows host; gateway alias is only the VM router).
+        "host.docker.internal".to_string()
+    }
+}
+
 fn describe_syqure_transport_mode(env_map: &BTreeMap<String, String>) -> String {
     let sequre_transport = env_map
         .get("SEQURE_TRANSPORT")
         .cloned()
-        .unwrap_or_else(|| "unknown".to_string());
-    let bv_transport = env::var("BV_SYQURE_TRANSPORT").unwrap_or_default();
+        .unwrap_or_else(|| "unknown".to_string())
+        .trim()
+        .to_ascii_lowercase();
+    let bv_transport = canonical_hotlink_transport(&env::var("BV_SYQURE_TRANSPORT").unwrap_or_default());
     let hotlink_enabled = env_flag(&["BV_SYFTBOX_HOTLINK", "SYFTBOX_HOTLINK"]).unwrap_or(false);
-    let quic_enabled =
+    let p2p_enabled =
         env_flag(&["BV_SYFTBOX_HOTLINK_QUIC", "SYFTBOX_HOTLINK_QUIC"]).unwrap_or(true);
-    let quic_only =
+    let p2p_only =
         env_flag(&["BV_SYFTBOX_HOTLINK_QUIC_ONLY", "SYFTBOX_HOTLINK_QUIC_ONLY"]).unwrap_or(false);
 
     if sequre_transport == "tcp" && (bv_transport == "hotlink" || hotlink_enabled) {
-        if quic_only {
-            return "hotlink over TCP proxy (QUIC-only, websocket fallback disabled)".to_string();
+        if p2p_only {
+            return "hotlink over TCP proxy (p2p-only, websocket fallback disabled)".to_string();
         }
-        if quic_enabled {
-            return "hotlink over TCP proxy (QUIC preferred, websocket fallback enabled)"
+        if p2p_enabled {
+            return "hotlink over TCP proxy (p2p preferred, websocket fallback enabled)"
                 .to_string();
         }
-        return "hotlink over TCP proxy (websocket only, QUIC disabled)".to_string();
+        return "hotlink over TCP proxy (websocket only, p2p disabled)".to_string();
     }
 
     if sequre_transport == "file" || bv_transport == "file" {
@@ -444,9 +470,9 @@ fn describe_syqure_transport_mode(env_map: &BTreeMap<String, String>) -> String 
 fn is_hotlink_transport_mode(env_map: &BTreeMap<String, String>) -> bool {
     let sequre_transport = env_map
         .get("SEQURE_TRANSPORT")
-        .map(|v| v.as_str())
-        .unwrap_or("");
-    let bv_transport = env::var("BV_SYQURE_TRANSPORT").unwrap_or_default();
+        .map(|v| v.trim().to_ascii_lowercase())
+        .unwrap_or_default();
+    let bv_transport = canonical_hotlink_transport(&env::var("BV_SYQURE_TRANSPORT").unwrap_or_default());
     let hotlink_enabled = env_flag(&["BV_SYFTBOX_HOTLINK", "SYFTBOX_HOTLINK"]).unwrap_or(false);
     sequre_transport == "tcp" && (bv_transport == "hotlink" || hotlink_enabled)
 }
@@ -483,41 +509,42 @@ fn count_mpc_files(dir: &Path) -> (usize, Option<u64>) {
 }
 
 struct HotlinkTelemetrySummary {
-    mode: String,
-    tx_quic_packets: u64,
+    tx_packets: u64,
+    tx_bytes: u64,
+    tx_p2p_packets: u64,
     tx_ws_packets: u64,
+    rx_packets: u64,
+    rx_bytes: u64,
+    webrtc_connected: u64,
     ws_fallbacks: u64,
-    tx_avg_send_ms: f64,
 }
 
 fn read_hotlink_telemetry(path: &Path) -> Option<HotlinkTelemetrySummary> {
     let raw = fs::read_to_string(path).ok()?;
     let v: JsonValue = serde_json::from_str(&raw).ok()?;
     Some(HotlinkTelemetrySummary {
-        mode: v
-            .get("mode")
-            .and_then(|x| x.as_str())
-            .unwrap_or("unknown")
-            .to_string(),
-        tx_quic_packets: v
-            .get("tx_quic_packets")
+        tx_packets: v.get("tx_packets").and_then(|x| x.as_u64()).unwrap_or(0),
+        tx_bytes: v.get("tx_bytes").and_then(|x| x.as_u64()).unwrap_or(0),
+        tx_p2p_packets: v
+            .get("tx_p2p_packets")
+            .or_else(|| v.get("tx_quic_packets"))
             .and_then(|x| x.as_u64())
             .unwrap_or(0),
         tx_ws_packets: v.get("tx_ws_packets").and_then(|x| x.as_u64()).unwrap_or(0),
+        rx_packets: v.get("rx_packets").and_then(|x| x.as_u64()).unwrap_or(0),
+        rx_bytes: v.get("rx_bytes").and_then(|x| x.as_u64()).unwrap_or(0),
+        webrtc_connected: v.get("webrtc_connected").and_then(|x| x.as_u64()).unwrap_or(0),
         ws_fallbacks: v.get("ws_fallbacks").and_then(|x| x.as_u64()).unwrap_or(0),
-        tx_avg_send_ms: v
-            .get("tx_avg_send_ms")
-            .and_then(|x| x.as_f64())
-            .unwrap_or(0.0),
     })
 }
 
-fn short_hotlink_mode(mode: &str) -> &'static str {
-    match mode {
-        "hotlink_quic_only" => "quic-only",
-        "hotlink_quic_pref" => "quic-pref",
-        "hotlink_ws_only" => "ws-only",
-        _ => "unknown",
+fn fmt_hotlink_bytes(b: u64) -> String {
+    if b >= 1_048_576 {
+        format!("{:.1}MB", b as f64 / 1_048_576.0)
+    } else if b >= 1024 {
+        format!("{:.1}KB", b as f64 / 1024.0)
+    } else {
+        format!("{}B", b)
     }
 }
 
@@ -3894,13 +3921,14 @@ async fn execute_syqure(
         .and_then(|s| s.poll_ms)
         .unwrap_or(50);
 
-    let transport = spec
+    let raw_transport = spec
         .runner
         .as_ref()
         .and_then(|r| r.syqure.as_ref())
         .and_then(|s| s.transport.as_ref())
         .cloned()
         .unwrap_or_else(|| "file".to_string());
+    let transport = canonical_hotlink_transport(&raw_transport);
 
     // Get platform from spec, defaulting to linux/amd64
     // Syqure containers are x86-only for now, so we always force amd64
@@ -3975,36 +4003,68 @@ async fn execute_syqure(
     env_map.insert("SEQURE_LOCAL_EMAIL".to_string(), current_email.clone());
     env_map.insert("SEQURE_FILE_KEEP".to_string(), "1".to_string());
     env_map.insert("SEQURE_FILE_DEBUG".to_string(), "1".to_string());
-    // TCP proxy is always on by default (syqure integrated).
-    // Users can force it off explicitly with `SEQURE_TCP_PROXY=0`.
-    let tcp_proxy = env_map
+    let mut docker_network_name: Option<String> = None;
+    let mut docker_network_subnet: Option<String> = None;
+    let mut docker_party_ip: Option<String> = None;
+    let mut tcp_proxy = env_map
         .get("SEQURE_TCP_PROXY")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(true);
-    env_map.insert(
-        "SEQURE_TCP_PROXY".to_string(),
-        if tcp_proxy {
-            "1".to_string()
+        .unwrap_or(transport == "hotlink");
+
+    // Docker+hotlink defaults to direct container TCP over a shared Docker network.
+    // Set BV_SYQURE_DOCKER_DIRECT=0 to force legacy proxy mode for debugging.
+    let docker_direct_tcp = use_docker
+        && transport == "hotlink"
+        && env::var("BV_SYQURE_DOCKER_DIRECT")
+            .map(|v| is_truthy(&v))
+            .unwrap_or(true);
+
+    if docker_direct_tcp {
+        tcp_proxy = false;
+        if party_count > 253 {
+            return Err(anyhow::anyhow!(
+                "Syqure Docker direct mode supports up to 253 parties, got {}",
+                party_count
+            )
+            .into());
+        }
+        let cp_ips: Vec<String> = if let Ok(raw) = env::var("BV_SYQURE_DOCKER_CP_IPS") {
+            let values: Vec<String> = raw
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if values.len() != party_count {
+                return Err(anyhow::anyhow!(
+                    "BV_SYQURE_DOCKER_CP_IPS must have {} entries (got {})",
+                    party_count,
+                    values.len()
+                )
+                .into());
+            }
+            values
         } else {
-            "0".to_string()
-        },
-    );
-    if tcp_proxy && transport == "hotlink" {
+            (0..party_count)
+                .map(|idx| format!("172.29.0.{}", idx + 2))
+                .collect()
+        };
+        if party_id >= cp_ips.len() {
+            return Err(anyhow::anyhow!(
+                "Party id {} out of bounds for CP IP list of size {}",
+                party_id,
+                cp_ips.len()
+            )
+            .into());
+        }
+        let network_name =
+            env::var("BV_SYQURE_DOCKER_NETWORK").unwrap_or_else(|_| format!("syqure-net-{}", run_id));
+        let network_subnet =
+            env::var("BV_SYQURE_DOCKER_SUBNET").unwrap_or_else(|_| "172.29.0.0/24".to_string());
+        let base_port = syqure_port_base + (party_id as usize) * SEQURE_COMMUNICATION_PORT_STRIDE;
+
         env_map.insert("SEQURE_TRANSPORT".to_string(), "tcp".to_string());
-    }
-    if tcp_proxy {
-        let proxy_ip = "127.0.0.1".to_string();
-        let proxy_ips = std::iter::repeat_n(proxy_ip.as_str(), party_count)
-            .collect::<Vec<_>>()
-            .join(",");
-        env_map.insert("SEQURE_CP_IPS".to_string(), proxy_ips);
-        env_map.insert(
-            "BV_SYQURE_PORT_BASE".to_string(),
-            syqure_port_base.to_string(),
-        );
-        // Share one global base across parties, but use party-specific communication/data-sharing
-        // ports so each local proxy listener gets a unique bind address.
-        let base_port = syqure_port_base + party_id * SEQURE_COMMUNICATION_PORT_STRIDE;
+        env_map.insert("SEQURE_TCP_PROXY".to_string(), "0".to_string());
+        env_map.insert("SEQURE_CP_IPS".to_string(), cp_ips.join(","));
         env_map.insert(
             "SEQURE_COMMUNICATION_PORT".to_string(),
             base_port.to_string(),
@@ -4013,6 +4073,50 @@ async fn execute_syqure(
             "SEQURE_DATA_SHARING_PORT".to_string(),
             (base_port + SEQURE_DATA_SHARING_PORT_OFFSET).to_string(),
         );
+        docker_party_ip = Some(cp_ips[party_id].clone());
+        docker_network_name = Some(network_name);
+        docker_network_subnet = Some(network_subnet);
+        println!(
+            "  Syqure Docker direct TCP enabled: network={} ip={}",
+            docker_network_name.as_deref().unwrap_or(""),
+            docker_party_ip.as_deref().unwrap_or("")
+        );
+    } else {
+        // Legacy behavior: hotlink over host TCP proxy.
+        env_map.insert(
+            "SEQURE_TCP_PROXY".to_string(),
+            if tcp_proxy {
+                "1".to_string()
+            } else {
+                "0".to_string()
+            },
+        );
+        if tcp_proxy && transport == "hotlink" {
+            env_map.insert("SEQURE_TRANSPORT".to_string(), "tcp".to_string());
+        }
+        if tcp_proxy {
+            let proxy_ip = if use_docker {
+                let container_runtime =
+                    env::var("BIOVAULT_CONTAINER_RUNTIME").unwrap_or_else(|_| "docker".to_string());
+                syqure_container_proxy_host(&container_runtime)
+            } else {
+                "127.0.0.1".to_string()
+            };
+            let proxy_ips = std::iter::repeat_n(proxy_ip.as_str(), party_count)
+                .collect::<Vec<_>>()
+                .join(",");
+            env_map.insert("SEQURE_CP_IPS".to_string(), proxy_ips);
+            let base_port =
+                syqure_port_base + (party_id as usize) * SEQURE_COMMUNICATION_PORT_STRIDE;
+            env_map.insert(
+                "SEQURE_COMMUNICATION_PORT".to_string(),
+                base_port.to_string(),
+            );
+            env_map.insert(
+                "SEQURE_DATA_SHARING_PORT".to_string(),
+                (base_port + 10_000).to_string(),
+            );
+        }
     }
     for pass_through in &["SYQURE_SKIP_BUNDLE", "SYQURE_DEBUG"] {
         if let Ok(val) = env::var(pass_through) {
@@ -4020,10 +4124,38 @@ async fn execute_syqure(
         }
     }
     if env::var("SYQURE_BUNDLE_CACHE").is_err() {
-        let cache_dir = PathBuf::from(&datasites_root)
+        let preferred_cache_dir = PathBuf::from(&datasites_root)
             .join(".syqure-cache")
             .join(&run_id)
             .join(format!("party-{}", party_id));
+        let cache_dir = match fs::create_dir_all(&preferred_cache_dir) {
+            Ok(_) => preferred_cache_dir,
+            Err(err) => {
+                let fallback = env::temp_dir()
+                    .join("biovault-syqure-cache")
+                    .join(&run_id)
+                    .join(format!("party-{}", party_id));
+                if let Err(fallback_err) = fs::create_dir_all(&fallback) {
+                    return Err(anyhow::anyhow!(
+                        "Failed to prepare Syqure cache directories.\n\
+                         Preferred: {} ({})\n\
+                         Fallback: {} ({})",
+                        preferred_cache_dir.display(),
+                        err,
+                        fallback.display(),
+                        fallback_err
+                    )
+                    .into());
+                }
+                eprintln!(
+                    "warn: using fallback Syqure cache dir due to permissions: {} -> {} ({})",
+                    preferred_cache_dir.display(),
+                    fallback.display(),
+                    err
+                );
+                fallback
+            }
+        };
         env_map.insert(
             "SYQURE_BUNDLE_CACHE".to_string(),
             cache_dir.to_string_lossy().to_string(),
@@ -4108,7 +4240,7 @@ async fn execute_syqure(
     }
 
     println!(
-        "  Syqure env: SEQURE_TRANSPORT={} SEQURE_TCP_PROXY={} BV_SYQURE_PORT_BASE={} SEQURE_COMMUNICATION_PORT={} SYQURE_SKIP_BUNDLE={} CODON_PATH={} SYQURE_DEBUG={} SEQURE_NATIVE_BIN={}",
+        "  Syqure env: SEQURE_TRANSPORT={} SEQURE_TCP_PROXY={} SEQURE_CP_IPS={} BV_SYQURE_PORT_BASE={} SEQURE_COMMUNICATION_PORT={} SYQURE_SKIP_BUNDLE={} CODON_PATH={} SYQURE_DEBUG={} SYQURE_BINARY={}",
         env_map
             .get("SEQURE_TRANSPORT")
             .map(|s| s.as_str())
@@ -4117,6 +4249,7 @@ async fn execute_syqure(
             .get("SEQURE_TCP_PROXY")
             .map(|s| s.as_str())
             .unwrap_or(""),
+        env_map.get("SEQURE_CP_IPS").map(|s| s.as_str()).unwrap_or(""),
         env_map
             .get("BV_SYQURE_PORT_BASE")
             .map(|s| s.as_str())
@@ -4141,7 +4274,7 @@ async fn execute_syqure(
         describe_syqure_transport_mode(&env_map)
     );
     println!(
-        "  Hotlink flags: BV_SYFTBOX_HOTLINK={} BV_SYFTBOX_HOTLINK_QUIC={} BV_SYFTBOX_HOTLINK_QUIC_ONLY={}",
+        "  Hotlink flags: BV_SYFTBOX_HOTLINK={} BV_SYFTBOX_HOTLINK_QUIC(legacy p2p)={} BV_SYFTBOX_HOTLINK_QUIC_ONLY(legacy p2p-only)={}",
         env_value("BV_SYFTBOX_HOTLINK"),
         env_value("BV_SYFTBOX_HOTLINK_QUIC"),
         env_value("BV_SYFTBOX_HOTLINK_QUIC_ONLY")
@@ -4342,6 +4475,9 @@ async fn execute_syqure(
             &datasites_root,
             &run_id,
             &docker_platform,
+            docker_network_name.as_deref(),
+            docker_network_subnet.as_deref(),
+            docker_party_ip.as_deref(),
         )?;
     } else {
         println!(
@@ -4457,6 +4593,7 @@ fn resolve_codon_path_from_syqure_binary(syqure_binary: &str) -> Option<PathBuf>
         all(target_os = "macos", target_arch = "aarch64")
     )))]
     let platforms = ["linux-x86", "linux-x86_64", "linux-amd64", "macos-arm64"];
+
 
     for ancestor in bin_path.ancestors() {
         let mut candidates = Vec::new();
@@ -4743,7 +4880,7 @@ fn execute_syqure_native(
         .unwrap_or(false);
     let hotlink_transport = is_hotlink_transport_mode(env_map);
     let status_label = if hotlink_transport {
-        "  📡 Hotlink telemetry (mode q/ws fb avg-ms)"
+        "  📡 Hotlink (↑tx ↓rx data p2p-status)"
     } else if tcp_transport {
         "  📡 MPC dir activity (files/age)"
     } else {
@@ -4771,6 +4908,7 @@ fn execute_syqure_native(
 
     let monitor_handle = thread::spawn(move || {
         let mut last_status = String::new();
+        let mut hotlink_activity: HashMap<String, (u64, std::time::Instant)> = HashMap::new();
         while !stop_flag_clone.load(Ordering::Relaxed) {
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -4796,15 +4934,41 @@ fn execute_syqure_native(
                     let mut telemetry_found = false;
                     for telemetry_path in telemetry_paths {
                         if let Some(t) = read_hotlink_telemetry(&telemetry_path) {
-                            status_parts.push(format!(
-                                "{}:{} q{}/ws{} fb{} {:.1}ms",
-                                short_party,
-                                short_hotlink_mode(&t.mode),
-                                t.tx_quic_packets,
-                                t.tx_ws_packets,
-                                t.ws_fallbacks,
-                                t.tx_avg_send_ms
-                            ));
+                            let activity_total = t.tx_packets + t.rx_packets;
+                            let now_instant = std::time::Instant::now();
+                            let entry = hotlink_activity
+                                .entry(party.to_string())
+                                .or_insert((activity_total, now_instant));
+                            if activity_total > entry.0 {
+                                entry.0 = activity_total;
+                                entry.1 = now_instant;
+                            }
+                            let stalled_for_s = now_instant.duration_since(entry.1).as_secs();
+                            let p2p_status = if t.webrtc_connected > 0 {
+                                format!("p2p:UP({})", t.webrtc_connected)
+                            } else if t.tx_p2p_packets > 0 {
+                                "p2p:used".to_string()
+                            } else {
+                                "p2p:off".to_string()
+                            };
+                            if activity_total == 0 {
+                                status_parts.push(format!(
+                                    "{}: idle {} stall:{}s",
+                                    short_party, p2p_status, stalled_for_s
+                                ));
+                            } else {
+                                status_parts.push(format!(
+                                    "{}: ↑{} ↓{} {} {} ws_fb:{} ws_tx:{} stall:{}s",
+                                    short_party,
+                                    t.tx_packets,
+                                    t.rx_packets,
+                                    fmt_hotlink_bytes(t.tx_bytes + t.rx_bytes),
+                                    p2p_status,
+                                    t.ws_fallbacks,
+                                    t.tx_ws_packets,
+                                    stalled_for_s,
+                                ));
+                            }
                             telemetry_found = true;
                             break;
                         }
@@ -4812,12 +4976,7 @@ fn execute_syqure_native(
                     if telemetry_found {
                         continue;
                     }
-                    let channel_path = PathBuf::from(&datasites_root_clone)
-                        .join(party)
-                        .join(&file_dir_clone);
-                    let (count, last_mod) = count_mpc_files(&channel_path);
-                    let ago = last_mod.map(|lm| now.saturating_sub(lm)).unwrap_or(999);
-                    status_parts.push(format!("{}:pending {}f/{}s", short_party, count, ago));
+                    status_parts.push(format!("{}: waiting", short_party));
                     continue;
                 }
                 let channel_path = PathBuf::from(&datasites_root_clone)
@@ -5110,6 +5269,9 @@ fn execute_syqure_docker(
     datasites_root: &str,
     run_id: &str,
     platform: &str,
+    docker_network_name: Option<&str>,
+    docker_network_subnet: Option<&str>,
+    docker_party_ip: Option<&str>,
 ) -> Result<()> {
     fn to_container_path(path: &Path) -> String {
         path.to_string_lossy().replace('\\', "/")
@@ -5120,10 +5282,8 @@ fn execute_syqure_docker(
         module_root: &Path,
         results_root: &Path,
         datasites_root: &Path,
+        datasites_in_container: &str,
     ) -> Option<String> {
-        if value.starts_with('/') {
-            return Some(value.replace('\\', "/"));
-        }
         let stripped = strip_extended_path_prefix(value);
         let value_path = PathBuf::from(&stripped);
         if let Ok(rel_path) = value_path.strip_prefix(results_root) {
@@ -5136,7 +5296,11 @@ fn execute_syqure_docker(
             ));
         }
         if let Ok(rel_path) = value_path.strip_prefix(datasites_root) {
-            return Some(format!("/datasites/{}", to_container_path(rel_path)));
+            return Some(format!(
+                "{}/{}",
+                datasites_in_container.trim_end_matches('/'),
+                to_container_path(rel_path)
+            ));
         }
         None
     }
@@ -5167,11 +5331,66 @@ fn execute_syqure_docker(
         .stderr(Stdio::null())
         .status();
 
+    if let Some(network_name) = docker_network_name {
+        if container_runtime != "docker" {
+            return Err(anyhow::anyhow!(
+                "Syqure Docker direct mode requires docker runtime, got {}",
+                container_runtime
+            )
+            .into());
+        }
+        let mut inspect = Command::new(&container_runtime);
+        super::configure_child_process(&mut inspect);
+        let exists = inspect
+            .args(["network", "inspect", network_name])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !exists {
+            let mut create = Command::new(&container_runtime);
+            super::configure_child_process(&mut create);
+            create.args(["network", "create", "--driver", "bridge"]);
+            if let Some(subnet) = docker_network_subnet {
+                create.args(["--subnet", subnet]);
+            }
+            create.arg(network_name);
+            let created = create.output().with_context(|| {
+                format!("Failed to create docker network {}", network_name)
+            })?;
+            if !created.status.success() {
+                let mut recheck = Command::new(&container_runtime);
+                super::configure_child_process(&mut recheck);
+                let already_exists = recheck
+                    .args(["network", "inspect", network_name])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status()
+                    .map(|s| s.success())
+                    .unwrap_or(false);
+                if !already_exists {
+                    return Err(anyhow::anyhow!(
+                        "Failed creating docker network {}: {}",
+                        network_name,
+                        String::from_utf8_lossy(&created.stderr)
+                    )
+                    .into());
+                }
+            }
+        }
+        println!(
+            "  Docker direct network: {} ({})",
+            network_name,
+            docker_network_subnet.unwrap_or("subnet unspecified")
+        );
+    }
+
     let module_path_abs = module_path
         .canonicalize()
         .unwrap_or_else(|_| module_path.to_path_buf());
 
-    let datasites_in_container = "/datasites";
+    let mut datasites_in_container = "/datasites".to_string();
     let results_in_container = "/results";
 
     let shared_datasites_root = env::var("BV_SHARED_DATASITES_ROOT").ok();
@@ -5193,11 +5412,126 @@ fn execute_syqure_docker(
     let module_root_for_match = PathBuf::from(strip_extended_path_prefix(
         module_path_abs.to_string_lossy().as_ref(),
     ));
-    let results_root_for_match = PathBuf::from(strip_extended_path_prefix(
-        results_root.to_string_lossy().as_ref(),
-    ));
-    let datasites_root_for_match =
-        PathBuf::from(strip_extended_path_prefix(effective_datasites_mount));
+    let datasites_mount_path = strip_extended_path_prefix(effective_datasites_mount);
+    let results_mount_path = strip_extended_path_prefix(results_root.to_string_lossy().as_ref());
+    fs::create_dir_all(&datasites_mount_path).with_context(|| {
+        format!(
+            "Failed to create datasites mount source: {}",
+            datasites_mount_path
+        )
+    })?;
+    fs::create_dir_all(&results_mount_path).with_context(|| {
+        format!(
+            "Failed to create results mount source: {}",
+            results_mount_path
+        )
+    })?;
+
+    let results_root_for_match = PathBuf::from(&results_mount_path);
+    let datasites_root_for_match = PathBuf::from(&datasites_mount_path);
+
+    // Docker Desktop can fail mounting nested paths with special characters in parent directories
+    // (e.g. ".../client1@sandbox.local/datasites"). Mount the parent and remap root in-container.
+    let mut datasites_mount_source = datasites_mount_path.clone();
+    let mut datasites_volume_target = datasites_in_container.clone();
+    if container_runtime == "docker" && datasites_mount_path.ends_with("/datasites") {
+        if let Some(parent) = Path::new(&datasites_mount_path).parent() {
+            if let Some(parent_str) = parent.to_str() {
+                datasites_mount_source = parent_str.to_string();
+                datasites_volume_target = "/datasite-home".to_string();
+                datasites_in_container = "/datasite-home/datasites".to_string();
+                // Docker Desktop can reject a direct bind mount to paths containing '@'
+                // (e.g. ".../sandbox/client1@sandbox.local"). In that case, mount the
+                // parent sandbox root and remap datasites to the current datasite path.
+                let parent_has_at = parent
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .map(|name| name.contains('@'))
+                    .unwrap_or(false);
+                if parent_has_at {
+                    if let Some(sandbox_root) = parent.parent().and_then(|p| p.to_str()) {
+                        if let Some(current_ds) = env_map.get("BV_CURRENT_DATASITE") {
+                            datasites_mount_source = sandbox_root.to_string();
+                            datasites_volume_target = "/datasite-root".to_string();
+                            datasites_in_container =
+                                format!("/datasite-root/{}/datasites", current_ds);
+                            println!(
+                                "  Docker mount fallback: using sandbox root {} (datasite {})",
+                                datasites_mount_source, current_ds
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+    fs::create_dir_all(&datasites_mount_source).with_context(|| {
+        format!(
+            "Failed to create resolved datasites mount source: {}",
+            datasites_mount_source
+        )
+    })?;
+
+    // Fail-fast: verify container→host proxy connectivity before launching the real container.
+    let tcp_proxy_enabled = env_map
+        .get("SEQURE_TCP_PROXY")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    if tcp_proxy_enabled {
+        if let Some(cp_ips) = env_map.get("SEQURE_CP_IPS") {
+        if let Some(proxy_host) = cp_ips.split(',').next() {
+            let comm_port = env_map
+                .get("SEQURE_COMMUNICATION_PORT")
+                .map(|s| s.as_str())
+                .unwrap_or("9001");
+            println!(
+                "  Preflight: checking container→host connectivity {}:{}...",
+                proxy_host, comm_port
+            );
+            let probe = Command::new(&container_runtime)
+                .args([
+                    "run",
+                    "--rm",
+                    "alpine:3.19",
+                    "sh",
+                    "-c",
+                    &format!("nc -z -w3 '{}' '{}' 2>&1", proxy_host, comm_port),
+                ])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .output();
+            match probe {
+                Ok(output) if output.status.success() => {
+                    println!("  Preflight: {}:{} reachable ✓", proxy_host, comm_port);
+                }
+                Ok(output) => {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    let combined = format!("{}\n{}", stdout, stderr);
+                    if combined.to_ascii_lowercase().contains("network is unreachable") {
+                        return Err(anyhow::anyhow!(
+                            "Container→host proxy route unreachable for {}:{} ({}). Set BV_SYQURE_CP_HOST to a reachable host IP.",
+                            proxy_host,
+                            comm_port,
+                            combined.trim()
+                        )
+                        .into());
+                    }
+                    eprintln!(
+                        "  Preflight WARNING: {}:{} not reachable from container (proxy may not be listening yet)",
+                        proxy_host, comm_port
+                    );
+                }
+                Err(err) => {
+                    eprintln!(
+                        "  Preflight WARNING: failed to probe {}:{} from container: {}",
+                        proxy_host, comm_port, err
+                    );
+                }
+            }
+        }
+    }
+    }
 
     let mut cmd = Command::new(&container_runtime);
     super::configure_child_process(&mut cmd);
@@ -5205,12 +5539,23 @@ fn execute_syqure_docker(
     if !keep_containers {
         cmd.arg("--rm");
     }
+    if let Some(network_name) = docker_network_name {
+        cmd.args(["--network", network_name]);
+    }
+    if let Some(party_ip) = docker_party_ip {
+        cmd.args(["--ip", party_ip]);
+    }
 
     // Add --platform for docker when specified (podman handles this differently)
     // Syqure containers are x86-only, so platform will typically be "linux/amd64"
     // This uses QEMU emulation on ARM64 systems
     if container_runtime == "docker" && !platform.is_empty() {
         cmd.args(["--platform", platform]);
+    }
+    if container_runtime == "docker" && cfg!(target_os = "linux") {
+        // Ensure Docker host aliases are available on Linux too.
+        cmd.args(["--add-host", "host.docker.internal:host-gateway"]);
+        cmd.args(["--add-host", "gateway.docker.internal:host-gateway"]);
     }
 
     for (k, v) in env_map {
@@ -5221,6 +5566,7 @@ fn execute_syqure_docker(
             &module_root_for_match,
             &results_root_for_match,
             &datasites_root_for_match,
+            &datasites_in_container,
         ) {
             cmd.args(["-e", &format!("{}={}", k, mapped)]);
         } else {
@@ -5230,13 +5576,10 @@ fn execute_syqure_docker(
 
     // Strip Windows extended path prefix for Docker volume mounts
     let module_mount_path = strip_extended_path_prefix(module_path_abs.to_string_lossy().as_ref());
-    let datasites_mount_path = strip_extended_path_prefix(effective_datasites_mount);
-    let results_mount_path = strip_extended_path_prefix(results_root.to_string_lossy().as_ref());
-
     cmd.args(["-v", &format!("{}:/workspace/project", module_mount_path)]);
     cmd.args([
         "-v",
-        &format!("{}:{}", datasites_mount_path, datasites_in_container),
+        &format!("{}:{}", datasites_mount_source, datasites_volume_target),
     ]);
     cmd.args([
         "-v",

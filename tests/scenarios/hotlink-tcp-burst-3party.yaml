@@ -1,0 +1,266 @@
+# Hotlink TCP Mesh Burst Benchmark (3-party, no Syqure)
+# Exercises all three party-pairs through the hotlink TCP proxy using large
+# framed payload bursts, without any Syqure/MPC runtime.
+#
+# Run with:
+#   ./biovault/test-scenario.sh --hotlink-p2p-only biovault/tests/scenarios/hotlink-tcp-burst-3party.yaml
+
+setup:
+  server:
+    - "SYFTBOX_HOTLINK=${BV_SYFTBOX_HOTLINK-1} SYFTBOX_HOTLINK_SOCKET_ONLY=1 SYFTBOX_HOTLINK_TCP_PROXY=${BV_SYFTBOX_HOTLINK_TCP_PROXY-1} SYFTBOX_HOTLINK_QUIC=${BV_SYFTBOX_HOTLINK_QUIC-1} SYFTBOX_HOTLINK_QUIC_ONLY=${BV_SYFTBOX_HOTLINK_QUIC_ONLY-1} SYFTBOX_HOTLINK_P2P_ONLY=${BV_SYFTBOX_HOTLINK_P2P_ONLY-1} SYFTBOX_HOTLINK_BENCH_STRICT=${SYFTBOX_HOTLINK_BENCH_STRICT-1} SYFTBOX_HOTLINK_TCP_PROXY_CHUNK_SIZE=${SYFTBOX_HOTLINK_TCP_PROXY_CHUNK_SIZE-61440} SYFTBOX_HOTLINK_WEBRTC_BUFFERED_HIGH=${SYFTBOX_HOTLINK_WEBRTC_BUFFERED_HIGH-1048576} SYFTBOX_HOTLINK_WEBRTC_BACKPRESSURE_WAIT_MS=${SYFTBOX_HOTLINK_WEBRTC_BACKPRESSURE_WAIT_MS-1500} ./tests/scripts/devstack.sh --reset --clients client1@sandbox.local,client2@sandbox.local,aggregator@sandbox.local"
+
+steps:
+  - name: Initialize BioVault for client1
+    datasite: client1@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv init client1@sandbox.local --quiet
+
+  - name: Initialize BioVault for client2
+    datasite: client2@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv init client2@sandbox.local --quiet
+
+  - name: Initialize BioVault for aggregator
+    datasite: aggregator@sandbox.local
+    run: |
+      {{workspace}}/cli/target/release/bv init aggregator@sandbox.local --quiet
+
+  - name: Wait for public key sync across all parties
+    run: |
+      python3 - <<'PY'
+      import pathlib, time, sys
+      root = pathlib.Path("sandbox")
+      peers = ["aggregator@sandbox.local", "client1@sandbox.local", "client2@sandbox.local"]
+      want = []
+      for dst in peers:
+        for src in peers:
+          if src == dst:
+            continue
+          want.append(root / dst / "datasites" / src / "public" / "crypto" / "did.json")
+      deadline = time.time() + 40
+      missing = list(want)
+      while time.time() < deadline:
+        missing = [p for p in want if not p.exists()]
+        if not missing:
+          print("All public keys synced")
+          sys.exit(0)
+        time.sleep(0.5)
+      print("Missing key sync files:")
+      for p in missing:
+        print(f"  - {p}")
+      sys.exit(1)
+      PY
+
+  - name: Create directional TCP markers for aggregator
+    datasite: aggregator@sandbox.local
+    run: |
+      RUN="{{run_id}}"
+      python3 - <<'PY'
+      import json
+      import pathlib
+
+      run_id = "{{run_id}}"
+      me = "aggregator@sandbox.local"
+      base = pathlib.Path("datasites") / me / "shared" / "flows" / "hotlink-burst-3party" / run_id / "_mpc"
+      base.mkdir(parents=True, exist_ok=True)
+      perms = (
+          "rules:\n"
+          "- pattern: \"**\"\n"
+          "  access:\n"
+          "    read:\n"
+          "    - aggregator@sandbox.local\n"
+          "    - client1@sandbox.local\n"
+          "    - client2@sandbox.local\n"
+          "    write:\n"
+          "    - aggregator@sandbox.local\n"
+          "    - client1@sandbox.local\n"
+          "    - client2@sandbox.local\n"
+          "    admin:\n"
+          "    - aggregator@sandbox.local\n"
+      )
+      (base / "syft.pub.yaml").write_text(perms)
+
+      channels = [
+        ("0_to_1", "aggregator@sandbox.local", "client1@sandbox.local", 13001, {"aggregator@sandbox.local": 13001, "client1@sandbox.local": 13100}),
+        ("0_to_2", "aggregator@sandbox.local", "client2@sandbox.local", 13002, {"aggregator@sandbox.local": 13002, "client2@sandbox.local": 13200}),
+      ]
+      for name, src, dst, port, ports in channels:
+        cdir = base / name
+        cdir.mkdir(parents=True, exist_ok=True)
+        (cdir / "stream.tcp").write_text(json.dumps({"from": src, "to": dst, "port": port, "ports": ports}))
+        (cdir / "stream.accept").write_text("1")
+        (cdir / "syft.pub.yaml").write_text(perms)
+      print("Aggregator markers ready")
+      PY
+
+  - name: Create directional TCP markers for client1
+    datasite: client1@sandbox.local
+    run: |
+      python3 - <<'PY'
+      import json
+      import pathlib
+
+      run_id = "{{run_id}}"
+      me = "client1@sandbox.local"
+      base = pathlib.Path("datasites") / me / "shared" / "flows" / "hotlink-burst-3party" / run_id / "_mpc"
+      base.mkdir(parents=True, exist_ok=True)
+      perms = (
+          "rules:\n"
+          "- pattern: \"**\"\n"
+          "  access:\n"
+          "    read:\n"
+          "    - aggregator@sandbox.local\n"
+          "    - client1@sandbox.local\n"
+          "    - client2@sandbox.local\n"
+          "    write:\n"
+          "    - aggregator@sandbox.local\n"
+          "    - client1@sandbox.local\n"
+          "    - client2@sandbox.local\n"
+          "    admin:\n"
+          "    - client1@sandbox.local\n"
+      )
+      (base / "syft.pub.yaml").write_text(perms)
+
+      channels = [
+        ("1_to_0", "client1@sandbox.local", "aggregator@sandbox.local", 13100, {"client1@sandbox.local": 13100, "aggregator@sandbox.local": 13001}),
+        ("1_to_2", "client1@sandbox.local", "client2@sandbox.local", 13102, {"client1@sandbox.local": 13102, "client2@sandbox.local": 13201}),
+      ]
+      for name, src, dst, port, ports in channels:
+        cdir = base / name
+        cdir.mkdir(parents=True, exist_ok=True)
+        (cdir / "stream.tcp").write_text(json.dumps({"from": src, "to": dst, "port": port, "ports": ports}))
+        (cdir / "stream.accept").write_text("1")
+        (cdir / "syft.pub.yaml").write_text(perms)
+      print("Client1 markers ready")
+      PY
+
+  - name: Create directional TCP markers for client2
+    datasite: client2@sandbox.local
+    run: |
+      python3 - <<'PY'
+      import json
+      import pathlib
+
+      run_id = "{{run_id}}"
+      me = "client2@sandbox.local"
+      base = pathlib.Path("datasites") / me / "shared" / "flows" / "hotlink-burst-3party" / run_id / "_mpc"
+      base.mkdir(parents=True, exist_ok=True)
+      perms = (
+          "rules:\n"
+          "- pattern: \"**\"\n"
+          "  access:\n"
+          "    read:\n"
+          "    - aggregator@sandbox.local\n"
+          "    - client1@sandbox.local\n"
+          "    - client2@sandbox.local\n"
+          "    write:\n"
+          "    - aggregator@sandbox.local\n"
+          "    - client1@sandbox.local\n"
+          "    - client2@sandbox.local\n"
+          "    admin:\n"
+          "    - client2@sandbox.local\n"
+      )
+      (base / "syft.pub.yaml").write_text(perms)
+
+      channels = [
+        ("2_to_0", "client2@sandbox.local", "aggregator@sandbox.local", 13200, {"client2@sandbox.local": 13200, "aggregator@sandbox.local": 13002}),
+        ("2_to_1", "client2@sandbox.local", "client1@sandbox.local", 13201, {"client2@sandbox.local": 13201, "client1@sandbox.local": 13102}),
+      ]
+      for name, src, dst, port, ports in channels:
+        cdir = base / name
+        cdir.mkdir(parents=True, exist_ok=True)
+        (cdir / "stream.tcp").write_text(json.dumps({"from": src, "to": dst, "port": port, "ports": ports}))
+        (cdir / "stream.accept").write_text("1")
+        (cdir / "syft.pub.yaml").write_text(perms)
+      print("Client2 markers ready")
+      PY
+
+  - name: Wait for marker sync and proxy discovery
+    run: |
+      echo "Waiting for marker sync and TCP proxy discovery..."
+      sleep 8
+
+  - name: Verify all mesh proxy ports are listening
+    run: |
+      python3 - <<'PY'
+      import socket
+      import sys
+      import time
+      ports = [13001, 13002, 13100, 13102, 13200, 13201]
+      for port in ports:
+        ok = False
+        for _ in range(30):
+          s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+          s.settimeout(1)
+          try:
+            s.connect(("127.0.0.1", port))
+            ok = True
+            break
+          except OSError:
+            time.sleep(0.3)
+          finally:
+            s.close()
+        if not ok:
+          print(f"Port not ready: {port}")
+          sys.exit(1)
+      print("All mesh proxy ports are listening")
+      PY
+
+  - name: Run 3-link burst benchmark (same payload profile)
+    run: |
+      BURST_COUNT="${HOTLINK_BURST_COUNT:-750}"
+      PAYLOAD_SIZE="${HOTLINK_BURST_PAYLOAD_SIZE:-1677722}"
+      TIMEOUT="${HOTLINK_BURST_TIMEOUT:-180}"
+      SCRIPT="{{workspace}}/tests/scripts/hotlink-tcp-test.py"
+
+      run_burst () {
+        local name="$1" tx="$2" rx="$3"
+        echo "=== ${name}: ${BURST_COUNT} x ${PAYLOAD_SIZE} ==="
+        PYTHONUNBUFFERED=1 PORT_CLIENT1="${tx}" PORT_CLIENT2="${rx}" \
+          BURST_ONLY=1 BURST_COUNT="${BURST_COUNT}" PAYLOAD_SIZE="${PAYLOAD_SIZE}" TCP_TIMEOUT="${TIMEOUT}" \
+          python3 "${SCRIPT}"
+      }
+
+      # Three independent party-links in directed mode:
+      # 0->1 via 0_to_1 (tx=13001) and 1_to_0 (rx=13100)
+      # 0->2 via 0_to_2 (tx=13002) and 2_to_0 (rx=13200)
+      # 1->2 via 1_to_2 (tx=13102) and 2_to_1 (rx=13201)
+      run_burst "burst-0to1" 13001 13100
+      run_burst "burst-0to2" 13002 13200
+      run_burst "burst-1to2" 13102 13201
+
+  - name: Assert strict WebRTC telemetry on all 3 peers
+    run: |
+      python3 - <<'PY'
+      import json
+      import pathlib
+      import sys
+
+      root = pathlib.Path("sandbox")
+      peers = ["aggregator@sandbox.local", "client1@sandbox.local", "client2@sandbox.local"]
+      ok = True
+      for peer in peers:
+        p = root / peer / "datasites" / peer / ".syftbox" / "hotlink_telemetry.json"
+        if not p.exists():
+          print(f"FAIL: missing telemetry for {peer}: {p}")
+          ok = False
+          continue
+        data = json.loads(p.read_text())
+        ws_fb = int(data.get("ws_fallbacks", 0))
+        ws_tx = int(data.get("tx_ws_packets", 0))
+        wrtc = int(data.get("webrtc_connected", 0))
+        tx_p2p = int(data.get("tx_p2p_packets", 0))
+        strict_v = int(data.get("strict_violations", 0))
+        print(
+          f"{peer}: webrtc_connected={wrtc} tx_p2p_packets={tx_p2p} ws_fallbacks={ws_fb} tx_ws_packets={ws_tx} strict_violations={strict_v}"
+        )
+        if ws_fb > 0 or ws_tx > 0:
+          print(f"FAIL: websocket fallback/tx detected for {peer}")
+          ok = False
+        if wrtc <= 0:
+          print(f"FAIL: no connected webrtc session on {peer}")
+          ok = False
+      if not ok:
+        sys.exit(1)
+      print("PASS: strict WebRTC mesh assertions satisfied")
+      PY

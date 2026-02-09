@@ -1,6 +1,6 @@
 setup:
   server:
-    - "SYFTBOX_HOTLINK=${BV_SYFTBOX_HOTLINK-1} SYFTBOX_HOTLINK_SOCKET_ONLY=1 SYFTBOX_HOTLINK_TCP_PROXY=${BV_SYQURE_TCP_PROXY-1} SYFTBOX_HOTLINK_QUIC=${BV_SYFTBOX_HOTLINK_QUIC-1} SYFTBOX_HOTLINK_QUIC_ONLY=${BV_SYFTBOX_HOTLINK_QUIC_ONLY-0} BV_SYQURE_TCP_PROXY=${BV_SYQURE_TCP_PROXY-1} ./tests/scripts/devstack.sh --reset --clients client1@sandbox.local,client2@sandbox.local,aggregator@sandbox.local"
+    - "SYFTBOX_HOTLINK=${BV_SYFTBOX_HOTLINK-1} SYFTBOX_HOTLINK_SOCKET_ONLY=1 SYFTBOX_HOTLINK_TCP_PROXY=${BV_SYQURE_TCP_PROXY-1} SYFTBOX_HOTLINK_TCP_PROXY_ADDR=${BV_SYFTBOX_HOTLINK_TCP_PROXY_ADDR-127.0.0.1} SYFTBOX_HOTLINK_QUIC=${BV_SYFTBOX_HOTLINK_QUIC-1} SYFTBOX_HOTLINK_P2P_ONLY=${BV_SYFTBOX_HOTLINK_P2P_ONLY-${BV_SYFTBOX_HOTLINK_QUIC_ONLY-0}} SYFTBOX_HOTLINK_QUIC_ONLY=${BV_SYFTBOX_HOTLINK_QUIC_ONLY-${BV_SYFTBOX_HOTLINK_P2P_ONLY-0}} BV_SYQURE_TCP_PROXY=${BV_SYQURE_TCP_PROXY-1} ./tests/scripts/devstack.sh --reset --clients client1@sandbox.local,client2@sandbox.local,aggregator@sandbox.local"
 
 steps:
   - name: Initialize BioVault for client1
@@ -41,7 +41,19 @@ steps:
   - name: Select Syqure aggregation mode
     run: |
       MODE="${BV_SYQURE_AGG_MODE:-smpc}"
-      TRANSPORT="${BV_SYQURE_TRANSPORT:-hotlink}"
+      RAW_TRANSPORT="${BV_SYQURE_TRANSPORT:-hotlink}"
+      case "${RAW_TRANSPORT}" in
+        hotlink|webrtc|"")
+          TRANSPORT="hotlink"
+          ;;
+        file)
+          TRANSPORT="file"
+          ;;
+        *)
+          echo "Unknown BV_SYQURE_TRANSPORT: ${RAW_TRANSPORT} (expected hotlink|file)" >&2
+          exit 1
+          ;;
+      esac
       MODULE_YAML="{{workspace}}/tests/scenarios/syqure-flow/modules/secure-aggregate/module.yaml"
       case "$MODE" in
         he) ENTRY="he_aggregate.codon" ;;
@@ -64,28 +76,84 @@ steps:
         run: |
           cd {{workspace}}
           TIMEFORMAT='flow_time:%3R'
-          BIOVAULT_FLOW_VERBOSE=1 BIOVAULT_FLOW_RUN_ID={{run_id}} \
-          BV_SYQURE_USE_DOCKER=${BV_SYQURE_USE_DOCKER:-} \
-            time {{workspace}}/cli/target/release/bv run tests/scenarios/syqure-flow/flow.yaml
+          time BIOVAULT_FLOW_VERBOSE=1 BIOVAULT_FLOW_RUN_ID={{run_id}} \
+            BV_SYQURE_USE_DOCKER=${BV_SYQURE_USE_DOCKER:-} \
+            {{workspace}}/cli/target/release/bv run tests/scenarios/syqure-flow/flow.yaml
 
       - name: client2-flow
         datasite: client2@sandbox.local
         run: |
           cd {{workspace}}
           TIMEFORMAT='flow_time:%3R'
-          BIOVAULT_FLOW_VERBOSE=1 BIOVAULT_FLOW_RUN_ID={{run_id}} \
-          BV_SYQURE_USE_DOCKER=${BV_SYQURE_USE_DOCKER:-} \
-            time {{workspace}}/cli/target/release/bv run tests/scenarios/syqure-flow/flow.yaml
+          time BIOVAULT_FLOW_VERBOSE=1 BIOVAULT_FLOW_RUN_ID={{run_id}} \
+            BV_SYQURE_USE_DOCKER=${BV_SYQURE_USE_DOCKER:-} \
+            {{workspace}}/cli/target/release/bv run tests/scenarios/syqure-flow/flow.yaml
 
       - name: aggregator-flow
         datasite: aggregator@sandbox.local
         run: |
           cd {{workspace}}
           TIMEFORMAT='flow_time:%3R'
-          BIOVAULT_FLOW_VERBOSE=1 BIOVAULT_FLOW_RUN_ID={{run_id}} \
-          BV_SYQURE_USE_DOCKER=${BV_SYQURE_USE_DOCKER:-} \
-            time {{workspace}}/cli/target/release/bv run tests/scenarios/syqure-flow/flow.yaml
-    timeout: 900
+          time BIOVAULT_FLOW_VERBOSE=1 BIOVAULT_FLOW_RUN_ID={{run_id}} \
+            BV_SYQURE_USE_DOCKER=${BV_SYQURE_USE_DOCKER:-} \
+            {{workspace}}/cli/target/release/bv run tests/scenarios/syqure-flow/flow.yaml
+    timeout: 420
+
+  - name: Assert hotlink p2p-only telemetry (no websocket fallback)
+    shell: bash
+    run: |
+      P2P_ONLY="${BV_SYFTBOX_HOTLINK_P2P_ONLY:-${BV_SYFTBOX_HOTLINK_QUIC_ONLY:-0}}"
+      if [[ "${P2P_ONLY}" != "1" ]]; then
+        echo "P2P-only assertion skipped (BV_SYFTBOX_HOTLINK_P2P_ONLY/BV_SYFTBOX_HOTLINK_QUIC_ONLY not set)"
+        exit 0
+      fi
+      python3 - <<'PY'
+      import json
+      from pathlib import Path
+
+      root = Path("{{workspace}}/sandbox")
+      peers = ["client1@sandbox.local", "client2@sandbox.local", "aggregator@sandbox.local"]
+      total_ws_packets = 0
+      total_ws_fallbacks = 0
+      total_p2p_packets = 0
+      total_webrtc_connected = 0
+      missing = []
+
+      for peer in peers:
+          candidates = [
+              root / peer / "datasites" / peer / ".syftbox" / "hotlink_telemetry.json",
+              root / peer / ".syftbox" / "hotlink_telemetry.json",
+          ]
+          path = next((p for p in candidates if p.exists()), None)
+          if path is None:
+              missing.append(peer)
+              continue
+          data = json.loads(path.read_text())
+          ws_packets = int(data.get("tx_ws_packets", 0))
+          ws_fallbacks = int(data.get("ws_fallbacks", 0))
+          p2p_packets = int(data.get("tx_p2p_packets", data.get("tx_quic_packets", 0) or 0))
+          connected = int(data.get("webrtc_connected", 0))
+          mode = data.get("mode", "unknown")
+          print(
+              f"{peer}: mode={mode} tx_p2p={p2p_packets} tx_ws={ws_packets} ws_fb={ws_fallbacks} webrtc_connected={connected}"
+          )
+          total_ws_packets += ws_packets
+          total_ws_fallbacks += ws_fallbacks
+          total_p2p_packets += p2p_packets
+          total_webrtc_connected += connected
+
+      if missing:
+          raise SystemExit(f"Missing hotlink telemetry for peers: {', '.join(missing)}")
+      if total_ws_packets > 0 or total_ws_fallbacks > 0:
+          raise SystemExit(
+              f"P2P-only violation: ws_tx={total_ws_packets} ws_fallbacks={total_ws_fallbacks}"
+          )
+      if total_p2p_packets == 0 or total_webrtc_connected == 0:
+          raise SystemExit(
+              f"P2P-only violation: no active webrtc dataplane (tx_p2p={total_p2p_packets}, webrtc_connected={total_webrtc_connected})"
+          )
+      print("✓ P2P-only telemetry assertion passed")
+      PY
 
   - name: Verify flow completion
     datasite: aggregator@sandbox.local
