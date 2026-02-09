@@ -50,7 +50,7 @@ spec:
           - name: counts
             type: File
       assets:
-        - path: run.sh
+        - path: assets/run.sh
 
     build_master:
       source:
@@ -67,7 +67,7 @@ spec:
           - name: count
             type: String
       assets:
-        - path: run.sh
+        - path: assets/run.sh
 
     align_counts:
       source:
@@ -84,7 +84,7 @@ spec:
           - name: counts_array
             type: File
       assets:
-        - path: run.sh
+        - path: assets/run.sh
 
     # Secure MPC aggregation using Syqure runtime
     secure_aggregate:
@@ -102,7 +102,7 @@ spec:
           - name: aggregated_counts
             type: File
       assets:
-        - path: secure_aggregate_he.codon
+        - path: assets/secure_aggregate_he.codon
 
   steps:
     - id: gen_variants

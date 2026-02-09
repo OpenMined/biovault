@@ -6,10 +6,10 @@ metadata:
 spec:
   runner:
     template: shell
-    entrypoint: run.sh
+    entrypoint: assets/run.sh
   assets:
-    - path: run.sh
-    - path: build_master.py
+    - path: assets/run.sh
+    - path: assets/build_master.py
   inputs:
     - name: rsids_manifest
       type: File

@@ -6,10 +6,10 @@ metadata:
 spec:
   runner:
     template: shell
-    entrypoint: run.sh
+    entrypoint: assets/run.sh
   assets:
-    - path: run.sh
-    - path: align_counts.py
+    - path: assets/run.sh
+    - path: assets/align_counts.py
   inputs:
     - name: master_list
       type: File
