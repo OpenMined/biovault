@@ -3,6 +3,7 @@ use chrono::Utc;
 use reqwest::blocking::Client as BlockingClient;
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use tracing::instrument;
 
@@ -130,6 +131,20 @@ impl MessageSync {
             .db
             .get_message(message_id)?
             .ok_or_else(|| anyhow::anyhow!("Message not found: {}", message_id))?;
+
+        if msg.from == msg.to {
+            // Self-addressed RPC messages create encrypted loopback envelopes and
+            // can be replayed noisily by higher-level sync loops. Mark as failed
+            // once and refuse send.
+            msg.sync_status = SyncStatus::Failed;
+            self.db.update_message(&msg)?;
+            let err = format!(
+                "Blocked self-send replay for message {} (from/to = {})",
+                msg.id, msg.from
+            );
+            eprintln!("❌ {}", err);
+            return Err(anyhow::anyhow!(err));
+        }
 
         // Create RPC request with message payload
         let payload = MessagePayload {
@@ -447,29 +462,32 @@ impl MessageSync {
     #[instrument(skip(self), fields(component = "messaging"), err)]
     pub fn check_acks(&self, no_cleanup: bool) -> Result<()> {
         let endpoint = Endpoint::new(&self.app, "/message")?;
-        let responses = endpoint.check_responses()?;
+        let mut pending_by_request_id: HashMap<String, Message> = HashMap::new();
+        for msg in self.db.list_messages(None)? {
+            if let Some(request_id) = msg.rpc_request_id.clone() {
+                if msg.rpc_ack_status.is_none() {
+                    pending_by_request_id.insert(request_id, msg);
+                }
+            }
+        }
+        if pending_by_request_id.is_empty() {
+            return Ok(());
+        }
+
+        let pending_ids: HashSet<String> = pending_by_request_id.keys().cloned().collect();
+        let responses = endpoint.check_responses_for_ids(&pending_ids)?;
 
         for (response_path, rpc_response) in responses {
-            // The response ID matches the request ID
-            let request_id = &rpc_response.id;
-
-            // Find message by RPC request ID
-            let messages = self.db.list_messages(None)?;
-            for mut msg in messages {
-                if msg.rpc_request_id.as_ref() == Some(request_id) {
-                    // Update message with ACK info
-                    msg.rpc_ack_status = Some(rpc_response.status_code as i32);
-                    msg.rpc_ack_at = Some(Utc::now());
-                    msg.sync_status = if rpc_response.status_code == 200 {
-                        SyncStatus::Synced
-                    } else {
-                        SyncStatus::Failed
-                    };
-                    self.db.update_message(&msg)?;
-
-                    // Silent - confirmation tracked in database
-                    break;
-                }
+            if let Some(mut msg) = pending_by_request_id.remove(&rpc_response.id) {
+                // Update message with ACK info
+                msg.rpc_ack_status = Some(rpc_response.status_code as i32);
+                msg.rpc_ack_at = Some(Utc::now());
+                msg.sync_status = if rpc_response.status_code == 200 {
+                    SyncStatus::Synced
+                } else {
+                    SyncStatus::Failed
+                };
+                self.db.update_message(&msg)?;
             }
 
             // Clean up response file (unless --no-cleanup mode)
@@ -658,5 +676,28 @@ mod tests {
         let updated = ms_sender.db.get_message(&m.id).unwrap().unwrap();
         assert_eq!(updated.sync_status, SyncStatus::Failed);
         assert!(updated.rpc_ack_at.is_some());
+    }
+
+    #[test]
+    fn self_send_is_blocked_and_marked_failed() {
+        let tmp = TempDir::new().unwrap();
+        let data_dir = tmp.path();
+        let app = SyftBoxApp::new(data_dir, "me@example.com", "biovault").unwrap();
+        let db_path = tmp.path().join("messages.sqlite");
+        let sync = MessageSync::new(&db_path, app).unwrap();
+
+        let m = Message::new(
+            "me@example.com".into(),
+            "me@example.com".into(),
+            "loopback".into(),
+        );
+        sync.db.insert_message(&m).unwrap();
+
+        let err = sync.send_message(&m.id).unwrap_err().to_string();
+        assert!(err.contains("Blocked self-send replay"));
+
+        let updated = sync.db.get_message(&m.id).unwrap().unwrap();
+        assert_eq!(updated.sync_status, SyncStatus::Failed);
+        assert!(updated.rpc_request_id.is_none());
     }
 }
