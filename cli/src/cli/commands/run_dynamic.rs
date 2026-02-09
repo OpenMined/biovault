@@ -3845,7 +3845,15 @@ fn resolve_syqure_backend(spec: &ModuleSpec) -> Result<(String, bool)> {
 
 fn resolve_codon_path_from_syqure_binary(syqure_binary: &str) -> Option<PathBuf> {
     let bin_path = PathBuf::from(syqure_binary);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    let platforms = ["linux-x86", "linux-x86_64", "linux-amd64", "macos-arm64"];
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     let platforms = ["macos-arm64", "linux-x86", "linux-x86_64", "linux-amd64"];
+    #[cfg(not(any(
+        all(target_os = "linux", target_arch = "x86_64"),
+        all(target_os = "macos", target_arch = "aarch64")
+    )))]
+    let platforms = ["linux-x86", "linux-x86_64", "linux-amd64", "macos-arm64"];
     for ancestor in bin_path.ancestors() {
         let mut candidates = Vec::new();
         for platform in platforms {
