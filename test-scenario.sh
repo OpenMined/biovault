@@ -64,7 +64,6 @@ ALLELE_COUNT=""
 SYQURE_AGG_MODE="smpc"
 SYQURE_TRANSPORT="hotlink"
 HOTLINK_P2P_ONLY=0
-TURN_ENABLED=0
 WEBRTC_FLOW=0
 SCENARIO=""
 SCENARIO_VARS=()
@@ -112,10 +111,6 @@ while [[ $# -gt 0 ]]; do
       ;;
     --hotlink-p2p-only|--hotlink-quic-only)
       HOTLINK_P2P_ONLY=1
-      TURN_ENABLED=1
-      ;;
-    --turn)
-      TURN_ENABLED=1
       ;;
     --webrtc-flow)
       WEBRTC_FLOW=1
@@ -346,9 +341,6 @@ if [[ -n "$RUST_CLIENT_BIN" ]]; then
 fi
 if (( SKIP_RUST_BUILD )); then
   export BV_DEVSTACK_SKIP_RUST_BUILD=1
-fi
-if (( TURN_ENABLED )); then
-  export BV_DEVSTACK_TURN=1
 fi
 
 if [[ "${CLIENT_MODE}" == "embedded" ]]; then
