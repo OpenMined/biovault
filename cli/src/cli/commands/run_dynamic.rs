@@ -5673,24 +5673,30 @@ fn execute_syqure_native(
     });
 
     let start_time = std::time::Instant::now();
-    let syqure_timeout_s = env_map
+    const DEFAULT_SYQURE_TIMEOUT_S: u64 = 3600;
+    let syqure_timeout_raw = env_map
         .get("BV_SYQURE_NATIVE_TIMEOUT_S")
         .and_then(|v| v.trim().parse::<u64>().ok())
         .or_else(|| {
             env::var("BV_SYQURE_NATIVE_TIMEOUT_S")
                 .ok()
                 .and_then(|v| v.trim().parse::<u64>().ok())
-        })
-        .filter(|v| *v > 0)
-        .unwrap_or(600);
-    let syqure_timeout = Duration::from_secs(syqure_timeout_s);
-    append_syqure_runner_log(
-        syqure_log_path.as_ref(),
-        &format!(
-            "syqure_timeout_s={} party_id={}",
-            syqure_timeout_s, party_id
-        ),
-    );
+        });
+    // BV_SYQURE_NATIVE_TIMEOUT_S semantics:
+    // - unset: use a 1-hour default timeout
+    // - 0: disable local timeout entirely
+    // - >0: explicit timeout in seconds
+    let syqure_timeout_s = syqure_timeout_raw.unwrap_or(DEFAULT_SYQURE_TIMEOUT_S);
+    let syqure_timeout = if syqure_timeout_s == 0 {
+        None
+    } else {
+        Some(Duration::from_secs(syqure_timeout_s))
+    };
+    let timeout_log = match syqure_timeout {
+        Some(_) => format!("syqure_timeout_s={} party_id={}", syqure_timeout_s, party_id),
+        None => format!("syqure_timeout=disabled party_id={}", party_id),
+    };
+    append_syqure_runner_log(syqure_log_path.as_ref(), &timeout_log);
     append_syqure_runner_log(syqure_log_path.as_ref(), "spawning syqure child process");
     let mut child = cmd.spawn().context("Failed to spawn syqure")?;
     append_syqure_runner_log(
@@ -5807,7 +5813,11 @@ fn execute_syqure_native(
             }
             None => {
                 poll_count += 1;
-                if peer_failure_reason.is_none() && start_time.elapsed() >= syqure_timeout {
+                if peer_failure_reason.is_none()
+                    && syqure_timeout
+                        .map(|timeout| start_time.elapsed() >= timeout)
+                        .unwrap_or(false)
+                {
                     let reason = format!(
                         "Syqure timed out after {}s for party_id={}; terminating process group",
                         syqure_timeout_s, party_id
