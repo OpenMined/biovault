@@ -1,0 +1,77 @@
+apiVersion: syftbox.openmined.org/v1alpha1
+kind: Flow
+metadata:
+  name: syqure-smoke-test
+  version: 0.1.0
+  description: Syqure smoke test — 3-party secure aggregation over WebRTC.
+
+spec:
+  vars:
+    flow_path: "syft://{datasite.current}/shared/flows/{flow_name}"
+    run_path: "{vars.flow_path}/{run_id}"
+    step_path: "{vars.run_path}/{step.number}-{step.id}"
+
+  coordination:
+    url: "{vars.run_path}/_progress"
+    share_with: all
+
+  mpc:
+    url: "{vars.run_path}/_mpc"
+    topology: mesh
+
+  inputs:
+    datasites:
+      default:
+        - aggregator@sandbox.local
+        - client1@sandbox.local
+        - client2@sandbox.local
+
+  datasites:
+    all: inputs.datasites
+    groups:
+      aggregator:
+        include:
+          - "{datasites[0]}"
+      clients:
+        include:
+          - "{datasites[1]}"
+          - "{datasites[2]}"
+
+  modules:
+    secure_aggregate:
+      source:
+        kind: local
+        path: ./modules/secure-aggregate
+      allow_dirty: true
+      interface:
+        inputs:
+          - name: counts
+            type: File
+          - name: array_length
+            type: String
+        outputs:
+          - name: aggregated_counts
+            type: File
+      assets:
+        - path: assets/smpc_aggregate.codon
+        - path: assets/he_aggregate.codon
+
+  steps:
+    - id: secure_aggregate
+      uses: secure_aggregate
+      run:
+        targets: all
+        strategy: parallel
+      with:
+        counts:
+          value: fixture:counts_array.json
+          only: clients
+        array_length:
+          value: fixture:count.txt
+      share:
+        result_shared:
+          source: self.outputs.aggregated_counts
+          url: "{vars.step_path}/aggregated.json"
+          permissions:
+            read: ["{datasites[*]}"]
+            write: ["{datasite.current}"]

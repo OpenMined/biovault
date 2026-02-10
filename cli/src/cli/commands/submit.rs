@@ -1190,10 +1190,8 @@ mod tests {
         assert!(module_location.ends_with(submission_folder));
         assert!(module_location.starts_with(&format!("syft://{}", config.email)));
 
-        // Ensure RPC request file written for the recipient
-        let rpc_dir = app.register_endpoint("/message").unwrap();
-        let rpc_entries = app.storage.list_dir(&rpc_dir).unwrap_or_default();
-        assert!(!rpc_entries.is_empty());
+        // Self-submission skips RPC send; verify message marked synced
+        assert_eq!(msg.sync_status, crate::messages::models::SyncStatus::Synced);
 
         clear_test_syftbox_data_dir();
         clear_test_biovault_home();

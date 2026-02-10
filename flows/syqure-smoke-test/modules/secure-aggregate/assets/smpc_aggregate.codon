@@ -1,0 +1,166 @@
+from sequre import sequre, mpc, Sharetensor as ST
+from numpy.create import array, zeros, zeros_like
+import os
+
+
+def load_json(path: str) -> List[int]:
+    """Load JSON array of ints from file. Pure Codon - no Python dependency."""
+    if not path:
+        return []
+    content = open(path).read().strip()
+    if not content or content == "[]":
+        return []
+    inner = content.strip("[]").strip()
+    if not inner:
+        return []
+    result: List[int] = []
+    for x in inner.split(","):
+        x = x.strip()
+        if x:
+            result.append(int(x))
+    return result
+
+
+def save_json(path: str, data: List[int]):
+    """Write JSON array to file. Pure Codon - no Python dependency."""
+    parts: List[str] = []
+    for x in data:
+        parts.append(str(x))
+    open(path, "w").write("[" + ",".join(parts) + "]")
+
+
+def fail_fast(pid: int, message: str):
+    full = f"CP{pid}: {message}"
+    print("FATAL:", full)
+    raise Exception(full)
+
+
+def parse_positive_int(pid: int, raw: str, label: str) -> int:
+    if not raw:
+        fail_fast(pid, f"missing {label}")
+    try:
+        value = int(raw.strip())
+    except:
+        fail_fast(pid, f"invalid {label}: '{raw}'")
+    if value <= 0:
+        fail_fast(pid, f"{label} must be > 0, got {value}")
+    return value
+
+
+def read_positive_int_file(pid: int, path: str, label: str) -> int:
+    if not path:
+        fail_fast(pid, f"missing path for {label}")
+    try:
+        content = open(path).read().strip()
+    except:
+        fail_fast(pid, f"cannot read {label} file: {path}")
+    return parse_positive_int(pid, content, f"{label} file contents")
+
+
+def append_phase(path: str, msg: str):
+    if not path:
+        return
+    try:
+        prev = ""
+        try:
+            prev = open(path).read()
+        except:
+            prev = ""
+        open(path, "w").write(prev + msg + "\n")
+    except:
+        pass
+
+
+@sequre
+def add(m, a, b):
+    return a + b
+
+
+def main():
+    phase_path = os.getenv("SEQURE_OUTPUT_AGGREGATED_COUNTS", "out.json") + ".phase"
+    append_phase(phase_path, "start:before_mpc")
+    m = mpc()
+    pid = m.pid
+    append_phase(phase_path, f"start:after_mpc pid={pid}")
+
+    counts_path = os.getenv("SEQURE_INPUT_COUNTS", "")
+    array_length_path = os.getenv("SEQURE_INPUT_ARRAY_LENGTH", "")
+    array_length_fallback = os.getenv("SEQURE_ARRAY_LENGTH", "")
+    output_path = os.getenv("SEQURE_OUTPUT_AGGREGATED_COUNTS", "")
+
+    if not output_path:
+        fail_fast(pid, "missing SEQURE_OUTPUT_AGGREGATED_COUNTS")
+
+    expected_n = 0
+    if array_length_path:
+        expected_n = read_positive_int_file(pid, array_length_path, "array_length")
+    else:
+        expected_n = parse_positive_int(pid, array_length_fallback, "SEQURE_ARRAY_LENGTH")
+
+    data: List[int] = []
+    # Clients (pid 1,2) must provide local counts; aggregator (pid 0) should not.
+    if pid == 1 or pid == 2:
+        if not counts_path:
+            fail_fast(pid, "missing SEQURE_INPUT_COUNTS for client party")
+        data = load_json(counts_path)
+        if len(data) == 0:
+            fail_fast(pid, f"counts input is empty: {counts_path}")
+    else:
+        # Aggregator is trusted dealer in this flow and should not require local counts.
+        data = []
+
+    if len(data) > 0 and len(data) != expected_n:
+        fail_fast(
+            pid,
+            f"counts length mismatch: got {len(data)}, expected {expected_n} (path={counts_path})",
+        )
+    n = expected_n
+
+    # Sync all parties before starting MPC computation
+    print(f"CP{pid}: Waiting for all parties to sync...")
+    append_phase(phase_path, f"sync:start pid={pid} n={n} data_len={len(data)}")
+    m.comms.sync_parties()
+    print(f"CP{pid}: All parties synced!")
+    append_phase(phase_path, f"sync:done pid={pid}")
+
+    # Secure sum: vectorized add for performance (single MPC op per vector)
+    print(f"CP{pid}: Starting MPC with n={n}, data_len={len(data)}")
+    if len(data) == 0:
+        data_vec = zeros((n,), dtype=int)
+    else:
+        data_vec = array(data, dtype=int)
+    zero_vec = zeros_like(data_vec)
+
+    print(f"CP{pid}: Encrypting shares")
+    append_phase(phase_path, f"encrypt:start pid={pid}")
+    v1 = data_vec if pid == 1 else zero_vec
+    v2 = data_vec if pid == 2 else zero_vec
+
+    s1 = ST.enc(m, v1, 1, m.default_mpc_modulus)
+    s2 = ST.enc(m, v2, 2, m.default_mpc_modulus)
+    append_phase(phase_path, f"encrypt:done pid={m.pid}")
+    print(f"CP{m.pid}: Running secure add")
+    append_phase(phase_path, f"add:start pid={m.pid}")
+    total = add(m, s1, s2)
+    append_phase(phase_path, f"add:done pid={m.pid}")
+    print(f"CP{m.pid}: Revealing result")
+    append_phase(phase_path, f"reveal:start pid={m.pid}")
+    revealed = total.reveal(m).tolist()
+    append_phase(phase_path, f"reveal:done pid={m.pid}")
+    result: List[int] = []
+    for x in revealed:
+        result.append(int(x))
+
+    if len(result) != n:
+        fail_fast(pid, f"revealed output length mismatch: got {len(result)}, expected {n}")
+
+    print(f"CP{pid}: Writing output")
+    append_phase(phase_path, f"write:start pid={pid}")
+    save_json(output_path, result)
+    append_phase(phase_path, f"write:done pid={pid} len={len(result)}")
+    print(f"CP{pid}: Done")
+    append_phase(phase_path, f"done pid={pid}")
+    m.done()
+
+
+main()

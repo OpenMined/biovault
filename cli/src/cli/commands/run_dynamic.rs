@@ -279,6 +279,24 @@ fn validate_syqure_port_base(name: &str, base: usize, max_base: usize) -> Result
     Ok(())
 }
 
+fn first_available_syqure_base_from_seed(seed_base: usize, party_count: usize) -> Option<usize> {
+    let max_base = max_syqure_base_port(party_count);
+    if max_base <= SEQURE_PORT_BASE_MIN {
+        return None;
+    }
+    if seed_base < SEQURE_PORT_BASE_MIN || seed_base > max_base {
+        return None;
+    }
+    let span = max_base - SEQURE_PORT_BASE_MIN + 1;
+    for offset in 0..span {
+        let candidate = SEQURE_PORT_BASE_MIN + ((seed_base - SEQURE_PORT_BASE_MIN + offset) % span);
+        if syqure_port_base_is_available(candidate, party_count) {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
 fn parse_port_base_env(name: &str) -> Result<Option<usize>> {
     match env::var(name) {
         Ok(value) => {
@@ -321,9 +339,48 @@ pub fn prepare_syqure_port_base_for_run(
     if let Some(base) = requested_base_override {
         // In desktop multiparty, all parties in one session must share one base.
         // Do not derive a per-party base, or channels will silently diverge.
+        // Intentionally do NOT write process-global env here; desktop can host
+        // multiple sessions in one long-lived process, and global env writes
+        // cause stale base clobbering between runs.
         validate_syqure_port_base("context syqure port base", base, max_base)?;
-        env::set_var("BV_SYQURE_PORT_BASE", base.to_string());
-        return Ok(base);
+        let hint_path = syqure_port_base_hint_path(run_id, party_count);
+        if let Some(existing) = read_syqure_port_base_hint(&hint_path) {
+            validate_syqure_port_base("cached syqure port base", existing, max_base)?;
+            return Ok(existing);
+        }
+
+        let selected =
+            first_available_syqure_base_from_seed(base, party_count).ok_or_else(|| {
+                anyhow::anyhow!(
+                "No free Syqure TCP proxy base port found for {} parties (seed={} in [{}..={}]).",
+                party_count,
+                base,
+                SEQURE_PORT_BASE_MIN,
+                max_base
+            )
+            })?;
+
+        match OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&hint_path)
+        {
+            Ok(mut file) => {
+                let _ = writeln!(file, "{}", selected);
+                return Ok(selected);
+            }
+            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
+                if let Some(existing) = read_syqure_port_base_hint(&hint_path) {
+                    validate_syqure_port_base("cached syqure port base", existing, max_base)?;
+                    return Ok(existing);
+                }
+                let _ = fs::write(&hint_path, format!("{selected}\n"));
+                return Ok(selected);
+            }
+            Err(_) => {
+                return Ok(selected);
+            }
+        }
     }
 
     if let Some(base) = parse_port_base_env("BV_SYQURE_PORT_BASE")? {
@@ -333,14 +390,12 @@ pub fn prepare_syqure_port_base_for_run(
     let requested_base = parse_port_base_env("SEQURE_COMMUNICATION_PORT")?;
     if let Some(base) = requested_base {
         validate_syqure_port_base("SEQURE_COMMUNICATION_PORT", base, max_base)?;
-        env::set_var("BV_SYQURE_PORT_BASE", base.to_string());
         return Ok(base);
     }
 
     let hint_path = syqure_port_base_hint_path(run_id, party_count);
     if let Some(base) = read_syqure_port_base_hint(&hint_path) {
         validate_syqure_port_base("cached syqure port base", base, max_base)?;
-        env::set_var("BV_SYQURE_PORT_BASE", base.to_string());
         return Ok(base);
     }
 
@@ -380,14 +435,12 @@ pub fn prepare_syqure_port_base_for_run(
         Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
             if let Some(existing) = read_syqure_port_base_hint(&hint_path) {
                 validate_syqure_port_base("cached syqure port base", existing, max_base)?;
-                env::set_var("BV_SYQURE_PORT_BASE", existing.to_string());
                 return Ok(existing);
             }
             let _ = fs::write(&hint_path, format!("{selected}\n"));
         }
         Err(_) => {}
     }
-    env::set_var("BV_SYQURE_PORT_BASE", selected.to_string());
     Ok(selected)
 }
 
@@ -4380,6 +4433,12 @@ async fn execute_syqure(
         &results_path,
         "syqure",
     );
+    // Keep Syqure base scoped to this run via explicit child env, rather than
+    // mutating process-global env that can leak across concurrent/adjacent runs.
+    env_map.insert(
+        "BV_SYQURE_PORT_BASE".to_string(),
+        syqure_port_base.to_string(),
+    );
 
     // MPC file dir must match flow.yaml mpc.url pattern: shared/flows/{flow_name}/{run_id}/_mpc
     let flow_name = exec_ctx
@@ -5469,6 +5528,9 @@ fn execute_syqure_native(
         println!(
             "  ℹ️  Hotlink stats are per-party packet counters from .syftbox/hotlink_telemetry.json."
         );
+        println!(
+            "  ℹ️  'no-telemetry-yet' means this process has not observed that peer's telemetry file yet."
+        );
     } else if tcp_transport {
         println!(
             "  ℹ️  TCP/hotlink mode: channel counters below are directory activity, not packet latency."
@@ -5545,7 +5607,7 @@ fn execute_syqure_native(
                     if telemetry_found {
                         continue;
                     }
-                    status_parts.push(format!("{}: waiting", short_party));
+                    status_parts.push(format!("{}: no-telemetry-yet", short_party));
                     continue;
                 }
                 let channel_path = PathBuf::from(&datasites_root_clone)
