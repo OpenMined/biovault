@@ -3,7 +3,7 @@ use chrono::Utc;
 use reqwest::blocking::Client as BlockingClient;
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::Path;
 use tracing::instrument;
 
@@ -474,10 +474,10 @@ impl MessageSync {
             return Ok(());
         }
 
-        let pending_ids: HashSet<String> = pending_by_request_id.keys().cloned().collect();
-        let responses = endpoint.check_responses_for_ids(&pending_ids)?;
+        let responses = endpoint.check_responses()?;
 
         for (response_path, rpc_response) in responses {
+            let matched_pending = pending_by_request_id.contains_key(&rpc_response.id);
             if let Some(mut msg) = pending_by_request_id.remove(&rpc_response.id) {
                 // Update message with ACK info
                 msg.rpc_ack_status = Some(rpc_response.status_code as i32);
@@ -491,7 +491,7 @@ impl MessageSync {
             }
 
             // Clean up response file (unless --no-cleanup mode)
-            if !no_cleanup {
+            if matched_pending && !no_cleanup {
                 endpoint.cleanup_response(&response_path)?;
             }
         }
