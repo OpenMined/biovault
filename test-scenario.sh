@@ -353,6 +353,7 @@ fi
 IS_WINDOWS=0
 if [[ "$(uname -s)" == MINGW* ]] || [[ "$(uname -s)" == MSYS* ]] || [[ "$(uname -s)" == CYGWIN* ]]; then
   IS_WINDOWS=1
+  export BV_DEVSTACK_NO_TURN=1
 fi
 
 # Check if scenario needs syqure or container runtime

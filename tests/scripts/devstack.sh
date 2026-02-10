@@ -33,6 +33,7 @@ Options:
   --reset          Remove any existing devstack state before starting (also removes sandbox on stop)
   --skip-sync-check Skip the sbdev sync probe after boot (faster, less safe)
   --skip-keys      Skip key generation (for manual key management testing)
+  --noturn         Skip coturn even when hotlink is enabled (warn instead of error)
   --stop           Stop the devstack instead of starting it
   --status         Print the current devstack state (relay/state.json) and exit
   -h, --help       Show this message
@@ -51,6 +52,7 @@ RESET_FLAG=0
 SKIP_SYNC_CHECK=0
 SKIP_KEYS=0
 SKIP_CLIENT_DAEMONS=0
+NO_TURN=0
 EMBEDDED_MODE=0
 ALLOW_PUBLIC_SUBS=0
 RAW_CLIENTS=()
@@ -115,6 +117,9 @@ while [[ $# -gt 0 ]]; do
     --skip-client-daemons)
       SKIP_CLIENT_DAEMONS=1
       ;;
+    --noturn)
+      NO_TURN=1
+      ;;
     --stop)
       ACTION="stop"
       ;;
@@ -155,6 +160,10 @@ fi
 
 if (( ! SKIP_RUST_BUILD )) && [[ "${BV_DEVSTACK_SKIP_RUST_BUILD:-0}" == "1" ]]; then
   SKIP_RUST_BUILD=1
+fi
+
+if (( ! NO_TURN )) && [[ "${BV_DEVSTACK_NO_TURN:-0}" == "1" ]]; then
+  NO_TURN=1
 fi
 
 # Default to embedded mode if not specified
@@ -312,11 +321,11 @@ start_turn() {
   esac
 
   if ! command -v turnserver >/dev/null 2>&1; then
-    if (( hotlink_enabled )); then
-      echo "ERROR: coturn (turnserver) not found but hotlink is enabled. Install coturn and retry." >&2
+    if (( hotlink_enabled )) && (( ! NO_TURN )); then
+      echo "ERROR: coturn (turnserver) not found but hotlink is enabled. Install coturn and retry, or pass --noturn to skip." >&2
       return 1
     fi
-    echo "WARNING: coturn (turnserver) not found; skipping TURN server (hotlink disabled)." >&2
+    echo "WARNING: coturn (turnserver) not found; skipping TURN server." >&2
     return 0
   fi
   local turn_port

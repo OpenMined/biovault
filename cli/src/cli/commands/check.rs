@@ -2428,9 +2428,10 @@ mod tests {
         make_exec("java", "echo 'openjdk version \"21\" 2024-01-01' 1>&2");
         // docker returns success on 'info'
         make_exec("docker", "[ \"$1\" = \"info\" ] && exit 0; exit 0");
-        // nextflow and syftbox stubs
+        // nextflow, syftbox, syqure stubs
         make_exec("nextflow", "exit 0");
         make_exec("syftbox", "exit 0");
+        make_exec("syqure", "exit 0");
         // uv stub
         make_exec("uv", "exit 0");
 

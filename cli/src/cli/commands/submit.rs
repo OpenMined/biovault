@@ -735,14 +735,18 @@ fn send_module_message(
     db.insert_message(&msg)?;
 
     if is_self_submission {
-        // For self-submission, write directly to our own inbox
+        // For self-submission, skip RPC send (self-addressed messages are blocked
+        // by the sync layer). Mark as synced directly.
         println!("🧪 Writing message directly to own inbox for testing");
-        // The sync system will handle this correctly as a self-message
+        msg.sync_status = crate::messages::models::SyncStatus::Synced;
+        msg.rpc_ack_status = Some(200);
+        msg.rpc_ack_at = Some(chrono::Utc::now());
+        db.update_message(&msg)?;
+    } else {
+        // Try to send immediately; if offline, it will remain queued locally
+        sync.send_message(&msg.id)
+            .context("failed to send module message")?;
     }
-
-    // Try to send immediately; if offline, it will remain queued locally
-    sync.send_message(&msg.id)
-        .context("failed to send module message")?;
 
     println!("✉️  Module message prepared for {}", datasite_email);
     if let Some(subj) = &msg.subject {
@@ -1186,10 +1190,8 @@ mod tests {
         assert!(module_location.ends_with(submission_folder));
         assert!(module_location.starts_with(&format!("syft://{}", config.email)));
 
-        // Ensure RPC request file written for the recipient
-        let rpc_dir = app.register_endpoint("/message").unwrap();
-        let rpc_entries = app.storage.list_dir(&rpc_dir).unwrap_or_default();
-        assert!(!rpc_entries.is_empty());
+        // Self-submission skips RPC send; verify message marked synced
+        assert_eq!(msg.sync_status, crate::messages::models::SyncStatus::Synced);
 
         clear_test_syftbox_data_dir();
         clear_test_biovault_home();

@@ -139,13 +139,15 @@ jobs:
         shell: bash
         run: |
           sudo apt-get update
-          sudo apt-get install -y llvm-17 llvm-17-dev zstd libgmp-dev
+          sudo apt-get install -y llvm-17 llvm-17-dev zstd libgmp-dev coturn
+          turnserver --version || true
 
       - name: Install syqure deps (macOS)
         if: matrix.os == 'macos-latest'
         shell: bash
         run: |
-          brew install llvm@17 zstd gmp
+          brew install llvm@17 zstd gmp coturn
+          turnserver --version || true
           echo "LLVM_PREFIX=$(brew --prefix llvm@17)" >> "$GITHUB_ENV"
 
       - name: Build syqure (Unix)
