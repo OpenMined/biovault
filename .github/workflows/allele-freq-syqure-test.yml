@@ -75,6 +75,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y llvm-17 llvm-17-dev zstd libgmp-dev coturn
+          turnserver --version || true
 
       - name: Build syqure
         shell: bash

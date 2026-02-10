@@ -172,6 +172,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y coturn
+          turnserver --version || true
 
       - name: Install Nextflow (Unix)
         if: matrix.os != 'windows'

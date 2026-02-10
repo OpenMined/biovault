@@ -4092,6 +4092,44 @@ fn shell_input_uses_path_resolution(raw_type: &str) -> bool {
     matches!(normalized, "File" | "Directory" | "Dir" | "Path")
 }
 
+fn resolve_fixture_input_reference(value: &str, module_path: &Path) -> Result<Option<String>> {
+    let trimmed = value.trim();
+    let Some(rel) = trimmed.strip_prefix("fixture:") else {
+        return Ok(None);
+    };
+    let rel = rel.trim();
+    if rel.is_empty() {
+        return Err(anyhow::anyhow!(
+            "Invalid fixture reference '{}': missing file name after 'fixture:'",
+            value
+        )
+        .into());
+    }
+
+    let rel_path = Path::new(rel);
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Some(flow_root) = module_path.parent().and_then(|p| p.parent()) {
+        candidates.push(flow_root.join("fixtures").join(rel_path));
+    }
+    candidates.push(module_path.join("fixtures").join(rel_path));
+
+    if let Some(found) = candidates.iter().find(|p| p.exists()) {
+        return Ok(Some(found.to_string_lossy().to_string()));
+    }
+
+    Err(anyhow::anyhow!(
+        "Fixture reference '{}' could not be resolved from module '{}'. Tried: {}",
+        value,
+        module_path.display(),
+        candidates
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+    .into())
+}
+
 async fn execute_shell(
     spec: &ModuleSpec,
     project_path: &Path,
@@ -4789,6 +4827,11 @@ async fn execute_syqure(
         let sequre_env_key = format!("SEQURE_INPUT_{}", env_key_suffix(&input.name));
         if let Some(arg) = parsed_args.inputs.get(&input.name) {
             let rendered_value = render_template(&arg.value, &ctx);
+            let rendered_value =
+                match resolve_fixture_input_reference(&rendered_value, module_path)? {
+                    Some(path) => path,
+                    None => rendered_value,
+                };
             let final_value = if input.raw_type == "File" {
                 let input_path = if Path::new(&rendered_value).is_absolute() {
                     PathBuf::from(rendered_value)
