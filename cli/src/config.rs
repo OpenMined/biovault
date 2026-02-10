@@ -252,6 +252,7 @@ impl Config {
             "nextflow" => paths.nextflow = path,
             "syftbox" => paths.syftbox = path,
             "uv" => paths.uv = path,
+            "syqure" => paths.syqure = path,
             _ => return Err(anyhow::anyhow!("Unknown dependency: {}", name).into()),
         }
 
@@ -265,6 +266,7 @@ impl Config {
             "nextflow" => paths.nextflow.clone(),
             "syftbox" => paths.syftbox.clone(),
             "uv" => paths.uv.clone(),
+            "syqure" => paths.syqure.clone(),
             "container_runtime" => paths.container_runtime.clone(),
             _ => None,
         })
