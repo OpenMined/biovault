@@ -260,6 +260,13 @@ fn syqure_port_base_hint_path(run_id: &str, party_count: usize) -> PathBuf {
     ))
 }
 
+pub fn cleanup_syqure_port_base_hint_for_run(run_id: &str, party_count: usize) {
+    let hint_path = syqure_port_base_hint_path(run_id, party_count);
+    if hint_path.exists() {
+        let _ = fs::remove_file(hint_path);
+    }
+}
+
 fn read_syqure_port_base_hint(path: &Path) -> Option<usize> {
     let raw = fs::read_to_string(path).ok()?;
     raw.trim().parse::<usize>().ok()
@@ -277,24 +284,6 @@ fn validate_syqure_port_base(name: &str, base: usize, max_base: usize) -> Result
         .into());
     }
     Ok(())
-}
-
-fn first_available_syqure_base_from_seed(seed_base: usize, party_count: usize) -> Option<usize> {
-    let max_base = max_syqure_base_port(party_count);
-    if max_base <= SEQURE_PORT_BASE_MIN {
-        return None;
-    }
-    if seed_base < SEQURE_PORT_BASE_MIN || seed_base > max_base {
-        return None;
-    }
-    let span = max_base - SEQURE_PORT_BASE_MIN + 1;
-    for offset in 0..span {
-        let candidate = SEQURE_PORT_BASE_MIN + ((seed_base - SEQURE_PORT_BASE_MIN + offset) % span);
-        if syqure_port_base_is_available(candidate, party_count) {
-            return Some(candidate);
-        }
-    }
-    None
 }
 
 fn parse_port_base_env(name: &str) -> Result<Option<usize>> {
@@ -337,8 +326,11 @@ pub fn prepare_syqure_port_base_for_run(
     }
 
     if let Some(base) = requested_base_override {
-        // In desktop multiparty, all parties in one session must share one base.
-        // Do not derive a per-party base, or channels will silently diverge.
+        // In desktop multiparty, all parties in one session must share one
+        // global base. Never auto-fallback from this override: each party runs
+        // in a separate process/machine, and independent fallback selection
+        // causes cross-party base drift and broken peer wiring.
+        //
         // Intentionally do NOT write process-global env here; desktop can host
         // multiple sessions in one long-lived process, and global env writes
         // cause stale base clobbering between runs.
@@ -346,19 +338,18 @@ pub fn prepare_syqure_port_base_for_run(
         let hint_path = syqure_port_base_hint_path(run_id, party_count);
         if let Some(existing) = read_syqure_port_base_hint(&hint_path) {
             validate_syqure_port_base("cached syqure port base", existing, max_base)?;
-            return Ok(existing);
+            if existing != base {
+                eprintln!(
+                    "warn: correcting stale syqure port hint {} (cached={}, requested={}, run={})",
+                    hint_path.display(),
+                    existing,
+                    base,
+                    run_id
+                );
+                let _ = fs::write(&hint_path, format!("{base}\n"));
+            }
+            return Ok(base);
         }
-
-        let selected =
-            first_available_syqure_base_from_seed(base, party_count).ok_or_else(|| {
-                anyhow::anyhow!(
-                "No free Syqure TCP proxy base port found for {} parties (seed={} in [{}..={}]).",
-                party_count,
-                base,
-                SEQURE_PORT_BASE_MIN,
-                max_base
-            )
-            })?;
 
         match OpenOptions::new()
             .create_new(true)
@@ -366,19 +357,29 @@ pub fn prepare_syqure_port_base_for_run(
             .open(&hint_path)
         {
             Ok(mut file) => {
-                let _ = writeln!(file, "{}", selected);
-                return Ok(selected);
+                let _ = writeln!(file, "{}", base);
+                return Ok(base);
             }
             Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
                 if let Some(existing) = read_syqure_port_base_hint(&hint_path) {
                     validate_syqure_port_base("cached syqure port base", existing, max_base)?;
-                    return Ok(existing);
+                    if existing != base {
+                        eprintln!(
+                            "warn: correcting stale syqure port hint {} (cached={}, requested={}, run={})",
+                            hint_path.display(),
+                            existing,
+                            base,
+                            run_id
+                        );
+                        let _ = fs::write(&hint_path, format!("{base}\n"));
+                    }
+                    return Ok(base);
                 }
-                let _ = fs::write(&hint_path, format!("{selected}\n"));
-                return Ok(selected);
+                let _ = fs::write(&hint_path, format!("{base}\n"));
+                return Ok(base);
             }
             Err(_) => {
-                return Ok(selected);
+                return Ok(base);
             }
         }
     }
