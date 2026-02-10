@@ -9,4 +9,5 @@ if [[ -z "$INPUT" ]]; then
   exit 1
 fi
 
-cp "$INPUT" "$OUTPUT"
+# Share only the locus key column (column 1) for build_master.
+awk -F'\t' 'NF { sub(/\r$/, "", $1); print $1 }' "$INPUT" > "$OUTPUT"
