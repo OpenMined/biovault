@@ -735,14 +735,18 @@ fn send_module_message(
     db.insert_message(&msg)?;
 
     if is_self_submission {
-        // For self-submission, write directly to our own inbox
+        // For self-submission, skip RPC send (self-addressed messages are blocked
+        // by the sync layer). Mark as synced directly.
         println!("🧪 Writing message directly to own inbox for testing");
-        // The sync system will handle this correctly as a self-message
+        msg.sync_status = crate::messages::models::SyncStatus::Synced;
+        msg.rpc_ack_status = Some(200);
+        msg.rpc_ack_at = Some(chrono::Utc::now());
+        db.update_message(&msg)?;
+    } else {
+        // Try to send immediately; if offline, it will remain queued locally
+        sync.send_message(&msg.id)
+            .context("failed to send module message")?;
     }
-
-    // Try to send immediately; if offline, it will remain queued locally
-    sync.send_message(&msg.id)
-        .context("failed to send module message")?;
 
     println!("✉️  Module message prepared for {}", datasite_email);
     if let Some(subj) = &msg.subject {
