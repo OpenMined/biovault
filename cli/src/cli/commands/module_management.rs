@@ -294,7 +294,8 @@ async fn import_from_url(
     // Convert github.com URLs to raw.githubusercontent.com
     let raw_url = url
         .replace("github.com", "raw.githubusercontent.com")
-        .replace("/blob/", "/");
+        .replace("/blob/", "/")
+        .replace("/tree/", "/");
 
     if !quiet {
         println!("📄 Downloading module.yaml...");
@@ -438,27 +439,23 @@ async fn import_from_url(
     }
 
     // Download assets
+    // Asset paths are relative to the module root (e.g. "assets/run.sh"),
+    // so we use base_url and module_dir directly (no extra /assets prefix).
     if !module_yaml.assets.is_empty() {
-        let assets_dir = module_dir.join("assets");
-        fs::create_dir_all(&assets_dir)?;
-
         if !quiet {
             println!("📦 Downloading {} assets...", module_yaml.assets.len());
         }
 
-        let assets_url = format!("{}/assets", base_url);
-
         for asset in &module_yaml.assets {
-            let asset_url = format!("{}/{}", assets_url, asset);
+            let asset_url = format!("{}/{}", base_url, asset);
 
             if !quiet {
                 println!("  - {}", asset);
             }
 
             let asset_content = download_file(&asset_url).await?;
-            let asset_path = assets_dir.join(asset);
+            let asset_path = module_dir.join(asset);
 
-            // Create parent directories if asset has a path
             if let Some(parent) = asset_path.parent() {
                 fs::create_dir_all(parent)?;
             }
@@ -629,20 +626,18 @@ async fn copy_local_module_to_managed(
     }
 
     // Copy assets
+    // Asset paths are relative to the module root (e.g. "assets/run.sh"),
+    // so we use source_path and module_dir directly (no extra /assets prefix).
     if !module_yaml.assets.is_empty() {
-        let assets_dir = module_dir.join("assets");
-        fs::create_dir_all(&assets_dir)?;
-
         if !quiet {
             println!("📦 Copying {} assets...", module_yaml.assets.len());
         }
 
         for asset in &module_yaml.assets {
-            let asset_source = source_path.join("assets").join(asset);
+            let asset_source = source_path.join(asset);
             if asset_source.exists() {
-                let asset_dest = assets_dir.join(asset);
+                let asset_dest = module_dir.join(asset);
 
-                // Create parent directories if asset has a path
                 if let Some(parent) = asset_dest.parent() {
                     fs::create_dir_all(parent)?;
                 }
@@ -1237,10 +1232,17 @@ pub async fn import_flow_with_deps(
         (yaml_str, DependencyContext::Local { base_path })
     } else {
         // Remote URL
-        // Convert GitHub URL to raw URL
-        let raw_url = url
+        // Convert GitHub URL to raw URL (handle both /blob/ and /tree/ paths)
+        let mut raw_url = url
             .replace("github.com", "raw.githubusercontent.com")
-            .replace("/blob/", "/");
+            .replace("/blob/", "/")
+            .replace("/tree/", "/");
+
+        // If URL points to a directory (no yaml/json extension), append /flow.yaml
+        if !raw_url.ends_with(".yaml") && !raw_url.ends_with(".yml") && !raw_url.ends_with(".json")
+        {
+            raw_url = format!("{}/flow.yaml", raw_url.trim_end_matches('/'));
+        }
 
         println!("{} Downloading flow from {}", "📥".cyan(), url.cyan());
 
@@ -1248,11 +1250,12 @@ pub async fn import_flow_with_deps(
         let yaml_content = download_file(&raw_url).await?;
         let yaml_str = String::from_utf8(yaml_content).context("Invalid UTF-8 in flow.yaml")?;
 
-        // Extract base URL for resolving relative module paths
-        let base_url = if let Some(idx) = url.rfind('/') {
-            url[..idx].to_string()
+        // Extract base URL for resolving relative module paths.
+        // Use the raw URL (without the filename) so module URLs are also raw.
+        let base_url = if let Some(idx) = raw_url.rfind('/') {
+            raw_url[..idx].to_string()
         } else {
-            url.to_string()
+            raw_url.clone()
         };
 
         (yaml_str, DependencyContext::GitHub { base_url })
@@ -1325,15 +1328,128 @@ pub async fn import_flow_with_deps(
         db.register_flow(&flow_name, &flow_dir.to_string_lossy())?
     };
 
-    println!(
-        "\n{} Flow '{}' imported successfully!",
-        "✅".green().bold(),
-        flow_name.bold()
-    );
+    // Validate all module files resolve
+    let warnings = validate_flow_modules(&spec, &db);
+    if warnings.is_empty() {
+        println!(
+            "\n{} Flow '{}' imported successfully!",
+            "✅".green().bold(),
+            flow_name.bold()
+        );
+    } else {
+        println!(
+            "\n{} Flow '{}' imported with warnings:",
+            "⚠️ ".yellow().bold(),
+            flow_name.bold()
+        );
+        for w in &warnings {
+            println!("   {} {}", "⚠".yellow(), w);
+        }
+    }
     println!("   Location: {}", flow_dir.display().to_string().dimmed());
     println!("   ID: {}", flow_id);
 
     Ok(flow_dir.to_string_lossy().to_string())
+}
+
+/// Validate that all module files for a flow exist on disk.
+/// Returns a list of warning strings for any missing files.
+pub fn validate_flow_modules(spec: &FlowSpec, db: &BioVaultDb) -> Vec<String> {
+    let mut warnings = Vec::new();
+
+    for step in &spec.steps {
+        let uses = match &step.uses {
+            Some(u) if !u.is_empty() => u,
+            _ => continue,
+        };
+
+        // Look up module in DB by name (try with and without version suffix)
+        let module = db.get_module(uses).ok().flatten().or_else(|| {
+            // Try as just the name part (before @)
+            let name = uses.split('@').next().unwrap_or(uses);
+            db.get_module(name).ok().flatten()
+        });
+
+        let module = match module {
+            Some(m) => m,
+            None => {
+                warnings.push(format!(
+                    "Step '{}': module '{}' not found in database",
+                    step.id, uses
+                ));
+                continue;
+            }
+        };
+
+        let module_dir = PathBuf::from(&module.module_path);
+        if !module_dir.exists() {
+            warnings.push(format!(
+                "Step '{}': module directory missing: {}",
+                step.id,
+                module_dir.display()
+            ));
+            continue;
+        }
+
+        // Check module.yaml exists
+        let module_yaml_path = module_dir.join(MODULE_YAML_FILE);
+        if !module_yaml_path.exists() {
+            warnings.push(format!(
+                "Step '{}': {} missing in {}",
+                step.id,
+                MODULE_YAML_FILE,
+                module_dir.display()
+            ));
+            continue;
+        }
+
+        // Parse module.yaml to check workflow and assets
+        let yaml_str = match fs::read_to_string(&module_yaml_path) {
+            Ok(s) => s,
+            Err(e) => {
+                warnings.push(format!(
+                    "Step '{}': failed to read {}: {}",
+                    step.id, MODULE_YAML_FILE, e
+                ));
+                continue;
+            }
+        };
+
+        let module_yaml = match ModuleYaml::from_str(&yaml_str) {
+            Ok(m) => m,
+            Err(e) => {
+                warnings.push(format!(
+                    "Step '{}': failed to parse {}: {}",
+                    step.id, MODULE_YAML_FILE, e
+                ));
+                continue;
+            }
+        };
+
+        // Check workflow/entrypoint file
+        let workflow_path = module_dir.join(&module_yaml.workflow);
+        if !workflow_path.exists() {
+            warnings.push(format!(
+                "Step '{}': workflow file missing: {}",
+                step.id,
+                workflow_path.display()
+            ));
+        }
+
+        // Check asset files
+        for asset in &module_yaml.assets {
+            let asset_path = module_dir.join(asset);
+            if !asset_path.exists() {
+                warnings.push(format!(
+                    "Step '{}': asset missing: {}",
+                    step.id,
+                    asset_path.display()
+                ));
+            }
+        }
+    }
+
+    warnings
 }
 
 // Helper function to download files
