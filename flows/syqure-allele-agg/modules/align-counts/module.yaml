@@ -23,3 +23,7 @@ spec:
       type: File
       format: { kind: json }
       path: aligned_counts.json
+    - name: an_bounds
+      type: String
+      path: an_bounds.txt
+      description: Min and max AN values (two lines) for Chebyshev interval

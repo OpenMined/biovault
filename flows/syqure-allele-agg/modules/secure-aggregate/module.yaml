@@ -20,6 +20,9 @@ spec:
     - name: array_length
       type: String
       description: Number of elements to aggregate (from build_master)
+    - name: an_bounds
+      type: File
+      description: Manifest of AN bounds files from all clients for Chebyshev interval
   outputs:
     - name: aggregated_counts
       type: File

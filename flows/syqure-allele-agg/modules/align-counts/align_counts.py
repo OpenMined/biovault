@@ -66,3 +66,11 @@ if force_len_raw:
 
 out_counts.write_text(json.dumps(combined, separators=(",", ":")) + "\n", encoding="utf-8")
 print(f"Aligned counts: {n} loci, {len(combined)} total elements (AC+AN concatenated)")
+
+# Compute and output AN bounds for Chebyshev interval
+an_positive = [v for v in an if v > 0]
+an_min = min(an_positive) if an_positive else 0
+an_max = max(an_positive) if an_positive else 0
+out_an_bounds = Path(os.environ.get("BV_OUTPUT_AN_BOUNDS", "an_bounds.txt"))
+out_an_bounds.write_text(f"{an_min}\n{an_max}\n", encoding="utf-8")
+print(f"AN bounds: min={an_min}, max={an_max} (from {len(an_positive)} positive values)")

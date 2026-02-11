@@ -2,8 +2,11 @@
 """
 Generate aggregated allele frequency report from MPC aggregation results.
 
-The input aggregated_counts is a concatenated vector: [ac..., an...]
-We split it back into AC and AN halves to compute allele frequencies.
+Supports two aggregated_counts formats:
+  - New (HE+Chebyshev): [af_0, ..., af_n] — pre-computed allele frequencies (floats, length n)
+  - Legacy (SMPC):      [ac_0,...,ac_n, an_0,...,an_n] — combined counts (ints, length 2n)
+
+Detection: if len(data) == n, treat as AF floats; if len(data) == 2*n, split into AC/AN.
 """
 import argparse
 import json
@@ -11,11 +14,7 @@ import os
 from pathlib import Path
 
 
-def split_combined_counts(combined: list[int], loci_count: int) -> tuple[list[int], list[int]]:
-    """
-    Split a combined [ac..., an...] vector.
-    If data is truncated (debug mode), fall back to AC-only with AN=zeros.
-    """
+def split_combined_counts(combined: list, loci_count: int) -> tuple[list[int], list[int]]:
     if loci_count <= 0:
         return [], []
     if len(combined) >= loci_count * 2:
@@ -26,9 +25,6 @@ def split_combined_counts(combined: list[int], loci_count: int) -> tuple[list[in
 
 
 def atomic_write_text(path: Path, content: str) -> None:
-    """
-    Write file content via temp file + atomic rename to avoid partial-file sync races.
-    """
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_name(f".{path.name}.tmp-{os.getpid()}")
     with tmp_path.open("w", encoding="utf-8") as f:
@@ -42,7 +38,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--union-index", required=True)
     parser.add_argument("--local-counts", required=True, help="Local aligned counts (for comparison)")
-    parser.add_argument("--aggregated-counts", required=True, help="Combined AC+AN from MPC")
+    parser.add_argument("--aggregated-counts", required=True, help="Aggregated output from MPC")
     parser.add_argument("--out-json")
     parser.add_argument("--out-tsv")
     parser.add_argument("--out-agg-tsv", help="Aggregated allele_freq.tsv format")
@@ -62,78 +58,94 @@ def main() -> int:
     rsids = index.get("rsids", [""] * len(loci))
     n = len(loci)
 
-    # Load local counts (combined AC+AN)
+    # Load local counts (always combined AC+AN from align_counts)
     local_combined = json.loads(local_counts_path.read_text())
     local_ac, local_an = split_combined_counts(local_combined, n)
 
-    # Load aggregated counts (combined AC+AN from MPC)
-    agg_combined = json.loads(aggregated_counts_path.read_text())
-    agg_ac, agg_an = split_combined_counts(agg_combined, n)
+    # Load aggregated data — detect format
+    agg_raw = json.loads(aggregated_counts_path.read_text())
 
-    # Ensure arrays match loci count
-    if len(local_ac) != n or len(agg_ac) != n:
-        print(f"WARNING: Array length mismatch. loci={n}, local_ac={len(local_ac)}, agg_ac={len(agg_ac)}")
-        n = min(len(local_ac), len(agg_ac), n)
+    if len(agg_raw) == n:
+        # New format: pre-computed allele frequencies from HE+Chebyshev
+        agg_af = [float(x) for x in agg_raw]
+        agg_ac = None
+        agg_an = None
+        mode = "af_direct"
+        print(f"aggregated format: AF direct (HE+Chebyshev), n={n}")
+    elif len(agg_raw) >= n * 2:
+        # Legacy format: combined [ac..., an...] ints
+        agg_ac_raw, agg_an_raw = split_combined_counts(agg_raw, n)
+        agg_ac = [int(x) for x in agg_ac_raw]
+        agg_an = [int(x) for x in agg_an_raw]
+        agg_af = [(ac / an) if an else 0.0 for ac, an in zip(agg_ac, agg_an)]
+        mode = "ac_an_split"
+        print(f"aggregated format: AC+AN split (legacy SMPC), n={n}")
+    else:
+        # Fallback: treat as AF if shorter than 2*n
+        agg_af = [float(x) for x in agg_raw] + [0.0] * max(0, n - len(agg_raw))
+        agg_ac = None
+        agg_an = None
+        mode = "af_direct"
+        print(f"WARNING: aggregated array length {len(agg_raw)} != n={n} or 2n={2*n}; treating as AF")
+
+    # Trim to common length
+    if len(local_ac) != n or len(agg_af) != n:
+        print(f"WARNING: Array length mismatch. loci={n}, local_ac={len(local_ac)}, agg_af={len(agg_af)}")
+        n = min(len(local_ac), len(agg_af), n)
         local_ac = local_ac[:n]
         local_an = local_an[:n]
-        agg_ac = agg_ac[:n]
-        agg_an = agg_an[:n]
-        if len(local_an) < n:
-            local_an = local_an + [0 for _ in range(n - len(local_an))]
-        if len(agg_an) < n:
-            agg_an = agg_an + [0 for _ in range(n - len(agg_an))]
+        agg_af = agg_af[:n]
+        if agg_ac is not None:
+            agg_ac = agg_ac[:n]
+            agg_an = agg_an[:n]
         loci = loci[:n]
         rsids = rsids[:n]
 
-    total_agg_ac = sum(agg_ac)
-    total_agg_an = sum(agg_an)
     total_local_ac = sum(local_ac)
     total_local_an = sum(local_an)
-    nonzero_agg = sum(1 for x in agg_ac if x)
-    max_agg = max(agg_ac) if agg_ac else 0
+    nonzero_af = sum(1 for x in agg_af if x > 0.0)
+    max_af = max(agg_af) if agg_af else 0.0
 
     print(f"aggregated_counts: {aggregated_counts_path}")
-    print(f"loci={n} total_agg_ac={total_agg_ac} total_agg_an={total_agg_an}")
+    print(f"loci={n} mode={mode}")
+    if agg_ac is not None:
+        print(f"total_agg_ac={sum(agg_ac)} total_agg_an={sum(agg_an)}")
     print(f"total_local_ac={total_local_ac} total_local_an={total_local_an}")
-    print(f"nonzero_agg={nonzero_agg} max_agg={max_agg}")
+    print(f"nonzero_af={nonzero_af} max_af={max_af:.6f}")
 
-    top_idx = sorted(range(n), key=lambda i: agg_ac[i], reverse=True)[: min(args.top, n)]
-    print("\nTop loci by aggregate count:")
-    print("rank\tagg_ac\tagg_an\tagg_af\tlocal_ac\trsid\tlocus")
+    top_idx = sorted(range(n), key=lambda i: agg_af[i], reverse=True)[: min(args.top, n)]
+    print("\nTop loci by aggregated allele frequency:")
+    print("rank\tagg_af\tlocal_ac\tlocal_an\tlocal_af\trsid\tlocus")
     for rank, i in enumerate(top_idx, start=1):
-        ac = agg_ac[i]
-        if ac == 0:
+        af = agg_af[i]
+        if af == 0.0:
             continue
-        an = agg_an[i]
-        af = (ac / an) if an else 0.0
-        local = local_ac[i]
+        lac = local_ac[i]
+        lan = local_an[i]
+        laf = (lac / lan) if lan else 0.0
         rs = rsids[i] if i < len(rsids) else ""
         locus = loci[i] if i < len(loci) else ""
-        print(f"{rank}\t{ac}\t{an}\t{af:.6f}\t{local}\t{rs}\t{locus}")
+        print(f"{rank}\t{af:.6f}\t{lac}\t{lan}\t{laf:.6f}\t{rs}\t{locus}")
 
     # Write detailed TSV report
     if args.out_tsv:
         out_path = Path(args.out_tsv)
-        lines = ["locus\trsid\tagg_ac\tagg_an\tagg_af\tlocal_ac\tlocal_an\tlocal_af\n"]
+        lines = ["locus\trsid\tagg_af\tlocal_ac\tlocal_an\tlocal_af\n"]
         for i, (locus, rsid) in enumerate(zip(loci, rsids)):
-            ac = agg_ac[i]
-            an = agg_an[i]
-            af = (ac / an) if an else 0.0
+            af = agg_af[i]
             lac = local_ac[i]
             lan = local_an[i]
             laf = (lac / lan) if lan else 0.0
-            lines.append(f"{locus}\t{rsid}\t{ac}\t{an}\t{af:.6f}\t{lac}\t{lan}\t{laf:.6f}\n")
+            lines.append(f"{locus}\t{rsid}\t{af:.6f}\t{lac}\t{lan}\t{laf:.6f}\n")
         atomic_write_text(out_path, "".join(lines))
 
-    # Write aggregated allele_freq.tsv format (same format as input TSV but with aggregated values)
+    # Write aggregated allele_freq.tsv format
     if args.out_agg_tsv:
         out_path = Path(args.out_agg_tsv)
-        lines = ["locus_key\trsid\tallele_count\tallele_number\tallele_freq\n"]
+        lines = ["locus_key\trsid\tallele_freq\n"]
         for i, (locus, rsid) in enumerate(zip(loci, rsids)):
-            ac = agg_ac[i]
-            an = agg_an[i]
-            af = (ac / an) if an else 0.0
-            lines.append(f"{locus}\t{rsid}\t{ac}\t{an}\t{af:.6f}\n")
+            af = agg_af[i]
+            lines.append(f"{locus}\t{rsid}\t{af:.6f}\n")
         atomic_write_text(out_path, "".join(lines))
         print(f"aggregated_allele_freq.tsv: {out_path}")
 
@@ -142,36 +154,40 @@ def main() -> int:
         out_path = Path(args.out_json)
         top_rows = []
         for rank, i in enumerate(top_idx, start=1):
-            ac = agg_ac[i]
-            if ac == 0:
+            af = agg_af[i]
+            if af == 0.0:
                 continue
-            an = agg_an[i]
-            af = (ac / an) if an else 0.0
-            local = local_ac[i]
+            lac = local_ac[i]
+            lan = local_an[i]
+            laf = (lac / lan) if lan else 0.0
             rs = rsids[i] if i < len(rsids) else ""
             locus = loci[i] if i < len(loci) else ""
-            top_rows.append(
-                {
-                    "rank": rank,
-                    "agg_ac": int(ac),
-                    "agg_an": int(an),
-                    "agg_af": af,
-                    "local_ac": int(local),
-                    "rsid": rs,
-                    "locus": locus,
-                }
-            )
+            row = {
+                "rank": rank,
+                "agg_af": round(af, 6),
+                "local_ac": int(lac),
+                "local_an": int(lan),
+                "local_af": round(laf, 6),
+                "rsid": rs,
+                "locus": locus,
+            }
+            if agg_ac is not None:
+                row["agg_ac"] = int(agg_ac[i])
+                row["agg_an"] = int(agg_an[i])
+            top_rows.append(row)
         payload = {
             "aggregated_counts_path": str(aggregated_counts_path),
+            "mode": mode,
             "loci": n,
-            "total_agg_ac": int(total_agg_ac),
-            "total_agg_an": int(total_agg_an),
             "total_local_ac": int(total_local_ac),
             "total_local_an": int(total_local_an),
-            "nonzero_agg": int(nonzero_agg),
-            "max_agg": int(max_agg),
+            "nonzero_af": int(nonzero_af),
+            "max_af": round(max_af, 6),
             "top": top_rows,
         }
+        if agg_ac is not None:
+            payload["total_agg_ac"] = int(sum(agg_ac))
+            payload["total_agg_an"] = int(sum(agg_an))
         atomic_write_text(out_path, json.dumps(payload, separators=(",", ":")) + "\n")
 
     print(f"report_json: {args.out_json}")
