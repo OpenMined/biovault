@@ -1,0 +1,118 @@
+apiVersion: syftbox.openmined.org/v1alpha1
+kind: Flow
+metadata:
+  name: trusted-allele-agg
+  version: 0.1.0
+  description: Trusted multiparty allele aggregation — clients share raw TSV with aggregator who computes in plaintext.
+
+spec:
+  vars:
+    flow_path: "syft://{datasite.current}/shared/flows/{flow_name}"
+    run_path: "{vars.flow_path}/{run_id}"
+    step_path: "{vars.run_path}/{step.number}-{step.id}"
+
+  coordination:
+    url: "{vars.run_path}/_progress"
+    share_with: all
+
+  inputs:
+    datasites:
+      default:
+        - aggregator@sandbox.local
+        - client1@sandbox.local
+        - client2@sandbox.local
+    allele_freq_tsv:
+      type: File?
+
+  datasites:
+    all: inputs.datasites
+    groups:
+      aggregator:
+        include:
+          - "{datasites[0]}"
+      clients:
+        include:
+          - "{datasites[1]}"
+          - "{datasites[2]}"
+
+  modules:
+    share_data:
+      source:
+        kind: local
+        path: ./modules/share-data
+      allow_dirty: true
+      interface:
+        inputs:
+          - name: allele_freq_tsv
+            type: File
+        outputs:
+          - name: allele_freq_tsv
+            type: File
+      assets:
+        - path: module.yaml
+        - path: run.sh
+
+    trusted_aggregate:
+      source:
+        kind: local
+        path: ./modules/aggregate
+      allow_dirty: true
+      interface:
+        inputs:
+          - name: data_manifest
+            type: File
+        outputs:
+          - name: aggregated_allele_freq_tsv
+            type: File
+          - name: report_json
+            type: File
+          - name: union_index
+            type: File
+      assets:
+        - path: module.yaml
+        - path: run.sh
+        - path: aggregate.py
+        - path: allele_freq_utils.py
+
+  steps:
+    - id: share_data
+      uses: share_data
+      run:
+        targets: clients
+        strategy: parallel
+      with:
+        allele_freq_tsv: inputs.allele_freq_tsv
+      share:
+        allele_freq_shared:
+          source: self.outputs.allele_freq_tsv
+          url: "{vars.step_path}/allele_freq.tsv"
+          permissions:
+            read: ["{groups.aggregator}"]
+            write: ["{datasite.current}"]
+
+    - id: trusted_aggregate
+      uses: trusted_aggregate
+      run:
+        targets: aggregator
+        timeout: 600
+      with:
+        data_manifest: step.share_data.share.allele_freq_shared.url_list
+      share:
+        aggregated_tsv_shared:
+          source: self.outputs.aggregated_allele_freq_tsv
+          url: "{vars.step_path}/aggregated_allele_freq.tsv"
+          permissions:
+            read: ["{datasites[*]}"]
+            write: ["{groups.aggregator}"]
+        report_shared:
+          source: self.outputs.report_json
+          url: "{vars.step_path}/report.json"
+          permissions:
+            read: ["{datasites[*]}"]
+            write: ["{groups.aggregator}"]
+        union_index_shared:
+          source: self.outputs.union_index
+          url: "{vars.step_path}/union_locus_index.json"
+          permissions:
+            read: ["{datasites[*]}"]
+            write: ["{groups.aggregator}"]

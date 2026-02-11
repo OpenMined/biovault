@@ -1,0 +1,30 @@
+apiVersion: syftbox.openmined.org/v1alpha1
+kind: Module
+metadata:
+  name: aggregate
+  version: 0.1.0
+spec:
+  runner:
+    template: shell
+    entrypoint: run.sh
+  assets:
+    - path: run.sh
+    - path: aggregate.py
+    - path: allele_freq_utils.py
+  inputs:
+    - name: data_manifest
+      type: File
+      format: { kind: txt }
+  outputs:
+    - name: aggregated_allele_freq_tsv
+      type: File
+      format: { kind: tsv }
+      path: aggregated_allele_freq.tsv
+    - name: report_json
+      type: File
+      format: { kind: json }
+      path: report.json
+    - name: union_index
+      type: File
+      format: { kind: json }
+      path: union_locus_index.json
