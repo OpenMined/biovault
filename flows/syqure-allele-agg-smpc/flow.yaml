@@ -1,0 +1,221 @@
+apiVersion: syftbox.openmined.org/v1alpha1
+kind: Flow
+metadata:
+  name: syqure-allele-agg-smpc
+  version: 0.2.0
+  description: Multiparty allele aggregation using SMPC (additive secret sharing + secure division) from participant-provided allele_freq.tsv inputs.
+
+spec:
+  vars:
+    flow_path: "syft://{datasite.current}/shared/flows/{flow_name}"
+    run_path: "{vars.flow_path}/{run_id}"
+    step_path: "{vars.run_path}/{step.number}-{step.id}"
+
+  coordination:
+    url: "{vars.run_path}/_progress"
+    share_with: all
+
+  mpc:
+    url: "{vars.run_path}/_mpc"
+    topology: mesh
+
+  inputs:
+    datasites:
+      default:
+        - aggregator@sandbox.local
+        - client1@sandbox.local
+        - client2@sandbox.local
+    allele_freq_tsv:
+      type: File?
+
+  datasites:
+    all: inputs.datasites
+    groups:
+      aggregator:
+        include:
+          - "{datasites[0]}"
+      clients:
+        include:
+          - "{datasites[1]}"
+          - "{datasites[2]}"
+
+  modules:
+    build_master:
+      source:
+        kind: local
+        path: ./modules/build-master
+      allow_dirty: true
+      interface:
+        inputs:
+          - name: index_manifest
+            type: File
+        outputs:
+          - name: union_index
+            type: File
+          - name: count
+            type: String
+      assets:
+        - path: module.yaml
+        - path: run.sh
+        - path: build_master.py
+        - path: allele_freq_utils.py
+
+    share_locus_index:
+      source:
+        kind: local
+        path: ./modules/share-locus-index
+      allow_dirty: true
+      interface:
+        inputs:
+          - name: locus_index
+            type: File
+        outputs:
+          - name: locus_index
+            type: File
+      assets:
+        - path: module.yaml
+        - path: run.sh
+
+    align_counts:
+      source:
+        kind: local
+        path: ./modules/align-counts
+      allow_dirty: true
+      interface:
+        inputs:
+          - name: union_index
+            type: File
+          - name: allele_freq_tsv
+            type: File
+        outputs:
+          - name: aligned_counts
+            type: File
+      assets:
+        - path: module.yaml
+        - path: run.sh
+        - path: align_counts.py
+        - path: allele_freq_utils.py
+
+    secure_aggregate:
+      source:
+        kind: local
+        path: ./modules/secure-aggregate
+      allow_dirty: true
+      interface:
+        inputs:
+          - name: counts
+            type: File
+          - name: array_length
+            type: String
+        outputs:
+          - name: aggregated_counts
+            type: File
+      assets:
+        - path: module.yaml
+        - path: secure_aggregate.codon
+
+    report_aggregate:
+      source:
+        kind: local
+        path: ./modules/report-aggregate
+      allow_dirty: true
+      interface:
+        inputs:
+          - name: union_index
+            type: File
+          - name: local_counts
+            type: File
+          - name: aggregated_counts
+            type: File
+        outputs:
+          - name: report_json
+            type: File
+          - name: report_tsv
+            type: File
+          - name: aggregated_allele_freq_tsv
+            type: File
+      assets:
+        - path: module.yaml
+        - path: run.sh
+        - path: report_aggregate.py
+
+  steps:
+    - id: share_locus_index
+      uses: share_locus_index
+      run:
+        targets: clients
+        strategy: parallel
+      with:
+        locus_index: inputs.allele_freq_tsv
+      share:
+        locus_index_shared:
+          source: self.outputs.locus_index
+          url: "{vars.step_path}/locus_index.tsv"
+          permissions:
+            read: ["{groups.aggregator}"]
+            write: ["{datasite.current}"]
+
+    - id: build_master
+      uses: build_master
+      run:
+        targets: aggregator
+        timeout: 600
+      with:
+        index_manifest: step.share_locus_index.share.locus_index_shared.url_list
+      share:
+        union_index_shared:
+          source: self.outputs.union_index
+          url: "{vars.step_path}/union_locus_index.json"
+          permissions:
+            read: ["{datasites[*]}"]
+            write: ["{groups.aggregator}"]
+        count_shared:
+          source: self.outputs.count
+          url: "{vars.step_path}/count.txt"
+          permissions:
+            read: ["{datasites[*]}"]
+            write: ["{groups.aggregator}"]
+
+    - id: align_counts
+      uses: align_counts
+      run:
+        targets: clients
+        strategy: parallel
+      with:
+        union_index: step.build_master.share.union_index_shared
+        allele_freq_tsv: inputs.allele_freq_tsv
+
+    - id: mpc_barrier
+      barrier:
+        wait_for: align_counts
+        targets: clients
+        timeout: 900
+
+    - id: secure_aggregate
+      uses: secure_aggregate
+      run:
+        targets: all
+        strategy: parallel
+      with:
+        counts:
+          value: step.align_counts.outputs.aligned_counts
+          only: clients
+        array_length:
+          value: step.build_master.share.count_shared
+      share:
+        result_shared:
+          source: self.outputs.aggregated_counts
+          url: "{vars.step_path}/aggregated_counts.json"
+          permissions:
+            read: ["{datasites[*]}"]
+            write: ["{datasite.current}"]
+
+    - id: report_aggregate
+      uses: report_aggregate
+      run:
+        targets: clients
+        strategy: parallel
+      with:
+        union_index: step.build_master.share.union_index_shared
+        local_counts: step.align_counts.outputs.aligned_counts
+        aggregated_counts: step.secure_aggregate.outputs.aggregated_counts
