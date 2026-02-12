@@ -1,0 +1,25 @@
+apiVersion: syftbox.openmined.org/v1alpha1
+kind: Module
+metadata:
+  name: build-master
+  version: 0.1.0
+spec:
+  runner:
+    template: shell
+    entrypoint: run.sh
+  assets:
+    - path: run.sh
+    - path: build_master.py
+    - path: allele_freq_utils.py
+  inputs:
+    - name: index_manifest
+      type: File
+      format: { kind: txt }
+  outputs:
+    - name: union_index
+      type: File
+      format: { kind: json }
+      path: union_locus_index.json
+    - name: count
+      type: String
+      path: count.txt

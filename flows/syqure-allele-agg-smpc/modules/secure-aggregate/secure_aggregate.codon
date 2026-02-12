@@ -1,0 +1,196 @@
+import os
+import time
+
+from numpy.create import array, zeros
+
+from sequre import sequre, mpc, Sharetensor as ST
+
+
+def load_json(path: str) -> List[int]:
+    content = open(path).read().strip()
+    if not content or content == "[]":
+        return []
+    inner = content.strip("[]").strip()
+    if not inner:
+        return []
+    result: List[int] = []
+    for x in inner.split(","):
+        x = x.strip()
+        if x:
+            result.append(int(x))
+    return result
+
+
+def save_json_floats(path: str, data: List[float]):
+    parts: List[str] = []
+    for x in data:
+        parts.append(str(x))
+    open(path, "w").write("[" + ",".join(parts) + "]")
+
+
+def read_positive_int_file(path: str) -> int:
+    if not path:
+        return 0
+    try:
+        content = open(path).read().strip()
+    except:
+        return 0
+    if not content:
+        return 0
+    try:
+        value = int(content)
+    except:
+        return 0
+    return value if value > 0 else 0
+
+
+def getenv_positive_int(name: str, default_value: int) -> int:
+    raw = os.getenv(name, "")
+    if not raw:
+        return default_value
+    try:
+        value = int(raw.strip())
+    except:
+        return default_value
+    return value if value > 0 else default_value
+
+
+@sequre
+def secure_add(mpc, a, b):
+    return a + b
+
+
+@sequre
+def secure_div(mpc, a, b):
+    return a / b
+
+
+def main():
+    t_start = time.time()
+    m = mpc()
+    t_setup = time.time()
+
+    pid = m.pid
+
+    counts_path = os.getenv("SEQURE_INPUT_COUNTS", "")
+    array_length_path = os.getenv("SEQURE_INPUT_ARRAY_LENGTH", "")
+    array_length_fallback = os.getenv("SEQURE_ARRAY_LENGTH", "")
+    output_path = os.getenv("SEQURE_OUTPUT_AGGREGATED_COUNTS", "")
+
+    expected_n = read_positive_int_file(array_length_path)
+    if expected_n <= 0:
+        try:
+            expected_n = int(array_length_fallback.strip()) if array_length_fallback else 0
+        except:
+            expected_n = 0
+
+    all_data: List[int] = []
+    if pid == 1 or pid == 2:
+        all_data = load_json(counts_path)
+
+    n = expected_n if expected_n > 0 else len(all_data)
+    if n < 0:
+        n = 0
+    n_half = n // 2
+
+    ac_data: List[int] = []
+    an_data: List[int] = []
+    if pid == 1 or pid == 2:
+        idx = 0
+        while idx < n_half:
+            if idx < len(all_data):
+                ac_data.append(all_data[idx])
+            else:
+                ac_data.append(0)
+            idx += 1
+        idx = n_half
+        while idx < n:
+            if idx < len(all_data):
+                an_data.append(all_data[idx])
+            else:
+                an_data.append(0)
+            idx += 1
+
+    print(f"CP{pid}: n={n}, n_half={n_half}, ac_len={len(ac_data)}, an_len={len(an_data)}")
+
+    mhe_setup_bytes = m.stats.bytes_sent
+    mhe_setup_sends = m.stats.send_requests
+    mhe_setup_receives = m.stats.receive_requests
+    m.stats.reset_stats()
+
+    if len(ac_data) > 0:
+        ac_vec = array(ac_data, dtype=int)
+        an_vec = array(an_data, dtype=int)
+    else:
+        ac_vec = zeros((n_half,), dtype=int)
+        an_vec = zeros((n_half,), dtype=int)
+    zero_vec = zeros((n_half,), dtype=int)
+
+    t_compute_start = time.time()
+
+    ac_1 = ST.enc(m, ac_vec if pid == 1 else zero_vec, 1, m.default_mpc_modulus)
+    ac_2 = ST.enc(m, ac_vec if pid == 2 else zero_vec, 2, m.default_mpc_modulus)
+    an_1 = ST.enc(m, an_vec if pid == 1 else zero_vec, 1, m.default_mpc_modulus)
+    an_2 = ST.enc(m, an_vec if pid == 2 else zero_vec, 2, m.default_mpc_modulus)
+
+    numerator = secure_add(m, ac_1, ac_2)
+    denominator = secure_add(m, an_1, an_2)
+    result = secure_div(m, numerator, denominator)
+
+    t_compute_done = time.time()
+    t_end = time.time()
+
+    if pid in (1, 2):
+        revealed = result.reveal(m).tolist()
+        af_list: List[float] = []
+        for x in revealed:
+            af_list.append(float(x))
+
+        if n_half <= 10:
+            for i in range(n_half):
+                print(f"CP{pid}: row {i}: AF={af_list[i]:.6f}")
+        else:
+            print(f"CP{pid}: first 3 AF values: {af_list[0]:.6f}, {af_list[1]:.6f}, {af_list[2]:.6f}")
+            print(f"CP{pid}: last AF value: {af_list[n_half-1]:.6f}")
+
+        setup_s = t_setup - t_start
+        compute_s = t_compute_done - t_compute_start
+        total_s = t_end - t_start
+
+        comp_bytes = m.stats.bytes_sent
+        comp_sends = m.stats.send_requests
+        comp_recvs = m.stats.receive_requests
+        total_bytes = mhe_setup_bytes + comp_bytes
+        total_sends = mhe_setup_sends + comp_sends
+        total_recvs = mhe_setup_receives + comp_recvs
+        comp_mb = comp_bytes / (1024.0 * 1024.0)
+        total_mb = total_bytes / (1024.0 * 1024.0)
+
+        print(f"\n=== BENCHMARK CP{pid} (SMPC+SecureDiv, N={n_half}) ===")
+        print(f"METRIC mode SMPC")
+        print(f"METRIC num_rows {n_half}")
+        print(f"METRIC setup_time_s {setup_s:.4f}")
+        print(f"METRIC compute_time_s {compute_s:.4f}")
+        print(f"METRIC total_time_s {total_s:.4f}")
+        print(f"METRIC compute_bytes {comp_bytes}")
+        print(f"METRIC compute_sends {comp_sends}")
+        print(f"METRIC compute_receives {comp_recvs}")
+        print(f"METRIC total_bytes {total_bytes}")
+        print(f"METRIC total_sends {total_sends}")
+        print(f"METRIC total_receives {total_recvs}")
+        print(f"METRIC compute_mb {comp_mb:.6f}")
+        print(f"METRIC total_mb {total_mb:.6f}")
+        if compute_s > 0.0:
+            print(f"METRIC throughput_mb_per_s {comp_mb / compute_s:.4f}")
+            print(f"METRIC throughput_msgs_per_s {float(comp_sends) / compute_s:.2f}")
+        print(f"=== END BENCHMARK CP{pid} ===")
+
+        print(f"CP{pid}: result length={len(af_list)}")
+        if output_path:
+            save_json_floats(output_path, af_list)
+            print(f"CP{pid}: saved allele frequencies to {output_path}")
+
+    m.done()
+
+
+main()

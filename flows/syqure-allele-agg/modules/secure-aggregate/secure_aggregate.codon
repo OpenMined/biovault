@@ -1,12 +1,19 @@
-from sequre import sequre, mpc, Sharetensor as ST
-from numpy.create import array, zeros, zeros_like
+import math
 import os
+import time
+
+from numpy.create import array
+
+import sequre.lattiseq.ckks as ckks
+
+from sequre import mpc
+from sequre.types.ciphertensor import Ciphertensor
+
+
+CHEBYSHEV_DEGREE = 8
 
 
 def load_json(path: str) -> List[int]:
-    """Load JSON array of ints from file. Pure Codon - no Python dependency."""
-    if not path:
-        return []
     content = open(path).read().strip()
     if not content or content == "[]":
         return []
@@ -21,8 +28,14 @@ def load_json(path: str) -> List[int]:
     return result
 
 
-def save_json(path: str, data: List[int]):
-    """Write JSON array to file. Pure Codon - no Python dependency."""
+def to_floats(data: List[int]) -> List[float]:
+    result: List[float] = []
+    for x in data:
+        result.append(float(x))
+    return result
+
+
+def save_json_floats(path: str, data: List[float]):
     parts: List[str] = []
     for x in data:
         parts.append(str(x))
@@ -56,18 +69,107 @@ def getenv_positive_int(name: str, default_value: int) -> int:
     return value if value > 0 else default_value
 
 
-@sequre
-def add(m, a, b):
-    return a + b
+def read_bounds_manifest(manifest_path: str) -> Tuple[float, float]:
+    """Read AN bounds manifest. Each line: 'datasite\\tpath'.
+    Each bounds file has two lines: min_an and max_an.
+    Returns (sum_of_mins, sum_of_maxes)."""
+    if not manifest_path:
+        return (0.0, 0.0)
+    try:
+        content = open(manifest_path).read().strip()
+    except:
+        return (0.0, 0.0)
+    if not content:
+        return (0.0, 0.0)
+
+    total_min = 0.0
+    total_max = 0.0
+    count = 0
+    for line in content.split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split("\t")
+        if len(parts) < 2:
+            continue
+        bounds_path = parts[1].strip()
+        if not bounds_path:
+            continue
+        try:
+            bounds_content = open(bounds_path).read().strip()
+            bounds_lines = bounds_content.split("\n")
+            if len(bounds_lines) >= 2:
+                total_min += float(bounds_lines[0].strip())
+                total_max += float(bounds_lines[1].strip())
+                count += 1
+        except:
+            continue
+
+    print(f"read_bounds_manifest: read {count} bounds files, sum_min={total_min}, sum_max={total_max}")
+    return (total_min, total_max)
+
+
+def chebyshev_nodes_plain(n: int, a: float, b: float) -> List[float]:
+    cx = 0.5 * (a + b)
+    cy = 0.5 * (b - a)
+    nodes: List[float] = []
+    for k in range(1, n + 1):
+        nodes.append(cx + cy * math.cos((float(k) - 0.5) * (math.pi / float(n))))
+    return nodes
+
+
+def chebyshev_coeffs_inv(nodes: List[float], a: float, b: float) -> List[float]:
+    n = len(nodes)
+    coeffs = [0.0 for _ in range(n)]
+    y: List[float] = []
+    for node in nodes:
+        y.append(1.0 / node)
+
+    for i in range(n):
+        u = (2.0 * nodes[i] - a - b) / (b - a)
+        t_prev = 1.0
+        t = u
+        for j in range(n):
+            coeffs[j] += y[i] * t_prev
+            t_next = 2.0 * u * t - t_prev
+            t_prev = t
+            t = t_next
+
+    coeffs[0] /= float(n)
+    for i in range(1, n):
+        coeffs[i] *= (2.0 / float(n))
+    return coeffs
+
+
+def chebyshev_evaluate_ct(m, x, coeffs: List[float], a: float, b: float):
+    n = len(coeffs)
+    scale = 2.0 / (b - a)
+    offset = (a + b) / (b - a)
+    scaled_x = x.mul(m, scale).sub(m, offset)
+
+    w_2 = scaled_x.mul(m, coeffs[n - 1] * 2.0).add(m, coeffs[n - 2])
+    w_1 = scaled_x.mul(m, w_2).mul(m, 2.0).sub(m, coeffs[n - 1] - coeffs[n - 3])
+    w_0 = scaled_x.mul(m, w_1).mul(m, 2.0).sub(m, w_2).add(m, coeffs[n - 4])
+
+    for i in range(n - 5, -1, -1):
+        w_2 = w_1
+        w_1 = w_0
+        w_0 = scaled_x.mul(m, w_1).mul(m, 2.0).sub(m, w_2).add(m, coeffs[i])
+
+    return w_0.sub(m, scaled_x.mul(m, w_1))
 
 
 def main():
+    t_start = time.time()
     m = mpc()
+    t_setup = time.time()
+
     pid = m.pid
 
     counts_path = os.getenv("SEQURE_INPUT_COUNTS", "")
     array_length_path = os.getenv("SEQURE_INPUT_ARRAY_LENGTH", "")
     array_length_fallback = os.getenv("SEQURE_ARRAY_LENGTH", "")
+    an_bounds_manifest = os.getenv("SEQURE_INPUT_AN_BOUNDS", "")
     output_path = os.getenv("SEQURE_OUTPUT_AGGREGATED_COUNTS", "")
 
     expected_n = read_positive_int_file(array_length_path)
@@ -77,6 +179,13 @@ def main():
         except:
             expected_n = 0
 
+    a_interval, b_interval = read_bounds_manifest(an_bounds_manifest)
+    if a_interval <= 0.0:
+        a_interval = 1.0
+    if b_interval <= a_interval:
+        b_interval = a_interval + 1000.0
+    print(f"CP{pid}: Chebyshev interval: a={a_interval}, b={b_interval}")
+
     all_data: List[int] = []
     if pid == 1 or pid == 2:
         all_data = load_json(counts_path)
@@ -84,13 +193,10 @@ def main():
     n = expected_n if expected_n > 0 else len(all_data)
     if n < 0:
         n = 0
-    chunk_size = getenv_positive_int("SEQURE_CHUNK_SIZE", 65536)
-    if chunk_size > n and n > 0:
-        chunk_size = n
+    n_half = n // 2
 
     data: List[int] = []
     if pid == 1 or pid == 2:
-        # Pad/truncate to the declared master length so both clients match index space.
         idx = 0
         while idx < n:
             if idx < len(all_data):
@@ -98,53 +204,131 @@ def main():
             else:
                 data.append(0)
             idx += 1
-        print(f"CP{pid}: n={n}, loaded={len(all_data)}, using={len(data)}")
-    else:
-        print(f"CP{pid}: dealer (no input), n={n}")
 
-    m.comms.sync_parties()
-    print(f"CP{pid}: starting SMPC aggregation with n={n}, chunk_size={chunk_size}")
-    result: List[int] = []
-    pos = 0
-    while pos < n:
-        end = pos + chunk_size
-        if end > n:
-            end = n
-        width = end - pos
-
-        chunk: List[int] = []
-        idx = pos
-        while idx < end:
+    ac_data: List[int] = []
+    an_data: List[int] = []
+    if pid == 1 or pid == 2:
+        idx = 0
+        while idx < n_half:
             if idx < len(data):
-                chunk.append(data[idx])
+                ac_data.append(data[idx])
             else:
-                chunk.append(0)
+                ac_data.append(0)
+            idx += 1
+        idx = n_half
+        while idx < n:
+            if idx < len(data):
+                an_data.append(data[idx])
+            else:
+                an_data.append(0)
             idx += 1
 
-        if len(chunk) == 0:
-            data_vec = zeros((width,), dtype=int)
+    ac_f = to_floats(ac_data) if len(ac_data) > 0 else [0.0 for _ in range(n_half)]
+    an_f = to_floats(an_data) if len(an_data) > 0 else [0.0 for _ in range(n_half)]
+
+    print(f"CP{pid}: n={n}, n_half={n_half}, ac_len={len(ac_f)}, an_len={len(an_f)}")
+
+    mhe_setup_bytes = m.stats.bytes_sent
+    mhe_setup_sends = m.stats.send_requests
+    mhe_setup_receives = m.stats.receive_requests
+    m.stats.reset_stats()
+
+    nodes = chebyshev_nodes_plain(CHEBYSHEV_DEGREE + 1, a_interval, b_interval)
+    coeffs = chebyshev_coeffs_inv(nodes, a_interval, b_interval)
+
+    if pid > 0:
+        t_enc_start = time.time()
+        ac_ct = Ciphertensor[ckks.Ciphertext].enc(m, array(ac_f))
+        an_ct = Ciphertensor[ckks.Ciphertext].enc(m, array(an_f))
+        t_enc_done = time.time()
+
+        t_comm_start = time.time()
+        if pid == 1:
+            other_ac = m.comms.receive_as_jar(2, Ciphertensor[ckks.Ciphertext])
+            other_an = m.comms.receive_as_jar(2, Ciphertensor[ckks.Ciphertext])
+            total_ac_ct = ac_ct.add(m, other_ac)
+            total_an_ct = an_ct.add(m, other_an)
+            m.comms.send_as_jar(total_ac_ct, 2)
+            m.comms.send_as_jar(total_an_ct, 2)
         else:
-            data_vec = array(chunk, dtype=int)
-        zero_vec = zeros_like(data_vec)
+            m.comms.send_as_jar(ac_ct, 1)
+            m.comms.send_as_jar(an_ct, 1)
+            total_ac_ct = m.comms.receive_as_jar(1, Ciphertensor[ckks.Ciphertext])
+            total_an_ct = m.comms.receive_as_jar(1, Ciphertensor[ckks.Ciphertext])
+        t_comm_done = time.time()
 
-        v1 = data_vec if pid == 1 else zero_vec
-        v2 = data_vec if pid == 2 else zero_vec
+        t_div_start = time.time()
+        inv_den = chebyshev_evaluate_ct(m, total_an_ct, coeffs, a_interval, b_interval)
+        result_ct = total_ac_ct.mul(m, inv_den)
+        t_div_done = time.time()
 
-        s1 = ST.enc(m, v1, 1, m.default_mpc_modulus)
-        s2 = ST.enc(m, v2, 2, m.default_mpc_modulus)
-        total = add(m, s1, s2)
-        revealed = total.reveal(m).tolist()
-        for x in revealed:
-            result.append(int(x))
+        t_reveal_start = time.time()
+        af_list_raw = result_ct.reveal(m, T=float).flatten().tolist()
+        t_reveal_done = time.time()
 
-        if pid == 1 or pid == 2:
-            print(f"CP{pid}: processed {end}/{n}")
-        pos = end
+        af_list: List[float] = []
+        for x in af_list_raw:
+            af_list.append(float(x))
 
-    print(f"CP{pid}: result length={len(result)}")
-    if output_path:
-        save_json(output_path, result)
-        print(f"CP{pid}: saved aggregated counts to {output_path}")
+        t_end = time.time()
+
+        if n_half <= 10:
+            for i in range(n_half):
+                print(f"CP{pid}: row {i}: AF={af_list[i]:.6f}")
+        else:
+            print(f"CP{pid}: first 3 AF values: {af_list[0]:.6f}, {af_list[1]:.6f}, {af_list[2]:.6f}")
+            print(f"CP{pid}: last AF value: {af_list[n_half-1]:.6f}")
+
+        setup_s = t_setup - t_start
+        enc_s = t_enc_done - t_enc_start
+        comm_s = t_comm_done - t_comm_start
+        div_s = t_div_done - t_div_start
+        reveal_s = t_reveal_done - t_reveal_start
+        total_s = t_end - t_start
+        compute_s = enc_s + comm_s + div_s + reveal_s
+
+        comp_bytes = m.stats.bytes_sent
+        comp_sends = m.stats.send_requests
+        comp_recvs = m.stats.receive_requests
+        total_bytes = mhe_setup_bytes + comp_bytes
+        total_sends = mhe_setup_sends + comp_sends
+        total_recvs = mhe_setup_receives + comp_recvs
+        comp_mb = comp_bytes / (1024.0 * 1024.0)
+        total_mb = total_bytes / (1024.0 * 1024.0)
+
+        print(f"\n=== BENCHMARK CP{pid} (HE+Chebyshev, N={n_half}) ===")
+        print(f"METRIC mode HE")
+        print(f"METRIC num_rows {n_half}")
+        print(f"METRIC chebyshev_degree {CHEBYSHEV_DEGREE}")
+        print(f"METRIC a_interval {a_interval}")
+        print(f"METRIC b_interval {b_interval}")
+        print(f"METRIC setup_time_s {setup_s:.4f}")
+        print(f"METRIC encryption_time_s {enc_s:.4f}")
+        print(f"METRIC communication_time_s {comm_s:.4f}")
+        print(f"METRIC division_time_s {div_s:.4f}")
+        print(f"METRIC reveal_time_s {reveal_s:.4f}")
+        print(f"METRIC compute_time_s {compute_s:.4f}")
+        print(f"METRIC total_time_s {total_s:.4f}")
+        print(f"METRIC mhe_setup_bytes {mhe_setup_bytes}")
+        print(f"METRIC mhe_setup_sends {mhe_setup_sends}")
+        print(f"METRIC mhe_setup_receives {mhe_setup_receives}")
+        print(f"METRIC compute_bytes {comp_bytes}")
+        print(f"METRIC compute_sends {comp_sends}")
+        print(f"METRIC compute_receives {comp_recvs}")
+        print(f"METRIC total_bytes {total_bytes}")
+        print(f"METRIC total_sends {total_sends}")
+        print(f"METRIC total_receives {total_recvs}")
+        print(f"METRIC compute_mb {comp_mb:.6f}")
+        print(f"METRIC total_mb {total_mb:.6f}")
+        if comm_s > 0.0:
+            print(f"METRIC throughput_mb_per_s {comp_mb / comm_s:.4f}")
+            print(f"METRIC throughput_msgs_per_s {float(comp_sends) / comm_s:.2f}")
+        print(f"=== END BENCHMARK CP{pid} ===")
+
+        print(f"CP{pid}: result length={len(af_list)}")
+        if output_path:
+            save_json_floats(output_path, af_list)
+            print(f"CP{pid}: saved allele frequencies to {output_path}")
 
     m.done()
 

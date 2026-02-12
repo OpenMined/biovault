@@ -2,14 +2,15 @@ apiVersion: syftbox.openmined.org/v1alpha1
 kind: Module
 metadata:
   name: secure-aggregate
-  version: 0.1.1
-  description: Secure multi-party aggregation using Syqure MPC
+  version: 0.2.0
+  description: Secure multi-party aggregation using Syqure SMPC (additive secret sharing + secure division)
 spec:
   runner:
     runtime: syqure
     entrypoint: secure_aggregate.codon
     syqure:
       transport: hotlink
+      skip_mhe_setup: true
   assets:
     - path: secure_aggregate.codon
   inputs:
@@ -20,13 +21,10 @@ spec:
     - name: array_length
       type: String
       description: Number of elements to aggregate (from build_master)
-    - name: an_bounds
-      type: File
-      description: Manifest of AN bounds files from all clients for Chebyshev interval
   outputs:
     - name: aggregated_counts
       type: File
       format: { kind: json }
       path: aggregated_counts.json
       optional: true
-      description: Aggregated sum (clients only; dealer does not emit)
+      description: Aggregated allele frequencies (clients only; dealer does not emit)

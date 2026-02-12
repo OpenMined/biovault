@@ -1,9 +1,9 @@
 apiVersion: syftbox.openmined.org/v1alpha1
 kind: Flow
 metadata:
-  name: syqure-allele-agg
-  version: 0.1.0
-  description: Multiparty allele aggregation from participant-provided allele_freq.tsv inputs (no Nextflow genotype stage).
+  name: syqure-allele-agg-smpc
+  version: 0.2.0
+  description: Multiparty allele aggregation using SMPC (additive secret sharing + secure division) from participant-provided allele_freq.tsv inputs.
 
 spec:
   vars:
@@ -90,8 +90,6 @@ spec:
         outputs:
           - name: aligned_counts
             type: File
-          - name: an_bounds
-            type: String
       assets:
         - path: module.yaml
         - path: run.sh
@@ -109,8 +107,6 @@ spec:
             type: File
           - name: array_length
             type: String
-          - name: an_bounds
-            type: File
         outputs:
           - name: aggregated_counts
             type: File
@@ -188,13 +184,6 @@ spec:
       with:
         union_index: step.build_master.share.union_index_shared
         allele_freq_tsv: inputs.allele_freq_tsv
-      share:
-        an_bounds_shared:
-          source: self.outputs.an_bounds
-          url: "{vars.step_path}/an_bounds.txt"
-          permissions:
-            read: ["{datasites[*]}"]
-            write: ["{datasite.current}"]
 
     - id: mpc_barrier
       barrier:
@@ -213,8 +202,6 @@ spec:
           only: clients
         array_length:
           value: step.build_master.share.count_shared
-        an_bounds:
-          value: step.align_counts.share.an_bounds_shared.url_list
       share:
         result_shared:
           source: self.outputs.aggregated_counts

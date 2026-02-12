@@ -1,0 +1,20 @@
+apiVersion: syftbox.openmined.org/v1alpha1
+kind: Module
+metadata:
+  name: share-data
+  version: 0.1.0
+spec:
+  runner:
+    template: shell
+    entrypoint: run.sh
+  assets:
+    - path: run.sh
+  inputs:
+    - name: allele_freq_tsv
+      type: File
+      format: { kind: tsv }
+  outputs:
+    - name: allele_freq_tsv
+      type: File
+      format: { kind: tsv }
+      path: allele_freq.tsv
