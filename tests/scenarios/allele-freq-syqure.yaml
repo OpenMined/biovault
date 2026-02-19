@@ -1,6 +1,15 @@
 setup:
   server:
     - |
+      export SYFTBOX_HOTLINK="${BV_SYFTBOX_HOTLINK:-1}"
+      export SYFTBOX_HOTLINK_SOCKET_ONLY=1
+      export SYFTBOX_HOTLINK_TCP_PROXY="${BV_SYQURE_TCP_PROXY:-1}"
+      export SYFTBOX_HOTLINK_TCP_PROXY_ADDR="${BV_SYFTBOX_HOTLINK_TCP_PROXY_ADDR:-127.0.0.1}"
+      export SYFTBOX_HOTLINK_QUIC="${BV_SYFTBOX_HOTLINK_QUIC:-1}"
+      export SYFTBOX_HOTLINK_P2P_ONLY="${BV_SYFTBOX_HOTLINK_P2P_ONLY:-${BV_SYFTBOX_HOTLINK_QUIC_ONLY:-0}}"
+      export SYFTBOX_HOTLINK_QUIC_ONLY="${BV_SYFTBOX_HOTLINK_QUIC_ONLY:-${BV_SYFTBOX_HOTLINK_P2P_ONLY:-0}}"
+      export BV_SYQURE_TCP_PROXY="${BV_SYQURE_TCP_PROXY:-1}"
+
       if [[ "${BV_DEVSTACK_RESET:-1}" == "1" ]]; then
         ./tests/scripts/devstack.sh --reset --clients client1@sandbox.local,client2@sandbox.local,aggregator@sandbox.local
       else
@@ -98,6 +107,7 @@ steps:
           BV_FLOW_SKIP_DONE=1 \
           BV_SYQURE_USE_DOCKER=${BV_SYQURE_USE_DOCKER:-} \
             {{workspace}}/cli/target/release/bv run flows/multiparty-allele-freq/flow.yaml \
+            --set inputs.genotype_files="{{sandbox}}/client1@sandbox.local/private/app_data/biovault/allele-freq-data/samplesheet.csv" \
             --results-dir "$RESULTS_DIR"
 
       - name: client2-flow
@@ -110,6 +120,7 @@ steps:
           BV_FLOW_SKIP_DONE=1 \
           BV_SYQURE_USE_DOCKER=${BV_SYQURE_USE_DOCKER:-} \
             {{workspace}}/cli/target/release/bv run flows/multiparty-allele-freq/flow.yaml \
+            --set inputs.genotype_files="{{sandbox}}/client2@sandbox.local/private/app_data/biovault/allele-freq-data/samplesheet.csv" \
             --results-dir "$RESULTS_DIR"
 
       - name: aggregator-flow
