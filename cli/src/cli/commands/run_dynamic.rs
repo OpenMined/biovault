@@ -5693,7 +5693,10 @@ fn execute_syqure_native(
         Some(Duration::from_secs(syqure_timeout_s))
     };
     let timeout_log = match syqure_timeout {
-        Some(_) => format!("syqure_timeout_s={} party_id={}", syqure_timeout_s, party_id),
+        Some(_) => format!(
+            "syqure_timeout_s={} party_id={}",
+            syqure_timeout_s, party_id
+        ),
         None => format!("syqure_timeout=disabled party_id={}", party_id),
     };
     append_syqure_runner_log(syqure_log_path.as_ref(), &timeout_log);

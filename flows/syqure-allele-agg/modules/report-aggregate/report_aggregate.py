@@ -67,7 +67,11 @@ def main() -> int:
 
     if len(agg_raw) == n:
         # New format: pre-computed allele frequencies from HE+Chebyshev
-        agg_af = [float(x) for x in agg_raw]
+        agg_af_raw = [float(x) for x in agg_raw]
+        out_of_range = sum(1 for x in agg_af_raw if x < 0.0 or x > 1.0)
+        agg_af = [max(0.0, min(1.0, x)) for x in agg_af_raw]
+        if out_of_range > 0:
+            print(f"Clamped {out_of_range}/{n} AF values to [0, 1]")
         agg_ac = None
         agg_an = None
         mode = "af_direct"
