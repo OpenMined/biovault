@@ -40,6 +40,28 @@ else:
     ac = [0 for _ in range(n)]
     an = [0 for _ in range(n)]
 
+# Clamp low-sample-size rows for tighter Chebyshev interval
+# Uses percentile-based threshold: P(BV_AN_CLAMP_PERCENTILE) of positive AN values
+clamp_pct = float(os.environ.get("BV_AN_CLAMP_PERCENTILE", "1.0"))
+an_positive_sorted = sorted(v for v in an if v > 0)
+if an_positive_sorted and clamp_pct > 0:
+    pct_idx = max(0, int(clamp_pct / 100.0 * len(an_positive_sorted)))
+    an_threshold = an_positive_sorted[pct_idx]
+else:
+    an_threshold = 0
+
+clamped_count = 0
+if an_threshold > 0:
+    for i in range(n):
+        if an[i] > 0 and an[i] < an_threshold:
+            ac[i] = 0
+            an[i] = an_threshold
+            clamped_count += 1
+if clamped_count > 0:
+    print(f"Clamped {clamped_count}/{n} rows with AN < {an_threshold} (P{clamp_pct}, AC→0, AN→{an_threshold})")
+else:
+    print(f"No rows clamped (threshold={an_threshold} from P{clamp_pct})")
+
 # Concatenate AC and AN into single vector: [ac..., an...]
 combined = ac + an
 
@@ -52,8 +74,6 @@ if force_len_raw:
         raise SystemExit(
             f"BV_ALLELE_FREQ_FORCE_ARRAY_LENGTH must be > 0, got {force_len}"
         )
-    # Prefer non-zero values for debug visibility so tiny-vector smoke tests
-    # still exercise arithmetic instead of all-zero paths.
     non_zero = [v for v in combined if v != 0]
     if len(non_zero) >= force_len:
         combined = non_zero[:force_len]
@@ -67,10 +87,10 @@ if force_len_raw:
 out_counts.write_text(json.dumps(combined, separators=(",", ":")) + "\n", encoding="utf-8")
 print(f"Aligned counts: {n} loci, {len(combined)} total elements (AC+AN concatenated)")
 
-# Compute and output AN bounds for Chebyshev interval
+# Compute and output AN bounds for Chebyshev interval (post-clamping)
 an_positive = [v for v in an if v > 0]
-an_min = min(an_positive) if an_positive else 0
-an_max = max(an_positive) if an_positive else 0
+an_min = min(an_positive) if an_positive else max(an_threshold, 1)
+an_max = max(an_positive) if an_positive else max(an_threshold, 1)
 out_an_bounds = Path(os.environ.get("BV_OUTPUT_AN_BOUNDS", "an_bounds.txt"))
 out_an_bounds.write_text(f"{an_min}\n{an_max}\n", encoding="utf-8")
-print(f"AN bounds: min={an_min}, max={an_max} (from {len(an_positive)} positive values)")
+print(f"AN bounds: min={an_min}, max={an_max} (P{clamp_pct} threshold={an_threshold}, {len(an_positive)} positive values)")
