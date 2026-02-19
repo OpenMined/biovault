@@ -13,7 +13,7 @@ use crate::syftbox::endpoint::Endpoint;
 use crate::syftbox::storage::WritePolicy;
 use crate::syftbox::types::{RpcRequest, RpcResponse};
 use syftbox_sdk::trace_context;
-use syftbox_sdk::{has_syc_magic, parse_envelope};
+use syftbox_sdk::{has_sbc_magic, parse_envelope};
 
 use super::db::MessageDb;
 use super::models::{
@@ -422,7 +422,7 @@ impl MessageSync {
         };
 
         // Try to parse the envelope
-        if has_syc_magic(raw_bytes) {
+        if has_sbc_magic(raw_bytes) {
             if let Ok(parsed) = parse_envelope(raw_bytes) {
                 sender_identity = parsed.prelude.sender.identity.clone();
                 sender_fingerprint = parsed.prelude.sender.ik_fingerprint.clone();

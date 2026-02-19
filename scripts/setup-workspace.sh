@@ -93,7 +93,7 @@ if should_include_syqure && [[ -d "$PARENT_DIR/syqure/.git" ]]; then
     git -C "$PARENT_DIR/syqure" submodule update --init --recursive
 fi
 
-# Setup syftbox-sdk's own dependencies (syft-crypto-core)
+# Setup syftbox-sdk's own dependencies (syftbox-crypto)
 if [[ -f "$PARENT_DIR/syftbox-sdk/scripts/setup-workspace.sh" ]]; then
     echo "Setting up syftbox-sdk dependencies..."
     chmod +x "$PARENT_DIR/syftbox-sdk/scripts/setup-workspace.sh"

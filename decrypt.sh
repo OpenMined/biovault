@@ -6,17 +6,17 @@ set -euo pipefail
 #
 # Examples:
 #   ./decrypt.sh client2@sandbox.local/app_data/biovault/rpc/message/abc.response
-#   ./decrypt.sh client1@sandbox.local/shared/biovault/submissions/foo/bar.response --vault sandbox/client1@sandbox.local/.syc
+#   ./decrypt.sh client1@sandbox.local/shared/biovault/submissions/foo/bar.response --vault sandbox/client1@sandbox.local/.sbc
 #
 # Defaults assume sandbox layout under the repo root:
-#   vault:       sandbox/<email>/.syc       (derived from the first path component)
+#   vault:       sandbox/<email>/.sbc       (derived from the first path component)
 #   data-root:   sandbox/<email>/datasites  (derived from the first path component)
 #   shadow-root: sandbox/<email>/unencrypted
 #   identity:    <email> (derived from the first path component)
 #   output:      stdout (omit --output to print)
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SYC_BIN=syc
+SBC_BIN=sbc
 
 if [[ $# -lt 1 ]]; then
   echo "Usage: $0 <relative-path-under-datasites> [--vault PATH] [--data-root DIR] [--shadow-root DIR] [--identity EMAIL] [--output FILE]" >&2
@@ -41,7 +41,7 @@ elif [[ "$trimmed" == "$host/"* ]]; then
   rel="${trimmed#${host}/}"
 fi
 
-vault="sandbox/${host}/.syc"
+vault="sandbox/${host}/.sbc"
 data_root="sandbox/${host}/datasites"
 shadow_root="sandbox/${host}/unencrypted"
 identity="$host"
@@ -59,7 +59,7 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
-cmd=("$SYC_BIN" bytes read
+cmd=("$SBC_BIN" bytes read
   --vault "$vault"
   --data-root "$data_root"
   --shadow-root "$shadow_root"
@@ -83,7 +83,7 @@ else
   printf '%s\n' "$content"
 fi
 
-# Decode JSON body if present (best-effort). Strip non-JSON lines (e.g., syc logs) first.
+# Decode JSON body if present (best-effort). Strip non-JSON lines (e.g., sbc logs) first.
 python3 <<PY
 import base64, json
 content = """$content"""

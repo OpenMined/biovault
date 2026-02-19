@@ -994,7 +994,7 @@ def run_step(step: Dict[str, Any], variables: Dict[str, str]):
 
         raise SystemExit(f"Timeout waiting for: {wait_path}")
 
-    # Handle assert_no_encrypted: check that files/directory have no SYC1 headers
+    # Handle assert_no_encrypted: check that files/directory have no SBC1 headers
     if assert_no_encrypted:
         import glob
         expanded = replace_vars(assert_no_encrypted, variables)
@@ -1014,13 +1014,13 @@ def run_step(step: Dict[str, Any], variables: Dict[str, str]):
         else:
             files_to_check = [check_path] if check_path.exists() else []
 
-        # Check each file for SYC1 header
+        # Check each file for SBC1 header
         encrypted_files = []
         for file_path in files_to_check:
             try:
                 with open(file_path, 'rb') as f:
                     header = f.read(4)
-                    if header == b'SYC1':
+                    if header == b'SBC1':
                         encrypted_files.append(file_path)
             except Exception:
                 pass  # Skip files we can't read
@@ -1034,7 +1034,7 @@ def run_step(step: Dict[str, Any], variables: Dict[str, str]):
         print(f"OK: No encrypted files in: {expanded}")
         return
 
-    # Handle assert_encrypted: check that files have SYC1 headers
+    # Handle assert_encrypted: check that files have SBC1 headers
     if assert_encrypted:
         import glob
         expanded = replace_vars(assert_encrypted, variables)
@@ -1057,13 +1057,13 @@ def run_step(step: Dict[str, Any], variables: Dict[str, str]):
         if not files_to_check:
             raise SystemExit(f"No files found to check: {check_path}")
 
-        # Check each file for SYC1 header
+        # Check each file for SBC1 header
         unencrypted_files = []
         for file_path in files_to_check:
             try:
                 with open(file_path, 'rb') as f:
                     header = f.read(4)
-                    if header != b'SYC1':
+                    if header != b'SBC1':
                         unencrypted_files.append(file_path)
             except Exception:
                 unencrypted_files.append(file_path)  # Assume unencrypted if can't read

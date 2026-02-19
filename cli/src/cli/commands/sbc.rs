@@ -1,12 +1,12 @@
 use crate::config::Config;
-use crate::syftbox::syc as syc_utils;
+use crate::syftbox::sbc as sbc_utils;
 use crate::Result;
 use anyhow::Context;
 use clap::Subcommand;
 use std::path::PathBuf;
 
 #[derive(Subcommand, Debug)]
-pub enum SycCommands {
+pub enum SbcCommands {
     /// Import another participant's public crypto bundle
     Import {
         #[arg(help = "Path to the bundle JSON (e.g., datasites/<email>/public/crypto/did.json)")]
@@ -25,17 +25,17 @@ pub enum SycCommands {
     },
 }
 
-pub async fn handle(command: SycCommands, config: &Config) -> Result<()> {
+pub async fn handle(command: SbcCommands, config: &Config) -> Result<()> {
     match command {
-        SycCommands::Import {
+        SbcCommands::Import {
             bundle,
             expected_identity,
         } => {
             let data_root = config.get_syftbox_data_dir()?;
-            let encrypted_root = syc_utils::resolve_encrypted_root(&data_root);
+            let encrypted_root = sbc_utils::resolve_encrypted_root(&data_root);
             // Use the explicit Syft Crypto vault location.
-            let vault_path = crate::config::resolve_syc_vault_path()?;
-            let parsed = syc_utils::import_public_bundle(
+            let vault_path = crate::config::resolve_sbc_vault_path()?;
+            let parsed = sbc_utils::import_public_bundle(
                 &bundle,
                 expected_identity.as_deref(),
                 &vault_path,
@@ -46,7 +46,7 @@ pub async fn handle(command: SycCommands, config: &Config) -> Result<()> {
             println!("✓ Imported Syft Crypto bundle for {}", parsed.identity);
             println!("  fingerprint: {}", parsed.fingerprint);
         }
-        SycCommands::Read { file, output } => {
+        SbcCommands::Read { file, output } => {
             use crate::syftbox::storage::SyftBoxStorage;
 
             let data_dir = config.get_syftbox_data_dir()?;
