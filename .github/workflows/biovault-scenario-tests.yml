@@ -206,7 +206,7 @@ jobs:
         env:
           CONTAINERS_MACHINE_PROVIDER: hyperv
           BIOVAULT_CONTAINER_RUNTIME: podman
-          BIOVAULT_HYPERV_MOUNT: "1"
+          BIOVAULT_HYPERV_MOUNT: "0"
           BIOVAULT_SYQURE_KEEP_CONTAINERS: "1"
         run: .\win.ps1 ./test-scenario.sh --client-mode ${{ matrix.client_mode }} ${{ matrix.scenario }}
 

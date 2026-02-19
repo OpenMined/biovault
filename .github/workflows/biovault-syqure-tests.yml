@@ -18,8 +18,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # - os: ubuntu-latest
-          #   runner: namespace-profile-linux-medium
+          - os: ubuntu-latest
+            runner: namespace-profile-linux-medium
           # - os: macos-latest
           #   runner: namespace-profile-mac-medium
           # - os: windows
@@ -175,7 +175,7 @@ jobs:
         env:
           CONTAINERS_MACHINE_PROVIDER: hyperv
           BIOVAULT_CONTAINER_RUNTIME: podman
-          BIOVAULT_HYPERV_MOUNT: "1"
+          BIOVAULT_HYPERV_MOUNT: "0"
           BIOVAULT_SYQURE_KEEP_CONTAINERS: "1"
         run: .\win.ps1 ./test-scenario.sh --docker tests/scenarios/syqure-distributed.yaml
 
