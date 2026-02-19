@@ -525,7 +525,7 @@ start_syftboxd() {
       SYFTBOX_EMAIL="$email" \
       SYFTBOX_DATA_DIR="$data_dir" \
       SYFTBOX_CONFIG_PATH="$config_path" \
-      SYC_VAULT="$data_dir/.syc" \
+      SBC_VAULT="$data_dir/.sbc" \
       BV_SYFTBOX_BACKEND=embedded \
       "$BV_BIN" syftboxd start </dev/null >/dev/null 2>&1
     ) || true

@@ -119,7 +119,7 @@ fn list_contacts(config: &Config, json_output: bool) -> Result<()> {
             let path = entry.path();
 
             if path.extension().map(|e| e == "json").unwrap_or(false) {
-                if let Ok(info) = crate::syftbox::syc::parse_public_bundle_file(&path) {
+                if let Ok(info) = crate::syftbox::sbc::parse_public_bundle_file(&path) {
                     contacts.push(ContactInfo {
                         identity: info.identity,
                         fingerprint: info.fingerprint,
@@ -193,7 +193,7 @@ fn scan_network(config: &Config, json_output: bool) -> Result<()> {
                 continue;
             }
 
-            if let Ok(remote_info) = crate::syftbox::syc::parse_public_bundle_file(&did_path) {
+            if let Ok(remote_info) = crate::syftbox::sbc::parse_public_bundle_file(&did_path) {
                 let slug = syftbox_sdk::sanitize_identity(&remote_info.identity);
 
                 // Skip current identity
@@ -205,7 +205,7 @@ fn scan_network(config: &Config, json_output: bool) -> Result<()> {
                 let is_imported = local_bundle_path.exists();
 
                 let has_changed = if is_imported {
-                    match crate::syftbox::syc::parse_public_bundle_file(&local_bundle_path) {
+                    match crate::syftbox::sbc::parse_public_bundle_file(&local_bundle_path) {
                         Ok(local_info) => local_info.fingerprint != remote_info.fingerprint,
                         Err(_) => false,
                     }
@@ -333,7 +333,7 @@ fn import_contact(config: &Config, identity: &str) -> Result<()> {
         );
     }
 
-    let remote_info = crate::syftbox::syc::parse_public_bundle_file(&did_path)
+    let remote_info = crate::syftbox::sbc::parse_public_bundle_file(&did_path)
         .context("Failed to parse DID file")?;
 
     let slug = syftbox_sdk::sanitize_identity(&remote_info.identity);

@@ -23,14 +23,14 @@ steps:
   - name: Client1 imports Client2 bundle
     datasite: client1@sandbox.local
     run: |
-      {{workspace}}/cli/target/release/bv syc import \
+      {{workspace}}/cli/target/release/bv sbc import \
         datasites/client2@sandbox.local/public/crypto/did.json \
         --expected-identity client2@sandbox.local
 
   - name: Client2 imports Client1 bundle
     datasite: client2@sandbox.local
     run: |
-      {{workspace}}/cli/target/release/bv syc import \
+      {{workspace}}/cli/target/release/bv sbc import \
         datasites/client1@sandbox.local/public/crypto/did.json \
         --expected-identity client1@sandbox.local
 
@@ -150,7 +150,7 @@ steps:
     run: |
       SUBDIR=$(ls datasites/client1@sandbox.local/shared/biovault/submissions | tail -n 1)
       RESULTS_PATH="datasites/client1@sandbox.local/shared/biovault/submissions/${SUBDIR}/results/ALL/line_counts.csv"
-      {{workspace}}/cli/target/release/bv syc read "$RESULTS_PATH"
+      {{workspace}}/cli/target/release/bv sbc read "$RESULTS_PATH"
 
   - name: Restrict results write access after receipt
     datasite: client1@sandbox.local

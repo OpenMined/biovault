@@ -990,6 +990,12 @@ pub async fn start(module_path: &str, python_version: &str) -> Result<()> {
         .env("XDG_RUNTIME_DIR", &runtime_dir)
         .env("VIRTUAL_ENV", &venv_path)
         .env("PATH", &combined_path)
+        // Keep notebook kernels quiet: test harnesses often set these for backend diagnostics,
+        // but they create noisy SyftBox crypto logs in Jupyter cell output.
+        .env_remove("BIOVAULT_DEV_SYFTBOX")
+        .env_remove("SYFTBOX_DEBUG_CRYPTO")
+        .env_remove("SYFTBOX_DEBUG")
+        .env_remove("BIOVAULT_DEV_MODE")
         // Ensure the runner's Python environment doesn't bleed into uv/venv processes.
         .env_remove("PYTHONHOME")
         .env_remove("PYTHONPATH")

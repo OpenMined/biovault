@@ -1,6 +1,6 @@
 use biovault::cli::commands::key::{handle, KeyCommands};
 use biovault::config::Config;
-use biovault::syftbox::syc::{parse_public_bundle_file, provision_local_identity};
+use biovault::syftbox::sbc::{parse_public_bundle_file, provision_local_identity};
 use std::sync::Mutex;
 use syftbox_sdk::{identity_material_from_recovery_key, SyftRecoveryKey};
 use tempfile::TempDir;
@@ -46,7 +46,7 @@ fn setup_config(email: &str) -> (TempDir, Config, EnvGuard, EnvGuard) {
     .unwrap();
     let env_guard = EnvGuard::set("SYFTBOX_CONFIG_PATH", syft_cfg.to_str().unwrap());
     let vault_guard = EnvGuard::set(
-        "SYC_VAULT",
+        "SBC_VAULT",
         temp.path().join("vault").to_string_lossy().as_ref(),
     );
 
@@ -71,7 +71,7 @@ fn generate_wipe_restore_round_trip() {
         .recovery_mnemonic
         .clone()
         .expect("mnemonic should be present");
-    let encrypted_root = syftbox_sdk::syftbox::syc::resolve_encrypted_root(&data_dir);
+    let encrypted_root = syftbox_sdk::syftbox::sbc::resolve_encrypted_root(&data_dir);
     let export_path = encrypted_root
         .join(&config.email)
         .join("public")

@@ -1,6 +1,6 @@
 use crate::config::{get_biovault_home, is_syftbox_env, Config};
 use crate::subscriptions;
-use crate::syftbox::syc;
+use crate::syftbox::sbc;
 use crate::Result;
 use anyhow::Context;
 use dialoguer::{theme::ColorfulTheme, Confirm, Input, Select};
@@ -86,7 +86,7 @@ pub async fn execute(email: Option<&str>, quiet: bool) -> Result<()> {
     }
 
     let config_file = biovault_dir.join("config.yaml");
-    let syc_vault = crate::config::resolve_syc_vault_path()?;
+    let sbc_vault = crate::config::resolve_sbc_vault_path()?;
 
     // Step 1: Create config.yaml if it doesn't exist
     let config = if config_file.exists() {
@@ -242,7 +242,7 @@ pub async fn execute(email: Option<&str>, quiet: bool) -> Result<()> {
                 if let Err(err) = ensure_default_syft_subscriptions(&data_root) {
                     eprintln!("⚠️  Unable to write default SyftBox subscriptions: {err}");
                 }
-                match syc::provision_local_identity(&config.email, &data_root, Some(&syc_vault)) {
+                match sbc::provision_local_identity(&config.email, &data_root, Some(&sbc_vault)) {
                     Ok(outcome) => {
                         if outcome.generated {
                             println!("✓ Generated Syft Crypto identity for {}", outcome.identity);
@@ -257,14 +257,14 @@ pub async fn execute(email: Option<&str>, quiet: bool) -> Result<()> {
                             "  Public bundle published at: {}",
                             outcome.public_bundle_path.display()
                         );
-                        println!("  Syft vault location: {}", syc_vault.display());
+                        println!("  Syft vault location: {}", sbc_vault.display());
                     }
                     Err(err) => {
                         eprintln!(
                             "⚠️  Unable to provision Syft Crypto identity automatically: {err}"
                         );
                         eprintln!(
-                        "    Run 'bv syc import --bundle <path> --expected-identity <email>' once your peer shares a bundle."
+                        "    Run 'bv sbc import --bundle <path> --expected-identity <email>' once your peer shares a bundle."
                     );
                     }
                 }

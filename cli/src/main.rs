@@ -52,7 +52,7 @@ mod tests {
     struct TestHomeGuard {
         _temp: TempDir,
         _syftbox_data_dir_prev: Option<String>,
-        _syc_vault_prev: Option<String>,
+        _sbc_vault_prev: Option<String>,
     }
 
     impl TestHomeGuard {
@@ -63,14 +63,14 @@ mod tests {
             biovault::config::set_test_biovault_home(&home);
             // Save previous env vars
             let syftbox_data_dir_prev = std::env::var("SYFTBOX_DATA_DIR").ok();
-            let syc_vault_prev = std::env::var("SYC_VAULT").ok();
-            // Set SYFTBOX_DATA_DIR and clear SYC_VAULT to avoid conflicts
+            let sbc_vault_prev = std::env::var("SBC_VAULT").ok();
+            // Set SYFTBOX_DATA_DIR and clear SBC_VAULT to avoid conflicts
             std::env::set_var("SYFTBOX_DATA_DIR", temp.path());
-            std::env::remove_var("SYC_VAULT");
+            std::env::remove_var("SBC_VAULT");
             Self {
                 _temp: temp,
                 _syftbox_data_dir_prev: syftbox_data_dir_prev,
-                _syc_vault_prev: syc_vault_prev,
+                _sbc_vault_prev: sbc_vault_prev,
             }
         }
     }
@@ -84,11 +84,11 @@ mod tests {
             } else {
                 std::env::remove_var("SYFTBOX_DATA_DIR");
             }
-            // Restore previous SYC_VAULT
-            if let Some(prev) = &self._syc_vault_prev {
-                std::env::set_var("SYC_VAULT", prev);
+            // Restore previous SBC_VAULT
+            if let Some(prev) = &self._sbc_vault_prev {
+                std::env::set_var("SBC_VAULT", prev);
             } else {
-                std::env::remove_var("SYC_VAULT");
+                std::env::remove_var("SBC_VAULT");
             }
         }
     }
@@ -531,9 +531,9 @@ enum Commands {
     },
 
     #[command(about = "Manage Syft Crypto vaults and bundles")]
-    Syc {
+    Sbc {
         #[command(subcommand)]
-        command: commands::syc::SycCommands,
+        command: commands::sbc::SbcCommands,
     },
 
     #[command(about = "Manage contacts (trusted peers)")]
@@ -1831,7 +1831,7 @@ async fn async_main_with(cli: Cli) -> Result<()> {
         .try_init();
 
     // Ensure Syft Crypto uses the BioVault-managed vault path by default
-    biovault::config::require_syc_vault_env()?;
+    biovault::config::require_sbc_vault_env()?;
 
     // Random version check on startup (10% chance)
     let _ = commands::update::check_and_notify_random().await;
@@ -2162,9 +2162,9 @@ async fn async_main_with(cli: Cli) -> Result<()> {
             let config = biovault::config::Config::load()?;
             commands::key::handle(command, &config).await?;
         }
-        Commands::Syc { command } => {
+        Commands::Sbc { command } => {
             let config = biovault::config::Config::load()?;
-            commands::syc::handle(command, &config).await?;
+            commands::sbc::handle(command, &config).await?;
         }
         Commands::Contacts { command } => {
             let config = biovault::config::Config::load()?;

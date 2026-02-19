@@ -1,5 +1,5 @@
 use crate::config::Config;
-use crate::syftbox::syc::{
+use crate::syftbox::sbc::{
     import_public_bundle, parse_public_bundle_file, provision_local_identity_with_options,
     restore_identity_from_mnemonic,
 };
@@ -24,7 +24,7 @@ pub enum KeyCommands {
         data_dir: Option<PathBuf>,
         #[arg(
             long,
-            help = "Override Syft Crypto vault path (defaults to datasites/.syc)"
+            help = "Override Syft Crypto vault path (defaults to datasites/.sbc)"
         )]
         vault: Option<PathBuf>,
         #[arg(long, help = "Force overwrite existing key material")]
@@ -466,7 +466,7 @@ fn resolve_paths(
     } else {
         config.get_syftbox_data_dir()?
     };
-    let encrypted_root = syftbox_sdk::syftbox::syc::resolve_encrypted_root(&data_root);
+    let encrypted_root = syftbox_sdk::syftbox::sbc::resolve_encrypted_root(&data_root);
     let vault_path = resolve_vault_default(vault_override)?;
     Ok((encrypted_root, vault_path))
 }
@@ -476,7 +476,7 @@ fn resolve_vault_only(
     vault_override: Option<&Path>,
 ) -> Result<(PathBuf, PathBuf)> {
     let data_root = config.get_syftbox_data_dir()?;
-    let encrypted_root = syftbox_sdk::syftbox::syc::resolve_encrypted_root(&data_root);
+    let encrypted_root = syftbox_sdk::syftbox::sbc::resolve_encrypted_root(&data_root);
     let vault_path = resolve_vault_default(vault_override)?;
     Ok((vault_path, encrypted_root))
 }
@@ -495,10 +495,10 @@ fn resolve_vault_default(vault_override: Option<&Path>) -> Result<PathBuf> {
     if let Some(v) = vault_override {
         return Ok(v.to_path_buf());
     }
-    if let Some(env_vault) = std::env::var_os("SYC_VAULT") {
+    if let Some(env_vault) = std::env::var_os("SBC_VAULT") {
         return Ok(PathBuf::from(env_vault));
     }
-    Ok(crate::config::resolve_syc_vault_path()?)
+    Ok(crate::config::resolve_sbc_vault_path()?)
 }
 
 /// Resolve the vault path using the same logic as key commands.

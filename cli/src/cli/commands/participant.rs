@@ -726,6 +726,10 @@ pub async fn validate(id: Option<String>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{
+        clear_test_biovault_home, clear_test_env_override, set_test_biovault_home,
+        set_test_env_override,
+    };
     use tempfile::TempDir;
 
     #[test]
@@ -866,19 +870,21 @@ mod tests {
     #[serial_test::serial]
     fn test_participants_file_load_nonexistent() {
         let temp = TempDir::new().unwrap();
-        std::env::set_var("BIOVAULT_HOME", temp.path());
+        clear_test_biovault_home();
+        set_test_biovault_home(temp.path());
 
         let pf = ParticipantsFile::load().unwrap();
         assert!(pf.participants.is_empty());
 
-        std::env::remove_var("BIOVAULT_HOME");
+        clear_test_biovault_home();
     }
 
     #[test]
     #[serial_test::serial]
     fn test_participants_file_save_and_reload() {
         let temp = TempDir::new().unwrap();
-        std::env::set_var("BIOVAULT_HOME", temp.path());
+        clear_test_biovault_home();
+        set_test_biovault_home(temp.path());
 
         let mut pf = ParticipantsFile::new();
         let participant = Participant {
@@ -908,7 +914,7 @@ mod tests {
             Some("GRCh38".to_string())
         );
 
-        std::env::remove_var("BIOVAULT_HOME");
+        clear_test_biovault_home();
     }
 
     #[test]
@@ -1002,14 +1008,14 @@ mod tests {
     fn test_get_participants_file_path() {
         let temp = TempDir::new().unwrap();
         let home = temp.path().join("biovault-home");
-        std::env::set_var("BIOVAULT_TEST_HOME", &home);
+        set_test_env_override("BIOVAULT_TEST_HOME", home.to_str());
 
         let path = get_participants_file_path().unwrap();
         assert!(path.ends_with("participants.yaml"));
         // BIOVAULT_TEST_HOME returns the path directly without .biovault suffix
         assert!(path.starts_with(&home));
 
-        std::env::remove_var("BIOVAULT_TEST_HOME");
+        clear_test_env_override("BIOVAULT_TEST_HOME");
     }
 
     #[test]
@@ -1031,20 +1037,22 @@ mod tests {
     #[tokio::test]
     async fn test_list_empty_participants() {
         let temp = TempDir::new().unwrap();
-        std::env::set_var("BIOVAULT_HOME", temp.path());
+        clear_test_biovault_home();
+        set_test_biovault_home(temp.path());
 
         // Should not error when no participants
         let result = list().await;
         assert!(result.is_ok());
 
-        std::env::remove_var("BIOVAULT_HOME");
+        clear_test_biovault_home();
     }
 
     #[tokio::test]
     #[serial_test::serial]
     async fn test_list_with_participants() {
         let temp = TempDir::new().unwrap();
-        std::env::set_var("BIOVAULT_HOME", temp.path());
+        clear_test_biovault_home();
+        set_test_biovault_home(temp.path());
 
         let mut pf = ParticipantsFile::new();
         pf.participants.insert(
@@ -1064,19 +1072,20 @@ mod tests {
         let result = list().await;
         assert!(result.is_ok());
 
-        std::env::remove_var("BIOVAULT_HOME");
+        clear_test_biovault_home();
     }
 
     #[tokio::test]
     async fn test_delete_nonexistent_participant() {
         let temp = TempDir::new().unwrap();
-        std::env::set_var("BIOVAULT_HOME", temp.path());
+        clear_test_biovault_home();
+        set_test_biovault_home(temp.path());
 
         let result = delete("nonexistent".to_string()).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not found"));
 
-        std::env::remove_var("BIOVAULT_HOME");
+        clear_test_biovault_home();
     }
 
     #[test]

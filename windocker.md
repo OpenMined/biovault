@@ -402,7 +402,7 @@ For rapid local testing without full CI:
 ```
 
 This script:
-1. Sets up required environment variables (`SYC_VAULT`)
+1. Sets up required environment variables (`SBC_VAULT`)
 2. Creates a temporary samplesheet with Windows paths
 3. Runs `biovault run` with the herc2 pipeline
 4. Cleans up temporary files

@@ -71,9 +71,9 @@ echo "Test directory: $TEST_DIR"
 mkdir -p /c/bvtemp
 
 # Set up minimal vault environment (needed by bv CLI)
-export SYC_VAULT="$TEST_DIR/.syc"
+export SBC_VAULT="$TEST_DIR/.sbc"
 export SYFTBOX_DATA_DIR="$TEST_DIR"
-mkdir -p "$SYC_VAULT"
+mkdir -p "$SBC_VAULT"
 
 # Convert Git Bash path (/c/Users/...) to Windows path (C:/Users/...)
 windows_path() {

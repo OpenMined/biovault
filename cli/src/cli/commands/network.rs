@@ -100,7 +100,7 @@ fn scan_datasets(
     let datasites_dir = data_dir.join("datasites");
 
     // Resolve vault path for trusted contacts
-    let vault_path = crate::config::resolve_syc_vault_path()?;
+    let vault_path = crate::config::resolve_sbc_vault_path()?;
     let bundles_dir = vault_path.join("bundles");
 
     let mut datasets = Vec::new();
@@ -347,7 +347,7 @@ fn show_status(config: &Config, json_output: bool) -> Result<()> {
     let data_dir = config.get_syftbox_data_dir()?;
     let datasites_dir = data_dir.join("datasites");
 
-    let vault_path = crate::config::resolve_syc_vault_path()?;
+    let vault_path = crate::config::resolve_sbc_vault_path()?;
     let bundles_dir = vault_path.join("bundles");
 
     let mut datasites_count = 0;
