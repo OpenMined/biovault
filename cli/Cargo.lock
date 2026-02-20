@@ -348,7 +348,7 @@ checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 
 [[package]]
 name = "biovault"
-version = "0.1.153"
+version = "0.1.154"
 dependencies = [
  "anyhow",
  "assert_cmd",
