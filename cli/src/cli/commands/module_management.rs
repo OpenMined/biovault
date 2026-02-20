@@ -6,11 +6,99 @@ use crate::flow_spec::FlowSpec;
 use anyhow::Context;
 use colored::Colorize;
 use std::fs;
+use std::path::Component;
 use std::path::{Path, PathBuf};
 
 // Standard filenames - can be made configurable in the future
 const MODULE_YAML_FILE: &str = "module.yaml";
 const FLOW_YAML_FILE: &str = "flow.yaml";
+
+fn sanitize_asset_rel_path(asset: &str) -> Result<PathBuf> {
+    let mut normalized = asset.trim().replace('\\', "/");
+    while let Some(stripped) = normalized.strip_prefix("./") {
+        normalized = stripped.to_string();
+    }
+    if let Some(stripped) = normalized.strip_prefix("assets/") {
+        normalized = stripped.to_string();
+    }
+    if normalized.is_empty() {
+        return Err(anyhow::anyhow!("Empty asset path in module.yaml").into());
+    }
+
+    let rel = PathBuf::from(&normalized);
+    for component in rel.components() {
+        match component {
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(anyhow::anyhow!(
+                    "Invalid asset path '{}' (must be relative)",
+                    asset
+                )
+                .into());
+            }
+            _ => {}
+        }
+    }
+    Ok(rel)
+}
+
+fn module_asset_dest_path(module_dir: &Path, asset: &str) -> Result<PathBuf> {
+    let rel = sanitize_asset_rel_path(asset)?;
+    Ok(module_dir.join("assets").join(rel))
+}
+
+fn module_asset_source_candidates(source_path: &Path, asset: &str) -> Result<Vec<PathBuf>> {
+    let rel = sanitize_asset_rel_path(asset)?;
+    let mut candidates = Vec::new();
+
+    // Canonical location for module assets.
+    candidates.push(source_path.join("assets").join(&rel));
+    // Backward-compatible fallback for modules that keep assets in root.
+    candidates.push(source_path.join(&rel));
+    // Also try the literal value from module.yaml for legacy specs.
+    let literal = source_path.join(asset);
+    if !candidates.contains(&literal) {
+        candidates.push(literal);
+    }
+
+    Ok(candidates)
+}
+
+fn module_asset_url_candidates(base_url: &str, asset: &str) -> Result<Vec<String>> {
+    let rel = sanitize_asset_rel_path(asset)?;
+    let rel_str = rel.to_string_lossy().replace('\\', "/");
+    let mut candidates = Vec::new();
+
+    // Canonical location for module assets.
+    candidates.push(format!("{}/assets/{}", base_url, rel_str));
+    // Backward-compatible fallback for modules that keep assets in root.
+    candidates.push(format!("{}/{}", base_url, rel_str));
+    // Also try the literal value from module.yaml for legacy specs.
+    let literal = format!("{}/{}", base_url, asset);
+    if !candidates.contains(&literal) {
+        candidates.push(literal);
+    }
+
+    Ok(candidates)
+}
+
+async fn download_asset_with_fallback(base_url: &str, asset: &str) -> Result<Vec<u8>> {
+    let candidates = module_asset_url_candidates(base_url, asset)?;
+    let mut errors = Vec::new();
+
+    for candidate in candidates {
+        match download_file(&candidate).await {
+            Ok(bytes) => return Ok(bytes),
+            Err(err) => errors.push(format!("{} ({})", candidate, err)),
+        }
+    }
+
+    Err(anyhow::anyhow!(
+        "Failed to download asset '{}'. Tried: {}",
+        asset,
+        errors.join(" | ")
+    )
+    .into())
+}
 
 /// Import a module from URL or register a local module directory
 pub async fn import(
@@ -438,23 +526,20 @@ async fn import_from_url(
         println!("✓ Saved {}", module_yaml.workflow);
     }
 
-    // Download assets
-    // Asset paths are relative to the module root (e.g. "assets/run.sh"),
-    // so we use base_url and module_dir directly (no extra /assets prefix).
+    // Download assets.
+    // Module asset paths are relative to module assets dir.
     if !module_yaml.assets.is_empty() {
         if !quiet {
             println!("📦 Downloading {} assets...", module_yaml.assets.len());
         }
 
         for asset in &module_yaml.assets {
-            let asset_url = format!("{}/{}", base_url, asset);
-
             if !quiet {
                 println!("  - {}", asset);
             }
 
-            let asset_content = download_file(&asset_url).await?;
-            let asset_path = module_dir.join(asset);
+            let asset_content = download_asset_with_fallback(base_url, asset).await?;
+            let asset_path = module_asset_dest_path(&module_dir, asset)?;
 
             if let Some(parent) = asset_path.parent() {
                 fs::create_dir_all(parent)?;
@@ -625,18 +710,22 @@ async fn copy_local_module_to_managed(
         );
     }
 
-    // Copy assets
-    // Asset paths are relative to the module root (e.g. "assets/run.sh"),
-    // so we use source_path and module_dir directly (no extra /assets prefix).
+    // Copy assets.
+    // Module asset paths are relative to module assets dir.
     if !module_yaml.assets.is_empty() {
         if !quiet {
             println!("📦 Copying {} assets...", module_yaml.assets.len());
         }
 
         for asset in &module_yaml.assets {
-            let asset_source = source_path.join(asset);
-            if asset_source.exists() {
-                let asset_dest = module_dir.join(asset);
+            let source_candidates = module_asset_source_candidates(source_path, asset)?;
+            let asset_source = source_candidates
+                .iter()
+                .find(|candidate| candidate.exists())
+                .cloned();
+
+            if let Some(asset_source) = asset_source {
+                let asset_dest = module_asset_dest_path(&module_dir, asset)?;
 
                 if let Some(parent) = asset_dest.parent() {
                     fs::create_dir_all(parent)?;
@@ -648,7 +737,15 @@ async fn copy_local_module_to_managed(
                     println!("  ✓ {}", asset);
                 }
             } else if !quiet {
-                println!("  ⚠️  Warning: asset '{}' not found", asset);
+                println!(
+                    "  ⚠️  Warning: asset '{}' not found (tried: {})",
+                    asset,
+                    source_candidates
+                        .iter()
+                        .map(|p| p.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
             }
         }
 
@@ -1438,12 +1535,20 @@ pub fn validate_flow_modules(spec: &FlowSpec, db: &BioVaultDb) -> Vec<String> {
 
         // Check asset files
         for asset in &module_yaml.assets {
-            let asset_path = module_dir.join(asset);
-            if !asset_path.exists() {
+            let canonical_path = module_asset_dest_path(&module_dir, asset);
+            let legacy_path = module_dir.join(asset);
+            let exists = canonical_path
+                .as_ref()
+                .map(|p| p.exists())
+                .unwrap_or(false)
+                || legacy_path.exists();
+            if !exists {
                 warnings.push(format!(
                     "Step '{}': asset missing: {}",
                     step.id,
-                    asset_path.display()
+                    canonical_path
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|_| format!("assets/<invalid:{}>", asset))
                 ));
             }
         }
@@ -1498,6 +1603,46 @@ mod tests {
     }
 
     #[test]
+    fn test_sanitize_asset_rel_path() {
+        assert_eq!(
+            sanitize_asset_rel_path("classify.py")
+                .unwrap()
+                .to_string_lossy(),
+            "classify.py"
+        );
+        assert_eq!(
+            sanitize_asset_rel_path("./assets/classify.py")
+                .unwrap()
+                .to_string_lossy(),
+            "classify.py"
+        );
+        assert_eq!(
+            sanitize_asset_rel_path("assets/subdir/tool.py")
+                .unwrap()
+                .to_string_lossy(),
+            "subdir/tool.py"
+        );
+        assert!(sanitize_asset_rel_path("../escape.py").is_err());
+    }
+
+    #[test]
+    fn test_module_asset_paths_and_candidates() {
+        let module_dir = PathBuf::from("tmp").join("module");
+        let dest = module_asset_dest_path(&module_dir, "assets/classify.py").unwrap();
+        assert_eq!(dest, module_dir.join("assets").join("classify.py"));
+
+        let source_dir = PathBuf::from("tmp").join("source");
+        let candidates = module_asset_source_candidates(&source_dir, "classify.py").unwrap();
+        assert_eq!(
+            candidates,
+            vec![
+                source_dir.join("assets").join("classify.py"),
+                source_dir.join("classify.py"),
+            ]
+        );
+    }
+
+    #[test]
     fn test_import_from_local() {
         let tmp = setup_test();
 
@@ -1541,6 +1686,48 @@ spec:
         let db = BioVaultDb::new().unwrap();
         let module = db.get_module("test-module").unwrap();
         assert!(module.is_some());
+
+        teardown_test();
+    }
+
+    #[test]
+    fn test_copy_local_module_to_managed_copies_assets_dir_entries() {
+        let tmp = setup_test();
+        let db = BioVaultDb::new().unwrap();
+
+        let source_dir = tmp.path().join("source-module");
+        fs::create_dir_all(source_dir.join("assets")).unwrap();
+        fs::write(source_dir.join("workflow.nf"), "// workflow").unwrap();
+        fs::write(source_dir.join("assets").join("classify.py"), "print('ok')").unwrap();
+
+        let yaml_content = r#"
+apiVersion: syftbox.openmined.org/v1alpha1
+kind: Module
+metadata:
+  name: copy-test
+  version: 0.1.0
+  authors:
+    - test@example.com
+spec:
+  runner:
+    kind: nextflow
+    template: dynamic-nextflow
+    entrypoint: workflow.nf
+  inputs: []
+  outputs: []
+  parameters: []
+  assets:
+    - path: classify.py
+"#;
+        fs::write(source_dir.join(MODULE_YAML_FILE), yaml_content).unwrap();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let module = rt
+            .block_on(copy_local_module_to_managed(&db, &source_dir, false, true))
+            .unwrap();
+
+        let imported_path = PathBuf::from(module.module_path);
+        assert!(imported_path.join("assets").join("classify.py").exists());
 
         teardown_test();
     }
