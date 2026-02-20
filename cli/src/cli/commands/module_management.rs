@@ -2,7 +2,7 @@ use crate::cli::examples;
 use crate::config;
 use crate::data::{BioVaultDb, Module, ModuleYaml};
 use crate::error::Result;
-use crate::flow_spec::FlowSpec;
+use crate::flow_spec::{FlowFile, FlowModuleDef, FlowModuleSource, FlowSpec, FlowStepUses};
 use anyhow::Context;
 use colored::Colorize;
 use std::fs;
@@ -441,6 +441,8 @@ async fn import_from_url(
     // Download assets
     // Asset paths are relative to the module root (e.g. "assets/run.sh"),
     // so we use base_url and module_dir directly (no extra /assets prefix).
+    // Asset download failures are non-fatal: a 404 is logged as a warning so
+    // the module can still be registered even if optional/generated files are absent.
     if !module_yaml.assets.is_empty() {
         if !quiet {
             println!("📦 Downloading {} assets...", module_yaml.assets.len());
@@ -450,21 +452,31 @@ async fn import_from_url(
             let asset_url = format!("{}/{}", base_url, asset);
 
             if !quiet {
-                println!("  - {}", asset);
+                print!("  - {} ", asset);
             }
 
-            let asset_content = download_file(&asset_url).await?;
-            let asset_path = module_dir.join(asset);
-
-            if let Some(parent) = asset_path.parent() {
-                fs::create_dir_all(parent)?;
+            match download_file(&asset_url).await {
+                Ok(asset_content) => {
+                    let asset_path = module_dir.join(asset);
+                    if let Some(parent) = asset_path.parent() {
+                        fs::create_dir_all(parent)?;
+                    }
+                    fs::write(&asset_path, asset_content)?;
+                    if !quiet {
+                        println!("✓");
+                    }
+                }
+                Err(e) => {
+                    if !quiet {
+                        println!("⚠️  skipped ({})", e);
+                    }
+                    // Non-fatal: continue registering the module
+                }
             }
-
-            fs::write(&asset_path, asset_content)?;
         }
 
         if !quiet {
-            println!("✓ Downloaded all assets");
+            println!("✓ Done with assets");
         }
     }
 
@@ -935,6 +947,312 @@ pub enum DependencyContext {
     Local { base_path: PathBuf },
 }
 
+/// Import a single module from a FlowModuleSource, registering it in the DB.
+///
+/// Handles both GitHub (raw URL) and local filesystem contexts.
+async fn import_module_from_flow_source(
+    db: &BioVaultDb,
+    source: &FlowModuleSource,
+    dependency_context: &DependencyContext,
+    overwrite: bool,
+    quiet: bool,
+) -> Result<Module> {
+    // Explicit URL takes priority over path-based resolution
+    if let Some(url) = &source.url {
+        return import_from_url(db, url, None, overwrite, quiet).await;
+    }
+
+    let path = source.path.as_deref().unwrap_or("./");
+
+    // Normalize: strip leading "./" or treat "." as current directory
+    let normalized = if path == "." || path == "./" {
+        ""
+    } else {
+        path.strip_prefix("./").unwrap_or(path)
+    };
+
+    match dependency_context {
+        DependencyContext::GitHub { base_url } => {
+            let module_yaml_url = if normalized.is_empty() {
+                format!("{}/module.yaml", base_url)
+            } else {
+                format!("{}/{}/module.yaml", base_url, normalized)
+            };
+            import_from_url(db, &module_yaml_url, None, overwrite, quiet).await
+        }
+        DependencyContext::Local { base_path } => {
+            let module_dir = if normalized.is_empty() {
+                base_path.clone()
+            } else {
+                base_path.join(normalized)
+            };
+            copy_local_module_to_managed(db, &module_dir, overwrite, quiet).await
+        }
+    }
+}
+
+/// Resolve and import all FlowFile dependencies without the lossy FlowFile→FlowSpec round-trip.
+///
+/// Processes `spec.modules` dict entries and step-level `uses` refs, importing each module
+/// and rewriting step `uses` to use registered module names. The FlowFile is mutated in-place
+/// so all other fields (vars, coordination, mpc, datasites, etc.) are preserved when saved.
+pub async fn resolve_flow_file_dependencies(
+    flow_file: &mut FlowFile,
+    dependency_context: &DependencyContext,
+    overwrite: bool,
+    quiet: bool,
+) -> Result<()> {
+    use std::collections::BTreeMap;
+
+    let db = BioVaultDb::new()?;
+
+    // --- Step 1: Process spec.modules dict ---
+    // Collect sources first (with clones) to avoid holding a borrow across .await points
+    let module_sources: Vec<(String, FlowModuleSource)> = flow_file
+        .spec
+        .modules
+        .iter()
+        .filter_map(|(key, module_def)| {
+            if let FlowModuleDef::Ref(module_ref) = module_def {
+                module_ref.source.clone().map(|s| (key.clone(), s))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    if !module_sources.is_empty() && !quiet {
+        println!(
+            "\n{} Importing module dependencies ({} modules):",
+            "📦".cyan(),
+            module_sources.len()
+        );
+    }
+
+    // Import each module and build key → registered_name mapping
+    let mut module_key_to_name: BTreeMap<String, String> = BTreeMap::new();
+    for (key, source) in &module_sources {
+        if !quiet {
+            print!("   {} {} ", "•".cyan(), key.bold());
+        }
+        match import_module_from_flow_source(&db, source, dependency_context, overwrite, quiet)
+            .await
+        {
+            Ok(module) => {
+                if !quiet {
+                    println!("{} → {}", "✓ imported".green(), module.name.green());
+                }
+                module_key_to_name.insert(key.clone(), module.name.clone());
+            }
+            Err(e) => {
+                if !quiet {
+                    println!("{}: {}", "⚠️  failed".yellow(), e.to_string().dimmed());
+                }
+            }
+        }
+    }
+
+    // --- Step 2: Process steps ---
+    // Collect step updates to avoid borrow checker issues
+    // Each entry: (step_index, new FlowStepUses value)
+    let mut step_updates: Vec<(usize, FlowStepUses)> = Vec::new();
+
+    // Collect inline refs and old-style path refs from steps (clone to avoid borrow-across-await)
+    let inline_refs: Vec<(usize, String, FlowModuleSource)> = flow_file
+        .spec
+        .steps
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, step)| match &step.uses {
+            Some(FlowStepUses::Ref(module_ref)) => module_ref
+                .source
+                .clone()
+                .map(|s| (idx, step.id.clone(), s)),
+            _ => None,
+        })
+        .collect();
+
+    let path_refs: Vec<(usize, String, String)> = flow_file
+        .spec
+        .steps
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, step)| {
+            if let Some(FlowStepUses::Name(name)) = &step.uses {
+                // Old-style: name contains '/' but is not a key in the modules dict
+                if name.contains('/') && !module_key_to_name.contains_key(name) {
+                    return Some((idx, step.id.clone(), name.clone()));
+                }
+            }
+            None
+        })
+        .collect();
+
+    // Apply dict-key rewrites (no async needed)
+    for (idx, step) in flow_file.spec.steps.iter().enumerate() {
+        if let Some(FlowStepUses::Name(name)) = &step.uses {
+            if let Some(registered_name) = module_key_to_name.get(name) {
+                step_updates.push((idx, FlowStepUses::Name(registered_name.clone())));
+            }
+        }
+    }
+
+    // Process inline step-level refs (FlowStepUses::Ref)
+    if !inline_refs.is_empty() && !quiet {
+        println!("\n{} Importing inline step deps:", "📦".cyan());
+    }
+    for (idx, step_id, source) in &inline_refs {
+        if !quiet {
+            print!("   {} {} ", "•".cyan(), step_id.bold());
+        }
+        match import_module_from_flow_source(&db, source, dependency_context, overwrite, quiet)
+            .await
+        {
+            Ok(module) => {
+                if !quiet {
+                    println!("{} → {}", "✓ imported".green(), module.name.green());
+                }
+                step_updates.push((*idx, FlowStepUses::Name(module.name.clone())));
+            }
+            Err(e) => {
+                if !quiet {
+                    println!("{}: {}", "⚠️  failed".yellow(), e.to_string().dimmed());
+                }
+            }
+        }
+    }
+
+    // Process old-style path references in steps (backward compat)
+    for (idx, step_id, path) in &path_refs {
+        if !quiet {
+            print!("   {} {} (path ref) ", "•".cyan(), step_id.bold());
+        }
+        let source = FlowModuleSource {
+            kind: Some("local".to_string()),
+            path: Some(path.clone()),
+            url: None,
+            r#ref: None,
+            subpath: None,
+            allow_fetch: None,
+        };
+        match import_module_from_flow_source(&db, &source, dependency_context, overwrite, quiet)
+            .await
+        {
+            Ok(module) => {
+                if !quiet {
+                    println!("{} → {}", "✓ imported".green(), module.name.green());
+                }
+                step_updates.push((*idx, FlowStepUses::Name(module.name.clone())));
+            }
+            Err(e) => {
+                if !quiet {
+                    println!("{}: {}", "⚠️  failed".yellow(), e.to_string().dimmed());
+                }
+            }
+        }
+    }
+
+    // Apply all step updates
+    for (idx, new_uses) in step_updates {
+        if let Some(step) = flow_file.spec.steps.get_mut(idx) {
+            step.uses = Some(new_uses);
+        }
+    }
+
+    Ok(())
+}
+
+/// Register all modules defined in a flow's `spec.modules` dict with the BioVault DB.
+///
+/// Expects the flow directory to already contain all module files (e.g. after a local copy).
+/// Modules are registered in-place, pointing to their paths within `flow_dir`.
+/// Silently skips entries whose module.yaml is missing or unparseable.
+pub fn register_flow_modules_from_dir(
+    flow_dir: &Path,
+    db: &BioVaultDb,
+    overwrite: bool,
+) -> Result<()> {
+    let flow_yaml_path = flow_dir.join(FLOW_YAML_FILE);
+    let yaml_str = match fs::read_to_string(&flow_yaml_path) {
+        Ok(s) => s,
+        Err(_) => return Ok(()), // no flow.yaml — nothing to register
+    };
+    let flow_file = match FlowFile::parse_yaml(&yaml_str) {
+        Ok(f) => f,
+        Err(_) => return Ok(()), // not a valid FlowFile — nothing to register
+    };
+
+    for (_key, module_def) in &flow_file.spec.modules {
+        let FlowModuleDef::Ref(module_ref) = module_def else {
+            continue;
+        };
+        let Some(source) = &module_ref.source else {
+            continue;
+        };
+        if source.kind.as_deref().unwrap_or("local") != "local" {
+            continue;
+        }
+        let path = source.path.as_deref().unwrap_or("./");
+        let normalized = if path == "." || path == "./" {
+            ""
+        } else {
+            path.strip_prefix("./").unwrap_or(path)
+        };
+        let module_dir = if normalized.is_empty() {
+            flow_dir.to_path_buf()
+        } else {
+            flow_dir.join(normalized)
+        };
+
+        let module_yaml_path = module_dir.join(MODULE_YAML_FILE);
+        if !module_yaml_path.exists() {
+            continue;
+        }
+        let yaml_str = match fs::read_to_string(&module_yaml_path) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        let module_yaml = match ModuleYaml::from_str(&yaml_str) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+
+        let identifier = format!("{}@{}", module_yaml.name, module_yaml.version);
+        if overwrite {
+            if db.get_module(&identifier)?.is_some() {
+                db.update_module(
+                    &module_yaml.name,
+                    &module_yaml.version,
+                    &module_yaml.author,
+                    &module_yaml.workflow,
+                    &module_yaml.template,
+                    &module_dir,
+                )?;
+            } else {
+                db.register_module(
+                    &module_yaml.name,
+                    &module_yaml.version,
+                    &module_yaml.author,
+                    &module_yaml.workflow,
+                    &module_yaml.template,
+                    &module_dir,
+                )?;
+            }
+        } else if db.get_module(&identifier)?.is_none() {
+            db.register_module(
+                &module_yaml.name,
+                &module_yaml.version,
+                &module_yaml.author,
+                &module_yaml.workflow,
+                &module_yaml.template,
+                &module_dir,
+            )?;
+        }
+    }
+
+    Ok(())
+}
+
 /// Resolve and import all flow step dependencies
 ///
 /// This function handles importing module dependencies for flow steps,
@@ -1015,11 +1333,16 @@ pub async fn resolve_flow_dependencies(
                 } else {
                     // Relative path - resolve based on context
                     match dependency_context {
-                        DependencyContext::GitHub { base_url } => (
-                            false,
-                            None,
-                            Some(format!("{}/{}/module.yaml", base_url, uses)),
-                        ),
+                        DependencyContext::GitHub { base_url } => {
+                            // Strip leading "./" — raw GitHub URLs don't normalize dot-segments
+                            let normalized = uses.strip_prefix("./").unwrap_or(uses);
+                            let url = if normalized.is_empty() {
+                                format!("{}/module.yaml", base_url)
+                            } else {
+                                format!("{}/{}/module.yaml", base_url, normalized)
+                            };
+                            (false, None, Some(url))
+                        }
                         DependencyContext::Local { base_path } => {
                             // Resolve exactly like GitHub: base_path + uses = module location
                             // GitHub does: base_url + "/" + uses + "/module.yaml"
@@ -1197,7 +1520,7 @@ pub async fn import_flow_with_deps(
     name_override: Option<String>,
     overwrite: bool,
 ) -> Result<String> {
-    use crate::flow_spec::{FlowFile, FlowSpec};
+    use crate::flow_spec::FlowFile;
     use colored::Colorize;
 
     // Check if this is a local path (starts with / or file://)
@@ -1261,8 +1584,8 @@ pub async fn import_flow_with_deps(
         (yaml_str, DependencyContext::GitHub { base_url })
     };
 
-    // Parse flow spec via FlowFile to support Flow schema shapes
-    let flow_file = FlowFile::parse_yaml(&yaml_str)
+    // Parse flow spec natively as FlowFile (no lossy round-trip through FlowSpec)
+    let mut flow_file = FlowFile::parse_yaml(&yaml_str)
         .inspect_err(|_e| {
             eprintln!(
                 "Failed to parse flow.yaml from {}. First 200 chars:\n{}",
@@ -1271,14 +1594,13 @@ pub async fn import_flow_with_deps(
             );
         })
         .context("Failed to parse flow.yaml")?;
-    let mut spec: FlowSpec = flow_file
-        .to_flow_spec()
-        .context("Failed to convert flow spec")?;
 
-    let flow_name = name_override.unwrap_or_else(|| spec.name.clone());
+    // Apply name override and record the final flow name
+    let flow_name = name_override.unwrap_or_else(|| flow_file.metadata.name.clone());
+    flow_file.metadata.name = flow_name.clone();
 
     println!("{} Flow: {}", "📦".cyan(), flow_name.bold());
-    println!("   Steps: {}", spec.steps.len());
+    println!("   Steps: {}", flow_file.spec.steps.len());
 
     // Create flow directory
     let biovault_home = crate::config::get_biovault_home()?;
@@ -1303,15 +1625,14 @@ pub async fn import_flow_with_deps(
 
     let flow_yaml_path = flow_dir.join(FLOW_YAML_FILE);
 
-    // Import each step's module and rewrite YAML to use registered names
-    resolve_flow_dependencies(
-        &mut spec,
-        &dependency_context,
-        &flow_yaml_path,
-        overwrite,
-        false, // quiet = false for CLI output
-    )
-    .await?;
+    // Import module dependencies and rewrite step uses to registered names.
+    // Works natively with FlowFile — preserves vars, modules, coordination, mpc, etc.
+    resolve_flow_file_dependencies(&mut flow_file, &dependency_context, overwrite, false).await?;
+
+    // Save the FlowFile directly, preserving all fields that the FlowSpec round-trip would drop
+    let yaml =
+        serde_yaml::to_string(&flow_file).context("Failed to serialize flow.yaml")?;
+    fs::write(&flow_yaml_path, &yaml).context("Failed to write flow.yaml")?;
 
     // Register flow in database (check for existing if overwrite)
     let db = BioVaultDb::new()?;
@@ -1328,8 +1649,11 @@ pub async fn import_flow_with_deps(
         db.register_flow(&flow_name, &flow_dir.to_string_lossy())?
     };
 
-    // Validate all module files resolve
-    let warnings = validate_flow_modules(&spec, &db);
+    // Validate: convert to FlowSpec for validation only (does not affect what was saved)
+    let spec_for_validation = flow_file
+        .to_flow_spec()
+        .unwrap_or_else(|_| FlowSpec { name: flow_name.clone(), ..Default::default() });
+    let warnings = validate_flow_modules(&spec_for_validation, &db);
     if warnings.is_empty() {
         println!(
             "\n{} Flow '{}' imported successfully!",
