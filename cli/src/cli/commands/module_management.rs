@@ -1064,10 +1064,9 @@ pub async fn resolve_flow_file_dependencies(
         .iter()
         .enumerate()
         .filter_map(|(idx, step)| match &step.uses {
-            Some(FlowStepUses::Ref(module_ref)) => module_ref
-                .source
-                .clone()
-                .map(|s| (idx, step.id.clone(), s)),
+            Some(FlowStepUses::Ref(module_ref)) => {
+                module_ref.source.clone().map(|s| (idx, step.id.clone(), s))
+            }
             _ => None,
         })
         .collect();
@@ -1182,7 +1181,7 @@ pub fn register_flow_modules_from_dir(
         Err(_) => return Ok(()), // not a valid FlowFile — nothing to register
     };
 
-    for (_key, module_def) in &flow_file.spec.modules {
+    for module_def in flow_file.spec.modules.values() {
         let FlowModuleDef::Ref(module_ref) = module_def else {
             continue;
         };
@@ -1630,8 +1629,7 @@ pub async fn import_flow_with_deps(
     resolve_flow_file_dependencies(&mut flow_file, &dependency_context, overwrite, false).await?;
 
     // Save the FlowFile directly, preserving all fields that the FlowSpec round-trip would drop
-    let yaml =
-        serde_yaml::to_string(&flow_file).context("Failed to serialize flow.yaml")?;
+    let yaml = serde_yaml::to_string(&flow_file).context("Failed to serialize flow.yaml")?;
     fs::write(&flow_yaml_path, &yaml).context("Failed to write flow.yaml")?;
 
     // Register flow in database (check for existing if overwrite)
@@ -1650,9 +1648,10 @@ pub async fn import_flow_with_deps(
     };
 
     // Validate: convert to FlowSpec for validation only (does not affect what was saved)
-    let spec_for_validation = flow_file
-        .to_flow_spec()
-        .unwrap_or_else(|_| FlowSpec { name: flow_name.clone(), ..Default::default() });
+    let spec_for_validation = flow_file.to_flow_spec().unwrap_or_else(|_| FlowSpec {
+        name: flow_name.clone(),
+        ..Default::default()
+    });
     let warnings = validate_flow_modules(&spec_for_validation, &db);
     if warnings.is_empty() {
         println!(
