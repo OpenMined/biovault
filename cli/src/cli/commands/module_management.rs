@@ -1800,6 +1800,24 @@ fn normalized_asset_rel(asset: &str) -> &str {
     asset.strip_prefix("assets/").unwrap_or(asset)
 }
 
+fn module_layout_complete(module_dir: &Path, module_yaml: &ModuleYaml) -> bool {
+    let workflow_ok = module_dir.join(&module_yaml.workflow).exists();
+    if !workflow_ok {
+        return false;
+    }
+
+    for asset in &module_yaml.assets {
+        let rel = normalized_asset_rel(asset);
+        let primary = module_dir.join("assets").join(rel);
+        let legacy = module_dir.join(asset);
+        if !primary.exists() && !legacy.exists() {
+            return false;
+        }
+    }
+
+    true
+}
+
 // Helper function to download files
 async fn download_file(url: &str) -> Result<Vec<u8>> {
     let response = reqwest::get(url)
