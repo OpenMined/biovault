@@ -10,7 +10,9 @@ workflow USER {
     participants
 
   main:
-    def assetsDir = System.getenv('BV_ASSETS_DIR') ?: "${projectDir}/assets"
+    // Prefer assets path injected by the dynamic template context.
+    // Fall back to env/projectDir for direct Nextflow runs.
+    def assetsDir = (context?.assets_dir?.toString()) ?: (context?.params?.assets_dir?.toString()) ?: System.getenv('BV_ASSETS_DIR') ?: "${projectDir}/assets"
     def assets_dir_ch = Channel.value(file(assetsDir))
 
     def per_participant = participants.map { record ->
