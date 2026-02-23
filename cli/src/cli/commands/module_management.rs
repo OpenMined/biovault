@@ -439,25 +439,37 @@ async fn import_from_url(
     }
 
     // Download assets
-    // Asset paths are relative to the module root (e.g. "assets/run.sh"),
-    // so we use base_url and module_dir directly (no extra /assets prefix).
-    // Asset download failures are non-fatal: a 404 is logged as a warning so
-    // the module can still be registered even if optional/generated files are absent.
+    // Module assets are expected under `<module>/assets/` at runtime, while module.yaml
+    // stores asset paths relative to that assets directory (e.g. "run.sh").
+    // We also keep a legacy fallback for repositories that store files at module root.
     if !module_yaml.assets.is_empty() {
         if !quiet {
             println!("📦 Downloading {} assets...", module_yaml.assets.len());
         }
 
         for asset in &module_yaml.assets {
-            let asset_url = format!("{}/{}", base_url, asset);
+            let asset_rel = normalized_asset_rel(asset);
+            let primary_asset_url = format!("{}/assets/{}", base_url, asset_rel);
+            let legacy_asset_url = format!("{}/{}", base_url, asset);
 
             if !quiet {
                 print!("  - {} ", asset);
             }
 
-            match download_file(&asset_url).await {
+            let downloaded = match download_file(&primary_asset_url).await {
+                Ok(content) => Ok(content),
+                Err(primary_err) => {
+                    // Backward compatibility for older repos that kept assets at module root.
+                    match download_file(&legacy_asset_url).await {
+                        Ok(content) => Ok(content),
+                        Err(_legacy_err) => Err(primary_err),
+                    }
+                }
+            };
+
+            match downloaded {
                 Ok(asset_content) => {
-                    let asset_path = module_dir.join(asset);
+                    let asset_path = module_dir.join("assets").join(asset_rel);
                     if let Some(parent) = asset_path.parent() {
                         fs::create_dir_all(parent)?;
                     }
@@ -638,17 +650,25 @@ async fn copy_local_module_to_managed(
     }
 
     // Copy assets
-    // Asset paths are relative to the module root (e.g. "assets/run.sh"),
-    // so we use source_path and module_dir directly (no extra /assets prefix).
+    // Primary layout is `<module>/assets/<asset>` with module.yaml entries relative to assets/.
+    // Keep a fallback to module-root assets for backward compatibility.
     if !module_yaml.assets.is_empty() {
         if !quiet {
             println!("📦 Copying {} assets...", module_yaml.assets.len());
         }
 
         for asset in &module_yaml.assets {
-            let asset_source = source_path.join(asset);
+            let asset_rel = normalized_asset_rel(asset);
+            let primary_source = source_path.join("assets").join(asset_rel);
+            let legacy_source = source_path.join(asset);
+            let asset_source = if primary_source.exists() {
+                primary_source
+            } else {
+                legacy_source
+            };
+
             if asset_source.exists() {
-                let asset_dest = module_dir.join(asset);
+                let asset_dest = module_dir.join("assets").join(asset_rel);
 
                 if let Some(parent) = asset_dest.parent() {
                     fs::create_dir_all(parent)?;
@@ -1761,18 +1781,23 @@ pub fn validate_flow_modules(spec: &FlowSpec, db: &BioVaultDb) -> Vec<String> {
 
         // Check asset files
         for asset in &module_yaml.assets {
-            let asset_path = module_dir.join(asset);
-            if !asset_path.exists() {
+            let primary_asset_path = module_dir.join("assets").join(normalized_asset_rel(asset));
+            let legacy_asset_path = module_dir.join(asset);
+            if !primary_asset_path.exists() && !legacy_asset_path.exists() {
                 warnings.push(format!(
                     "Step '{}': asset missing: {}",
                     step.id,
-                    asset_path.display()
+                    primary_asset_path.display()
                 ));
             }
         }
     }
 
     warnings
+}
+
+fn normalized_asset_rel(asset: &str) -> &str {
+    asset.strip_prefix("assets/").unwrap_or(asset)
 }
 
 // Helper function to download files
