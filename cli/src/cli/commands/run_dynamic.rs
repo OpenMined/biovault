@@ -5255,17 +5255,16 @@ fn execute_syqure_native(
         cmd.env(k, v);
     }
 
-    // ── LD_LIBRARY_PATH: ensure Codon shared libs are discoverable ───
-    // On Linux, the syqure binary links libcodonrt.so and libcodonc.so
-    // dynamically. The compiled rpath ($ORIGIN/lib/codon) only works when
-    // libs are co-located with the binary. In dev/CI the libs live under
-    // CODON_PATH/lib/codon or the bundle cache, so we must add them to
-    // LD_LIBRARY_PATH explicitly. On macOS this is harmless (dyld ignores it).
+    // ── Dynamic library lookup path: ensure Codon shared libs are discoverable ───
+    // Linux uses LD_LIBRARY_PATH; macOS uses DYLD_LIBRARY_PATH.
+    // The syqure binary links codon runtime dylibs/so files dynamically and
+    // dev/CI layouts do not always co-locate libs beside the syqure binary.
     if let Some(ref lib_dir) = codon_lib_dir {
         let lib_dir_str = lib_dir.to_string_lossy().to_string();
         // Also include the parent (lib/) for any top-level .so files.
         let lib_parent = lib_dir.parent().map(|p| p.to_string_lossy().to_string());
         let existing_ld = env::var("LD_LIBRARY_PATH").unwrap_or_default();
+        let existing_dyld = env::var("DYLD_LIBRARY_PATH").unwrap_or_default();
         let mut parts: Vec<String> = vec![lib_dir_str.clone()];
         if let Some(ref parent) = lib_parent {
             parts.push(parent.clone());
@@ -5276,6 +5275,19 @@ fn execute_syqure_native(
         let new_ld = parts.join(":");
         cmd.env("LD_LIBRARY_PATH", &new_ld);
         println!("  LD_LIBRARY_PATH={}", new_ld);
+        #[cfg(target_os = "macos")]
+        {
+            let mut dyld_parts: Vec<String> = vec![lib_dir_str];
+            if let Some(parent) = lib_parent {
+                dyld_parts.push(parent);
+            }
+            if !existing_dyld.is_empty() {
+                dyld_parts.push(existing_dyld);
+            }
+            let new_dyld = dyld_parts.join(":");
+            cmd.env("DYLD_LIBRARY_PATH", &new_dyld);
+            println!("  DYLD_LIBRARY_PATH={}", new_dyld);
+        }
     }
     if env::var("BV_SYQURE_BACKTRACE")
         .map(|v| v == "1" || v.to_lowercase() == "true")
