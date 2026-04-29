@@ -360,16 +360,24 @@ start_turn() {
       return 1
     fi
     if ! python3 - "$turn_port" <<'PY'
+import time
 import socket, sys
 port = int(sys.argv[1])
-s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-s.settimeout(1.5)
-try:
-    s.connect(("127.0.0.1", port))
-except OSError:
-    sys.exit(1)
-finally:
-    s.close()
+deadline = time.monotonic() + 10.0
+last_error = None
+while time.monotonic() < deadline:
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(1.5)
+    try:
+        s.connect(("127.0.0.1", port))
+        s.close()
+        sys.exit(0)
+    except OSError as e:
+        last_error = e
+        s.close()
+        time.sleep(0.2)
+print(last_error, file=sys.stderr)
+sys.exit(1)
 PY
     then
       echo "ERROR: TURN server did not accept TCP connections on 127.0.0.1:${turn_port}." >&2
