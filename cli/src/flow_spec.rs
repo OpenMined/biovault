@@ -1112,7 +1112,9 @@ impl FlowFile {
         for (name, input) in &self.spec.inputs {
             let entry = FlowInputSpec::Detailed {
                 raw_type: input.raw_type(),
+                description: input.description.clone(),
                 default: input.default.as_ref().and_then(value_to_string),
+                required_facets: Vec::new(),
             };
             inputs.insert(name.clone(), entry);
         }
@@ -1435,7 +1437,11 @@ pub enum FlowInputSpec {
         #[serde(rename = "type")]
         raw_type: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         default: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        required_facets: Vec<String>,
     },
 }
 
@@ -1455,6 +1461,15 @@ impl FlowInputSpec {
         match self {
             FlowInputSpec::Simple(_) => None,
             FlowInputSpec::Detailed { default, .. } => default.as_deref(),
+        }
+    }
+
+    pub fn required_facets(&self) -> &[String] {
+        match self {
+            FlowInputSpec::Simple(_) => &[],
+            FlowInputSpec::Detailed {
+                required_facets, ..
+            } => required_facets,
         }
     }
 }
