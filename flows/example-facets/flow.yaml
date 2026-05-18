@@ -1,0 +1,23 @@
+apiVersion: syftbox.openmined.org/v1alpha1
+kind: Flow
+metadata:
+  name: example-facets
+  version: 0.1.0
+spec:
+  inputs:
+    samplesheet:
+      type: List[GenotypeRecord]
+      description: Genotype samplesheet with optional participant facet columns such as country and split.
+      required_facets:
+        - split
+  steps:
+    - id: facet_variant_counts
+      uses:
+        source:
+          kind: local
+          path: ./
+      with:
+        participants: inputs.samplesheet
+      publish:
+        facet_counts: File(facet_counts.tsv)
+        participant_counts: File(participant_counts.tsv)

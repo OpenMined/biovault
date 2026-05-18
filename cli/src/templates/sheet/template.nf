@@ -150,7 +150,7 @@ def rows_for_user = rows_src
 // and accept: sample_sheet_ch, rows_for_user, mapping_ch, assets_dir_ch, results_dir
 // ------------------------------------------------------------------
 
-include { USER } from "${params.work_flow_file}"
+include { USER } from '__BV_USER_WORKFLOW__'
 
 workflow {
     // ensure results dir exists (harmless if already present)

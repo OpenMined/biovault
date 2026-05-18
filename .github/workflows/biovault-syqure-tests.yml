@@ -1,8 +1,9 @@
 name: BioVault Syqure Scenario Tests
 
 on:
-  pull_request:
-    branches: [main]
+  # Disabled on PR to main (run on schedule / manual dispatch only)
+  # pull_request:
+  #   branches: [main]
   workflow_dispatch:
   schedule:
     - cron: '15 3 * * *'
@@ -14,6 +15,8 @@ concurrency:
 
 jobs:
   syqure-distributed:
+    # Disabled: do not run syqure-distributed (set to true to re-enable).
+    if: ${{ false }}
     strategy:
       fail-fast: false
       matrix:

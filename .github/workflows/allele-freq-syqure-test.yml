@@ -1,8 +1,9 @@
 name: Allele Freq Syqure Test
 
 on:
-  pull_request:
-    branches: [main]
+  # Disabled on PR to main (manual dispatch only)
+  # pull_request:
+  #   branches: [main]
   workflow_dispatch:
 
 concurrency:

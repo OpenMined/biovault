@@ -70,6 +70,7 @@ podman run --rm \
     --userns=keep-id \
     --security-opt label=disable \
     -e "NXF_HOME=/tmp/.nextflow" \
+    -e "NXF_SYNTAX_PARSER=v1" \
     -v "$PODMAN_SOCKET:/run/podman/podman.sock" \
     -e "CONTAINER_HOST=unix:///run/podman/podman.sock" \
     -v "$TEST_DIR_MOUNT:$TEST_DIR_MOUNT" \

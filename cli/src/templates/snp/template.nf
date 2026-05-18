@@ -27,7 +27,7 @@ work_flow_file       = Channel.fromPath(params.work_flow_file)
 //     --results_dir ./results \
 //     -with-docker
 
-include { USER } from "${params.work_flow_file}"
+include { USER } from '__BV_USER_WORKFLOW__'
 
 workflow {
   USER(

@@ -1699,6 +1699,9 @@ async fn test_submission(
         println!("   Output: {}", output_dir.display());
 
         let status = Command::new("nextflow")
+            // Nextflow >= 26 defaults to the strict parser, which rejects the
+            // Groovy constructs in BioVault templates; keep the legacy parser.
+            .env("NXF_SYNTAX_PARSER", "v1")
             .arg("run")
             .arg(&workflow_file)
             .arg("--input")

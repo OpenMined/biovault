@@ -47,6 +47,23 @@ CREATE TABLE IF NOT EXISTS participants (
 
 CREATE INDEX IF NOT EXISTS idx_participant_id ON participants(participant_id);
 
+-- Participant facets imported from user-provided metadata sheets.
+-- Each participant can have one value per facet name, e.g. country=Bahamas.
+CREATE TABLE IF NOT EXISTS participant_facets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    participant_id INTEGER NOT NULL,
+    facet_name TEXT NOT NULL,
+    facet_value TEXT NOT NULL,
+    source_file TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (participant_id) REFERENCES participants(id) ON DELETE CASCADE,
+    UNIQUE(participant_id, facet_name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_participant_facets_participant_id ON participant_facets(participant_id);
+CREATE INDEX IF NOT EXISTS idx_participant_facets_name ON participant_facets(facet_name);
+
 -- NEW: Files (shared CLI/Desktop)
 -- participant_id is NULLABLE - files can exist without participant assignment
 CREATE TABLE IF NOT EXISTS files (
