@@ -2864,9 +2864,8 @@ pub async fn execute_dynamic(
             .replace('\'', "\\'");
         let rendered = raw.replace("__BV_USER_WORKFLOW__", &literal);
         let staged = project_path.join(".bv_template.nf");
-        std::fs::write(&staged, rendered).with_context(|| {
-            format!("Failed to write staged template {}", staged.display())
-        })?;
+        std::fs::write(&staged, rendered)
+            .with_context(|| format!("Failed to write staged template {}", staged.display()))?;
         staged
     };
 
