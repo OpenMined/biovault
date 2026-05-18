@@ -55,10 +55,9 @@ params.datasite = null
 params.user = null
 params.run_timestamp = null
 
-// Handle both absolute and relative paths for workflow file
-def workflowPath = params.work_flow_file.startsWith('/') ? params.work_flow_file : "./${params.work_flow_file}"
-
-include { USER } from "${workflowPath}"
+// Workflow include path is rendered by the BioVault runner to a string
+// literal (Nextflow >= 26 strict syntax forbids interpolated include paths).
+include { USER } from '__BV_USER_WORKFLOW__'
 
 workflow {
     if (!params.module_spec) {

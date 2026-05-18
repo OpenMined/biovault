@@ -2833,6 +2833,43 @@ pub async fn execute_dynamic(
         .into());
     }
 
+    // Stage a rendered template next to the user workflow inside the project.
+    // Nextflow >= 26 strict syntax forbids interpolated `include` paths, so the
+    // `__BV_USER_WORKFLOW__` placeholder is replaced with a string literal.
+    // Nextflow resolves relative includes against the script's own directory,
+    // so the staged template must live in the project dir alongside the
+    // workflow (this also keeps Docker path mapping within the project mount).
+    let template_path = {
+        let raw = std::fs::read_to_string(&template_path)
+            .with_context(|| format!("Failed to read template {}", template_path.display()))?;
+        if !raw.contains("__BV_USER_WORKFLOW__") {
+            return Err(anyhow::anyhow!(
+                "Template {} is missing the __BV_USER_WORKFLOW__ placeholder; reinstall templates with 'bv init'",
+                template_path.display()
+            )
+            .into());
+        }
+        let rel = match workflow_path.strip_prefix(project_path) {
+            Ok(rel) => rel.to_path_buf(),
+            Err(_) => {
+                let dest = project_path.join(".bv_user_workflow.nf");
+                std::fs::copy(&workflow_path, &dest).with_context(|| {
+                    format!("Failed to stage user workflow into {}", dest.display())
+                })?;
+                std::path::PathBuf::from(".bv_user_workflow.nf")
+            }
+        };
+        let literal = format!("./{}", rel.to_string_lossy().replace('\\', "/"))
+            .replace('\\', "\\\\")
+            .replace('\'', "\\'");
+        let rendered = raw.replace("__BV_USER_WORKFLOW__", &literal);
+        let staged = project_path.join(".bv_template.nf");
+        std::fs::write(&staged, rendered).with_context(|| {
+            format!("Failed to write staged template {}", staged.display())
+        })?;
+        staged
+    };
+
     // Canonicalize paths for Nextflow
     let use_docker = should_use_docker_for_nextflow();
     let template_abs = if use_docker {
@@ -3643,6 +3680,12 @@ pub async fn execute_dynamic(
         };
 
         docker_cmd
+            // Use Nextflow's legacy syntax parser. Nextflow >= 26 defaults to
+            // the strict language parser, which rejects the Groovy constructs
+            // (spread calls, File, try/catch, JsonSlurper) used by the BioVault
+            // templates. Keep the legacy parser until templates are ported.
+            .arg("-e")
+            .arg("NXF_SYNTAX_PARSER=v1")
             // Set working directory
             .arg("-w")
             .arg(&container_work_dir)
@@ -3791,6 +3834,12 @@ pub async fn execute_dynamic(
                 "[Pipeline] WARNING: Could not build augmented PATH, using system PATH",
             );
         }
+
+        // Use Nextflow's legacy syntax parser. Nextflow >= 26 defaults to the
+        // strict language parser, which rejects the Groovy constructs (spread
+        // calls, File, try/catch, JsonSlurper) used by the BioVault templates.
+        // Keep the legacy parser until templates are ported.
+        native_cmd.env("NXF_SYNTAX_PARSER", "v1");
 
         native_cmd.arg("-log").arg(&nextflow_log_path);
 

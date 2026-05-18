@@ -1357,6 +1357,10 @@ async fn execute_sheet_workflow(params: &RunParams, config: &ModuleConfig) -> an
     // Build Nextflow command
     let mut cmd = Command::new(&nextflow_cmd);
 
+    // Use Nextflow's legacy syntax parser (Nextflow >= 26 defaults to the
+    // strict parser, which rejects the Groovy constructs in BioVault templates).
+    cmd.env("NXF_SYNTAX_PARSER", "v1");
+
     // Set working directory to module directory
     cmd.current_dir(&module_path);
 
@@ -1608,6 +1612,10 @@ pub async fn execute(params: RunParams) -> anyhow::Result<()> {
 
     // Build Nextflow command
     let mut cmd = Command::new(&nextflow_cmd);
+
+    // Use Nextflow's legacy syntax parser (Nextflow >= 26 defaults to the
+    // strict parser, which rejects the Groovy constructs in BioVault templates).
+    cmd.env("NXF_SYNTAX_PARSER", "v1");
 
     // Set working directory to module directory
     cmd.current_dir(&module_path);
