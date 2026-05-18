@@ -129,7 +129,11 @@ fn detect_gsgt(path: &Path) -> Result<Option<GenotypeMetadata>> {
 
         let l = layout.as_ref().unwrap();
         let fields = split_fields(&line);
-        let max_idx = l.chr.max(l.position).max(l.allele1_plus).max(l.allele2_plus);
+        let max_idx = l
+            .chr
+            .max(l.position)
+            .max(l.allele1_plus)
+            .max(l.allele2_plus);
         if fields.len() <= max_idx {
             continue;
         }
