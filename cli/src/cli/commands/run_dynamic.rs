@@ -3003,7 +3003,7 @@ pub async fn execute_dynamic(
         // Build/get Nextflow runner image with modern Docker CLI
         // Skip image pulling in dry-run mode - use placeholder
         let nextflow_image = if dry_run {
-            "ghcr.io/openmined/nextflow-runner:latest"
+            get_nextflow_runner_image()
         } else {
             ensure_nextflow_runner_image(&docker_bin)?
         };
