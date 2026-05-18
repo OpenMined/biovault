@@ -81,6 +81,11 @@ fn detect_genotype_metadata_from_real_world_headers() {
             source: "Unknown",
             grch: "Unknown",
         },
+        SampleExpectation {
+            file: "14_illumina_gsgt_grch38_final_report.txt",
+            source: "Illumina GenomeStudio",
+            grch: "38",
+        },
     ];
 
     for expectation in expectations {

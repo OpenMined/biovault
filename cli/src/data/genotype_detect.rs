@@ -42,12 +42,144 @@ impl Default for GenotypeMetadata {
     }
 }
 
+/// Column layout of an Illumina GenomeStudio (GSGT) Final Report `[Data]` block.
+struct GsgtLayout {
+    chr: usize,
+    position: usize,
+    allele1_plus: usize,
+    allele2_plus: usize,
+}
+
+/// Parse a GSGT `[Data]` column-header line into a column layout.
+///
+/// Requires `SNP Name`, `Chr`, `Position` and the plus-strand allele columns
+/// (`Allele1 - Plus` / `Allele2 - Plus`). The plus columns are required because
+/// only the plus strand aligns with the GRCh38 reference.
+fn parse_gsgt_layout(header_fields: &[String]) -> Option<GsgtLayout> {
+    let mut snp_name = None;
+    let mut chr = None;
+    let mut position = None;
+    let mut allele1_plus = None;
+    let mut allele2_plus = None;
+
+    for (idx, field) in header_fields.iter().enumerate() {
+        match field.trim().to_lowercase().as_str() {
+            "snp name" => snp_name = Some(idx),
+            "chr" => chr = Some(idx),
+            "position" => position = Some(idx),
+            "allele1 - plus" => allele1_plus = Some(idx),
+            "allele2 - plus" => allele2_plus = Some(idx),
+            _ => {}
+        }
+    }
+
+    snp_name?;
+    Some(GsgtLayout {
+        chr: chr?,
+        position: position?,
+        allele1_plus: allele1_plus?,
+        allele2_plus: allele2_plus?,
+    })
+}
+
+/// Detect an Illumina GenomeStudio (GSGT) "Final Report" export.
+///
+/// These files start with a `[Header]` metadata block and a `[Data]` block
+/// whose column header is tab-separated. They carry no genome-build line; the
+/// `Position` column is empirically GRCh38 plus-strand, so the build is fixed
+/// to `38`. Returns `Ok(None)` when the file is not GSGT.
+fn detect_gsgt(path: &Path) -> Result<Option<GenotypeMetadata>> {
+    let file = File::open(path)?;
+    let reader = BufReader::new(file);
+
+    let mut seen_header_marker = false;
+    let mut layout: Option<GsgtLayout> = None;
+    let mut data_rows = 0usize;
+    let mut valid_rows = 0usize;
+
+    for (idx, line_result) in reader.lines().enumerate() {
+        let line = line_result?;
+        let trimmed = line.trim();
+
+        if layout.is_none() {
+            let lower = trimmed.to_lowercase();
+            if lower == "[header]" {
+                seen_header_marker = true;
+            } else if lower == "[data]" {
+                if !seen_header_marker {
+                    return Ok(None);
+                }
+            } else if seen_header_marker && trimmed.contains('\t') {
+                // First tab-separated line after [Data] is the column header.
+                match parse_gsgt_layout(&split_fields(&line)) {
+                    Some(l) => layout = Some(l),
+                    None => continue,
+                }
+            }
+            // Bail out early if the markers never show up near the top.
+            if !seen_header_marker && idx > 20 {
+                return Ok(None);
+            }
+            continue;
+        }
+
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let l = layout.as_ref().unwrap();
+        let fields = split_fields(&line);
+        let max_idx = l.chr.max(l.position).max(l.allele1_plus).max(l.allele2_plus);
+        if fields.len() <= max_idx {
+            continue;
+        }
+        data_rows += 1;
+        let pos_ok = fields[l.position].trim().parse::<u64>().is_ok();
+        let a1 = fields[l.allele1_plus].trim();
+        let a2 = fields[l.allele2_plus].trim();
+        if pos_ok && is_gsgt_allele(a1) && is_gsgt_allele(a2) {
+            valid_rows += 1;
+        }
+        if data_rows >= 20 {
+            break;
+        }
+    }
+
+    if layout.is_none() || data_rows == 0 {
+        return Ok(None);
+    }
+    // Require the bulk of sampled rows to be structurally valid.
+    if valid_rows * 10 < data_rows * 7 {
+        return Ok(None);
+    }
+
+    Ok(Some(GenotypeMetadata {
+        data_type: "Genotype".to_string(),
+        source: Some("Illumina GenomeStudio".to_string()),
+        grch_version: Some("38".to_string()),
+        row_count: None,
+        chromosome_count: None,
+        inferred_sex: None,
+    }))
+}
+
+/// A single GSGT plus-strand allele cell: ACGT, indel `I`/`D`, or no-call `-`.
+fn is_gsgt_allele(value: &str) -> bool {
+    matches!(value, "A" | "C" | "G" | "T" | "I" | "D" | "-")
+}
+
 /// Detect if a file is a genotype file and extract metadata (fast version - header only)
 pub fn detect_genotype_metadata(file_path: &str) -> Result<GenotypeMetadata> {
     let path = Path::new(file_path);
 
     if !path.exists() {
         return Ok(GenotypeMetadata::default());
+    }
+
+    // Illumina GenomeStudio (GSGT) files use a `[Header]`/`[Data]` block layout
+    // that the generic rsid-first detector below cannot recognise.
+    if let Some(metadata) = detect_gsgt(path)? {
+        return Ok(metadata);
     }
 
     let file = File::open(path)?;
@@ -158,6 +290,10 @@ fn count_rows_and_chromosomes(
     file_path: &str,
     source: Option<&str>,
 ) -> Result<(usize, usize, String)> {
+    if source == Some("Illumina GenomeStudio") {
+        return count_gsgt_rows_and_chromosomes(file_path);
+    }
+
     let file = File::open(file_path)?;
     let reader = BufReader::new(file);
 
@@ -225,6 +361,63 @@ fn count_rows_and_chromosomes(
         } else {
             "Unknown".to_string()
         }
+    };
+
+    Ok((row_count, chromosomes.len(), inferred_sex))
+}
+
+/// Count data rows and unique chromosomes in a GSGT Final Report.
+///
+/// Skips the `[Header]` block and the `[Data]` column header, then counts one
+/// row per probe. Rows with `Chr`/`Position == 0` are unmapped and skipped
+/// (matching how they are excluded downstream).
+fn count_gsgt_rows_and_chromosomes(file_path: &str) -> Result<(usize, usize, String)> {
+    let file = File::open(file_path)?;
+    let reader = BufReader::new(file);
+
+    let mut layout: Option<GsgtLayout> = None;
+    let mut in_data = false;
+    let mut row_count = 0usize;
+    let mut chromosomes = HashSet::new();
+
+    for line_result in reader.lines() {
+        let line = line_result?;
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        if layout.is_none() {
+            let lower = trimmed.to_lowercase();
+            if lower == "[data]" {
+                in_data = true;
+            } else if in_data && trimmed.contains('\t') {
+                layout = parse_gsgt_layout(&split_fields(&line));
+            }
+            continue;
+        }
+
+        let l = layout.as_ref().unwrap();
+        let fields = split_fields(&line);
+        let max_idx = l.chr.max(l.position);
+        if fields.len() <= max_idx {
+            continue;
+        }
+        let chr = fields[l.chr].trim();
+        let pos = fields[l.position].trim();
+        if chr == "0" || pos == "0" {
+            continue;
+        }
+        row_count += 1;
+        chromosomes.insert(chr.to_string());
+    }
+
+    let has_x = chromosomes.contains("X") || chromosomes.contains("23");
+    let has_y = chromosomes.contains("Y") || chromosomes.contains("24");
+    let inferred_sex = if has_x && !has_y {
+        "Female".to_string()
+    } else {
+        "Unknown".to_string()
     };
 
     Ok((row_count, chromosomes.len(), inferred_sex))
