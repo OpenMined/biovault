@@ -130,10 +130,7 @@ fn upgrade_templates(biovault_home: &std::path::Path) -> anyhow::Result<()> {
     println!("  - Default templates: {}", default_dir.display());
     println!("  - SNP templates: {}", snp_dir.display());
     println!("  - Sheet templates: {}", sheet_dir.display());
-    println!(
-        "  - Dynamic Nextflow templates: {}",
-        dynamic_dir.display()
-    );
+    println!("  - Dynamic Nextflow templates: {}", dynamic_dir.display());
 
     Ok(())
 }
