@@ -107,10 +107,33 @@ fn upgrade_templates(biovault_home: &std::path::Path) -> anyhow::Result<()> {
     fs::write(&sheet_nextflow_config_path, sheet_nextflow_config_content)?;
     info!("Updated sheet nextflow.config");
 
+    // Copy/update dynamic Nextflow template
+    let dynamic_dir = env_dir.join("dynamic-nextflow");
+    if !dynamic_dir.exists() {
+        fs::create_dir_all(&dynamic_dir)?;
+    }
+
+    let dynamic_template_nf_content = include_str!("../templates/dynamic/template.nf");
+    let dynamic_template_nf_path = dynamic_dir.join("template.nf");
+    fs::write(&dynamic_template_nf_path, dynamic_template_nf_content)?;
+    info!("Updated dynamic-nextflow template.nf");
+
+    let dynamic_nextflow_config_content = "process.executor = 'local'\n";
+    let dynamic_nextflow_config_path = dynamic_dir.join("nextflow.config");
+    fs::write(
+        &dynamic_nextflow_config_path,
+        dynamic_nextflow_config_content,
+    )?;
+    info!("Updated dynamic-nextflow nextflow.config");
+
     println!("✓ Templates updated:");
     println!("  - Default templates: {}", default_dir.display());
     println!("  - SNP templates: {}", snp_dir.display());
     println!("  - Sheet templates: {}", sheet_dir.display());
+    println!(
+        "  - Dynamic Nextflow templates: {}",
+        dynamic_dir.display()
+    );
 
     Ok(())
 }
@@ -298,6 +321,10 @@ mod tests {
         assert!(env_dir.join("default/nextflow.config").exists());
         assert!(env_dir.join("snp/template.nf").exists());
         assert!(env_dir.join("snp/nextflow.config").exists());
+        assert!(env_dir.join("sheet/template.nf").exists());
+        assert!(env_dir.join("sheet/nextflow.config").exists());
+        assert!(env_dir.join("dynamic-nextflow/template.nf").exists());
+        assert!(env_dir.join("dynamic-nextflow/nextflow.config").exists());
 
         // Permission files fixed with expected content prefixes
         let rpc_fixed = std::fs::read_to_string(&rpc_perm).unwrap();
