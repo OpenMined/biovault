@@ -17,10 +17,13 @@ workflow USER {
 
     main:
         def participant_work_items = participants.map { record ->
-            def facets = [:]
-            record.each { key, value ->
-                if (!(key in ['participant_id', 'genotype_file']) && value != null && value.toString().trim()) {
-                    facets[key] = value.toString()
+            def facets = record.facets instanceof Map ? record.facets : [:]
+            if (facets.isEmpty()) {
+                def reserved = ['participant_id', 'genotype_file', 'genotype_path', 'validation', 'grch_build', 'source', 'facets'] as Set
+                record.each { key, value ->
+                    if (!(key in reserved) && value != null && value.toString().trim()) {
+                        facets[key] = value.toString()
+                    }
                 }
             }
             tuple(

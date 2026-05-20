@@ -488,14 +488,29 @@ def __bvLoadGenotypeRecords(path, format, mapping) {
                     println "[bv] WARNING: Participant '${participantId}' genotype file issue (${validation.status}) at '${genoFilePath}' - ${validation.message}"
                 }
 
-                return [
+                def facets = [:]
+                def rec = [
                     participant_id: participantId,
                     genotype_file: genoFilePath ? file(genoFilePath) : null,
                     genotype_path: genoFilePath,
                     validation: validation,
                     grch_build: grchBuild,
                     source: source
-                ].findAll { it.value != null }
+                ]
+
+                // Carry every other samplesheet column as participant facets.
+                row.each { col, val ->
+                    if (!rec.containsKey(col)) {
+                        def facetValue = __bvSanitizeCsvScalar(val)
+                        rec[col] = facetValue
+                        facets[col.toString()] = facetValue
+                    }
+                }
+                if (!facets.isEmpty()) {
+                    rec.facets = facets
+                }
+
+                return rec.findAll { it.value != null }
             }
     } else if (format == 'json') {
         def jsonData = new groovy.json.JsonSlurper().parse(pathFile)
@@ -519,14 +534,29 @@ def __bvLoadGenotypeRecords(path, format, mapping) {
                 println "[bv] WARNING: Participant '${participantId}' genotype file issue (${validation.status}) at '${genoFilePath}' - ${validation.message}"
             }
 
-            return [
+            def facets = [:]
+            def rec = [
                 participant_id: participantId,
                 genotype_file: genoFilePath ? file(genoFilePath) : null,
                 genotype_path: genoFilePath,
                 validation: validation,
                 grch_build: grchBuild,
                 source: source
-            ].findAll { it.value != null }
+            ]
+
+            // Carry every other record key as participant facets.
+            record.each { col, val ->
+                if (!rec.containsKey(col)) {
+                    def facetValue = __bvSanitizeCsvScalar(val)
+                    rec[col] = facetValue
+                    facets[col.toString()] = facetValue
+                }
+            }
+            if (!facets.isEmpty()) {
+                rec.facets = facets
+            }
+
+            return rec.findAll { it.value != null }
         }
     } else {
         throw new IllegalArgumentException("Unsupported format '${format}' for GenotypeRecord loading. Use 'csv', 'tsv', or 'json'.")
