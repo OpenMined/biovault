@@ -23,7 +23,7 @@ fn test_cli_version() {
         .and_then(|line| line.split('"').nth(1))
         .expect("Version not found in Cargo.toml");
 
-    let mut cmd = Command::cargo_bin("bv").unwrap();
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("bv");
     cmd.arg("--version")
         .assert()
         .success()
@@ -32,7 +32,7 @@ fn test_cli_version() {
 
 #[test]
 fn test_cli_help() {
-    let mut cmd = Command::cargo_bin("bv").unwrap();
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("bv");
     cmd.arg("--help")
         .assert()
         .success()
@@ -64,7 +64,7 @@ fn test_init_command() {
         original_home
     };
 
-    let mut cmd = Command::cargo_bin("bv").unwrap();
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("bv");
     set_sbc_env(&mut cmd, &temp_dir);
     // Use our test-specific env var that the init command will respect
     cmd.env("BIOVAULT_TEST_HOME", temp_dir.path());
@@ -135,7 +135,7 @@ fn test_init_command_existing_config() {
         original_home
     };
 
-    let mut cmd = Command::cargo_bin("bv").unwrap();
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("bv");
     set_sbc_env(&mut cmd, &temp_dir);
     // Use our test-specific env var that the init command will respect
     cmd.env("BIOVAULT_TEST_HOME", temp_dir.path());
@@ -176,7 +176,7 @@ fn test_init_command_existing_config() {
 #[test]
 fn test_info_command() {
     let temp_dir = TempDir::new().unwrap();
-    let mut cmd = Command::cargo_bin("bv").unwrap();
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("bv");
     set_sbc_env(&mut cmd, &temp_dir);
     cmd.arg("info")
         .assert()
@@ -192,7 +192,7 @@ fn test_info_command() {
 #[test]
 fn test_project_examples_cli() {
     let temp_dir = TempDir::new().unwrap();
-    let mut cmd = Command::cargo_bin("bv").unwrap();
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("bv");
     set_sbc_env(&mut cmd, &temp_dir);
     cmd.arg("project")
         .arg("examples")
@@ -204,7 +204,7 @@ fn test_project_examples_cli() {
 #[test]
 fn test_sample_data_list_cli() {
     let temp_dir = TempDir::new().unwrap();
-    let mut cmd = Command::cargo_bin("bv").unwrap();
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("bv");
     set_sbc_env(&mut cmd, &temp_dir);
     cmd.arg("sample-data")
         .arg("list")
@@ -253,7 +253,7 @@ fn test_run_dry_run_cli() {
     .unwrap();
     fs::write(proj.join("workflow.nf"), "workflow USER { }").unwrap();
 
-    let mut cmd = Command::cargo_bin("bv").unwrap();
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("bv");
     set_sbc_env(&mut cmd, &data_dir);
     cmd.env("BIOVAULT_HOME", &bv_home)
         .arg("run")
@@ -269,7 +269,7 @@ fn test_run_dry_run_cli() {
 #[test]
 fn test_invalid_command() {
     let temp_dir = TempDir::new().unwrap();
-    let mut cmd = Command::cargo_bin("bv").unwrap();
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("bv");
     set_sbc_env(&mut cmd, &temp_dir);
     cmd.arg("invalid-command")
         .assert()
@@ -280,7 +280,7 @@ fn test_invalid_command() {
 #[test]
 fn test_init_missing_email() {
     let temp_dir = TempDir::new().unwrap();
-    let mut cmd = Command::cargo_bin("bv").unwrap();
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("bv");
     set_sbc_env(&mut cmd, &temp_dir);
     cmd.arg("init")
         .assert()
