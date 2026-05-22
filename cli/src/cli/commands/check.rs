@@ -12,9 +12,10 @@ use std::io::Write;
 #[cfg(target_os = "macos")]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output, Stdio};
 #[cfg(target_os = "macos")]
 use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
 #[cfg(target_os = "macos")]
 use tempfile::NamedTempFile;
 
@@ -27,6 +28,68 @@ fn configure_child_process(cmd: &mut Command) {
 
 #[cfg(not(target_os = "windows"))]
 fn configure_child_process(_cmd: &mut Command) {}
+
+const DEPENDENCY_PROBE_TIMEOUT: Duration = Duration::from_secs(8);
+const DEPENDENCY_RUNNING_TIMEOUT: Duration = Duration::from_secs(5);
+
+fn command_output_with_timeout(
+    command: &mut Command,
+    timeout: Duration,
+) -> std::io::Result<Option<Output>> {
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::piped());
+
+    let mut child = command.spawn()?;
+    let started = Instant::now();
+
+    loop {
+        if child.try_wait()?.is_some() {
+            return child.wait_with_output().map(Some);
+        }
+
+        if started.elapsed() >= timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok(None);
+        }
+
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn probe_output(command: &mut Command) -> Option<Output> {
+    match command_output_with_timeout(command, DEPENDENCY_PROBE_TIMEOUT) {
+        Ok(Some(output)) => Some(output),
+        Ok(None) => {
+            eprintln!(
+                "Dependency probe timed out after {:?}",
+                DEPENDENCY_PROBE_TIMEOUT
+            );
+            None
+        }
+        Err(err) => {
+            eprintln!("Dependency probe failed to start: {}", err);
+            None
+        }
+    }
+}
+
+fn running_probe_output(command: &mut Command) -> Option<Output> {
+    match command_output_with_timeout(command, DEPENDENCY_RUNNING_TIMEOUT) {
+        Ok(Some(output)) => Some(output),
+        Ok(None) => {
+            eprintln!(
+                "Dependency running check timed out after {:?}",
+                DEPENDENCY_RUNNING_TIMEOUT
+            );
+            None
+        }
+        Err(err) => {
+            eprintln!("Dependency running check failed to start: {}", err);
+            None
+        }
+    }
+}
 
 fn syftbox_backend_is_embedded() -> bool {
     env::var("BV_SYFTBOX_BACKEND")
@@ -95,7 +158,7 @@ fn is_valid_java_binary(path: &str) -> bool {
     cmd.arg("-version");
     configure_child_process(&mut cmd);
 
-    cmd.output()
+    probe_output(&mut cmd)
         .map(|output| {
             if !output.status.success() {
                 return false;
@@ -153,7 +216,8 @@ fn adjust_java_binary(mut current: Option<String>) -> Option<String> {
                 }
             }
 
-            if let Ok(output) = Command::new("/usr/libexec/java_home").output() {
+            let mut java_home = Command::new("/usr/libexec/java_home");
+            if let Some(output) = probe_output(&mut java_home) {
                 if output.status.success() {
                     let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
                     if !path.is_empty() {
@@ -209,7 +273,7 @@ fn get_java_version_string(path: Option<&str>) -> Option<String> {
     let mut cmd = Command::new(command);
     cmd.arg("-version");
     configure_child_process(&mut cmd);
-    let output = cmd.output().ok()?;
+    let output = probe_output(&mut cmd)?;
     if !output.status.success() {
         return None;
     }
@@ -222,10 +286,10 @@ fn check_java_version_with_info_at(path: Option<&str>, min_version: u32) -> (boo
     let mut cmd = Command::new(command);
     cmd.arg("-version");
     configure_child_process(&mut cmd);
-    let output = cmd.output();
+    let output = probe_output(&mut cmd);
 
     match output {
-        Ok(output) => {
+        Some(output) => {
             let version_str = String::from_utf8_lossy(&output.stderr);
             if let Some(version) = parse_java_version(&version_str) {
                 (version >= min_version, Some(version.to_string()))
@@ -233,7 +297,7 @@ fn check_java_version_with_info_at(path: Option<&str>, min_version: u32) -> (boo
                 (false, None)
             }
         }
-        Err(_) => (false, None),
+        None => (false, None),
     }
 }
 
@@ -316,11 +380,37 @@ pub struct DependencyResult {
     pub install_instructions: Option<String>,
 }
 
+fn syqure_enabled_for_build() -> bool {
+    std::env::var("BIOVAULT_ENABLE_SYQURE")
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
 /// Check a single dependency with optional custom path (for library use)
 pub fn check_single_dependency(
     name: &str,
     custom_path: Option<String>,
 ) -> Result<DependencyResult> {
+    if name == "syqure" && !syqure_enabled_for_build() {
+        return Ok(DependencyResult {
+            name: name.to_string(),
+            found: false,
+            path: None,
+            version: None,
+            running: None,
+            skipped: true,
+            skip_reason: Some("Syqure is disabled for this build".to_string()),
+            description: Some("Secure compute runtime".to_string()),
+            website: None,
+            install_instructions: None,
+        });
+    }
+
     // Load the deps.yaml file embedded in the binary
     let deps_yaml = include_str!("../../deps.yaml");
     let config: DependencyConfig = serde_yaml::from_str(deps_yaml)?;
@@ -442,7 +532,7 @@ pub fn check_single_dependency(
                     let mut cmd = Command::new(custom);
                     cmd.arg("--version");
                     configure_child_process(&mut cmd);
-                    cmd.output()
+                    probe_output(&mut cmd)
                         .map(|output| {
                             let version_str = String::from_utf8_lossy(&output.stdout);
                             version_str.contains("Docker")
@@ -453,7 +543,7 @@ pub fn check_single_dependency(
                     let mut cmd = Command::new(custom);
                     cmd.arg("-version");
                     configure_child_process(&mut cmd);
-                    cmd.output()
+                    probe_output(&mut cmd)
                         .map(|output| {
                             let version_str = String::from_utf8_lossy(&output.stdout);
                             version_str.contains("nextflow") || version_str.contains("version")
@@ -464,7 +554,7 @@ pub fn check_single_dependency(
                     let mut cmd = Command::new(custom);
                     cmd.arg("--version");
                     configure_child_process(&mut cmd);
-                    cmd.output()
+                    probe_output(&mut cmd)
                         .map(|output| {
                             let version_str = String::from_utf8_lossy(&output.stdout);
                             version_str.contains("syftbox") || version_str.contains("version")
@@ -562,9 +652,7 @@ pub fn check_single_dependency(
         let mut cmd = Command::new(&sbenv_path);
         cmd.arg("--version");
         configure_child_process(&mut cmd);
-        let version = cmd
-            .output()
-            .ok()
+        let version = probe_output(&mut cmd)
             .filter(|output| output.status.success())
             .and_then(|output| {
                 let version_str = String::from_utf8_lossy(&output.stdout);
@@ -654,6 +742,10 @@ pub fn check_dependencies_result() -> Result<DependencyCheckResult> {
     let current_os = std::env::consts::OS;
 
     for dep in &config.dependencies {
+        if dep.name == "syqure" && !syqure_enabled_for_build() {
+            continue;
+        }
+
         // Skip package managers (they're checked separately during onboarding)
         if dep.package_manager {
             continue;
@@ -818,9 +910,7 @@ pub fn check_dependencies_result() -> Result<DependencyCheckResult> {
             let mut cmd = Command::new(&sbenv_path);
             cmd.arg("--version");
             configure_child_process(&mut cmd);
-            let version = cmd
-                .output()
-                .ok()
+            let version = probe_output(&mut cmd)
                 .filter(|output| output.status.success())
                 .and_then(|output| {
                     let version_str = String::from_utf8_lossy(&output.stdout);
@@ -1175,9 +1265,7 @@ pub async fn execute(json: bool) -> Result<()> {
             let mut cmd = Command::new(&sbenv_path);
             cmd.arg("--version");
             configure_child_process(&mut cmd);
-            let version = cmd
-                .output()
-                .ok()
+            let version = probe_output(&mut cmd)
                 .filter(|output| output.status.success())
                 .and_then(|output| {
                     let version_str = String::from_utf8_lossy(&output.stdout);
@@ -1347,7 +1435,7 @@ fn check_if_running(service: &str) -> bool {
             let mut cmd = Command::new(&runtime);
             cmd.arg("info");
             configure_child_process(&mut cmd);
-            cmd.output()
+            running_probe_output(&mut cmd)
                 .map(|output| output.status.success())
                 .unwrap_or(false)
         }
@@ -1477,10 +1565,10 @@ fn check_java_version(min_version: u32) -> bool {
     let mut command = Command::new("java");
     command.arg("-version");
     configure_child_process(&mut command);
-    let output = command.output();
+    let output = probe_output(&mut command);
 
     match output {
-        Ok(output) => {
+        Some(output) => {
             // Java version info is typically printed to stderr
             let version_str = String::from_utf8_lossy(&output.stderr);
 
@@ -1496,7 +1584,7 @@ fn check_java_version(min_version: u32) -> bool {
                 false
             }
         }
-        Err(_) => false,
+        None => false,
     }
 }
 
@@ -1572,7 +1660,7 @@ fn get_docker_version(version_source: Option<&str>) -> Option<String> {
     let mut command = command_for_version(version_source, &fallback)?;
     command.arg("--version");
     configure_child_process(&mut command);
-    let output = command.output().ok()?;
+    let output = probe_output(&mut command)?;
     if !output.status.success() {
         return None;
     }
@@ -1597,7 +1685,7 @@ fn get_syftbox_version(version_source: Option<&str>) -> Option<String> {
 
     command.arg("--version");
     configure_child_process(&mut command);
-    let output = command.output().ok()?;
+    let output = probe_output(&mut command)?;
     if !output.status.success() {
         return None;
     }
@@ -1608,7 +1696,8 @@ fn get_syftbox_version(version_source: Option<&str>) -> Option<String> {
 fn get_nextflow_version(version_source: Option<&str>) -> Option<String> {
     let mut command = command_for_version(version_source, "nextflow")?;
     configure_child_process(&mut command);
-    let output = command.arg("-version").output().ok()?;
+    command.arg("-version");
+    let output = probe_output(&mut command)?;
     if !output.status.success() {
         return None;
     }
@@ -1625,10 +1714,10 @@ fn check_java_version_with_info(min_version: u32) -> (bool, Option<String>) {
     let mut command = Command::new("java");
     command.arg("-version");
     configure_child_process(&mut command);
-    let output = command.output();
+    let output = probe_output(&mut command);
 
     match output {
-        Ok(output) => {
+        Some(output) => {
             let version_str = String::from_utf8_lossy(&output.stderr);
             if let Some(version) = parse_java_version(&version_str) {
                 (version >= min_version, Some(version.to_string()))
@@ -1636,7 +1725,7 @@ fn check_java_version_with_info(min_version: u32) -> (bool, Option<String>) {
                 (false, None)
             }
         }
-        Err(_) => (false, None),
+        None => (false, None),
     }
 }
 
@@ -1699,10 +1788,9 @@ fn check_java_in_brew_not_in_path() -> Option<String> {
         ];
 
         for formula in formulas.iter() {
-            let output = Command::new(&brew_cmd)
-                .args(["--prefix", formula])
-                .output()
-                .ok();
+            let mut brew_prefix = Command::new(&brew_cmd);
+            brew_prefix.args(["--prefix", formula]);
+            let output = probe_output(&mut brew_prefix);
 
             let output = match output {
                 Some(out) if out.status.success() => out,
@@ -1831,7 +1919,7 @@ fn get_uv_version(uv_path: &str) -> Option<String> {
     let mut command = Command::new(uv_path);
     command.arg("--version");
     configure_child_process(&mut command);
-    let output = command.output().ok()?;
+    let output = probe_output(&mut command)?;
     if !output.status.success() {
         return None;
     }
