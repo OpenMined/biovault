@@ -1304,6 +1304,7 @@ pub async fn resolve_flow_dependencies(
 
     // Collect step updates to avoid borrow checker issues
     let mut step_updates: Vec<(usize, String)> = Vec::new();
+    let single_step_flow = spec.steps.len() == 1;
 
     for (index, step) in spec.steps.iter().enumerate() {
         if let Some(uses) = &step.uses {
@@ -1324,7 +1325,10 @@ pub async fn resolve_flow_dependencies(
             let should_skip_as_registered = match dependency_context {
                 DependencyContext::GitHub { .. } => {
                     // In GitHub context, no slashes + not http = registered name
-                    !uses.contains('/') && !uses.starts_with("http")
+                    // unless overwrite is refreshing a single-step colocated flow/module import.
+                    !uses.contains('/')
+                        && !uses.starts_with("http")
+                        && !(overwrite && single_step_flow)
                 }
                 DependencyContext::Local { .. } => {
                     // In Local context, never skip - always try to resolve as path first
@@ -1355,7 +1359,9 @@ pub async fn resolve_flow_dependencies(
                         DependencyContext::GitHub { base_url } => {
                             // Strip leading "./" — raw GitHub URLs don't normalize dot-segments
                             let normalized = uses.strip_prefix("./").unwrap_or(uses);
-                            let url = if normalized.is_empty() {
+                            let url = if normalized.is_empty()
+                                || (overwrite && single_step_flow && !normalized.contains('/'))
+                            {
                                 format!("{}/module.yaml", base_url)
                             } else {
                                 format!("{}/{}/module.yaml", base_url, normalized)
